@@ -261,17 +261,7 @@ export async function createApp() {
       await db.run('INSERT INTO commands(id,node_id,project_id,type,state,payload_json,attempts,run_after,deadline,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)', cmdId, node.id, project, 'backup.volume', 'pending', JSON.stringify({ project, volume: target, backupId }), 0, ts, null, ts, ts);
       return res.json({ backupId, commandId: cmdId, nodeId: node.id, state: 'queued', type: 'volume' });
     }
-    const service = state.compose?.services?.[target];
-    const backupType = service?.['x-launchpad']?.backup?.type;
-    if (service && (backupType === 'mariadb' || String(service.image || '').startsWith('mariadb:'))) {
-      const nodeName = service['x-launchpad']?.placement?.nodes?.[0];
-      if (!nodeName) return res.status(400).json({ error: 'service backup requires x-launchpad.placement.nodes[0]' });
-      const node = await db.get('SELECT id FROM nodes WHERE name=? OR id=?', nodeName, nodeName); if (!node) return res.status(404).json({ error: 'node not found' });
-      await db.run('INSERT INTO backups(id,project_id,target,node_id,state,metadata_json,created_at) VALUES(?,?,?,?,?,?,?)', backupId, project, target, node.id, 'queued', JSON.stringify({ type: 'mariadb' }), ts);
-      await db.run('INSERT INTO commands(id,node_id,project_id,type,state,payload_json,attempts,run_after,deadline,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)', cmdId, node.id, project, 'backup.mariadb', 'pending', JSON.stringify({ project, service: target, backupId }), 0, ts, null, ts, ts);
-      return res.json({ backupId, commandId: cmdId, nodeId: node.id, state: 'queued', type: 'mariadb' });
-    }
-    return res.status(404).json({ error: 'backup target must be a named volume or mariadb service' });
+    return res.status(404).json({ error: 'backup target must be a named volume' });
   });
   app.get('/api/v1/volumes', authOperator, async (req, res) => res.json({ volumes: await db.all('SELECT * FROM volumes WHERE project_id=? ORDER BY name', req.query.project || 'site') }));
   app.delete('/api/v1/volumes/:name', authOperator, async (req, res) => {
@@ -341,11 +331,8 @@ export async function createApp() {
     if (!backup?.artifact_ref) return res.status(404).json({ error: 'completed backup artifact not found' });
     const ts = now(); const cmdId = id('cmd');
     const metadata = JSON.parse(backup.metadata_json || '{}');
-    const commandType = metadata.type === 'mariadb' ? 'restore.mariadb' : 'restore.volume';
-    const payload = metadata.type === 'mariadb'
-      ? { project, service: target, backupId: backup.id, artifactRef: backup.artifact_ref }
-      : { project, volume: target, backupId: backup.id, artifactRef: backup.artifact_ref };
-    await db.run('INSERT INTO commands(id,node_id,project_id,type,state,payload_json,attempts,run_after,deadline,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)', cmdId, backup.node_id, project, commandType, 'pending', JSON.stringify(payload), 0, ts, null, ts, ts);
+    const payload = { project, volume: target, backupId: backup.id, artifactRef: backup.artifact_ref };
+    await db.run('INSERT INTO commands(id,node_id,project_id,type,state,payload_json,attempts,run_after,deadline,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)', cmdId, backup.node_id, project, 'restore.volume', 'pending', JSON.stringify(payload), 0, ts, null, ts, ts);
     res.json({ commandId: cmdId, nodeId: backup.node_id, backupId: backup.id, state: 'queued', type: metadata.type || 'volume' });
     } catch (e) { sendError(res, e); }
     finally { await releaseLock(lock); }

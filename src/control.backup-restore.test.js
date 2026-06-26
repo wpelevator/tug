@@ -47,24 +47,3 @@ test('queues and completes named volume backup command', async () => {
     assert.equal(restoreWork.commands[0].type, 'restore.volume');
   } finally { await s.close(); }
 });
-
-test('queues mariadb service backup and restore commands', async () => {
-  const s = await makeServer();
-  try {
-    const registered = await post(s.base, '/api/v1/nodes/register', { name: 'db' });
-    const compose = { services: { mariadb: { image: 'mariadb:11', environment: { MARIADB_DATABASE: 'app', MARIADB_USER: 'app', MARIADB_PASSWORD: '${DB_PASSWORD}', MARIADB_ROOT_PASSWORD: '${DB_ROOT_PASSWORD}' }, 'x-launchpad': { placement: { nodes: ['db'] }, backup: { type: 'mariadb' } } } } };
-    await post(s.base, '/api/v1/deployments', { project: 'site', version: 'v1', compose });
-    const queued = await post(s.base, '/api/v1/backups/run', { project: 'site', target: 'mariadb' });
-    assert.equal(queued.type, 'mariadb');
-    let res = await fetch(`${s.base}/agent/v1/work`, { headers: { Authorization: `Bearer ${registered.agentToken}` } });
-    let work = await res.json();
-    assert.equal(work.commands[0].type, 'backup.mariadb');
-    res = await fetch(`${s.base}/agent/v1/status`, { method: 'POST', headers: { Authorization: `Bearer ${registered.agentToken}`, 'content-type': 'application/json' }, body: JSON.stringify({ commandResults: [{ commandId: queued.commandId, state: 'succeeded', result: { backupId: queued.backupId, artifactRef: '/tmp/mariadb.sql.gz', type: 'mariadb' } }] }) });
-    assert.equal(res.status, 200);
-    const restore = await post(s.base, '/api/v1/restore', { project: 'site', target: 'mariadb', from: 'latest' });
-    assert.equal(restore.type, 'mariadb');
-    res = await fetch(`${s.base}/agent/v1/work`, { headers: { Authorization: `Bearer ${registered.agentToken}` } });
-    work = await res.json();
-    assert.equal(work.commands[0].type, 'restore.mariadb');
-  } finally { await s.close(); }
-});

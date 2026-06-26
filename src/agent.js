@@ -144,18 +144,6 @@ async function executeCommand(command) {
     await run('docker', ['run', '--rm', '-v', `${composeVolume}:/volume:ro`, '-v', `${backupDir}:/backup`, 'busybox:1.36', 'tar', '-czf', `/backup/${artifact}`, '-C', '/volume', '.']);
     return { commandId: command.id, state: 'succeeded', result: { backupId, artifactRef: path.join(backupDir, artifact), type: 'volume', volume } };
   }
-  if (command.type === 'backup.mariadb') {
-    const project = payload.project;
-    const service = payload.service;
-    const backupId = payload.backupId;
-    const backupDir = path.join(STATE_DIR, 'backups', project);
-    await ensureDir(backupDir);
-    const artifact = `${service}-${new Date().toISOString().replace(/[:.]/g, '-')}.sql.gz`;
-    const dir = path.join(STATE_DIR, 'projects', project);
-    const script = `docker compose -p ${project} exec -T ${service} sh -c 'mariadb-dump -u"$MARIADB_USER" -p"$MARIADB_PASSWORD" "$MARIADB_DATABASE" || mariadb-dump -uroot -p"$MARIADB_ROOT_PASSWORD" --all-databases' | gzip > ${path.join(backupDir, artifact)}`;
-    await run('bash', ['-lc', script], dir);
-    return { commandId: command.id, state: 'succeeded', result: { backupId, artifactRef: path.join(backupDir, artifact), type: 'mariadb', service } };
-  }
   if (command.type === 'restore.volume') {
     const project = payload.project;
     const volume = payload.volume;
@@ -164,16 +152,6 @@ async function executeCommand(command) {
     const composeVolume = `${project}_${volume}`;
     await run('docker', ['run', '--rm', '-v', `${composeVolume}:/volume`, '-v', `${path.dirname(artifactRef)}:/backup:ro`, 'busybox:1.36', 'sh', '-c', `find /volume -mindepth 1 -maxdepth 1 -exec rm -rf {} + && tar -xzf /backup/${path.basename(artifactRef)} -C /volume`]);
     return { commandId: command.id, state: 'succeeded', result: { backupId: payload.backupId, artifactRef, type: 'volume', volume, restored: true } };
-  }
-  if (command.type === 'restore.mariadb') {
-    const project = payload.project;
-    const service = payload.service;
-    const artifactRef = payload.artifactRef;
-    if (!artifactRef) throw new Error('artifactRef required');
-    const dir = path.join(STATE_DIR, 'projects', project);
-    const script = `gzip -dc ${artifactRef} | docker compose -p ${project} exec -T ${service} sh -c 'mariadb -u"$MARIADB_USER" -p"$MARIADB_PASSWORD" "$MARIADB_DATABASE" || mariadb -uroot -p"$MARIADB_ROOT_PASSWORD"'`;
-    await run('bash', ['-lc', script], dir);
-    return { commandId: command.id, state: 'succeeded', result: { backupId: payload.backupId, artifactRef, type: 'mariadb', service, restored: true } };
   }
   return { commandId: command.id, state: 'failed', result: { error: `unsupported command ${command.type}` } };
 }
