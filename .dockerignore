@@ -1,0 +1,6 @@
+.git
+node_modules
+data
+registry-data
+.launchpad.json
+*.log

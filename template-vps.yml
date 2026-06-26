@@ -1,0 +1,41 @@
+images:
+  - location: https://cloud-images.ubuntu.com/releases/26.04/release/ubuntu-26.04-server-cloudimg-arm64.img
+    arch: "aarch64"
+  - location: https://cloud-images.ubuntu.com/releases/26.04/release/ubuntu-26.04-server-cloudimg-amd64.img
+    arch: "x86_64"
+
+cpus: 2
+memory: "1GiB"
+disk: "20GiB"
+
+networks:
+  - vzNAT: true
+
+mounts:
+  - location: "~"
+    writable: true
+
+provision:
+  - mode: system
+    script: |
+      apt-get update
+      apt-get install -y ca-certificates curl git rsync
+
+      if ! command -v docker >/dev/null 2>&1; then
+        curl -fsSL https://get.docker.com | sh
+      fi
+
+      if ! command -v node >/dev/null 2>&1; then
+        curl -fsSL https://deb.nodesource.com/setup_lts.x | bash -
+        apt-get install -y nodejs
+      fi
+
+      usermod -aG docker lima || true
+      systemctl enable --now docker
+
+probes:
+  - script: |
+      #!/bin/env bash
+      docker version
+      node --version
+      npm --version

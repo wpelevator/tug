@@ -1,0 +1,52 @@
+services:
+  registry:
+    build: ./services/registry
+    container_name: launchpad-registry
+    ports:
+      - "5000:5000"
+    volumes:
+      - registry-data:/var/lib/registry
+      - registry-auth:/auth
+
+  control:
+    build: .
+    command: node src/control.js
+    environment:
+      PORT: 8080
+      LAUNCHPAD_DB: /data/launchpad.db
+      LAUNCHPAD_MASTER_KEY_FILE: /data/master.key
+      LAUNCHPAD_REGISTRY: localhost:5000
+      LAUNCHPAD_PUSH: "false"
+      LAUNCHPAD_REGISTRY_AUTH_PATH: /registry-auth/htpasswd
+      LAUNCHPAD_REGISTRY_CONTAINER: launchpad-registry
+    ports:
+      - "8080:8080"
+    volumes:
+      - launchpad-data:/data
+      - registry-auth:/registry-auth
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - registry
+
+  agent:
+    build: .
+    command: node src/agent.js
+    profiles: ["agent"]
+    environment:
+      LAUNCHPAD_CONTROL_URL: http://control:8080
+      LAUNCHPAD_NODE_NAME: dev-node
+      LAUNCHPAD_AGENT_TOKEN: ${LAUNCHPAD_AGENT_TOKEN:-}
+      LAUNCHPAD_STATE_DIR: /var/lib/launchpad
+      LAUNCHPAD_APPLY: "false"
+      LAUNCHPAD_POLL_INTERVAL_MS: 5000
+    volumes:
+      - agent-state:/var/lib/launchpad
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - control
+
+volumes:
+  launchpad-data:
+  registry-data:
+  registry-auth:
+  agent-state:

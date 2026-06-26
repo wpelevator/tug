@@ -1,0 +1,43 @@
+services:
+  web:
+    image: nginx:1.27-alpine
+    ports:
+      - "8088:80"
+    environment:
+      SAMPLE_SECRET: ${SAMPLE_SECRET:-not-set}
+    x-launchpad:
+      placement:
+        nodes: [vps-a]
+      health:
+        type: http
+        port: 80
+        path: /
+
+  worker:
+    image: busybox:1.36
+    command: ["sh", "-c", "while true; do echo worker alive; sleep 30; done"]
+    environment:
+      SAMPLE_SECRET: ${SAMPLE_SECRET:-not-set}
+    x-launchpad:
+      placement:
+        nodes: [vps-b]
+
+  cache:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - cache-data:/data
+    x-launchpad:
+      placement:
+        nodes: [vps-c]
+      health:
+        type: tcp
+        port: 6379
+
+volumes:
+  cache-data:
+    x-launchpad:
+      type: local
+      persistent: true
+      placement:
+        nodes: [vps-c]

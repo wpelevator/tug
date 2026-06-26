@@ -1,0 +1,26 @@
+services:
+  registry:
+    build: ./services/registry
+    container_name: launchpad-registry
+    ports:
+      - "5000:5000"
+    volumes:
+      - registry-auth:/auth
+
+  control:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      LAUNCHPAD_REGISTRY: localhost:5000
+      LAUNCHPAD_PUSH: "false"
+      LAUNCHPAD_REGISTRY_AUTH_PATH: /registry-auth/htpasswd
+      LAUNCHPAD_REGISTRY_CONTAINER: launchpad-registry
+    volumes:
+      - registry-auth:/registry-auth
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - registry
+
+volumes:
+  registry-auth:

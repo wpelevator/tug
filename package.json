@@ -1,0 +1,28 @@
+{
+    "name": "pad-launch",
+    "version": "0.1.0",
+    "private": true,
+    "type": "module",
+    "bin": {
+        "launchpad": "./src/cli.js",
+        "launchpad-control": "./src/control.js",
+        "launchpad-agent": "./src/agent.js"
+    },
+    "scripts": {
+        "start:control": "node src/control.js",
+        "start:agent": "node src/agent.js",
+        "test": "node --test",
+        "lint": "for f in src/*.js scripts/*.js test/*.js test/*.test.js; do if [ -e \"$f\" ]; then node --check \"$f\" || exit 1; fi; done",
+        "test:integration": "bash scripts/integration-test.sh"
+    },
+    "dependencies": {
+        "commander": "^12.1.0",
+        "dotenv": "^16.4.7",
+        "express": "^4.21.2",
+        "js-yaml": "^4.1.0",
+        "multer": "^2.2.0",
+        "sqlite": "^5.1.1",
+        "sqlite3": "^5.1.7",
+        "tar": "^7.4.3"
+    }
+}
