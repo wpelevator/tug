@@ -5,8 +5,7 @@
     "type": "module",
     "bin": {
         "launchpad": "./src/cli.js",
-        "launchpad-control": "./src/control.js",
-        "launchpad-agent": "./src/agent.js"
+        "launchpad-node": "./src/main.js"
     },
     "scripts": {
         "start:control": "node src/main.js control",
