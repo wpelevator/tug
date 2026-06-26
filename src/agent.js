@@ -133,26 +133,6 @@ async function executeCommand(command) {
     }
     return { commandId: command.id, state: 'succeeded', result: { project, volume, deleted: true } };
   }
-  if (command.type === 'backup.volume') {
-    const project = payload.project;
-    const volume = payload.volume;
-    const backupId = payload.backupId;
-    const backupDir = path.join(STATE_DIR, 'backups', project);
-    await ensureDir(backupDir);
-    const artifact = `${volume}-${new Date().toISOString().replace(/[:.]/g, '-')}.tar.gz`;
-    const composeVolume = `${project}_${volume}`;
-    await run('docker', ['run', '--rm', '-v', `${composeVolume}:/volume:ro`, '-v', `${backupDir}:/backup`, 'busybox:1.36', 'tar', '-czf', `/backup/${artifact}`, '-C', '/volume', '.']);
-    return { commandId: command.id, state: 'succeeded', result: { backupId, artifactRef: path.join(backupDir, artifact), type: 'volume', volume } };
-  }
-  if (command.type === 'restore.volume') {
-    const project = payload.project;
-    const volume = payload.volume;
-    const artifactRef = payload.artifactRef;
-    if (!artifactRef) throw new Error('artifactRef required');
-    const composeVolume = `${project}_${volume}`;
-    await run('docker', ['run', '--rm', '-v', `${composeVolume}:/volume`, '-v', `${path.dirname(artifactRef)}:/backup:ro`, 'busybox:1.36', 'sh', '-c', `find /volume -mindepth 1 -maxdepth 1 -exec rm -rf {} + && tar -xzf /backup/${path.basename(artifactRef)} -C /volume`]);
-    return { commandId: command.id, state: 'succeeded', result: { backupId: payload.backupId, artifactRef, type: 'volume', volume, restored: true } };
-  }
   return { commandId: command.id, state: 'failed', result: { error: `unsupported command ${command.type}` } };
 }
 

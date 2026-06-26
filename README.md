@@ -14,13 +14,13 @@ A Node.js MVP of the Portable VPS Launch Pad described in `plan.md`.
 - Deployment convergence to `succeeded`, project operation locks, cancellation, rollback via a new rollback desired-state record, per-service rollout status/events, and agent-mediated log fetch.
 - Secret version tracking with targeted service recreation when only referenced secrets change.
 - SSH-based Docker bootstrap helpers with preflight checks for Docker, Compose, writable paths, control reachability, free disk space, and published-port availability.
-- Production-style control install generation with Caddy TLS in front of the control API and registry; plaintext HTTP is only for local/private development with `--http-only-dev`.
-- `control.js` can also terminate TLS itself (`LAUNCHPAD_TLS_CERT_FILE` / `LAUNCHPAD_TLS_KEY_FILE`) for setups without Caddy/ACME, e.g. a private network with a self-signed cert; point agents at it with `LAUNCHPAD_CONTROL_URL=https://...` and `NODE_EXTRA_CA_CERTS=<path to CA cert>` so the agent's `fetch` trusts it.
+- `control install` publishes the control API/registry over plain HTTP; front it with your own reverse proxy/TLS termination if exposing it publicly.
+- `control.js` can also terminate TLS itself (`LAUNCHPAD_TLS_CERT_FILE` / `LAUNCHPAD_TLS_KEY_FILE`), e.g. a private network with a self-signed cert; point agents at it with `LAUNCHPAD_CONTROL_URL=https://...` and `NODE_EXTRA_CA_CERTS=<path to CA cert>` so the agent's `fetch` trusts it.
 - Per-node registry pull tokens are issued at registration and enforced by the registry itself via an htpasswd file that control writes; `node install --registry <host>` performs `docker login` for agents. Tokens can be rotated or revoked with `node:rotate-registry-token` / `node:revoke-registry-token`, which restarts the registry container so the change takes effect immediately.
 - Control/local/agent diagnostics via `launchpad doctor`.
 - Development `docker-compose.yml` with control API, registry, and optional agent service.
 
-Non-critical backup/volume helper experiments may exist in the codebase for later hardening, but they are not part of the critical MVP scope.
+Control-plane backup/restore (SQLite + master key) exists for disaster recovery of the control host itself; per-project data backup/restore is left to the operator (e.g. via their own volume/database tooling).
 
 ## Local development
 
@@ -107,7 +107,7 @@ Run the full integration test:
 npm run test:integration
 ```
 
-The test provisions `vps-a`, `vps-b`, and `vps-c`, sets a sample secret, deploys `docker-compose.sample.yml`, waits for all three agents to report the desired version, verifies registry pull-auth (a rotated token authenticates, a wrong password is rejected, and a revoked token is rejected) via `scripts/integration-verify-registry-auth.js`, runs a volume backup, and then tears the stack down. Set `KEEP_INTEGRATION_STACK=true` to keep containers and volumes for inspection. The integration compose file uses subnet `10.89.240.0/24`; change it if that overlaps with local Docker/VPN networks.
+The test provisions `vps-a`, `vps-b`, and `vps-c`, sets a sample secret, deploys `docker-compose.sample.yml`, waits for all three agents to report the desired version, verifies registry pull-auth (a rotated token authenticates, a wrong password is rejected, and a revoked token is rejected) via `scripts/integration-verify-registry-auth.js`, and then tears the stack down. Set `KEEP_INTEGRATION_STACK=true` to keep containers and volumes for inspection. The integration compose file uses subnet `10.89.240.0/24`; change it if that overlaps with local Docker/VPN networks.
 
 ## CLI commands
 

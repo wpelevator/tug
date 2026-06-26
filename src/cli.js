@@ -6,7 +6,10 @@ import os from 'node:os';
 import path from 'node:path';
 import * as tar from 'tar';
 import { readCompose, composeHash } from './compose.js';
-import { token } from './util.js';
+import { token, loadTemplate } from './util.js';
+
+const __dirname = path.dirname(new URL(import.meta.url).pathname);
+const templatesDir = path.join(__dirname, 'templates');
 
 const program = new Command();
 program.name('launchpad').description('Portable VPS Launch Pad').version('0.1.0');
@@ -93,39 +96,25 @@ program.command('control:token').description('print local dev operator token if 
 
 const control = program.command('control');
 control.command('install <sshTarget>')
-  .description('install the control plane on a Docker-capable host over SSH')
+  .description('install the control plane on a Docker-capable host over SSH; front it with your own reverse proxy/TLS if exposing it publicly')
   .option('--image <tag>', 'local/remote image tag', 'launchpad:local')
   .option('--token <token>', 'operator token')
-  .option('--port <port>', 'published API port for --http-only-dev', '8080')
+  .option('--port <port>', 'published API port', '8080')
   .option('--registry <host>', 'registry host used in desired images')
-  .option('--domain <domain>', 'production control-plane HTTPS domain')
-  .option('--registry-domain <domain>', 'production registry HTTPS domain')
-  .option('--email <email>', 'ACME email for Caddy')
-  .option('--http-only-dev', 'allow plaintext HTTP install for local/private development')
   .option('--no-transfer-image', 'skip docker build/save/scp/load')
   .action(async (sshTarget, o) => {
     const operatorToken = o.token || process.env.LAUNCHPAD_TOKEN || token('lpo');
-    preflightRemote(sshTarget, { ports: o.httpOnlyDev ? [Number(o.port)] : [80, 443], minDiskMb: 2048 });
-    if (!o.httpOnlyDev && (!o.domain || !o.registryDomain || !o.email)) throw new Error('production install requires --domain, --registry-domain, and --email (or pass --http-only-dev)');
+    preflightRemote(sshTarget, { ports: [Number(o.port)], minDiskMb: 2048 });
     if (o.transferImage) await transferLaunchpadImage(sshTarget, o.image);
-    const registryHost = o.registry || o.registryDomain || 'localhost:5000';
-    const registryEnv = `      REGISTRY_AUTH: htpasswd\n      REGISTRY_AUTH_HTPASSWD_REALM: launchpad-registry\n      REGISTRY_AUTH_HTPASSWD_PATH: /auth/htpasswd\n`;
-    const controlRegistryEnv = `      LAUNCHPAD_REGISTRY_AUTH_PATH: /registry-auth/htpasswd\n      LAUNCHPAD_REGISTRY_CONTAINER: launchpad-registry\n`;
-    const compose = o.httpOnlyDev ? `services:\n  registry:\n    image: registry:3.1.1\n    container_name: launchpad-registry\n    restart: unless-stopped\n    ports:\n      - "5000:5000"\n    environment:\n${registryEnv}    volumes:\n      - /var/lib/launchpad-registry:/var/lib/registry\n      - /var/lib/launchpad-registry-auth:/auth\n  control:\n    image: ${o.image}\n    restart: unless-stopped\n    command: node src/control.js\n    environment:\n      PORT: 8080\n      LAUNCHPAD_DATA_DIR: /data\n      LAUNCHPAD_OPERATOR_TOKEN: ${operatorToken}\n      LAUNCHPAD_REGISTRY: ${registryHost}\n${controlRegistryEnv}    ports:\n      - "${o.port}:8080"\n    volumes:\n      - /var/lib/launchpad-control:/data\n      - /var/lib/launchpad-registry-auth:/registry-auth\n      - /var/run/docker.sock:/var/run/docker.sock\n    depends_on:\n      - registry\n` : `services:\n  caddy:\n    image: caddy:2-alpine\n    restart: unless-stopped\n    ports:\n      - "80:80"\n      - "443:443"\n    volumes:\n      - /opt/launchpad-control/Caddyfile:/etc/caddy/Caddyfile:ro\n      - /var/lib/launchpad-caddy/data:/data\n      - /var/lib/launchpad-caddy/config:/config\n    depends_on: [control, registry]\n  registry:\n    image: registry:3.1.1\n    container_name: launchpad-registry\n    restart: unless-stopped\n    environment:\n${registryEnv}    volumes:\n      - /var/lib/launchpad-registry:/var/lib/registry\n      - /var/lib/launchpad-registry-auth:/auth\n  control:\n    image: ${o.image}\n    restart: unless-stopped\n    command: node src/control.js\n    environment:\n      PORT: 8080\n      LAUNCHPAD_DATA_DIR: /data\n      LAUNCHPAD_OPERATOR_TOKEN: ${operatorToken}\n      LAUNCHPAD_REGISTRY: ${registryHost}\n${controlRegistryEnv}    volumes:\n      - /var/lib/launchpad-control:/data\n      - /var/lib/launchpad-registry-auth:/registry-auth\n      - /var/run/docker.sock:/var/run/docker.sock\n    depends_on:\n      - registry\n`;
-    const caddyfile = o.httpOnlyDev ? '' : `{\n\temail ${o.email}\n}\n${o.domain} {\n\treverse_proxy control:8080\n}\n${o.registryDomain} {\n\treverse_proxy registry:5000\n}\n`;
-    const remote = `set -euo pipefail
-mkdir -p /opt/launchpad-control /var/lib/launchpad-control /var/lib/launchpad-registry /var/lib/launchpad-registry-auth /var/lib/launchpad-caddy/data /var/lib/launchpad-caddy/config
-touch /var/lib/launchpad-registry-auth/htpasswd
-cat > /opt/launchpad-control/docker-compose.yml <<'YAML'
-${compose}YAML
-cat > /opt/launchpad-control/Caddyfile <<'CADDY'
-${caddyfile}CADDY
-docker compose -f /opt/launchpad-control/docker-compose.yml up -d
-install -m 0600 /dev/null /var/lib/launchpad-control/operator.token
-printf %s ${sh(operatorToken)} > /var/lib/launchpad-control/operator.token
-`;
+    const registryHost = o.registry || 'localhost:5000';
+    const compose = await loadTemplate(templatesDir, 'control-compose.yml', {
+      IMAGE: o.image, OPERATOR_TOKEN: operatorToken, REGISTRY_HOST: registryHost, PORT: o.port
+    });
+    const remote = await loadTemplate(templatesDir, 'control-install.sh', {
+      COMPOSE: compose, OPERATOR_TOKEN_SH: sh(operatorToken)
+    });
     runLocal('ssh', [sshTarget, remote]);
-    console.log(JSON.stringify({ ok: true, sshTarget, operatorToken, url: o.httpOnlyDev ? `http://${remoteHost(sshTarget)}:${o.port}` : `https://${o.domain}`, registry: registryHost, tls: !o.httpOnlyDev }, null, 2));
+    console.log(JSON.stringify({ ok: true, sshTarget, operatorToken, url: `http://${remoteHost(sshTarget)}:${o.port}`, registry: registryHost }, null, 2));
   });
 
 const node = program.command('node');
@@ -146,16 +135,13 @@ node.command('install <sshTarget>')
     preflightRemote(sshTarget, { controlUrl });
     const registered = await request('POST', '/api/v1/nodes/register', { name: o.name, address: o.address, publicAddress: o.publicAddress });
     if (o.transferImage) await transferLaunchpadImage(sshTarget, o.image);
-    const env = `LAUNCHPAD_CONTROL_URL=${controlUrl}\nLAUNCHPAD_NODE_NAME=${o.name}\nLAUNCHPAD_AGENT_TOKEN=${registered.agentToken}\nLAUNCHPAD_STATE_DIR=/var/lib/launchpad\nLAUNCHPAD_APPLY=true\nLAUNCHPAD_POLL_INTERVAL_MS=5000\n`;
-    const remote = `set -euo pipefail
-mkdir -p /etc/launchpad /var/lib/launchpad
-cat > /etc/launchpad/agent.env <<'ENV'
-${env}ENV
-chmod 0600 /etc/launchpad/agent.env
-${o.registry ? `printf %s ${sh(registered.registryToken)} | docker login ${sh(o.registry)} --username ${sh(o.name)} --password-stdin` : 'true'}
-docker rm -f launchpad-agent >/dev/null 2>&1 || true
-docker run -d --name launchpad-agent --restart unless-stopped --env-file /etc/launchpad/agent.env -v /var/run/docker.sock:/var/run/docker.sock -v /var/lib/launchpad:/var/lib/launchpad ${sh(o.image)} node src/agent.js
-`;
+    const env = await loadTemplate(templatesDir, 'agent.env', {
+      CONTROL_URL: controlUrl, NODE_NAME: o.name, AGENT_TOKEN: registered.agentToken
+    });
+    const dockerLogin = o.registry ? `printf %s ${sh(registered.registryToken)} | docker login ${sh(o.registry)} --username ${sh(o.name)} --password-stdin` : 'true';
+    const remote = await loadTemplate(templatesDir, 'node-install.sh', {
+      ENV: env, DOCKER_LOGIN: dockerLogin, IMAGE_SH: sh(o.image)
+    });
     runLocal('ssh', [sshTarget, remote]);
     console.log(JSON.stringify({ ok: true, node: registered.node, registryToken: registered.registryToken }, null, 2));
   });
@@ -216,19 +202,6 @@ program.command('volume:list').option('--project <name>').action(async (o) => {
 program.command('volume:rm <name>').option('--project <name>').option('--delete-data', 'delete underlying Docker volume data').action(async (name, o) => {
   const cfg = await loadCfg(); const project = o.project || cfg.project || 'site';
   console.log(JSON.stringify(await request('DELETE', `/api/v1/volumes/${encodeURIComponent(name)}?project=${encodeURIComponent(project)}&deleteData=${Boolean(o.deleteData)}`), null, 2));
-});
-const backup = program.command('backup');
-backup.command('run <target>').option('--project <name>').action(async (target, o) => {
-  const cfg = await loadCfg();
-  console.log(JSON.stringify(await request('POST', '/api/v1/backups/run', { project: o.project || cfg.project || 'site', target }), null, 2));
-});
-backup.command('list').option('--project <name>').action(async (o) => {
-  const cfg = await loadCfg();
-  console.log(JSON.stringify(await request('GET', `/api/v1/backups?project=${encodeURIComponent(o.project || cfg.project || 'site')}`), null, 2));
-});
-program.command('restore <target>').option('--project <name>').option('--from <backup>', 'backup id or latest', 'latest').action(async (target, o) => {
-  const cfg = await loadCfg();
-  console.log(JSON.stringify(await request('POST', '/api/v1/restore', { project: o.project || cfg.project || 'site', target, from: o.from }), null, 2));
 });
 const controlBackup = program.command('control-backup');
 controlBackup.command('run').description('create a control-plane SQLite/master-key backup').action(async () => console.log(JSON.stringify(await request('POST', '/api/v1/control/backups/run', {}), null, 2)));

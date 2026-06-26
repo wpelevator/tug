@@ -246,23 +246,6 @@ export async function createApp() {
     } catch (e) { sendError(res, e); }
     finally { await releaseLock(lock); }
   });
-  app.post('/api/v1/backups/run', authOperator, async (req, res) => {
-    const project = req.body.project || 'site'; const target = req.body.target;
-    if (!target) return res.status(400).json({ error: 'target required' });
-    const ds = await currentDesired(project); if (!ds) return res.status(404).json({ error: 'project has no desired state' });
-    const state = JSON.parse(ds.state_json);
-    const ts = now(); const backupId = id('bak'); const cmdId = id('cmd');
-    const volume = state.compose?.volumes?.[target];
-    if (volume) {
-      const nodeName = volume['x-launchpad']?.placement?.nodes?.[0];
-      if (!nodeName) return res.status(400).json({ error: 'volume backup requires x-launchpad.placement.nodes[0]' });
-      const node = await db.get('SELECT id FROM nodes WHERE name=? OR id=?', nodeName, nodeName); if (!node) return res.status(404).json({ error: 'node not found' });
-      await db.run('INSERT INTO backups(id,project_id,target,node_id,state,metadata_json,created_at) VALUES(?,?,?,?,?,?,?)', backupId, project, target, node.id, 'queued', JSON.stringify({ type: 'volume' }), ts);
-      await db.run('INSERT INTO commands(id,node_id,project_id,type,state,payload_json,attempts,run_after,deadline,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)', cmdId, node.id, project, 'backup.volume', 'pending', JSON.stringify({ project, volume: target, backupId }), 0, ts, null, ts, ts);
-      return res.json({ backupId, commandId: cmdId, nodeId: node.id, state: 'queued', type: 'volume' });
-    }
-    return res.status(404).json({ error: 'backup target must be a named volume' });
-  });
   app.get('/api/v1/volumes', authOperator, async (req, res) => res.json({ volumes: await db.all('SELECT * FROM volumes WHERE project_id=? ORDER BY name', req.query.project || 'site') }));
   app.delete('/api/v1/volumes/:name', authOperator, async (req, res) => {
     const project = req.query.project || 'site'; const deleteData = String(req.query.deleteData || 'false') === 'true';
@@ -289,7 +272,6 @@ export async function createApp() {
     } catch (e) { sendError(res, e); }
     finally { await releaseLock(lock); }
   });
-  app.get('/api/v1/backups', authOperator, async (req, res) => res.json({ backups: await db.all('SELECT * FROM backups WHERE project_id=? ORDER BY created_at DESC', req.query.project || 'site') }));
   app.post('/api/v1/control/backups/run', authOperator, async (req, res) => {
     const backupDir = process.env.LAUNCHPAD_CONTROL_BACKUP_DIR || path.join(DATA_DIR, 'control-backups');
     await ensureDir(backupDir);
@@ -318,24 +300,6 @@ export async function createApp() {
     await fs.copyFile(path.join(restoreDir, 'launchpad.db'), dbFile);
     await fs.copyFile(path.join(restoreDir, 'master.key'), masterKeyFile);
     res.json({ ok: true, restored: true, restartRequired: true });
-  });
-  app.post('/api/v1/restore', authOperator, async (req, res) => {
-    const project = req.body.project || 'site'; const target = req.body.target; const from = req.body.from || 'latest';
-    if (!target) return res.status(400).json({ error: 'target required' });
-    let lock;
-    try {
-      lock = await acquireProjectLock(project, 'restore');
-    const backup = from === 'latest'
-      ? await db.get('SELECT * FROM backups WHERE project_id=? AND target=? AND state=? ORDER BY completed_at DESC LIMIT 1', project, target, 'completed')
-      : await db.get('SELECT * FROM backups WHERE id=? AND project_id=? AND target=? AND state=?', from, project, target, 'completed');
-    if (!backup?.artifact_ref) return res.status(404).json({ error: 'completed backup artifact not found' });
-    const ts = now(); const cmdId = id('cmd');
-    const metadata = JSON.parse(backup.metadata_json || '{}');
-    const payload = { project, volume: target, backupId: backup.id, artifactRef: backup.artifact_ref };
-    await db.run('INSERT INTO commands(id,node_id,project_id,type,state,payload_json,attempts,run_after,deadline,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)', cmdId, backup.node_id, project, 'restore.volume', 'pending', JSON.stringify(payload), 0, ts, null, ts, ts);
-    res.json({ commandId: cmdId, nodeId: backup.node_id, backupId: backup.id, state: 'queued', type: metadata.type || 'volume' });
-    } catch (e) { sendError(res, e); }
-    finally { await releaseLock(lock); }
   });
   async function commandForService({ project, service, type, payload }) {
     if (!service) throw Object.assign(new Error('service required'), { status: 400 });
@@ -418,10 +382,6 @@ export async function createApp() {
     for (const cr of req.body.commandResults || []) {
       const result = cr.result || {};
       await db.run('UPDATE commands SET state=?,result_json=?,updated_at=? WHERE id=? AND node_id=?', cr.state || 'succeeded', JSON.stringify(result), ts, cr.commandId, req.node.id);
-      if (result.backupId) {
-        const backupState = cr.state === 'succeeded' ? 'completed' : 'failed';
-        await db.run('UPDATE backups SET state=?,artifact_ref=?,metadata_json=?,completed_at=? WHERE id=? AND node_id=?', backupState, result.artifactRef || null, JSON.stringify(result), ts, result.backupId, req.node.id);
-      }
     }
     await db.run('UPDATE nodes SET last_seen_at=?,status=? WHERE id=?', ts, 'online', req.node.id);
     res.json({ ok: true });
