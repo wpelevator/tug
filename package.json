@@ -1,33 +1,33 @@
 {
-    "name": "pad-launch",
-    "version": "0.1.0",
-    "private": true,
-    "type": "module",
-    "bin": {
-        "launchpad": "./src/cli.js",
-        "launchpad-node": "./src/main.js"
-    },
-    "scripts": {
-        "start:control": "node src/main.js control",
-        "start:agent": "node src/main.js agent",
-        "test": "node --test",
-        "lint": "eslint .",
-        "format": "eslint . --fix",
-        "test:integration": "bash scripts/integration-test.sh"
-    },
-    "dependencies": {
-        "commander": "^12.1.0",
-        "dotenv": "^16.4.7",
-        "express": "^4.21.2",
-        "js-yaml": "^4.1.0",
-        "multer": "^2.2.0",
-        "sqlite": "^5.1.1",
-        "sqlite3": "^5.1.7",
-        "tar": "^7.4.3"
-    },
-    "devDependencies": {
-        "@eslint/js": "^10.0.1",
-        "eslint": "^10.5.0",
-        "globals": "^17.7.0"
-    }
+  "name": "pad-launch",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "launchpad": "./src/cli.js",
+    "launchpad-node": "./src/main.js"
+  },
+  "scripts": {
+    "start:control": "node src/main.js control",
+    "start:agent": "node src/main.js agent",
+    "test": "node --test",
+    "lint": "eslint .",
+    "format": "eslint . --fix",
+    "test:integration": "bash scripts/integration-test.sh"
+  },
+  "dependencies": {
+    "commander": "^12.1.0",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "js-yaml": "^4.1.0",
+    "multer": "^2.2.0",
+    "sqlite": "^5.1.1",
+    "sqlite3": "^5.1.7",
+    "tar": "^7.4.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.5.0",
+    "globals": "^17.7.0"
+  }
 }
