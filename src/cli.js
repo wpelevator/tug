@@ -100,15 +100,19 @@ control.command('install <sshTarget>')
   .option('--image <tag>', 'local/remote image tag', 'launchpad:local')
   .option('--token <token>', 'operator token')
   .option('--port <port>', 'published API port', '8080')
-  .option('--registry <host>', 'registry host used in desired images')
+  .requiredOption('--registry <host>', 'registry host used in desired images; bring your own registry, Launchpad does not provision one')
+  .option('--registry-auth-path <path>', 'container path to an htpasswd file launchpad-control should manage credentials in, if your registry uses one')
+  .option('--registry-container <name>', 'docker container name to restart when a node\'s registry credentials change, if your registry uses an htpasswd file')
   .option('--no-transfer-image', 'skip docker build/save/scp/load')
   .action(async (sshTarget, o) => {
     const operatorToken = o.token || process.env.LAUNCHPAD_TOKEN || token('lpo');
     preflightRemote(sshTarget, { ports: [Number(o.port)], minDiskMb: 2048 });
     if (o.transferImage) await transferLaunchpadImage(sshTarget, o.image);
-    const registryHost = o.registry || 'localhost:5000';
+    const registryHost = o.registry;
     const compose = await loadTemplate(templatesDir, 'control-compose.yml', {
-      IMAGE: o.image, OPERATOR_TOKEN: operatorToken, REGISTRY_HOST: registryHost, PORT: o.port
+      IMAGE: o.image, OPERATOR_TOKEN: operatorToken, REGISTRY_HOST: registryHost, PORT: o.port,
+      REGISTRY_AUTH_PATH: o.registryAuthPath || '',
+      REGISTRY_CONTAINER: o.registryContainer || ''
     });
     const remote = await loadTemplate(templatesDir, 'control-install.sh', {
       COMPOSE: compose, OPERATOR_TOKEN_SH: sh(operatorToken)

@@ -36,6 +36,100 @@ docker compose up --build control registry
 
 The control service prints and stores the initial operator token in `./data/operator.token` when run directly on the host, or in the `launchpad-data` volume when run in Docker.
 
+## Setup steps
+
+1. **Install the control plane** on a Docker-capable host: `launchpad control install root@control.example.com --token "$LAUNCHPAD_TOKEN" --registry registry.example.com ...`. This builds/ships the Launchpad image over SSH, starts the `control` container, and prints the operator token and control URL. Launchpad does not provision a registry itself — `--registry <host>` is required and must point at a registry you already run. If that registry uses htpasswd auth and you want Launchpad to manage per-node credentials for it, also pass `--registry-auth-path` (the htpasswd file path, mounted into the control container) and `--registry-container` (the registry's container name, restarted whenever credentials change).
+2. **Point the CLI at the control plane**: `launchpad init --control-url https://control.example.com --token "$LAUNCHPAD_TOKEN"`. This writes `.launchpad.json` locally so subsequent commands don't need `--control-url`/`--token` repeated.
+3. **Set any secrets your services need**: `launchpad secret:set NAME --value ...`. Secrets are encrypted at rest and only released to agents for services that reference them.
+4. **Bootstrap each node**: `launchpad node install root@app1.example.com --name app1 --control-url https://control.example.com --registry registry.example.com`. This registers the node with the control plane (issuing an agent token and a registry pull token), ships the agent container over SSH, writes `/etc/launchpad/agent.env`, runs `docker login` against the registry, and starts the agent container polling the control plane.
+5. **Deploy a Compose project**: `launchpad deploy -f docker-compose.yml`. The control plane validates placement, optionally builds/pushes images from an uploaded source tarball, and creates a desired-state record.
+6. **Wait for convergence**: `launchpad deploy` waits by default (or run `launchpad status` / `launchpad events`) until each agent pulls, applies, and health-checks its services and reports back, at which point the deployment is marked `succeeded`.
+7. **Operate**: use `launchpad rollback`, `launchpad restart <service>`, `launchpad logs <service>`, and `launchpad doctor [--nodes]` for day-to-day operations.
+
+## Workflows
+
+### Node bootstrap (`launchpad node install`)
+
+```mermaid
+sequenceDiagram
+    participant Op as Operator
+    participant CLI as launchpad CLI
+    participant Ctrl as Control plane
+    participant DB as SQLite
+    participant Host as Remote host (SSH)
+    participant Agent as Agent container
+
+    Op->>CLI: node install root@host --name app1
+    CLI->>Host: SSH preflight (docker, compose, paths, disk, control reachable)
+    CLI->>Ctrl: POST /api/v1/nodes/register
+    Ctrl->>DB: insert node, generate agentToken + registryToken
+    Ctrl->>Ctrl: write htpasswd entry, restart registry container
+    Ctrl-->>CLI: { node, agentToken, registryToken }
+    CLI->>Host: docker save | scp | docker load (image transfer)
+    CLI->>Host: ssh node-install.sh (writes /etc/launchpad/agent.env, docker login, docker run agent)
+    Host->>Agent: start container
+    loop every LAUNCHPAD_POLL_INTERVAL_MS
+        Agent->>Ctrl: GET /agent/v1/work (Bearer agentToken)
+        Ctrl->>DB: update last_seen_at, status=online
+    end
+    CLI-->>Op: { ok, node, registryToken }
+```
+
+### Deploy (`launchpad deploy`)
+
+```mermaid
+sequenceDiagram
+    participant Op as Operator
+    participant CLI as launchpad CLI
+    participant Ctrl as Control plane
+    participant DB as SQLite
+    participant Agent as Agent (per node)
+
+    Op->>CLI: deploy -f docker-compose.yml
+    CLI->>CLI: read & hash compose, tar build context
+    CLI->>Ctrl: POST /api/v1/deployments (compose + context)
+    Ctrl->>DB: lock project, insert deployment (state=building)
+    Ctrl->>Ctrl: build & push images for services with build:
+    Ctrl->>DB: insert desired_state, set current_deployment_id, state=rolling_out
+    Ctrl-->>CLI: { deployment, desiredState }
+    loop poll interval
+        Agent->>Ctrl: GET /agent/v1/work
+        Ctrl-->>Agent: matching desiredStates for this node
+        Agent->>Agent: fetch secrets, write compose+.env, pull, up -d, health checks
+        Agent->>Ctrl: POST /agent/v1/status (observedVersion, health)
+        Ctrl->>DB: upsert node_statuses, check convergence
+    end
+    Ctrl->>DB: all nodes serving desired version -> deployment state=succeeded
+    CLI->>Ctrl: GET /api/v1/deployments/:id (poll until terminal state)
+    CLI-->>Op: deployment result
+```
+
+### Rollback (`launchpad rollback`)
+
+```mermaid
+sequenceDiagram
+    participant Op as Operator
+    participant CLI as launchpad CLI
+    participant Ctrl as Control plane
+    participant DB as SQLite
+    participant Agent as Agent (per node)
+
+    Op->>CLI: rollback [--force]
+    CLI->>Ctrl: POST /api/v1/rollback { project, force }
+    Ctrl->>DB: lock project, reject 409 if active deployment & not --force
+    Ctrl->>DB: find most recent prior succeeded/rolling_out desired_state
+    Ctrl->>DB: insert new deployment (version=rollback-...), insert desired_state copy, set current_deployment_id
+    Ctrl-->>CLI: { deployment, desiredState: previousState }
+    loop poll interval
+        Agent->>Ctrl: GET /agent/v1/work
+        Ctrl-->>Agent: previous desiredState
+        Agent->>Agent: reconcile (pull/apply prior images, health checks)
+        Agent->>Ctrl: POST /agent/v1/status (observedVersion=previousState.version)
+        Ctrl->>DB: convergence check -> deployment state=succeeded
+    end
+    CLI-->>Op: rollback deployment result
+```
+
 ## SSH bootstrap
 
 The CLI includes pragmatic SSH installers for Docker-capable Linux hosts. They build the local Launchpad image, transfer it with `docker save`/`scp`, and start containers remotely.

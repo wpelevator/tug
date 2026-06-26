@@ -1,6 +1,5 @@
 set -euo pipefail
-mkdir -p /opt/launchpad-control /var/lib/launchpad-control /var/lib/launchpad-registry /var/lib/launchpad-registry-auth
-touch /var/lib/launchpad-registry-auth/htpasswd
+mkdir -p /opt/launchpad-control /var/lib/launchpad-control
 cat > /opt/launchpad-control/docker-compose.yml <<'YAML'
 {{COMPOSE}}YAML
 docker compose -f /opt/launchpad-control/docker-compose.yml up -d
