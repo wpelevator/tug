@@ -1,15 +1,16 @@
 #!/usr/bin/env node
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import net from 'node:net';
 import { composeForNode, dumpYaml, serviceSecretVersions } from './compose.js';
 import { ensureDir, now } from './util.js';
 import { openAgentDb } from './db.js';
 
-const CONTROL_URL = process.env.LAUNCHPAD_CONTROL_URL || 'http://localhost:8080';
-const TOKEN = process.env.LAUNCHPAD_AGENT_TOKEN;
-const NODE_NAME = process.env.LAUNCHPAD_NODE_NAME || process.env.HOSTNAME || 'node1';
+const CONTROL_URL_FROM_ENV = Boolean(process.env.LAUNCHPAD_CONTROL_URL);
+let CONTROL_URL = process.env.LAUNCHPAD_CONTROL_URL || 'http://localhost:8080';
+let TOKEN = process.env.LAUNCHPAD_AGENT_TOKEN;
+let NODE_NAME = process.env.LAUNCHPAD_NODE_NAME || process.env.HOSTNAME || 'node1';
 const STATE_DIR = process.env.LAUNCHPAD_STATE_DIR || '/var/lib/launchpad';
 const APPLY = process.env.LAUNCHPAD_APPLY !== 'false';
 const INTERVAL = Number(process.env.LAUNCHPAD_POLL_INTERVAL_MS || 5000);
@@ -197,7 +198,80 @@ export async function pollOnce() {
   return projects;
 }
 
+const CREDS_FILE = () => path.join(STATE_DIR, 'agent.json');
+async function loadCreds() {
+  try { return JSON.parse(await fs.readFile(CREDS_FILE(), 'utf8')); } catch { return null; }
+}
+async function saveCreds(creds) {
+  await ensureDir(STATE_DIR);
+  await fs.writeFile(CREDS_FILE(), JSON.stringify(creds), { mode: 0o600 });
+}
+async function readJoinKey() {
+  if (process.env.LAUNCHPAD_JOIN_KEY) return process.env.LAUNCHPAD_JOIN_KEY.trim();
+  const file = process.env.LAUNCHPAD_JOIN_KEY_FILE;
+  if (file) {
+    try { return (await fs.readFile(file, 'utf8')).trim(); }
+    catch (e) { throw new Error(`cannot read LAUNCHPAD_JOIN_KEY_FILE ${file}: ${e.message}`, { cause: e }); }
+  }
+  return null;
+}
+function dockerLogin(registry, user, password) {
+  return new Promise((resolve, reject) => {
+    const p = spawn('docker', ['login', registry, '-u', user, '--password-stdin'], { stdio: ['pipe', 'ignore', 'pipe'] });
+    let err = ''; p.stderr.on('data', d => err += d);
+    p.on('error', reject);
+    p.on('close', code => code === 0 ? resolve() : reject(new Error(err.trim() || `exit ${code}`)));
+    p.stdin.write(password); p.stdin.end();
+  });
+}
+async function enroll(joinKey) {
+  let decoded;
+  try { decoded = JSON.parse(Buffer.from(joinKey, 'base64url').toString('utf8')); }
+  catch (e) { throw new Error('invalid LAUNCHPAD_JOIN_KEY (expected base64url-encoded JSON)', { cause: e }); }
+  if (!decoded.enrollToken) throw new Error('join key is missing enrollToken');
+  const controlUrl = (!CONTROL_URL_FROM_ENV && decoded.controlUrl) ? decoded.controlUrl : CONTROL_URL;
+  // node's fetch reads NODE_EXTRA_CA_CERTS only at startup, so apply an embedded CA by
+  // persisting it and re-execing ourselves once with the env var set.
+  if (decoded.ca && !process.env.NODE_EXTRA_CA_CERTS) {
+    await ensureDir(STATE_DIR);
+    const caPath = path.join(STATE_DIR, 'control-ca.pem');
+    await fs.writeFile(caPath, decoded.ca);
+    const r = spawnSync(process.execPath, process.argv.slice(1), { stdio: 'inherit', env: { ...process.env, NODE_EXTRA_CA_CERTS: caPath } });
+    process.exit(r.status ?? 1);
+  }
+  console.log(`enrolling with ${controlUrl} as ${NODE_NAME}`);
+  const res = await fetch(`${controlUrl}/agent/v1/enroll`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ enrollToken: decoded.enrollToken, name: NODE_NAME, address: process.env.LAUNCHPAD_NODE_ADDRESS, publicAddress: process.env.LAUNCHPAD_NODE_PUBLIC_ADDRESS })
+  });
+  if (!res.ok) throw new Error(`enroll failed: ${res.status} ${await res.text()}`);
+  const out = await res.json();
+  const creds = { agentToken: out.agentToken, nodeName: out.node?.name || NODE_NAME, controlUrl, registry: out.registry || null, registryToken: out.registryToken || null };
+  await saveCreds(creds);
+  console.log(`enrolled as node ${creds.nodeName}`);
+  return creds;
+}
+// Establish durable credentials before polling: explicit env token (SSH/push install) wins,
+// then credentials persisted on the state volume, then a one-time enroll via the join key.
+export async function loadOrEnroll() {
+  let creds = TOKEN ? { agentToken: TOKEN, nodeName: NODE_NAME, controlUrl: CONTROL_URL } : await loadCreds();
+  if (!creds) {
+    const joinKey = await readJoinKey();
+    if (!joinKey) throw new Error('no LAUNCHPAD_AGENT_TOKEN, no persisted credentials, and no LAUNCHPAD_JOIN_KEY to enroll with');
+    creds = await enroll(joinKey);
+  }
+  TOKEN = creds.agentToken;
+  NODE_NAME = creds.nodeName || NODE_NAME;
+  if (!CONTROL_URL_FROM_ENV && creds.controlUrl) CONTROL_URL = creds.controlUrl;
+  if (APPLY && creds.registry && creds.registryToken) {
+    try { await dockerLogin(creds.registry, NODE_NAME, creds.registryToken); }
+    catch (e) { console.error(`registry login failed (pulls from ${creds.registry} may fail): ${e.message}`); }
+  }
+  return creds;
+}
+
 export async function main() {
+  await loadOrEnroll();
   console.log(`launchpad-agent node=${NODE_NAME} control=${CONTROL_URL} apply=${APPLY}`);
   for (;;) { try { await pollOnce(); } catch (e) { console.error(e.message); } await new Promise(r => setTimeout(r, INTERVAL)); }
 }

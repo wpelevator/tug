@@ -5,7 +5,7 @@ A Node.js MVP of the Portable VPS Launch Pad described in `plan.md`.
 ## Implemented MVP
 
 - Control API with bearer-token auth and SQLite metadata.
-- Node registration with per-node agent and registry tokens.
+- Node registration with per-node agent and registry tokens, via SSH push (`node install`) or self-service pull enrollment (`node:enroll` + a single `docker run` on the host).
 - Agent pull reconciliation via `/agent/v1/work` and status reporting.
 - Compose parsing with `x-launchpad.placement`, build-to-immutable-image desired state, and generated per-node Compose files.
 - Optional remote Docker builds on the control host when `launchpad deploy` uploads a source tarball.
@@ -41,7 +41,9 @@ The control service prints and stores the initial operator token in `./data/oper
 1. **Install the control plane** on a Docker-capable host: `launchpad control install root@control.example.com --token "$LAUNCHPAD_TOKEN" --registry registry.example.com ...`. This builds/ships the Launchpad image over SSH, starts the `control` container, and prints the operator token and control URL. Launchpad does not provision a registry itself — `--registry <host>` is required and must point at a registry you already run. If that registry uses htpasswd auth and you want Launchpad to manage per-node credentials for it, also pass `--registry-auth-path` (the htpasswd file path, mounted into the control container) and `--registry-container` (the registry's container name, restarted whenever credentials change).
 2. **Point the CLI at the control plane**: `launchpad init --control-url https://control.example.com --token "$LAUNCHPAD_TOKEN"`. This writes `.launchpad.json` locally so subsequent commands don't need `--control-url`/`--token` repeated.
 3. **Set any secrets your services need**: `launchpad secret:set NAME --value ...`. Secrets are encrypted at rest and only released to agents for services that reference them.
-4. **Bootstrap each node**: `launchpad node install root@app1.example.com --name app1 --control-url https://control.example.com --registry registry.example.com`. This registers the node with the control plane (issuing an agent token and a registry pull token), ships the agent container over SSH, writes `/etc/launchpad/agent.env`, runs `docker login` against the registry, and starts the agent container polling the control plane.
+4. **Bootstrap each node**, either way:
+   - **Push (you have SSH to the host):** `launchpad node install root@app1.example.com --name app1 --control-url https://control.example.com --registry registry.example.com`. This registers the node with the control plane (issuing an agent token and a registry pull token), ships the agent container over SSH, writes `/etc/launchpad/agent.env`, runs `docker login` against the registry, and starts the agent container polling the control plane.
+   - **Pull (the host enrolls itself, no SSH):** `launchpad node:enroll --name app1` mints a short-lived, single-use enrollment key and prints a ready-to-paste `docker run`. Run that one command on the freshly provisioned host (or drop it into cloud-init/user-data) and the agent exchanges the key for its durable agent + registry tokens on first boot. See [Self-service node enrollment](#self-service-node-enrollment-launchpad-nodeenroll).
 5. **Deploy a Compose project**: `launchpad deploy -f docker-compose.yml`. The control plane validates placement, optionally builds/pushes images from an uploaded source tarball, and creates a desired-state record.
 6. **Wait for convergence**: `launchpad deploy` waits by default (or run `launchpad status` / `launchpad events`) until each agent pulls, applies, and health-checks its services and reports back, at which point the deployment is marked `succeeded`.
 7. **Operate**: use `launchpad rollback`, `launchpad restart <service>`, `launchpad logs <service>`, and `launchpad doctor [--nodes]` for day-to-day operations.

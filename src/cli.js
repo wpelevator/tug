@@ -150,6 +150,36 @@ node.command('install <sshTarget>')
     console.log(JSON.stringify({ ok: true, node: registered.node, registryToken: registered.registryToken }, null, 2));
   });
 
+function dockerRunSnippet(image, joinKey) {
+  return `docker run -d --name launchpad-agent --restart unless-stopped \\
+  -v /var/run/docker.sock:/var/run/docker.sock \\
+  -v launchpad-agent:/var/lib/launchpad \\
+  -e LAUNCHPAD_JOIN_KEY=${joinKey} \\
+  ${image} agent`;
+}
+node.command('enroll')
+  .description('mint a single-use enrollment key so a fresh host can self-join with one docker run (no SSH)')
+  .option('--name <name>', 'pre-bind the node name (default: the agent uses its own hostname)')
+  .option('--control-url <url>', 'control URL the agent will connect to')
+  .option('--ttl <seconds>', 'enrollment key lifetime', '3600')
+  .option('--uses <n>', 'how many hosts may enroll with this key', '1')
+  .option('--ca <file>', 'PEM CA cert to embed so agents trust a private/self-signed control')
+  .option('--http-only-dev', 'allow a plaintext HTTP control URL for local/private development')
+  .option('--image <tag>', 'agent image used in the printed docker run', 'launchpad:local')
+  .option('--json', 'print machine-readable JSON instead of the docker run snippet')
+  .action(async (o) => {
+    const cfg = await loadCfg();
+    const controlUrl = o.controlUrl || cfg.controlUrl || process.env.LAUNCHPAD_CONTROL_URL || 'http://localhost:8080';
+    assertHttps(controlUrl, o.httpOnlyDev);
+    const minted = await request('POST', '/api/v1/nodes/enroll-token', { name: o.name || null, ttlSeconds: Number(o.ttl), uses: Number(o.uses) });
+    const keyPayload = { v: 1, controlUrl, enrollToken: minted.enrollToken };
+    if (o.ca) keyPayload.ca = await fs.readFile(o.ca, 'utf8');
+    const joinKey = Buffer.from(JSON.stringify(keyPayload)).toString('base64url');
+    if (o.json) { console.log(JSON.stringify({ ...minted, controlUrl, joinKey }, null, 2)); return; }
+    console.log(`# Enrollment key valid until ${minted.expiresAt} (${minted.usesRemaining} use(s)). Run on each fresh host:\n`);
+    console.log(dockerRunSnippet(o.image, joinKey));
+  });
+
 program.command('secret:set <name>').option('--project <name>').option('--value <value>').action(async (name, o) => {
   const value = o.value ?? await new Promise(resolve => { process.stdout.write(`${name}: `); process.stdin.once('data', d => resolve(String(d).trim())); });
   console.log(await request('POST', '/api/v1/secrets', { project: o.project || (await loadCfg()).project || 'site', name, value }));

@@ -134,14 +134,47 @@ export async function createApp() {
   });
   app.get('/api/v1/projects/:project', authOperator, async (req, res) => res.json(await db.get('SELECT * FROM projects WHERE id=?', req.params.project)));
 
-  app.post('/api/v1/nodes/register', authOperator, async (req, res) => {
-    const name = req.body.name; if (!name) return res.status(400).json({ error: 'name required' });
+  async function registerNode({ name, address, publicAddress }) {
     const agentToken = token('lpa'); const registryToken = token('lpr'); const ts = now();
     await db.run(`INSERT INTO nodes(id,name,address,public_address,status,agent_token_hash,registry_token_hash,created_at,updated_at)
       VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,address=excluded.address,public_address=excluded.public_address,agent_token_hash=excluded.agent_token_hash,registry_token_hash=excluded.registry_token_hash,updated_at=excluded.updated_at`,
-      name, name, req.body.address || null, req.body.publicAddress || null, 'registered', hashToken(agentToken), hashToken(registryToken), ts, ts);
+      name, name, address || null, publicAddress || null, 'registered', hashToken(agentToken), hashToken(registryToken), ts, ts);
     await upsertRegistryCredential(name, registryToken);
-    res.json({ node: await db.get('SELECT id,name,address,public_address,status,created_at,updated_at FROM nodes WHERE id=?', name), agentToken, registryToken });
+    const node = await db.get('SELECT id,name,address,public_address,status,created_at,updated_at FROM nodes WHERE id=?', name);
+    return { node, agentToken, registryToken };
+  }
+  app.post('/api/v1/nodes/register', authOperator, async (req, res) => {
+    const name = req.body.name; if (!name) return res.status(400).json({ error: 'name required' });
+    res.json(await registerNode({ name, address: req.body.address, publicAddress: req.body.publicAddress }));
+  });
+
+  // Self-service enrollment: operator mints a short-lived, limited-use key; the agent
+  // exchanges it for durable credentials on first boot (Portainer Edge-style join).
+  app.post('/api/v1/nodes/enroll-token', authOperator, async (req, res) => {
+    const name = req.body.name || null;
+    const ttlSeconds = Math.max(1, Number(req.body.ttlSeconds ?? 3600));
+    const uses = Math.max(1, Number(req.body.uses ?? 1));
+    const enrollToken = token('lpe');
+    const expiresAt = new Date(Date.now() + ttlSeconds * 1000).toISOString();
+    await db.run('INSERT INTO enroll_tokens(token_hash,name,uses_remaining,expires_at,created_at) VALUES(?,?,?,?,?)',
+      hashToken(enrollToken), name, uses, expiresAt, now());
+    res.json({ enrollToken, name, usesRemaining: uses, expiresAt, registry: REGISTRY });
+  });
+  app.post('/agent/v1/enroll', async (req, res) => {
+    const raw = String(req.body.enrollToken || (req.headers.authorization || '').replace(/^Bearer /, '')).trim();
+    if (!raw) return res.status(400).json({ error: 'enrollToken required' });
+    const row = await db.get('SELECT * FROM enroll_tokens WHERE token_hash=?', hashToken(raw));
+    if (!row || row.uses_remaining < 1 || row.expires_at < now()) {
+      if (row) await db.run('DELETE FROM enroll_tokens WHERE token_hash=?', hashToken(raw));
+      return res.status(401).json({ error: 'invalid or expired enroll token' });
+    }
+    const name = row.name || req.body.name;
+    if (!name) return res.status(400).json({ error: 'node name required (bind one to the enroll token or send name)' });
+    const result = await registerNode({ name, address: req.body.address, publicAddress: req.body.publicAddress });
+    const remaining = row.uses_remaining - 1;
+    if (remaining < 1) await db.run('DELETE FROM enroll_tokens WHERE token_hash=?', hashToken(raw));
+    else await db.run('UPDATE enroll_tokens SET uses_remaining=? WHERE token_hash=?', remaining, hashToken(raw));
+    res.json({ ...result, registry: REGISTRY });
   });
   app.get('/api/v1/nodes', authOperator, async (req, res) => res.json({ nodes: await db.all('SELECT id,name,address,public_address,status,last_seen_at,created_at,updated_at FROM nodes ORDER BY name') }));
   app.post('/api/v1/nodes/:name/rotate-registry-token', authOperator, async (req, res) => {
