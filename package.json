@@ -13,7 +13,7 @@
         "start:agent": "node src/main.js agent",
         "test": "node --test",
         "lint": "eslint .",
-        "lint:fix": "eslint . --fix",
+        "format": "eslint . --fix",
         "test:integration": "bash scripts/integration-test.sh"
     },
     "dependencies": {
