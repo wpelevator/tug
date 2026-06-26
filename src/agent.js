@@ -222,7 +222,7 @@ export async function pollOnce() {
   return projects;
 }
 
-async function main() {
+export async function main() {
   console.log(`launchpad-agent node=${NODE_NAME} control=${CONTROL_URL} apply=${APPLY}`);
   for (;;) { try { await pollOnce(); } catch (e) { console.error(e.message); } await new Promise(r => setTimeout(r, INTERVAL)); }
 }

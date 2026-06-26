@@ -9,8 +9,8 @@
         "launchpad-agent": "./src/agent.js"
     },
     "scripts": {
-        "start:control": "node src/control.js",
-        "start:agent": "node src/agent.js",
+        "start:control": "node src/main.js control",
+        "start:agent": "node src/main.js agent",
         "test": "node --test",
         "lint": "for f in src/*.js scripts/*.js test/*.js test/*.test.js; do if [ -e \"$f\" ]; then node --check \"$f\" || exit 1; fi; done",
         "test:integration": "bash scripts/integration-test.sh"

@@ -1,0 +1,9 @@
+FROM node:lts-alpine
+WORKDIR /app
+RUN apk add --no-cache python3 make g++ docker-cli ca-certificates apache2-utils
+COPY package*.json ./
+RUN npm install --omit=dev
+COPY src ./src
+COPY scripts ./scripts
+ENTRYPOINT ["node", "src/main.js"]
+CMD ["control"]

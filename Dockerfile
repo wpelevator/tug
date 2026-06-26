@@ -5,4 +5,5 @@ COPY package*.json ./
 RUN npm install --omit=dev
 COPY src ./src
 COPY scripts ./scripts
-CMD ["node", "src/control.js"]
+ENTRYPOINT ["node", "src/main.js"]
+CMD ["control"]

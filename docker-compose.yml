@@ -10,7 +10,7 @@ services:
 
   control:
     build: .
-    command: node src/control.js
+    command: ["control"]
     environment:
       PORT: 8080
       LAUNCHPAD_DB: /data/launchpad.db
@@ -30,7 +30,7 @@ services:
 
   agent:
     build: .
-    command: node src/agent.js
+    command: ["agent"]
     profiles: ["agent"]
     environment:
       LAUNCHPAD_CONTROL_URL: http://control:8080
