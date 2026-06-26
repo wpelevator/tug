@@ -6,7 +6,7 @@ import path from 'node:path';
 import * as tar from 'tar';
 import { openDb } from './db.js';
 import { encrypt, decrypt, loadOrCreateMasterKey } from './secrets.js';
-import { buildDesiredState, validateCompose, serviceSecretNames } from './compose.js';
+import { buildDesiredState, validateCompose } from './compose.js';
 import { buildAndPush, unpackContext, run as runCommand } from './build.js';
 import { ensureDir, hashToken, id, now, token } from './util.js';
 
