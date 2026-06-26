@@ -32,6 +32,7 @@ node src/cli.js init --control-url "$CONTROL" --token "$TOKEN" --project sample
 node src/cli.js secret:set SAMPLE_SECRET --project sample --value integration-secret
 node src/cli.js deploy -f docker-compose.sample.yml --project sample --no-build-upload
 node scripts/integration-verify.js
+LAUNCHPAD_REGISTRY_URL=http://localhost:15000 node scripts/integration-verify-registry-auth.js
 BACKUP_JSON=$(node src/cli.js backup run cache-data --project sample)
 echo "$BACKUP_JSON"
 LAUNCHPAD_BACKUP_ID=$(node -e 'const chunks=[]; process.stdin.on("data", d => chunks.push(d)); process.stdin.on("end", () => console.log(JSON.parse(Buffer.concat(chunks).toString()).backupId));' <<<"$BACKUP_JSON")

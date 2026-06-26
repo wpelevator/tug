@@ -11,50 +11,51 @@ import { buildAndPush, unpackContext, run as runCommand } from './build.js';
 import { ensureDir, hashToken, id, now, token } from './util.js';
 
 const PORT = Number(process.env.PORT || 8080);
-const REGISTRY = process.env.LAUNCHPAD_REGISTRY || 'localhost:5000';
-const REGISTRY_AUTH_PATH = process.env.LAUNCHPAD_REGISTRY_AUTH_PATH || null;
-const REGISTRY_CONTAINER = process.env.LAUNCHPAD_REGISTRY_CONTAINER || null;
 const upload = multer({ dest: process.env.LAUNCHPAD_UPLOAD_DIR || './data/uploads' });
-
-let htpasswdQueue = Promise.resolve();
-function withHtpasswdLock(fn) {
-  const next = htpasswdQueue.catch(() => {}).then(fn);
-  htpasswdQueue = next.catch(() => {});
-  return next;
-}
-async function reloadRegistry() {
-  if (!REGISTRY_CONTAINER) return;
-  await runCommand('docker', ['restart', REGISTRY_CONTAINER]).catch(e => console.error(`registry reload failed: ${e.message}`));
-}
-async function upsertRegistryCredential(name, password) {
-  if (!REGISTRY_AUTH_PATH) return;
-  await withHtpasswdLock(async () => {
-    const { out } = await runCommand('htpasswd', ['-nbB', name, password]);
-    const line = out.trim();
-    let existing = '';
-    try { existing = await fs.readFile(REGISTRY_AUTH_PATH, 'utf8'); } catch {}
-    const lines = existing.split('\n').filter(Boolean).filter(l => !l.startsWith(`${name}:`));
-    lines.push(line);
-    await ensureDir(path.dirname(REGISTRY_AUTH_PATH));
-    await fs.writeFile(REGISTRY_AUTH_PATH, `${lines.join('\n')}\n`);
-  });
-  await reloadRegistry();
-}
-async function removeRegistryCredential(name) {
-  if (!REGISTRY_AUTH_PATH) return;
-  await withHtpasswdLock(async () => {
-    let existing = '';
-    try { existing = await fs.readFile(REGISTRY_AUTH_PATH, 'utf8'); } catch {}
-    const lines = existing.split('\n').filter(Boolean).filter(l => !l.startsWith(`${name}:`));
-    await ensureDir(path.dirname(REGISTRY_AUTH_PATH));
-    await fs.writeFile(REGISTRY_AUTH_PATH, lines.length ? `${lines.join('\n')}\n` : '');
-  });
-  await reloadRegistry();
-}
 
 export async function createApp() {
   const dbFile = process.env.LAUNCHPAD_DB || './data/launchpad.db';
   const masterKeyFile = process.env.LAUNCHPAD_MASTER_KEY_FILE || './data/master.key';
+  const REGISTRY = process.env.LAUNCHPAD_REGISTRY || 'localhost:5000';
+  const REGISTRY_AUTH_PATH = process.env.LAUNCHPAD_REGISTRY_AUTH_PATH || null;
+  const REGISTRY_CONTAINER = process.env.LAUNCHPAD_REGISTRY_CONTAINER || null;
+
+  let htpasswdQueue = Promise.resolve();
+  function withHtpasswdLock(fn) {
+    const next = htpasswdQueue.catch(() => {}).then(fn);
+    htpasswdQueue = next.catch(() => {});
+    return next;
+  }
+  async function reloadRegistry() {
+    if (!REGISTRY_CONTAINER) return;
+    await runCommand('docker', ['restart', REGISTRY_CONTAINER]).catch(e => console.error(`registry reload failed: ${e.message}`));
+  }
+  async function upsertRegistryCredential(name, password) {
+    if (!REGISTRY_AUTH_PATH) return;
+    await withHtpasswdLock(async () => {
+      const { out } = await runCommand('htpasswd', ['-nbB', name, password]);
+      const line = out.trim();
+      let existing = '';
+      try { existing = await fs.readFile(REGISTRY_AUTH_PATH, 'utf8'); } catch {}
+      const lines = existing.split('\n').filter(Boolean).filter(l => !l.startsWith(`${name}:`));
+      lines.push(line);
+      await ensureDir(path.dirname(REGISTRY_AUTH_PATH));
+      await fs.writeFile(REGISTRY_AUTH_PATH, `${lines.join('\n')}\n`);
+    });
+    await reloadRegistry();
+  }
+  async function removeRegistryCredential(name) {
+    if (!REGISTRY_AUTH_PATH) return;
+    await withHtpasswdLock(async () => {
+      let existing = '';
+      try { existing = await fs.readFile(REGISTRY_AUTH_PATH, 'utf8'); } catch {}
+      const lines = existing.split('\n').filter(Boolean).filter(l => !l.startsWith(`${name}:`));
+      await ensureDir(path.dirname(REGISTRY_AUTH_PATH));
+      await fs.writeFile(REGISTRY_AUTH_PATH, lines.length ? `${lines.join('\n')}\n` : '');
+    });
+    await reloadRegistry();
+  }
+
   const db = await openDb(dbFile);
   const masterKey = await loadOrCreateMasterKey(masterKeyFile);
   let operator = await db.get('SELECT value FROM meta WHERE key=?', 'operator_token_hash');
@@ -106,13 +107,15 @@ export async function createApp() {
     const name = `project:${project}`;
     const ts = now();
     await db.run('DELETE FROM locks WHERE expires_at < ?', ts);
-    const existing = await db.get('SELECT * FROM locks WHERE name=?', name);
-    if (existing) {
-      const err = new Error(`project ${project} is locked by ${existing.owner} until ${existing.expires_at}`);
+    const owner = `${operation}:${id('lock')}`;
+    try {
+      await db.run('INSERT INTO locks(name,owner,expires_at,created_at) VALUES(?,?,?,?)', name, owner, new Date(Date.now() + ttlMs).toISOString(), ts);
+    } catch (e) {
+      if (!/UNIQUE constraint/.test(e.message)) throw e;
+      const existing = await db.get('SELECT * FROM locks WHERE name=?', name);
+      const err = new Error(`project ${project} is locked by ${existing?.owner} until ${existing?.expires_at}`);
       err.status = 409; err.lock = existing; throw err;
     }
-    const owner = `${operation}:${id('lock')}`;
-    await db.run('INSERT INTO locks(name,owner,expires_at,created_at) VALUES(?,?,?,?)', name, owner, new Date(Date.now() + ttlMs).toISOString(), ts);
     return { name, owner };
   }
   async function releaseLock(lock) {

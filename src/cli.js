@@ -35,12 +35,16 @@ function remoteHost(sshTarget) { return sshTarget.replace(/^[^@]+@/, '').split('
 function assertHttps(url, allowHttp) {
   if (!allowHttp && !String(url).startsWith('https://')) throw new Error(`${url} must use https:// outside local development (pass --http-only-dev to override)`);
 }
-function preflightRemote(target, { controlUrl } = {}) {
+function preflightRemote(target, { controlUrl, ports = [], minDiskMb = 1024 } = {}) {
   const checks = [
     ['docker.version', 'docker version >/dev/null', 'Install Docker Engine and ensure the SSH user can access it.'],
     ['docker.compose.version', 'docker compose version >/dev/null', 'Install Docker Compose v2.'],
-    ['paths', 'mkdir -p /opt/launchpad-preflight /var/lib/launchpad-preflight /etc/launchpad && test -w /opt/launchpad-preflight && test -w /var/lib/launchpad-preflight && test -w /etc/launchpad', 'Ensure /opt, /var/lib, and /etc/launchpad are writable by the installer.']
+    ['paths', 'mkdir -p /opt/launchpad-preflight /var/lib/launchpad-preflight /etc/launchpad && test -w /opt/launchpad-preflight && test -w /var/lib/launchpad-preflight && test -w /etc/launchpad', 'Ensure /opt, /var/lib, and /etc/launchpad are writable by the installer.'],
+    ['disk.space', `[ "$(df -Pm /var/lib | tail -1 | awk '{print $4}')" -ge ${Number(minDiskMb)} ]`, `Free at least ${minDiskMb}MB on the filesystem backing /var/lib.`]
   ];
+  for (const port of ports) {
+    checks.push([`port.${port}.free`, `! ( command -v ss >/dev/null 2>&1 && ss -ltn | awk '{print $4}' | grep -qE "[.:]${port}$" )`, `Port ${port} is already in use on the target host; stop the conflicting service or choose another port.`]);
+  }
   if (controlUrl) checks.push(['control.reachable', `curl -fsS ${sh(controlUrl)}/healthz >/dev/null`, 'Verify DNS/firewall/TLS for the control URL from the node.']);
   const script = `set -e
 ${checks.map(([name, cmd, fix]) => `echo "preflight: ${name}"; (${cmd}) || { echo "FAILED ${name}: ${fix}" >&2; exit 20; }`).join('\n')}
@@ -101,14 +105,17 @@ control.command('install <sshTarget>')
   .option('--no-transfer-image', 'skip docker build/save/scp/load')
   .action(async (sshTarget, o) => {
     const operatorToken = o.token || process.env.LAUNCHPAD_TOKEN || token('lpo');
-    preflightRemote(sshTarget);
+    preflightRemote(sshTarget, { ports: o.httpOnlyDev ? [Number(o.port)] : [80, 443], minDiskMb: 2048 });
     if (!o.httpOnlyDev && (!o.domain || !o.registryDomain || !o.email)) throw new Error('production install requires --domain, --registry-domain, and --email (or pass --http-only-dev)');
     if (o.transferImage) await transferLaunchpadImage(sshTarget, o.image);
     const registryHost = o.registry || o.registryDomain || 'localhost:5000';
-    const compose = o.httpOnlyDev ? `services:\n  registry:\n    image: registry:3.1.1\n    restart: unless-stopped\n    ports:\n      - \"5000:5000\"\n    volumes:\n      - /var/lib/launchpad-registry:/var/lib/registry\n  control:\n    image: ${o.image}\n    restart: unless-stopped\n    command: node src/control.js\n    environment:\n      PORT: 8080\n      LAUNCHPAD_DB: /data/launchpad.db\n      LAUNCHPAD_MASTER_KEY_FILE: /data/master.key\n      LAUNCHPAD_OPERATOR_TOKEN: ${operatorToken}\n      LAUNCHPAD_REGISTRY: ${registryHost}\n    ports:\n      - \"${o.port}:8080\"\n    volumes:\n      - /var/lib/launchpad-control:/data\n      - /var/run/docker.sock:/var/run/docker.sock\n` : `services:\n  caddy:\n    image: caddy:2-alpine\n    restart: unless-stopped\n    ports:\n      - \"80:80\"\n      - \"443:443\"\n    volumes:\n      - /opt/launchpad-control/Caddyfile:/etc/caddy/Caddyfile:ro\n      - /var/lib/launchpad-caddy/data:/data\n      - /var/lib/launchpad-caddy/config:/config\n    depends_on: [control, registry]\n  registry:\n    image: registry:3.1.1\n    restart: unless-stopped\n    volumes:\n      - /var/lib/launchpad-registry:/var/lib/registry\n  control:\n    image: ${o.image}\n    restart: unless-stopped\n    command: node src/control.js\n    environment:\n      PORT: 8080\n      LAUNCHPAD_DB: /data/launchpad.db\n      LAUNCHPAD_MASTER_KEY_FILE: /data/master.key\n      LAUNCHPAD_OPERATOR_TOKEN: ${operatorToken}\n      LAUNCHPAD_REGISTRY: ${registryHost}\n    volumes:\n      - /var/lib/launchpad-control:/data\n      - /var/run/docker.sock:/var/run/docker.sock\n`;
+    const registryEnv = `      REGISTRY_AUTH: htpasswd\n      REGISTRY_AUTH_HTPASSWD_REALM: launchpad-registry\n      REGISTRY_AUTH_HTPASSWD_PATH: /auth/htpasswd\n`;
+    const controlRegistryEnv = `      LAUNCHPAD_REGISTRY_AUTH_PATH: /registry-auth/htpasswd\n      LAUNCHPAD_REGISTRY_CONTAINER: launchpad-registry\n`;
+    const compose = o.httpOnlyDev ? `services:\n  registry:\n    image: registry:3.1.1\n    container_name: launchpad-registry\n    restart: unless-stopped\n    ports:\n      - \"5000:5000\"\n    environment:\n${registryEnv}    volumes:\n      - /var/lib/launchpad-registry:/var/lib/registry\n      - /var/lib/launchpad-registry-auth:/auth\n  control:\n    image: ${o.image}\n    restart: unless-stopped\n    command: node src/control.js\n    environment:\n      PORT: 8080\n      LAUNCHPAD_DB: /data/launchpad.db\n      LAUNCHPAD_MASTER_KEY_FILE: /data/master.key\n      LAUNCHPAD_OPERATOR_TOKEN: ${operatorToken}\n      LAUNCHPAD_REGISTRY: ${registryHost}\n${controlRegistryEnv}    ports:\n      - \"${o.port}:8080\"\n    volumes:\n      - /var/lib/launchpad-control:/data\n      - /var/lib/launchpad-registry-auth:/registry-auth\n      - /var/run/docker.sock:/var/run/docker.sock\n    depends_on:\n      - registry\n` : `services:\n  caddy:\n    image: caddy:2-alpine\n    restart: unless-stopped\n    ports:\n      - \"80:80\"\n      - \"443:443\"\n    volumes:\n      - /opt/launchpad-control/Caddyfile:/etc/caddy/Caddyfile:ro\n      - /var/lib/launchpad-caddy/data:/data\n      - /var/lib/launchpad-caddy/config:/config\n    depends_on: [control, registry]\n  registry:\n    image: registry:3.1.1\n    container_name: launchpad-registry\n    restart: unless-stopped\n    environment:\n${registryEnv}    volumes:\n      - /var/lib/launchpad-registry:/var/lib/registry\n      - /var/lib/launchpad-registry-auth:/auth\n  control:\n    image: ${o.image}\n    restart: unless-stopped\n    command: node src/control.js\n    environment:\n      PORT: 8080\n      LAUNCHPAD_DB: /data/launchpad.db\n      LAUNCHPAD_MASTER_KEY_FILE: /data/master.key\n      LAUNCHPAD_OPERATOR_TOKEN: ${operatorToken}\n      LAUNCHPAD_REGISTRY: ${registryHost}\n${controlRegistryEnv}    volumes:\n      - /var/lib/launchpad-control:/data\n      - /var/lib/launchpad-registry-auth:/registry-auth\n      - /var/run/docker.sock:/var/run/docker.sock\n    depends_on:\n      - registry\n`;
     const caddyfile = o.httpOnlyDev ? '' : `{\n\temail ${o.email}\n}\n${o.domain} {\n\treverse_proxy control:8080\n}\n${o.registryDomain} {\n\treverse_proxy registry:5000\n}\n`;
     const remote = `set -euo pipefail
-mkdir -p /opt/launchpad-control /var/lib/launchpad-control /var/lib/launchpad-registry /var/lib/launchpad-caddy/data /var/lib/launchpad-caddy/config
+mkdir -p /opt/launchpad-control /var/lib/launchpad-control /var/lib/launchpad-registry /var/lib/launchpad-registry-auth /var/lib/launchpad-caddy/data /var/lib/launchpad-caddy/config
+touch /var/lib/launchpad-registry-auth/htpasswd
 cat > /opt/launchpad-control/docker-compose.yml <<'YAML'
 ${compose}YAML
 cat > /opt/launchpad-control/Caddyfile <<'CADDY'

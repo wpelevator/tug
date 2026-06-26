@@ -17,7 +17,7 @@ services:
       LAUNCHPAD_MASTER_KEY_FILE: /data/master.key
       LAUNCHPAD_OPERATOR_TOKEN: integration-token
       LAUNCHPAD_REGISTRY: registry:5000
-      LAUNCHPAD_PUSH: "true"
+      LAUNCHPAD_PUSH: "false"
       LAUNCHPAD_REGISTRY_AUTH_PATH: /registry-auth/htpasswd
       LAUNCHPAD_REGISTRY_CONTAINER: launchpad-registry-it
     ports:
@@ -51,6 +51,7 @@ services:
     environment:
       LAUNCHPAD_NODE_NAME: vps-a
       LAUNCHPAD_CONTROL_URL: http://control:8080
+      LAUNCHPAD_REGISTRY: registry:5000
       LAUNCHPAD_APPLY: "true"
       LAUNCHPAD_POLL_INTERVAL_MS: 2000
     volumes:
@@ -68,6 +69,7 @@ services:
     environment:
       LAUNCHPAD_NODE_NAME: vps-b
       LAUNCHPAD_CONTROL_URL: http://control:8080
+      LAUNCHPAD_REGISTRY: registry:5000
       LAUNCHPAD_APPLY: "true"
       LAUNCHPAD_POLL_INTERVAL_MS: 2000
     volumes:
@@ -85,6 +87,7 @@ services:
     environment:
       LAUNCHPAD_NODE_NAME: vps-c
       LAUNCHPAD_CONTROL_URL: http://control:8080
+      LAUNCHPAD_REGISTRY: registry:5000
       LAUNCHPAD_APPLY: "true"
       LAUNCHPAD_POLL_INTERVAL_MS: 2000
     volumes:

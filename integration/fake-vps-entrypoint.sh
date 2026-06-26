@@ -9,7 +9,7 @@ set -euo pipefail
 
 echo "[$LAUNCHPAD_NODE_NAME] starting fake VPS Docker daemon"
 mkdir -p /var/lib/docker /var/run "$LAUNCHPAD_STATE_DIR"
-dockerd --host=unix:///var/run/docker.sock --storage-driver=vfs >/var/log/dockerd.log 2>&1 &
+dockerd --host=unix:///var/run/docker.sock --storage-driver=vfs ${LAUNCHPAD_REGISTRY:+--insecure-registry "$LAUNCHPAD_REGISTRY"} >/var/log/dockerd.log 2>&1 &
 
 for i in $(seq 1 60); do
   if docker info >/dev/null 2>&1; then
@@ -41,7 +41,16 @@ fi
 
 if [ -n "${LAUNCHPAD_REGISTRY:-}" ] && [ -n "${LAUNCHPAD_REGISTRY_TOKEN:-}" ]; then
   echo "[$LAUNCHPAD_NODE_NAME] docker login $LAUNCHPAD_REGISTRY"
-  echo "$LAUNCHPAD_REGISTRY_TOKEN" | docker login "$LAUNCHPAD_REGISTRY" --username "$LAUNCHPAD_NODE_NAME" --password-stdin
+  for i in $(seq 1 10); do
+    if echo "$LAUNCHPAD_REGISTRY_TOKEN" | docker login "$LAUNCHPAD_REGISTRY" --username "$LAUNCHPAD_NODE_NAME" --password-stdin; then
+      break
+    fi
+    if [ "$i" = "10" ]; then
+      echo "docker login to $LAUNCHPAD_REGISTRY failed" >&2
+      exit 1
+    fi
+    sleep 2
+  done
 fi
 
 export LAUNCHPAD_CONTROL_URL LAUNCHPAD_NODE_NAME LAUNCHPAD_AGENT_TOKEN LAUNCHPAD_STATE_DIR LAUNCHPAD_APPLY LAUNCHPAD_POLL_INTERVAL_MS
