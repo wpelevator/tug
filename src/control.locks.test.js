@@ -9,8 +9,7 @@ import { openDb } from './db.js';
 async function server() {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'lp-lock-'));
   const dbFile = path.join(dir, 'launchpad.db');
-  process.env.LAUNCHPAD_DB = dbFile;
-  process.env.LAUNCHPAD_MASTER_KEY_FILE = path.join(dir, 'master.key');
+  process.env.LAUNCHPAD_DATA_DIR = dir;
   process.env.LAUNCHPAD_OPERATOR_TOKEN = 'op-lock-token';
   process.env.LAUNCHPAD_REGISTRY = 'registry.test';
   delete process.env.LAUNCHPAD_REGISTRY_AUTH_PATH;

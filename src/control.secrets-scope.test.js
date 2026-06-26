@@ -7,8 +7,7 @@ import { createApp } from './control.js';
 
 async function makeServer() {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'lp-sec-scope-'));
-  process.env.LAUNCHPAD_DB = path.join(dir, 'launchpad.db');
-  process.env.LAUNCHPAD_MASTER_KEY_FILE = path.join(dir, 'master.key');
+  process.env.LAUNCHPAD_DATA_DIR = dir;
   process.env.LAUNCHPAD_OPERATOR_TOKEN = 'op-scope-token';
   const app = await createApp();
   const srv = await new Promise(resolve => { const s = app.listen(0, () => resolve(s)); });

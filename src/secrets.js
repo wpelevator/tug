@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import { ensureDir, exists } from './util.js';
 import path from 'node:path';
 
-export async function loadOrCreateMasterKey(file = process.env.LAUNCHPAD_MASTER_KEY_FILE || './data/master.key') {
+export async function loadOrCreateMasterKey(file) {
   await ensureDir(path.dirname(file));
   if (await exists(file)) return (await fs.readFile(file, 'utf8')).trim();
   const key = crypto.randomBytes(32).toString('base64');

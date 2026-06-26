@@ -7,8 +7,7 @@ import { createApp } from './control.js';
 
 async function server() {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'lp-'));
-  process.env.LAUNCHPAD_DB = path.join(dir, 'launchpad.db');
-  process.env.LAUNCHPAD_MASTER_KEY_FILE = path.join(dir, 'master.key');
+  process.env.LAUNCHPAD_DATA_DIR = dir;
   process.env.LAUNCHPAD_OPERATOR_TOKEN = 'op-test-token';
   process.env.LAUNCHPAD_REGISTRY = 'registry.test';
   const app = await createApp();

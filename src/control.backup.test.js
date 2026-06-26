@@ -7,8 +7,7 @@ import { createApp } from './control.js';
 
 async function makeServer() {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'lp-cbak-'));
-  process.env.LAUNCHPAD_DB = path.join(dir, 'launchpad.db');
-  process.env.LAUNCHPAD_MASTER_KEY_FILE = path.join(dir, 'master.key');
+  process.env.LAUNCHPAD_DATA_DIR = dir;
   process.env.LAUNCHPAD_CONTROL_BACKUP_DIR = path.join(dir, 'control-backups');
   process.env.LAUNCHPAD_CONTROL_RESTORE_DIR = path.join(dir, 'control-restore');
   process.env.LAUNCHPAD_OPERATOR_TOKEN = 'op-control-backup-token';

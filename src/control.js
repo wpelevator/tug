@@ -12,12 +12,12 @@ import { buildAndPush, unpackContext, run as runCommand } from './build.js';
 import { ensureDir, hashToken, id, now, token } from './util.js';
 
 const PORT = Number(process.env.PORT || 8080);
-const DATA_DIR = process.env.LAUNCHPAD_DATA_DIR || './data';
-const upload = multer({ dest: process.env.LAUNCHPAD_UPLOAD_DIR || path.join(DATA_DIR, 'uploads') });
 
 export async function createApp() {
-  const dbFile = process.env.LAUNCHPAD_DB || path.join(DATA_DIR, 'launchpad.db');
-  const masterKeyFile = process.env.LAUNCHPAD_MASTER_KEY_FILE || path.join(DATA_DIR, 'master.key');
+  const DATA_DIR = process.env.LAUNCHPAD_DATA_DIR || './data';
+  const upload = multer({ dest: process.env.LAUNCHPAD_UPLOAD_DIR || path.join(DATA_DIR, 'uploads') });
+  const dbFile = path.join(DATA_DIR, 'launchpad.db');
+  const masterKeyFile = path.join(DATA_DIR, 'master.key');
   const REGISTRY = process.env.LAUNCHPAD_REGISTRY || 'localhost:5000';
   const REGISTRY_AUTH_PATH = process.env.LAUNCHPAD_REGISTRY_AUTH_PATH || null;
   const REGISTRY_CONTAINER = process.env.LAUNCHPAD_REGISTRY_CONTAINER || null;

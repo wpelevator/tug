@@ -13,8 +13,7 @@ services:
     command: node src/control.js
     environment:
       PORT: 8080
-      LAUNCHPAD_DB: /data/launchpad.db
-      LAUNCHPAD_MASTER_KEY_FILE: /data/master.key
+      LAUNCHPAD_DATA_DIR: /data
       LAUNCHPAD_OPERATOR_TOKEN: integration-token
       LAUNCHPAD_REGISTRY: registry:5000
       LAUNCHPAD_PUSH: "false"

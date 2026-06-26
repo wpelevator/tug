@@ -3,7 +3,7 @@ import { open } from 'sqlite';
 import path from 'node:path';
 import { ensureDir, now } from './util.js';
 
-export async function openDb(filename = process.env.LAUNCHPAD_DB || './data/launchpad.db') {
+export async function openDb(filename) {
   await ensureDir(path.dirname(filename));
   const db = await open({ filename, driver: sqlite3.Database });
   await db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
