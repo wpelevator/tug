@@ -2,6 +2,7 @@
 import express from 'express';
 import multer from 'multer';
 import fs from 'node:fs/promises';
+import https from 'node:https';
 import path from 'node:path';
 import * as tar from 'tar';
 import { openDb } from './db.js';
@@ -473,4 +474,16 @@ export async function createApp() {
   return app;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) createApp().then(app => app.listen(PORT, () => console.log(`launchpad-control listening on ${PORT}`)));
+export async function listen(app, port = PORT) {
+  const certFile = process.env.LAUNCHPAD_TLS_CERT_FILE;
+  const keyFile = process.env.LAUNCHPAD_TLS_KEY_FILE;
+  if (certFile && keyFile) {
+    const [cert, key] = await Promise.all([fs.readFile(certFile), fs.readFile(keyFile)]);
+    const server = https.createServer({ cert, key }, app);
+    return new Promise(resolve => server.listen(port, () => { console.log(`launchpad-control listening on ${port} (tls)`); resolve(server); }));
+  }
+  console.warn('LAUNCHPAD_TLS_CERT_FILE/LAUNCHPAD_TLS_KEY_FILE not set; serving plain HTTP');
+  return new Promise(resolve => { const server = app.listen(port, () => { console.log(`launchpad-control listening on ${port}`); resolve(server); }); });
+}
+
+if (import.meta.url === `file://${process.argv[1]}`) createApp().then(app => listen(app));
