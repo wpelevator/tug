@@ -13,8 +13,7 @@ services:
     command: ["control"]
     environment:
       PORT: 8080
-      LAUNCHPAD_DB: /data/launchpad.db
-      LAUNCHPAD_MASTER_KEY_FILE: /data/master.key
+      LAUNCHPAD_DATA_DIR: /data
       LAUNCHPAD_REGISTRY: localhost:5000
       LAUNCHPAD_PUSH: "false"
       LAUNCHPAD_REGISTRY_AUTH_PATH: /registry-auth/htpasswd

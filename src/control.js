@@ -12,11 +12,12 @@ import { buildAndPush, unpackContext, run as runCommand } from './build.js';
 import { ensureDir, hashToken, id, now, token } from './util.js';
 
 const PORT = Number(process.env.PORT || 8080);
-const upload = multer({ dest: process.env.LAUNCHPAD_UPLOAD_DIR || './data/uploads' });
+const DATA_DIR = process.env.LAUNCHPAD_DATA_DIR || './data';
+const upload = multer({ dest: process.env.LAUNCHPAD_UPLOAD_DIR || path.join(DATA_DIR, 'uploads') });
 
 export async function createApp() {
-  const dbFile = process.env.LAUNCHPAD_DB || './data/launchpad.db';
-  const masterKeyFile = process.env.LAUNCHPAD_MASTER_KEY_FILE || './data/master.key';
+  const dbFile = process.env.LAUNCHPAD_DB || path.join(DATA_DIR, 'launchpad.db');
+  const masterKeyFile = process.env.LAUNCHPAD_MASTER_KEY_FILE || path.join(DATA_DIR, 'master.key');
   const REGISTRY = process.env.LAUNCHPAD_REGISTRY || 'localhost:5000';
   const REGISTRY_AUTH_PATH = process.env.LAUNCHPAD_REGISTRY_AUTH_PATH || null;
   const REGISTRY_CONTAINER = process.env.LAUNCHPAD_REGISTRY_CONTAINER || null;
@@ -63,7 +64,7 @@ export async function createApp() {
   if (!operator) {
     const t = process.env.LAUNCHPAD_OPERATOR_TOKEN || token('lpo');
     await db.run('INSERT INTO meta(key,value) VALUES(?,?)', 'operator_token_hash', hashToken(t));
-    await fs.writeFile('./data/operator.token', `${t}\n`, { mode: 0o600 }).catch(()=>{});
+    await fs.writeFile(path.join(DATA_DIR, 'operator.token'), `${t}\n`, { mode: 0o600 }).catch(()=>{});
     console.log(`operator token: ${t}`);
   }
 
@@ -196,7 +197,7 @@ export async function createApp() {
       await db.run('INSERT INTO deployments(id,project_id,version,state,created_at,updated_at) VALUES(?,?,?,?,?,?)', depId, project, version, 'building', ts, ts);
       const desired = buildDesiredState({ project, version, compose, registry: REGISTRY, defaultNode: nodes[0]?.name || null });
       if (req.file) {
-        const contextDir = path.resolve('./data/build-contexts', depId); await unpackContext(req.file.path, contextDir);
+        const contextDir = path.resolve(DATA_DIR, 'build-contexts', depId); await unpackContext(req.file.path, contextDir);
         for (const [svc, spec] of Object.entries(compose.services)) if (spec.build) await buildAndPush({ contextDir, service: svc, buildSpec: spec.build, imageRef: desired.services[svc].image, push: process.env.LAUNCHPAD_PUSH !== 'false' });
       }
       await db.run('INSERT INTO desired_states(id,project_id,deployment_id,version,state_json,created_at) VALUES(?,?,?,?,?,?)', id('ds'), project, depId, version, JSON.stringify(desired), ts);
@@ -300,7 +301,7 @@ export async function createApp() {
   });
   app.get('/api/v1/backups', authOperator, async (req, res) => res.json({ backups: await db.all('SELECT * FROM backups WHERE project_id=? ORDER BY created_at DESC', req.query.project || 'site') }));
   app.post('/api/v1/control/backups/run', authOperator, async (req, res) => {
-    const backupDir = process.env.LAUNCHPAD_CONTROL_BACKUP_DIR || './data/control-backups';
+    const backupDir = process.env.LAUNCHPAD_CONTROL_BACKUP_DIR || path.join(DATA_DIR, 'control-backups');
     await ensureDir(backupDir);
     const ts = now(); const backupId = id('cbak');
     const staging = path.join(backupDir, `${backupId}-staging`);
@@ -320,7 +321,7 @@ export async function createApp() {
     if (!req.body.confirm) return res.status(400).json({ error: 'confirm=true is required; restore overwrites control database and master key, then requires process restart' });
     const artifactRef = req.body.artifactRef;
     if (!artifactRef) return res.status(400).json({ error: 'artifactRef required' });
-    const restoreDir = process.env.LAUNCHPAD_CONTROL_RESTORE_DIR || './data/control-restore';
+    const restoreDir = process.env.LAUNCHPAD_CONTROL_RESTORE_DIR || path.join(DATA_DIR, 'control-restore');
     await fs.rm(restoreDir, { recursive: true, force: true });
     await ensureDir(restoreDir);
     await tar.x({ file: artifactRef, cwd: restoreDir });

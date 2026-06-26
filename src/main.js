@@ -4,10 +4,9 @@ const role = process.argv[2] || process.env.LAUNCHPAD_ROLE;
 
 switch (role) {
   case 'control': {
-    const { createApp } = await import('./control.js');
-    const PORT = process.env.PORT || 8080;
+    const { createApp, listen } = await import('./control.js');
     const app = await createApp();
-    app.listen(PORT, () => console.log(`launchpad-control listening on ${PORT}`));
+    await listen(app);
     break;
   }
   case 'agent': {
