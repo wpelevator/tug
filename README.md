@@ -15,6 +15,7 @@ A Node.js MVP of the Portable VPS Launch Pad described in `plan.md`.
 - Secret version tracking with targeted service recreation when only referenced secrets change.
 - SSH-based Docker bootstrap helpers with preflight checks for Docker, Compose, writable paths, control reachability, free disk space, and published-port availability.
 - Production-style control install generation with Caddy TLS in front of the control API and registry; plaintext HTTP is only for local/private development with `--http-only-dev`.
+- `control.js` can also terminate TLS itself (`LAUNCHPAD_TLS_CERT_FILE` / `LAUNCHPAD_TLS_KEY_FILE`) for setups without Caddy/ACME, e.g. a private network with a self-signed cert; point agents at it with `LAUNCHPAD_CONTROL_URL=https://...` and `NODE_EXTRA_CA_CERTS=<path to CA cert>` so the agent's `fetch` trusts it.
 - Per-node registry pull tokens are issued at registration and enforced by the registry itself via an htpasswd file that control writes; `node install --registry <host>` performs `docker login` for agents. Tokens can be rotated or revoked with `node:rotate-registry-token` / `node:revoke-registry-token`, which restarts the registry container so the change takes effect immediately.
 - Control/local/agent diagnostics via `launchpad doctor`.
 - Development `docker-compose.yml` with control API, registry, and optional agent service.

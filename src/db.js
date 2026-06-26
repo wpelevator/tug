@@ -11,6 +11,22 @@ export async function openDb(filename = process.env.LAUNCHPAD_DB || './data/laun
   return db;
 }
 
+export async function openAgentDb(filename) {
+  await ensureDir(path.dirname(filename));
+  const db = await open({ filename, driver: sqlite3.Database });
+  await db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
+  await db.exec(`
+CREATE TABLE IF NOT EXISTS applied_state(
+  project TEXT PRIMARY KEY,
+  version TEXT,
+  applied_at TEXT,
+  service_states_json TEXT,
+  secret_versions_json TEXT
+);
+`);
+  return db;
+}
+
 async function migrate(db) {
   await db.exec(`
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);

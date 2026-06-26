@@ -9,10 +9,11 @@
   "scripts": {
     "start:control": "node src/main.js control",
     "start:agent": "node src/main.js agent",
-    "test": "node --test",
+    "test": "node --test 'src/**/*.test.js'",
     "lint": "eslint .",
     "format": "eslint . --fix",
-    "test:integration": "bash scripts/integration-test.sh"
+    "test:integration": "bash scripts/integration-test.sh",
+    "test:integration:agent": "node --test 'test/integration/**/*.test.js'"
   },
   "dependencies": {
     "commander": "^12.1.0",

@@ -19,6 +19,11 @@ services:
       LAUNCHPAD_PUSH: "false"
       LAUNCHPAD_REGISTRY_AUTH_PATH: /registry-auth/htpasswd
       LAUNCHPAD_REGISTRY_CONTAINER: launchpad-registry
+      # Set both to terminate TLS directly in control.js instead of relying on Caddy/ACME
+      # (e.g. private networks without a public domain). Use a self-signed cert and point
+      # agents at it with LAUNCHPAD_CONTROL_URL=https://... plus NODE_EXTRA_CA_CERTS=<ca.pem>.
+      # LAUNCHPAD_TLS_CERT_FILE: /data/tls/cert.pem
+      # LAUNCHPAD_TLS_KEY_FILE: /data/tls/key.pem
     ports:
       - "8080:8080"
     volumes:

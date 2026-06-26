@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import { spawnSync } from 'node:child_process';
-import { buildDesiredState } from './compose.js';
+import { buildDesiredState } from '../../src/compose.js';
 
 function dockerInspect(name) {
   const r = spawnSync('docker', ['compose', '-p', 'lpsecrettest', 'ps', '-q', name], { cwd: global.__dir, encoding: 'utf8' });
@@ -40,7 +40,7 @@ test('changing one secret only recreates the service that references it', { time
   process.env.LAUNCHPAD_NODE_NAME = 'n1';
   process.env.LAUNCHPAD_STATE_DIR = path.join(dir);
   process.env.LAUNCHPAD_APPLY = 'true';
-  const { reconcile } = await import('./agent.js');
+  const { reconcile } = await import('../../src/agent.js');
 
   const compose = {
     services: {

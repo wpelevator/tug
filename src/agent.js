@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process';
 import net from 'node:net';
 import { composeForNode, dumpYaml, serviceSecretVersions } from './compose.js';
 import { ensureDir, now } from './util.js';
+import { openAgentDb } from './db.js';
 
 const CONTROL_URL = process.env.LAUNCHPAD_CONTROL_URL || 'http://localhost:8080';
 const TOKEN = process.env.LAUNCHPAD_AGENT_TOKEN;
@@ -12,6 +13,15 @@ const NODE_NAME = process.env.LAUNCHPAD_NODE_NAME || process.env.HOSTNAME || 'no
 const STATE_DIR = process.env.LAUNCHPAD_STATE_DIR || '/var/lib/launchpad';
 const APPLY = process.env.LAUNCHPAD_APPLY !== 'false';
 const INTERVAL = Number(process.env.LAUNCHPAD_POLL_INTERVAL_MS || 5000);
+
+const dbsByStateDir = new Map();
+async function agentDb(stateDir) {
+  if (!dbsByStateDir.has(stateDir)) {
+    await ensureDir(stateDir);
+    dbsByStateDir.set(stateDir, await openAgentDb(path.join(stateDir, 'agent.db')));
+  }
+  return dbsByStateDir.get(stateDir);
+}
 
 function authHeaders() { if (!TOKEN) throw new Error('LAUNCHPAD_AGENT_TOKEN required'); return { Authorization: `Bearer ${TOKEN}` }; }
 async function api(path, opts = {}) {
@@ -178,8 +188,9 @@ export async function reconcile(desiredState) {
   const emit = (service, rolloutState, message = rolloutState) => api('/agent/v1/events', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ projectId: desiredState.project, level: 'info', type: `service.${rolloutState}`, message, metadata: { service, version: desiredState.version, node: NODE_NAME } }) }).catch(() => {});
   const sec = await api(`/agent/v1/secrets?project=${encodeURIComponent(desiredState.project)}&services=${encodeURIComponent(serviceNames.join(','))}`);
   const currentSecretVersions = serviceSecretVersions(desiredState.compose, serviceNames, sec.versions || {});
-  let previous = {};
-  try { previous = JSON.parse(await fs.readFile(path.join(dir, 'last-applied.json'), 'utf8')); } catch {}
+  const db = await agentDb(STATE_DIR);
+  const previousRow = await db.get('SELECT version, secret_versions_json FROM applied_state WHERE project = ?', desiredState.project);
+  const previous = previousRow ? { version: previousRow.version, secretVersions: JSON.parse(previousRow.secret_versions_json) } : {};
   const secretChangedServices = serviceNames.filter(service => JSON.stringify(previous.secretVersions?.[service] || {}) !== JSON.stringify(currentSecretVersions[service] || {}));
   const sameDesiredVersion = previous.version === desiredState.version;
   const nodeCompose = composeForNode(desiredState, NODE_NAME, sec.secrets || {});
@@ -202,7 +213,13 @@ export async function reconcile(desiredState) {
   } else {
     for (const service of serviceNames) serviceStates[service].rolloutState = 'serving';
   }
-  await fs.writeFile(path.join(dir, 'last-applied.json'), JSON.stringify({ version: desiredState.version, at: now(), serviceStates, secretVersions: currentSecretVersions }, null, 2));
+  await db.run(
+    `INSERT INTO applied_state(project, version, applied_at, service_states_json, secret_versions_json)
+     VALUES(?,?,?,?,?)
+     ON CONFLICT(project) DO UPDATE SET version=excluded.version, applied_at=excluded.applied_at,
+       service_states_json=excluded.service_states_json, secret_versions_json=excluded.secret_versions_json`,
+    desiredState.project, desiredState.version, now(), JSON.stringify(serviceStates), JSON.stringify(currentSecretVersions)
+  );
   return { project: desiredState.project, observedVersion: desiredState.version, health: 'serving', services: serviceNames, serviceStates };
 }
 
