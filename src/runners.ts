@@ -12,7 +12,11 @@ export function createDockerRunner(): DockerRunner {
 }
 
 /** Runs a host binary (`wg`, `ip`); rejects on a non-zero exit like the docker runner. */
-export type HostRunner = (cmd: string, args: string[], opts?: { cwd?: string }) => Promise<RunResult>;
+export type HostRunner = (
+  cmd: string,
+  args: string[],
+  opts?: { cwd?: string },
+) => Promise<RunResult>;
 
 export function createHostRunner(): HostRunner {
   return (cmd, args, opts) => run(cmd, args, opts);

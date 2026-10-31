@@ -5,5 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
-fs.cpSync(path.join(root, 'src', 'templates'), path.join(root, 'dist', 'templates'), { recursive: true });
+fs.cpSync(path.join(root, 'src', 'templates'), path.join(root, 'dist', 'templates'), {
+  recursive: true,
+});
 console.log('copied src/templates -> dist/templates');

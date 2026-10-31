@@ -4,7 +4,11 @@
 
 // ---- Compose input (what the operator deploys) -------------------------------------------------
 
-export interface Placement { nodes?: string[]; labels?: string[]; global?: boolean }
+export interface Placement {
+  nodes?: string[];
+  labels?: string[];
+  global?: boolean;
+}
 
 export interface HealthCheck {
   type: 'docker' | 'tcp' | 'http';
@@ -40,7 +44,14 @@ export interface RolloutSpec {
 }
 
 /** The `x-tug` extension on a Compose service. */
-export interface ServiceExtension { placement?: Placement; replicas?: number; global?: boolean; health?: HealthCheck; ingress?: IngressSpec; rollout?: RolloutSpec }
+export interface ServiceExtension {
+  placement?: Placement;
+  replicas?: number;
+  global?: boolean;
+  health?: HealthCheck;
+  ingress?: IngressSpec;
+  rollout?: RolloutSpec;
+}
 
 /** The top-level `x-tug` extension of a Compose file. */
 export interface ProjectExtension {
@@ -60,7 +71,8 @@ export interface VolumeExtension {
   export?: string;
 }
 
-export type BuildConfig = string | { context?: string; dockerfile?: string; [key: string]: unknown };
+export type BuildConfig =
+  string | { context?: string; dockerfile?: string; [key: string]: unknown };
 export type ComposeVolumeMount = string | { source?: string; [key: string]: unknown };
 
 export interface ComposeService {
@@ -71,14 +83,19 @@ export interface ComposeService {
   env_file?: string | string[];
   container_name?: string;
   deploy?: unknown;
-  ports?: (string | number | { target?: number; published?: number | string; [key: string]: unknown })[];
+  ports?: (
+    string | number | { target?: number; published?: number | string; [key: string]: unknown }
+  )[];
   extra_hosts?: string[] | Record<string, string>;
   depends_on?: string[] | Record<string, unknown>;
   'x-tug'?: ServiceExtension;
   [key: string]: unknown;
 }
 
-export interface ComposeVolume { 'x-tug'?: VolumeExtension; [key: string]: unknown }
+export interface ComposeVolume {
+  'x-tug'?: VolumeExtension;
+  [key: string]: unknown;
+}
 
 export interface ComposeFile {
   services: Record<string, ComposeService>;
@@ -89,8 +106,23 @@ export interface ComposeFile {
 
 // ---- Desired state -----------------------------------------------------------------------------
 
-export interface ImageArtifact { buildId: string; imageRef: string; imageId: string; platform: string; sha256: string; sizeBytes: number }
-export interface LocalImageUpload { service: string; imageRef: string; imageId: string; platform: string; sha256: string; sizeBytes: number; field: string }
+export interface ImageArtifact {
+  buildId: string;
+  imageRef: string;
+  imageId: string;
+  platform: string;
+  sha256: string;
+  sizeBytes: number;
+}
+export interface LocalImageUpload {
+  service: string;
+  imageRef: string;
+  imageId: string;
+  platform: string;
+  sha256: string;
+  sizeBytes: number;
+  field: string;
+}
 
 export interface ServiceSpec {
   artifact?: ImageArtifact;
@@ -112,14 +144,26 @@ export interface DesiredState {
 // ---- Deployments -------------------------------------------------------------------------------
 
 /** Deployment states during which a project is considered busy. */
-export const ACTIVE_DEPLOYMENT_STATES = ['uploading', 'building', 'pending_dependencies', 'rolling_out'] as const;
+export const ACTIVE_DEPLOYMENT_STATES = [
+  'uploading',
+  'building',
+  'pending_dependencies',
+  'rolling_out',
+] as const;
 /** Deployment states a CLI wait loop stops on. */
-export const TERMINAL_DEPLOYMENT_STATES = ['succeeded', 'failed', 'build_failed', 'cancelled'] as const;
-export type DeploymentState = (typeof ACTIVE_DEPLOYMENT_STATES)[number] | (typeof TERMINAL_DEPLOYMENT_STATES)[number];
+export const TERMINAL_DEPLOYMENT_STATES = [
+  'succeeded',
+  'failed',
+  'build_failed',
+  'cancelled',
+] as const;
+export type DeploymentState =
+  (typeof ACTIVE_DEPLOYMENT_STATES)[number] | (typeof TERMINAL_DEPLOYMENT_STATES)[number];
 
 // ---- Commands (control -> agent) ---------------------------------------------------------------
 
-export type CommandType = 'diagnostics.run' | 'service.restart' | 'logs.fetch' | 'volume.delete' | 'wg.rotate-key';
+export type CommandType =
+  'diagnostics.run' | 'service.restart' | 'logs.fetch' | 'volume.delete' | 'wg.rotate-key';
 
 /** A `commands` table row as delivered in `GET /agent/v1/work`. */
 export interface Command {
@@ -140,7 +184,14 @@ export interface Command {
 }
 
 /** One diagnostic result; `warning` flags something to look at that does not fail the check. */
-export interface DiagnosticCheck { name: string; ok: boolean; stdout?: string; stderr?: string; error?: string; warning?: string }
+export interface DiagnosticCheck {
+  name: string;
+  ok: boolean;
+  stdout?: string;
+  stderr?: string;
+  error?: string;
+  warning?: string;
+}
 
 export type CommandResultPayload =
   | { checks: DiagnosticCheck[]; node: string }
@@ -169,8 +220,25 @@ export type StreamMessage =
 
 /** Live operations always resolve their project/service placement on control before reaching an agent. */
 export type LiveRequest =
-  | { operation: 'exec'; project: string; service: string; node?: string; command: string[]; interactive: boolean; tty: boolean; columns?: number; rows?: number }
-  | { operation: 'logs'; project: string; service: string; node?: string; follow: true; tail: number }
+  | {
+      operation: 'exec';
+      project: string;
+      service: string;
+      node?: string;
+      command: string[];
+      interactive: boolean;
+      tty: boolean;
+      columns?: number;
+      rows?: number;
+    }
+  | {
+      operation: 'logs';
+      project: string;
+      service: string;
+      node?: string;
+      follow: true;
+      tail: number;
+    }
   | { operation: 'ps'; project: string; node?: string }
   | { operation: 'inspect'; project: string; service: string; node?: string };
 export const LIVE_MAX_FRAME_BYTES = 256 * 1024;
@@ -183,12 +251,22 @@ export type LiveInput =
   | { v: 1; type: 'live.resize'; columns: number; rows: number }
   | { v: 1; type: 'live.cancel' };
 export type OperatorLiveFrame = { v: 1; type: 'live.open'; request: LiveRequest } | LiveInput;
-export type AgentLiveCommand = { v: 1; type: 'live.open'; sessionId: string; request: LiveRequest } | (LiveInput & { sessionId: string });
+export type AgentLiveCommand =
+  | { v: 1; type: 'live.open'; sessionId: string; request: LiveRequest }
+  | (LiveInput & { sessionId: string });
 export type AgentLiveFrame =
   | { v: 1; type: 'live.started'; sessionId: string }
   | { v: 1; type: 'live.output'; sessionId: string; stream: 'stdout' | 'stderr'; data: string }
   | { v: 1; type: 'live.result'; sessionId: string; result: unknown }
-  | { v: 1; type: 'live.exit'; sessionId: string; code: number | null; signal: string | null; cancelled: boolean; error?: string };
+  | {
+      v: 1;
+      type: 'live.exit';
+      sessionId: string;
+      code: number | null;
+      signal: string | null;
+      cancelled: boolean;
+      error?: string;
+    };
 export type OperatorLiveMessage =
   | { v: 1; type: 'live.started'; sessionId: string; node: string }
   | { v: 1; type: 'live.output'; sessionId: string; stream: 'stdout' | 'stderr'; data: string }
@@ -251,7 +329,9 @@ export interface NetworkConfig {
 }
 
 /** Body of `POST /agent/v1/wireguard/key` (also accepted as `wgPublicKey` on register and enroll). */
-export interface WgKeyRequest { publicKey: string }
+export interface WgKeyRequest {
+  publicKey: string;
+}
 
 export interface ServiceEndpoint {
   node: string;
@@ -356,7 +436,11 @@ export interface NodeInfo {
 }
 
 /** Response of `POST /api/v1/nodes/register`. */
-export interface RegisterResponse { node: NodeInfo; agentToken: string; registryToken: string }
+export interface RegisterResponse {
+  node: NodeInfo;
+  agentToken: string;
+  registryToken: string;
+}
 
 /** Body of `POST /agent/v1/enroll`. */
 export interface EnrollRequest {
@@ -371,7 +455,9 @@ export interface EnrollRequest {
 }
 
 /** Response of `POST /agent/v1/enroll`. */
-export interface EnrollResponse extends RegisterResponse { registry: string }
+export interface EnrollResponse extends RegisterResponse {
+  registry: string;
+}
 
 /** Response of `POST /api/v1/nodes/enroll-token`. */
 export interface EnrollTokenResponse {

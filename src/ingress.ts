@@ -7,7 +7,15 @@ import path from 'node:path';
 import { loopbackIngressServices, publishedPort } from './compose.ts';
 import { ensureDir, errMessage } from './util.ts';
 import type {
-  DesiredState, IngressRoute, IngressSpec, IngressStatus, IngressTls, IngressWork, ProjectStatus, ServiceEndpoint, ServiceEndpoints
+  DesiredState,
+  IngressRoute,
+  IngressSpec,
+  IngressStatus,
+  IngressTls,
+  IngressWork,
+  ProjectStatus,
+  ServiceEndpoint,
+  ServiceEndpoints,
 } from './protocol.ts';
 import type { DockerRunner } from './runners.ts';
 
@@ -24,16 +32,25 @@ export interface NodeView {
   address: string | null;
   lastSeenAt: string | null;
 }
-export interface ReportedStatus { node: string; project: string; status: ProjectStatus }
+export interface ReportedStatus {
+  node: string;
+  project: string;
+  status: ProjectStatus;
+}
 
 /**
  * Where each service can be reached right now: one endpoint per placement node whose agent is
  * fresh and reports that service `serving`. Withdrawn automatically when a node goes stale or its
  * rollout state drops, which is what makes DNS and ingress health-aware.
  */
-export function resolveServiceEndpoints(states: DesiredState[], nodes: NodeView[], statuses: ReportedStatus[], staleBefore: string): ServiceEndpoints {
-  const byName = new Map(nodes.map(n => [n.name, n]));
-  const reported = new Map(statuses.map(s => [`${s.node}\0${s.project}`, s.status]));
+export function resolveServiceEndpoints(
+  states: DesiredState[],
+  nodes: NodeView[],
+  statuses: ReportedStatus[],
+  staleBefore: string,
+): ServiceEndpoints {
+  const byName = new Map(nodes.map((n) => [n.name, n]));
+  const reported = new Map(statuses.map((s) => [`${s.node}\0${s.project}`, s.status]));
   const out: ServiceEndpoints = {};
   for (const state of states) {
     for (const [service, spec] of Object.entries(state.services)) {
@@ -42,12 +59,21 @@ export function resolveServiceEndpoints(states: DesiredState[], nodes: NodeView[
         const node = byName.get(nodeName);
         const address = node && (node.overlayIp || node.address);
         if (!node || !address || !node.lastSeenAt || node.lastSeenAt < staleBefore) continue;
-        const serviceState = reported.get(`${nodeName}\0${state.project}`)?.serviceStates?.[service];
+        const serviceState = reported.get(`${nodeName}\0${state.project}`)?.serviceStates?.[
+          service
+        ];
         if (serviceState?.rolloutState !== 'serving') continue;
         // Rolling services publish each revision on its own host port; the report names the serving one.
-        endpoints.push({ node: nodeName, address, ...(serviceState.port ? { port: serviceState.port } : {}) });
+        endpoints.push({
+          node: nodeName,
+          address,
+          ...(serviceState.port ? { port: serviceState.port } : {}),
+        });
       }
-      if (endpoints.length) (out[state.project] ||= {})[service] = endpoints.sort((a, b) => a.node.localeCompare(b.node));
+      if (endpoints.length)
+        (out[state.project] ||= {})[service] = endpoints.sort((a, b) =>
+          a.node.localeCompare(b.node),
+        );
     }
   }
   return out;
@@ -66,24 +92,46 @@ export interface IngressInput {
   acmeEmail?: string;
 }
 
-const certFile = (host: string, ext: 'crt' | 'key') => `certs/${host.replace(/\*/g, '_wildcard_')}.${ext}`;
+const certFile = (host: string, ext: 'crt' | 'key') =>
+  `certs/${host.replace(/\*/g, '_wildcard_')}.${ext}`;
 
 /**
  * Upstreams on the ingress node itself are dialed on `127.0.0.1` when the service's ingress port
  * listens on loopback only (see `loopbackIngressServices`), otherwise on the address its published
  * ports are bound to, which is the endpoint address, like every other node.
  */
-export function buildIngressWork({ states, endpoints, node, nodes = [node], ingressNodes = [node], secrets, acmeEmail }: IngressInput): IngressWork {
+export function buildIngressWork({
+  states,
+  endpoints,
+  node,
+  nodes = [node],
+  ingressNodes = [node],
+  secrets,
+  acmeEmail,
+}: IngressInput): IngressWork {
   const routes: IngressRoute[] = [];
   const files: Record<string, string> = {};
   const warnings: string[] = [];
   const seenHosts = new Map<string, string>();
-  const tagged: { project: string; service: string; ingress: IngressSpec; port: number | null; loopback: boolean }[] = [];
+  const tagged: {
+    project: string;
+    service: string;
+    ingress: IngressSpec;
+    port: number | null;
+    loopback: boolean;
+  }[] = [];
   for (const state of states) {
     const loopback = new Set(loopbackIngressServices(state, node, ingressNodes, nodes));
     for (const [service, svc] of Object.entries(state.compose.services || {})) {
       const ingress = svc['x-tug']?.ingress;
-      if (ingress) tagged.push({ project: state.project, service, ingress, port: publishedPort(svc, ingress.port), loopback: loopback.has(service) });
+      if (ingress)
+        tagged.push({
+          project: state.project,
+          service,
+          ingress,
+          port: publishedPort(svc, ingress.port),
+          loopback: loopback.has(service),
+        });
     }
   }
   tagged.sort((a, b) => `${a.project}/${a.service}`.localeCompare(`${b.project}/${b.service}`));
@@ -91,13 +139,31 @@ export function buildIngressWork({ states, endpoints, node, nodes = [node], ingr
     const label = `${project}/${service}`;
     const host = ingress.host.toLowerCase();
     const tls: IngressTls = ingress.tls || 'auto';
-    if (seenHosts.has(host)) { warnings.push(`${label}: host ${host} is already routed by ${seenHosts.get(host)}; skipped`); continue; }
-    if (port == null) { warnings.push(`${label}: ingress.port ${ingress.port} is not published; skipped`); continue; }
-    const upstreams = (endpoints[project]?.[service] || []).map(e => `${e.node === node && loopback ? '127.0.0.1' : upstreamHost(e.address)}:${e.port ?? port}`);
-    if (!upstreams.length) { warnings.push(`${label}: no serving upstream for ${host}; route withheld`); continue; }
+    if (seenHosts.has(host)) {
+      warnings.push(`${label}: host ${host} is already routed by ${seenHosts.get(host)}; skipped`);
+      continue;
+    }
+    if (port == null) {
+      warnings.push(`${label}: ingress.port ${ingress.port} is not published; skipped`);
+      continue;
+    }
+    const upstreams = (endpoints[project]?.[service] || []).map(
+      (e) =>
+        `${e.node === node && loopback ? '127.0.0.1' : upstreamHost(e.address)}:${e.port ?? port}`,
+    );
+    if (!upstreams.length) {
+      warnings.push(`${label}: no serving upstream for ${host}; route withheld`);
+      continue;
+    }
     if (tls === 'custom') {
-      const cert = secrets.get(`${project}/${ingress.cert}`); const key = secrets.get(`${project}/${ingress.key}`);
-      if (!cert || !key) { warnings.push(`${label}: custom TLS secrets ${ingress.cert}/${ingress.key} not found in project ${project}; skipped`); continue; }
+      const cert = secrets.get(`${project}/${ingress.cert}`);
+      const key = secrets.get(`${project}/${ingress.key}`);
+      if (!cert || !key) {
+        warnings.push(
+          `${label}: custom TLS secrets ${ingress.cert}/${ingress.key} not found in project ${project}; skipped`,
+        );
+        continue;
+      }
       files[certFile(host, 'crt')] = cert.endsWith('\n') ? cert : `${cert}\n`;
       files[certFile(host, 'key')] = key.endsWith('\n') ? key : `${key}\n`;
     }
@@ -108,7 +174,8 @@ export function buildIngressWork({ states, endpoints, node, nodes = [node], ingr
 }
 
 /** IPv6 upstream addresses need brackets before the port. */
-const upstreamHost = (address: string) => (address.includes(':') && !address.startsWith('[') ? `[${address}]` : address);
+const upstreamHost = (address: string) =>
+  address.includes(':') && !address.startsWith('[') ? `[${address}]` : address;
 
 export function renderCaddyfile(routes: IngressRoute[], opts: { acmeEmail?: string } = {}): string {
   const out: string[] = [];
@@ -116,8 +183,17 @@ export function renderCaddyfile(routes: IngressRoute[], opts: { acmeEmail?: stri
   for (const route of routes) {
     // An explicit http:// address turns off automatic HTTPS for that site.
     out.push(`${route.tls === 'off' ? 'http://' : ''}${route.host} {`);
-    if (route.tls === 'custom') out.push(`\ttls ${CADDY_ETC}/${certFile(route.host, 'crt')} ${CADDY_ETC}/${certFile(route.host, 'key')}`);
-    out.push(`\treverse_proxy ${route.upstreams.join(' ')} {`, '\t\tlb_policy round_robin', '\t}', '}', '');
+    if (route.tls === 'custom')
+      out.push(
+        `\ttls ${CADDY_ETC}/${certFile(route.host, 'crt')} ${CADDY_ETC}/${certFile(route.host, 'key')}`,
+      );
+    out.push(
+      `\treverse_proxy ${route.upstreams.join(' ')} {`,
+      '\t\tlb_policy round_robin',
+      '\t}',
+      '}',
+      '',
+    );
   }
   return out.length ? out.join('\n') : '# no ingress routes\n';
 }
@@ -126,11 +202,16 @@ export function renderCaddyfile(routes: IngressRoute[], opts: { acmeEmail?: stri
 
 export function ingressConfigHash(work: Pick<IngressWork, 'caddyfile' | 'files'>): string {
   const h = crypto.createHash('sha256').update(work.caddyfile);
-  for (const name of Object.keys(work.files).sort()) h.update('\0').update(name).update('\0').update(work.files[name]);
+  for (const name of Object.keys(work.files).sort())
+    h.update('\0').update(name).update('\0').update(work.files[name]);
   return h.digest('hex');
 }
 
-export interface IngressContext { docker: DockerRunner; stateDir: string; caddyImage?: string }
+export interface IngressContext {
+  docker: DockerRunner;
+  stateDir: string;
+  caddyImage?: string;
+}
 
 async function writeStage(dir: string, work: IngressWork): Promise<void> {
   await fs.rm(dir, { recursive: true, force: true });
@@ -149,24 +230,45 @@ async function writeStage(dir: string, work: IngressWork): Promise<void> {
  * applied with `caddy reload`, which swaps config gracefully without dropping connections. If
  * Caddy rejects the new config the previous one is restored and the error reported.
  */
-export async function reconcileIngress(ctx: IngressContext, work: IngressWork): Promise<IngressStatus> {
+export async function reconcileIngress(
+  ctx: IngressContext,
+  work: IngressWork,
+): Promise<IngressStatus> {
   const root = path.join(ctx.stateDir, 'ingress');
   const stage = path.join(root, 'stage');
   const applied = path.join(root, 'applied');
   const configHash = ingressConfigHash(work);
   const routes = work.routes.length;
-  const running: boolean | null = await ctx.docker(['container', 'inspect', '-f', '{{.State.Running}}', CADDY_CONTAINER])
-    .then(r => r.out.trim() === 'true', () => null);
-  const appliedHash = await fs.readFile(path.join(root, 'applied.hash'), 'utf8').then(s => s.trim(), () => '');
+  const running: boolean | null = await ctx
+    .docker(['container', 'inspect', '-f', '{{.State.Running}}', CADDY_CONTAINER])
+    .then(
+      (r) => r.out.trim() === 'true',
+      () => null,
+    );
+  const appliedHash = await fs.readFile(path.join(root, 'applied.hash'), 'utf8').then(
+    (s) => s.trim(),
+    () => '',
+  );
   if (running && appliedHash === configHash) return { state: 'serving', configHash, routes };
 
   await writeStage(stage, work);
   try {
     if (running === null) {
       await ctx.docker([
-        'create', '--name', CADDY_CONTAINER, '--restart', 'unless-stopped', '--network', 'host',
-        '-v', 'tug-caddy-data:/data', '-v', 'tug-caddy-config:/config', '-v', `tug-caddy-etc:${CADDY_ETC}`,
-        ctx.caddyImage || DEFAULT_CADDY_IMAGE
+        'create',
+        '--name',
+        CADDY_CONTAINER,
+        '--restart',
+        'unless-stopped',
+        '--network',
+        'host',
+        '-v',
+        'tug-caddy-data:/data',
+        '-v',
+        'tug-caddy-config:/config',
+        '-v',
+        `tug-caddy-etc:${CADDY_ETC}`,
+        ctx.caddyImage || DEFAULT_CADDY_IMAGE,
       ]);
       await ctx.docker(['cp', `${stage}/.`, `${CADDY_CONTAINER}:${CADDY_ETC}/`]);
       await ctx.docker(['start', CADDY_CONTAINER]);
@@ -177,9 +279,26 @@ export async function reconcileIngress(ctx: IngressContext, work: IngressWork): 
       try {
         await ctx.docker(['exec', CADDY_CONTAINER, 'rm', '-rf', `${CADDY_ETC}/certs`]);
         await ctx.docker(['cp', `${stage}/.`, `${CADDY_CONTAINER}:${CADDY_ETC}/`]);
-        await ctx.docker(['exec', CADDY_CONTAINER, 'caddy', 'reload', '--config', `${CADDY_ETC}/Caddyfile`, '--adapter', 'caddyfile']);
+        await ctx.docker([
+          'exec',
+          CADDY_CONTAINER,
+          'caddy',
+          'reload',
+          '--config',
+          `${CADDY_ETC}/Caddyfile`,
+          '--adapter',
+          'caddyfile',
+        ]);
       } catch (e) {
-        if (await fs.stat(applied).then(() => true, () => false)) await ctx.docker(['cp', `${applied}/.`, `${CADDY_CONTAINER}:${CADDY_ETC}/`]).catch(() => {});
+        if (
+          await fs.stat(applied).then(
+            () => true,
+            () => false,
+          )
+        )
+          await ctx
+            .docker(['cp', `${applied}/.`, `${CADDY_CONTAINER}:${CADDY_ETC}/`])
+            .catch(() => {});
         throw e;
       }
     }
@@ -196,7 +315,13 @@ export async function reconcileIngress(ctx: IngressContext, work: IngressWork): 
 /** Removes the Caddy container when a node stops being an ingress node; ACME data volumes are kept. */
 export async function removeIngress(ctx: IngressContext): Promise<boolean> {
   const root = path.join(ctx.stateDir, 'ingress');
-  if (!(await fs.stat(root).then(() => true, () => false))) return false;
+  if (
+    !(await fs.stat(root).then(
+      () => true,
+      () => false,
+    ))
+  )
+    return false;
   await ctx.docker(['rm', '-f', CADDY_CONTAINER]).catch(() => {});
   await fs.rm(root, { recursive: true, force: true });
   return true;
