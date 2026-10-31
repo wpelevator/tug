@@ -42,7 +42,7 @@ Bare hosts: add an opt-in Docker Engine + Compose install step to `node-install`
 
 ### M5 — Streaming channel between agent and control (day-2 operations)
 
-`exec` and `logs -f` need a live stream, which the poll-based command queue cannot provide. Add an agent-initiated persistent connection to control (WebSocket, falling back to long-poll), keeping the property that agents only dial out so NAT'd nodes still work. On top of it build:
+`exec` and `logs -f` need a live stream, which the poll-based command queue cannot provide (how this fits logs and metrics is in [Observability](observability.md#live-commands)). Add an agent-initiated persistent connection to control (WebSocket, falling back to long-poll), keeping the property that agents only dial out so NAT'd nodes still work. On top of it build:
 
 - `tug exec SERVICE [-- cmd]`, including interactive TTY shells
 - `tug logs SERVICE -f` streaming, plus agent/daemon logs for troubleshooting
@@ -59,7 +59,7 @@ The primary use case in `plan.md` needs an NFS-backed WordPress docroot on a sto
 
 ### M8 — Central API advantages
 
-What a single control plane makes easy:
+What a single control plane makes easy (the events worth sending as webhooks, and where a dashboard fits, are in [Observability](observability.md#alerting)):
 
 - scoped API tokens (deploy-only, read-only, per-project) for CI, alongside the operator token: shipped, see [Access control](access-control.md)
 - `tug deploy` from CI with a documented GitHub Actions example: shipped, in [Access control](access-control.md)
@@ -67,10 +67,16 @@ What a single control plane makes easy:
 - multiple operators with named tokens, recorded in the events audit trail: shipped, in [Access control](access-control.md)
 - a minimal read-only web dashboard over the existing `/api/v1/status` and `/api/v1/events`
 
+### M9 — Observability
+
+Make the system's behavior visible without adding required services: event hygiene, structured logs, a Prometheus `/metrics` endpoint on control that also carries node and service stats reported by agents, a readiness endpoint, sample alert rules and webhooks. The design, the proposed metric list and what exists today are in [Observability](observability.md); most of it is proposed, not built.
+
+Sequencing: it complements M5 (live `logs -f`, `ps`, `inspect`) and M8 (webhooks, dashboard) and its first steps depend on neither. Event hygiene goes first, then logs and `/metrics`, then agent-reported stats, then alerts and webhooks.
+
 ### Later / only if needed
 
 - Warm-standby control plane (WAL shipping or periodic backup + promote), see [Positioning](#positioning)
-- Metrics per service and node (CPU, memory, restarts) via the M5 channel
+- Metrics per service and node (CPU, memory, restarts): see [M9](#m9--observability) and [Observability](observability.md)
 - Managed DNS convenience domain for ingress, similar to uncloud's `*.uncloud.run`
 
 - Standalone Bun-compiled `tug` binaries and a Homebrew tap, so operators need no Node.js; see [Standalone binary](standalone-binary.md)
@@ -111,6 +117,14 @@ The test layers, the metrics milestones are held to and the backlog of mocked te
 - [ ] M8 outbound webhooks
 - [x] M8 named multi-operator tokens in the audit trail
 - [ ] M8 read-only web dashboard
+- [ ] M9 event hygiene: lifecycle events only on change, retention by age and row count (in progress)
+- [ ] M9 structured logs (`TUG_LOG_FORMAT`, `TUG_LOG_LEVEL`)
+- [ ] M9 `GET /metrics` on control (Prometheus text, `read` token)
+- [ ] M9 agent-reported node and service stats exposed on `/metrics`
+- [ ] M9 `/readyz` readiness endpoint
+- [ ] M9 sample alert rules and outbound webhooks
+- [ ] M9 metrics test gate: every registered metric documented and vice versa
+- [x] M9 observability setup documented ([Observability](observability.md))
 - [ ] Later: standalone CLI binary and Homebrew tap ([Standalone binary](standalone-binary.md))
 - [ ] Mocked tests from the [Testing](testing.md#backlog-of-mocked-tests-proposed) backlog: revisions started per deployment, WireGuard key re-report, old-schema database, preflight remedies
 - [ ] Re-check uncloud releases at the start of each milestone and update the baseline above
