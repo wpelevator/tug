@@ -11,7 +11,9 @@ import sqlite3 from 'sqlite3';
 import { open } from 'sqlite';
 import { scanArchive } from './archive.ts';
 import https from 'node:https';
+import http from 'node:http';
 import path from 'node:path';
+import { WebSocketServer, WebSocket } from 'ws';
 import * as tar from 'tar';
 import { openDb } from './db.ts';
 import type { CommandRow, DeploymentRow, DesiredStateRow, EnrollTokenRow, LockRow, NodeRow, ProjectRow, SecretRow, WgPeerRow } from './db.ts';
@@ -27,8 +29,67 @@ import { AUTO_ROLLBACK_ACTOR, ROUTE_ROLES, assertProject, bodyProject, createGua
 import type { Actor, ProjectResolver, RouteRole } from './tokens.ts';
 import type {
   ImageArtifact, LocalImageUpload, AgentEvent, CommandResult, CommandType, ComposeFile, DesiredState, EnrollRequest, EnrollResponse, NetworkConfig, NodeInfo,
-  RegisterResponse, SecretsResponse, ServiceEndpoints, StatusReport, WgKeyRequest, WorkResponse
+  RegisterResponse, SecretsResponse, ServiceEndpoints, StatusReport, StreamMessage, WakeResponse, WgKeyRequest, WorkResponse
 } from './protocol.ts';
+
+class WakeHub {
+  private readonly cursors = new Map<string, number>();
+  private readonly projects = new Map<string, string | undefined>();
+  private readonly streams = new Map<string, WebSocket>();
+  private readonly waiters = new Map<string, Set<() => void>>();
+
+  cursor(nodeId: string): number { return this.cursors.get(nodeId) ?? 0; }
+
+  connect(nodeId: string, ws: WebSocket): void {
+    const previous = this.streams.get(nodeId);
+    if (previous && previous !== ws) previous.close(1000, 'replaced by a newer agent connection');
+    this.streams.set(nodeId, ws);
+    const ready: StreamMessage = { type: 'ready', nodeId, cursor: this.cursor(nodeId) };
+    ws.send(JSON.stringify(ready));
+    ws.once('close', () => { if (this.streams.get(nodeId) === ws) this.streams.delete(nodeId); });
+  }
+
+  wake(nodeId: string, project?: string): void {
+    const cursor = this.cursor(nodeId) + 1;
+    this.cursors.set(nodeId, cursor);
+    this.projects.set(nodeId, project);
+    const ws = this.streams.get(nodeId);
+    if (ws?.readyState === WebSocket.OPEN) {
+      const message: StreamMessage = { type: 'work-available', cursor, ...(project ? { project } : {}) };
+      ws.send(JSON.stringify(message));
+    }
+    for (const resolve of this.waiters.get(nodeId) ?? []) resolve();
+  }
+
+  async wait(nodeId: string, after: number, timeoutMs: number): Promise<WakeResponse> {
+    const response = (): WakeResponse => {
+      const cursor = this.cursor(nodeId);
+      const project = this.projects.get(nodeId);
+      return { type: cursor > after ? 'work-available' : 'timeout', cursor, ...(project ? { project } : {}) };
+    };
+    if (this.cursor(nodeId) > after) return response();
+    await new Promise<void>(resolve => {
+      const waiters = this.waiters.get(nodeId) ?? new Set<() => void>();
+      const done = () => {
+        clearTimeout(timer);
+        waiters.delete(done);
+        if (!waiters.size) this.waiters.delete(nodeId);
+        resolve();
+      };
+      waiters.add(done);
+      this.waiters.set(nodeId, waiters);
+      const timer = setTimeout(done, timeoutMs);
+    });
+    return response();
+  }
+}
+
+interface StreamRuntime {
+  hub: WakeHub;
+  authenticate(token: string): Promise<NodeRow | undefined>;
+}
+
+const streamRuntimes = new WeakMap<express.Express, StreamRuntime>();
 
 declare module 'express-serve-static-core' {
   interface Request { node?: NodeRow }
@@ -129,6 +190,7 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
   }
 
   const db = await (options.openDatabase || openDb)(dbFile);
+  const wakeHub = new WakeHub();
 
   // Events are an operator-facing log, not a record of truth, so keep them bounded. `0` turns a limit off; anything that is
   // not a whole number falls back to the default.
@@ -163,6 +225,8 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
   }
 
   const app = express();
+  const authenticateAgent = async (raw: string): Promise<NodeRow | undefined> => raw ? db.get<NodeRow>('SELECT * FROM nodes WHERE agent_token_hash=?', hashToken(raw)) : undefined;
+  streamRuntimes.set(app, { hub: wakeHub, authenticate: authenticateAgent });
   let restartRequired = false;
   app.use((_req, res, next) => restartRequired ? res.status(503).json({ error: 'control restored; restart required', restartRequired: true }) : next());
   app.use(express.json({ limit: '20mb' }));
@@ -206,10 +270,14 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
   const projectScope = (actor: Actor, column: string) => actor.projects ? { where: `${column} IN (${actor.projects.map(() => '?').join(',') || "''"})`, args: actor.projects } : { where: '1=1', args: [] as string[] };
   const authAgent = async (req: Request, res: Response, next: NextFunction) => {
     const raw = (req.headers.authorization || '').replace(/^Bearer /, '');
-    const node = raw && await db.get<NodeRow>('SELECT * FROM nodes WHERE agent_token_hash=?', hashToken(raw));
+    const node = await authenticateAgent(raw);
     if (!node) return res.status(401).json({ error: 'unauthorized' });
     req.node = node; next();
   };
+  const wakeAll = async (project?: string): Promise<void> => {
+    for (const node of await db.all<Pick<NodeRow, 'id'>[]>('SELECT id FROM nodes')) wakeHub.wake(node.id, project);
+  };
+  let endpointSnapshot = '';
 
   async function updateDeploymentConvergence(projectId: string): Promise<void> {
     const project = await db.get<ProjectRow>('SELECT * FROM projects WHERE id=?', projectId);
@@ -260,6 +328,7 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
       await db.run('INSERT INTO deployments(id,project_id,version,state,created_at,updated_at,actor) VALUES(?,?,?,?,?,?,?)', depId, project, `${ROLLBACK_VERSION_PREFIX}${previousState.version}-${Date.now()}`, 'rolling_out', ts, ts, opts.actor);
       await db.run('INSERT INTO desired_states(id,project_id,deployment_id,version,state_json,created_at) VALUES(?,?,?,?,?,?)', id('ds'), project, depId, previousState.version, JSON.stringify(previousState), ts);
       await db.run('UPDATE projects SET current_deployment_id=?,updated_at=? WHERE id=?', depId, now(), project);
+      await wakeAll(project);
       return { deployment: await db.get<DeploymentRow>('SELECT * FROM deployments WHERE id=?', depId), desiredState: previousState };
     } finally { await releaseLock(lock); }
   }
@@ -358,6 +427,7 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
     await ensureOverlayIp(name);
     await syncWgPeer(name, wgPublicKey);
     await upsertRegistryCredential(name, registryToken);
+    await wakeAll();
     const node = (await db.get<NodeInfo>(NODE_INFO_SQL, name))!;
     return { node, agentToken, registryToken };
   }
@@ -416,9 +486,11 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
     res.json({ ok: true, node: node.name, revoked: true });
   });
   async function findNode(nameOrId: string) { return db.get<Pick<NodeRow, 'id' | 'name'>>('SELECT id,name FROM nodes WHERE name=? OR id=?', nameOrId, nameOrId); }
-  function queueCommand(nodeId: string, projectId: string | null, type: CommandType, payload: Record<string, unknown> = {}): Promise<string> {
+  async function queueCommand(nodeId: string, projectId: string | null, type: CommandType, payload: Record<string, unknown> = {}): Promise<string> {
     const commandId = id('cmd'); const ts = now();
-    return db.run('INSERT INTO commands(id,node_id,project_id,type,state,payload_json,attempts,run_after,deadline,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)', commandId, nodeId, projectId, type, 'pending', JSON.stringify(payload), 0, ts, null, ts, ts).then(() => commandId);
+    await db.run('INSERT INTO commands(id,node_id,project_id,type,state,payload_json,attempts,run_after,deadline,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)', commandId, nodeId, projectId, type, 'pending', JSON.stringify(payload), 0, ts, null, ts, ts);
+    wakeHub.wake(nodeId, projectId ?? undefined);
+    return commandId;
   }
   // The private key lives only on the node, so rotation is a command the agent executes: it
   // generates a new keypair, reports the public key and peers pick it up from their next work response.
@@ -433,13 +505,14 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
     if (!node) return res.status(404).json({ error: 'node not found' });
     const enabled = req.body.enabled !== false;
     await db.run('UPDATE nodes SET ingress=?,updated_at=? WHERE id=?', enabled ? 1 : 0, now(), node.id);
+    wakeHub.wake(node.id);
     res.json({ ok: true, node: node.name, ingress: enabled });
   });
   post('/agent/v1/wireguard/key', authAgent, async (req, res) => {
     if (!MESH) return res.status(409).json({ error: 'the WireGuard mesh is not enabled' });
     const { publicKey }: Partial<WgKeyRequest> = req.body;
     if (!isWgKey(publicKey)) return res.status(400).json({ error: 'publicKey must be a base64 WireGuard public key' });
-    try { await syncWgPeer(req.node!.id, publicKey); res.json({ ok: true }); }
+    try { await syncWgPeer(req.node!.id, publicKey); await wakeAll(); res.json({ ok: true }); }
     catch (e) { sendError(res, /UNIQUE constraint/.test(errMessage(e)) ? httpError(409, 'public key already registered to another node') : e); }
   });
   post('/api/v1/registry/auth', async (req, res) => {
@@ -472,6 +545,7 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
       await db.run(`INSERT INTO secrets(id,project_id,name,encrypted_value,version,created_at,updated_at) VALUES(?,?,?,?,?,?,?)
         ON CONFLICT(project_id,name) DO UPDATE SET encrypted_value=excluded.encrypted_value,version=excluded.version,updated_at=excluded.updated_at`,
         id('sec'), project, name, encrypt(value, masterKey), (old?.version || 0) + 1, ts, ts);
+      await wakeAll(project);
       await audit(req.actor!, { type: 'secret.set', project, message: `secret ${name} set to version ${(old?.version || 0) + 1} by ${req.actor!.name}`, metadata: { name, version: (old?.version || 0) + 1 } });
       res.json({ ok: true, name, version: (old?.version || 0) + 1 });
     } catch (e) { sendError(res, e); }
@@ -481,7 +555,10 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
   api('delete', '/api/v1/secrets/:name', queryProject, async (req, res) => {
     const project = String(req.query.project || 'site');
     const removed = await db.run('DELETE FROM secrets WHERE project_id=? AND name=?', project, req.params.name);
-    if (removed.changes) await audit(req.actor!, { type: 'secret.delete', project, message: `secret ${req.params.name} deleted by ${req.actor!.name}`, metadata: { name: req.params.name } });
+    if (removed.changes) {
+      await wakeAll(project);
+      await audit(req.actor!, { type: 'secret.delete', project, message: `secret ${req.params.name} deleted by ${req.actor!.name}`, metadata: { name: req.params.name } });
+    }
     res.json({ ok: true });
   });
 
@@ -617,6 +694,7 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
       } catch (e) { await db.exec('ROLLBACK'); throw e; }
       });
       await audit(req.actor!, { type: 'deploy', project, deploymentId: depId, message: `deployment ${depId} (${version}) started by ${req.actor!.name}`, metadata: { version } });
+      await wakeAll(project);
       responseBody = { deployment: { id: depId, project, version, state: 'rolling_out', actor: req.actor!.name }, desiredState: desired };
     } catch (e) {
       if (depId) await db.run("UPDATE deployments SET state='build_failed',error_message=?,updated_at=? WHERE id=? AND state='building'", errMessage(e), now(), depId).catch(() => {});
@@ -678,8 +756,7 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
     }
     let commandId = null;
     if (deleteData && volume.node_id) {
-      commandId = id('cmd'); const ts = now();
-      await db.run('INSERT INTO commands(id,node_id,project_id,type,state,payload_json,attempts,run_after,deadline,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)', commandId, volume.node_id, project, 'volume.delete', 'pending', JSON.stringify({ project, volume: req.params.name }), 0, ts, null, ts, ts);
+      commandId = await queueCommand(volume.node_id, project, 'volume.delete', { project, volume: req.params.name });
     }
     await db.run('DELETE FROM volumes WHERE project_id=? AND name=?', project, req.params.name);
     res.json({ ok: true, commandId, deletedMetadata: true, deleteData });
@@ -752,8 +829,7 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
     const state = JSON.parse(ds.state_json); const svc = state.services?.[service]; if (!svc) throw httpError(404, missingService(project, service));
     const nodeName = svc.placement?.nodes?.[0]; if (!nodeName) throw httpError(400, 'service has no explicit node placement');
     const node = await db.get('SELECT id FROM nodes WHERE name=? OR id=?', nodeName, nodeName); if (!node) throw httpError(404, 'node not found');
-    const cmdId = id('cmd'); const ts = now();
-    await db.run('INSERT INTO commands(id,node_id,project_id,type,state,payload_json,attempts,run_after,deadline,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)', cmdId, node.id, project, type, 'pending', JSON.stringify({ project, service, ...payload }), 0, ts, null, ts, ts);
+    const cmdId = await queueCommand(node.id, project, type, { project, service, ...payload });
     return { commandId: cmdId, nodeId: node.id };
   }
   api('post', '/api/v1/restart', bodyProject, async (req, res) => {
@@ -772,8 +848,7 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
     const state = JSON.parse(ds.state_json); const svc = state.services?.[service]; if (!svc) return res.status(404).json({ error: missingService(project, service) });
     const nodeName = svc.placement?.nodes?.[0]; if (!nodeName) return res.status(400).json({ error: 'service has no explicit node placement' });
     const node = await db.get('SELECT id FROM nodes WHERE name=? OR id=?', nodeName, nodeName); if (!node) return res.status(404).json({ error: 'node not found' });
-    const cmdId = id('cmd'); const ts = now();
-    await db.run('INSERT INTO commands(id,node_id,project_id,type,state,payload_json,attempts,run_after,deadline,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)', cmdId, node.id, project, 'logs.fetch', 'pending', JSON.stringify({ project, service, tail }), 0, ts, null, ts, ts);
+    const cmdId = await queueCommand(node.id, project, 'logs.fetch', { project, service, tail });
     res.json({ commandId: cmdId, nodeId: node.id });
   });
   api('get', '/api/v1/commands/:id', commandProject, async (req, res) => res.json(await db.get('SELECT * FROM commands WHERE id=?', req.params.id)));
@@ -826,10 +901,9 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
   api('post', '/api/v1/diagnostics/nodes', null, async (req, res) => {
     const nodes = req.body.node ? await db.all('SELECT id FROM nodes WHERE id=? OR name=?', req.body.node, req.body.node) : await db.all('SELECT id FROM nodes');
     if (req.body.node && !nodes.length) return res.status(404).json({ error: `node ${req.body.node} not found` });
-    const ts = now(); const commands = [];
+    const commands = [];
     for (const node of nodes) {
-      const cmdId = id('cmd');
-      await db.run('INSERT INTO commands(id,node_id,project_id,type,state,payload_json,attempts,run_after,deadline,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)', cmdId, node.id, null, 'diagnostics.run', 'pending', '{}', 0, ts, null, ts, ts);
+      const cmdId = await queueCommand(node.id, null, 'diagnostics.run');
       commands.push({ commandId: cmdId, nodeId: node.id });
     }
     res.json({ commands });
@@ -870,6 +944,12 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
     return buildIngressWork({ states, endpoints: await endpointsFor(states), node: node.name, secrets, acmeEmail: ACME_EMAIL });
   }
 
+  get('/agent/v1/wake', authAgent, async (req, res) => {
+    const after = Math.max(0, Number.parseInt(String(req.query.after ?? '0'), 10) || 0);
+    const timeoutMs = Math.min(30_000, Math.max(0, Number.parseInt(String(req.query.timeout ?? '25000'), 10) || 0));
+    await db.run('UPDATE nodes SET last_seen_at=?,status=? WHERE id=?', now(), 'online', req.node!.id);
+    res.json(await wakeHub.wait(req.node!.id, after, timeoutMs));
+  });
   get('/agent/v1/work', authAgent, async (req, res) => {
     await db.run('UPDATE nodes SET last_seen_at=?,status=? WHERE id=?', now(), 'online', req.node!.id);
     const node = (await db.get<NodeRow>('SELECT * FROM nodes WHERE id=?', req.node!.id))!;
@@ -901,6 +981,11 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
     }
     if (report.ingress) await db.run('UPDATE nodes SET ingress_status_json=? WHERE id=?', JSON.stringify({ ...report.ingress, reportedAt: ts }), req.node!.id);
     await db.run('UPDATE nodes SET last_seen_at=?,status=? WHERE id=?', ts, 'online', req.node!.id);
+    const nextEndpointSnapshot = JSON.stringify(await endpointsFor(await currentDesiredStates()));
+    if (nextEndpointSnapshot !== endpointSnapshot) {
+      endpointSnapshot = nextEndpointSnapshot;
+      await wakeAll();
+    }
     res.json({ ok: true });
   });
   post('/agent/v1/events', authAgent, async (req, res) => { const evs: AgentEvent[] = req.body.events || [req.body]; for (const ev of evs) await db.run('INSERT INTO events(id,project_id,deployment_id,node_id,level,type,message,metadata_json,created_at) VALUES(?,?,?,?,?,?,?,?,?)', id('evt'), ev.projectId || null, ev.deploymentId || null, req.node!.id, ev.level || 'info', ev.type || 'event', ev.message || '', JSON.stringify(ev.metadata || {}), now());
@@ -927,16 +1012,46 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
   return app;
 }
 
-export async function listen(app: express.Express, port = PORT): Promise<import('node:http').Server | https.Server> {
+function attachAgentStream(app: express.Express, server: http.Server | https.Server): void {
+  const runtime = streamRuntimes.get(app);
+  if (!runtime) throw new Error('control app is missing its stream runtime');
+  const wss = new WebSocketServer({ noServer: true });
+  server.on('upgrade', (request, socket, head) => {
+    const pathname = new URL(request.url || '/', 'http://localhost').pathname;
+    if (pathname !== '/agent/v1/stream') {
+      socket.write('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+    const raw = String(request.headers.authorization || '').replace(/^Bearer /, '');
+    void runtime.authenticate(raw).then(node => {
+      if (!node) {
+        socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
+        socket.destroy();
+        return;
+      }
+      wss.handleUpgrade(request, socket, head, ws => runtime.hub.connect(node.id, ws));
+    }).catch(() => {
+      socket.write('HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n');
+      socket.destroy();
+    });
+  });
+  server.once('close', () => wss.close());
+}
+
+export async function listen(app: express.Express, port = PORT): Promise<http.Server | https.Server> {
   const certFile = process.env.TUG_TLS_CERT_FILE;
   const keyFile = process.env.TUG_TLS_KEY_FILE;
   if (certFile && keyFile) {
     const [cert, key] = await Promise.all([fs.readFile(certFile), fs.readFile(keyFile)]);
     const server = https.createServer({ cert, key }, app);
+    attachAgentStream(app, server);
     return new Promise(resolve => server.listen(port, () => { console.log(`tug-control listening on ${port} (tls)`); resolve(server); }));
   }
   console.warn('TUG_TLS_CERT_FILE/TUG_TLS_KEY_FILE not set; serving plain HTTP');
-  return new Promise(resolve => { const server = app.listen(port, () => { console.log(`tug-control listening on ${port}`); resolve(server); }); });
+  const server = http.createServer(app);
+  attachAgentStream(app, server);
+  return new Promise(resolve => server.listen(port, () => { console.log(`tug-control listening on ${port}`); resolve(server); }));
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) createApp().then(app => listen(app));

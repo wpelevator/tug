@@ -82,7 +82,7 @@ Sequencing: it complements M5 (live `logs -f`, `ps`, `inspect`) and M8 (webhooks
 - Standalone Bun-compiled `tug` binaries and a Homebrew tap, so operators need no Node.js; see [Standalone binary](standalone-binary.md)
 ## Sequencing notes
 
-M3 is implemented; the current priority is M5. Real-server validation of M2, M3 and M4 has been done on two Ubuntu 24.04 hosts (Linux 6.8): SSH installation including the Docker bootstrap, a WireGuard mesh with handshakes between hosts, an agent behind bridge NAT on a real host, a publicly trusted Let's Encrypt certificate issued by the managed Caddy, service names resolving across nodes over the mesh, a remote-build deploy, an operator-local `--build-local` deploy, rollback from the retained image, a rolling rollout through the public ingress with no failed requests (over 2,200 sampled from the internet and from the ingress host), a version whose health check fails being rejected while the old revision kept serving, and the automatic rollback that followed. Not yet validated on real hosts: a physically separate node behind NAT, certificate renewal, `node-enroll --install-docker` cloud-init on a cloud-init host, and arm64 nodes.
+M3 is implemented; the current priority is M5. [Real-server validation](real-host-evaluation.md) of M2, M3 and M4 has been done on two Ubuntu 24.04 hosts (Linux 6.8): SSH installation including the Docker bootstrap, a WireGuard mesh with handshakes between hosts, an agent behind bridge NAT on a real host, a publicly trusted Let's Encrypt certificate issued by the managed Caddy, service names resolving across nodes over the mesh, a remote-build deploy, an operator-local `--build-local` deploy, rollback from the retained image, a rolling rollout through the public ingress with no failed requests (over 2,200 sampled from the internet and from the ingress host), a version whose health check fails being rejected while the old revision kept serving, and the automatic rollback that followed. Not yet validated on real hosts: a physically separate node behind NAT, certificate renewal, `node-enroll --install-docker` cloud-init on a cloud-init host, and arm64 nodes.
 
 M3 depends on M2's ingress and needs a design decision about reaching old and new containers concurrently: either routable container addresses over the mesh or per-version host ports with Caddy upstream switching. Today's service names depend on published host ports, so this decision belongs in the M3 spec before implementation. M4 is technically independent of M2/M3. After M3, prioritize M5's day-to-day operations; M8 can provide small independent wins, while M6/M7 primarily serve the WordPress topology. M5 should follow M1 so the stream protocol lives in `protocol.ts`. M6 is independent; M7 depends on M2.
 
@@ -108,8 +108,9 @@ The test layers, the metrics milestones are held to and the backlog of mocked te
 - [x] M4 `--install-docker` selects apt or dnf by `/etc/os-release` (unit-tested detection)
 - [ ] M4 dnf bootstrap verified on real Fedora and Rocky/AlmaLinux hosts (not yet run outside detection tests)
 - [ ] M4 `node-enroll --install-docker` cloud-init verified on a real cloud-init host (the output is unit-tested only)
-- [ ] M5 spec written (`plan-agent-stream.md`)
-- [ ] M5 agent-initiated persistent channel (WebSocket, long-poll fallback), dial-out only
+- [x] M5 wake-channel design folded into [Architecture](architecture.md#agent-wake-channel)
+- [x] M5 agent-initiated persistent wake channel (WebSocket, cursor-based long-poll fallback), dial-out only
+- [x] M5 faster convergence for deployments, configuration changes and queued commands
 - [ ] M5 `exec` (incl. TTY), `logs -f`, `ps`, `inspect`
 - [ ] M6 node labels, label placement, replicas spread, `global` mode, `scale` command
 - [ ] M7 `nfs` volume type for shared docroot over the mesh

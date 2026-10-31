@@ -151,6 +151,20 @@ export interface CommandResult {
   result: CommandResultPayload;
 }
 
+// ---- Agent streaming channel (M5) --------------------------------------------------------------
+
+/**
+ * Messages sent by control over the agent-initiated WebSocket. The stream is authenticated during the HTTP
+ * upgrade, so credentials never appear in the URL or a message. A wake is only a hint: the agent fetches the
+ * authoritative state from `/agent/v1/work` and continues periodic polling if notifications are lost.
+ */
+export type StreamMessage =
+  | { type: 'ready'; nodeId: string; cursor: number }
+  | { type: 'work-available'; cursor: number; project?: string };
+
+/** Response from the long-poll fallback used when a WebSocket cannot be established. */
+export type WakeResponse = { type: 'work-available' | 'timeout'; cursor: number; project?: string };
+
 // ---- GET /agent/v1/work ------------------------------------------------------------------------
 
 export interface WorkResponse {
