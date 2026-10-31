@@ -162,6 +162,35 @@ export type StreamMessage =
   | { type: 'ready'; nodeId: string; cursor: number }
   | { type: 'work-available'; cursor: number; project?: string };
 
+/** Live operations always resolve their project/service placement on control before reaching an agent. */
+export type LiveRequest =
+  | { operation: 'exec'; project: string; service: string; node?: string; command: string[]; interactive: boolean; tty: boolean; columns?: number; rows?: number }
+  | { operation: 'logs'; project: string; service: string; node?: string; follow: true; tail: number }
+  | { operation: 'ps'; project: string; node?: string }
+  | { operation: 'inspect'; project: string; service: string; node?: string };
+export const LIVE_MAX_FRAME_BYTES = 256 * 1024;
+export const LIVE_MAX_BUFFERED_BYTES = 1024 * 1024;
+export const LIVE_MAX_SESSIONS = 64;
+export const LIVE_START_TIMEOUT_MS = 10_000;
+export type LiveInput =
+  | { v: 1; type: 'live.stdin'; data: string }
+  | { v: 1; type: 'live.stdin-end' }
+  | { v: 1; type: 'live.resize'; columns: number; rows: number }
+  | { v: 1; type: 'live.cancel' };
+export type OperatorLiveFrame = { v: 1; type: 'live.open'; request: LiveRequest } | LiveInput;
+export type AgentLiveCommand = { v: 1; type: 'live.open'; sessionId: string; request: LiveRequest } | (LiveInput & { sessionId: string });
+export type AgentLiveFrame =
+  | { v: 1; type: 'live.started'; sessionId: string }
+  | { v: 1; type: 'live.output'; sessionId: string; stream: 'stdout' | 'stderr'; data: string }
+  | { v: 1; type: 'live.result'; sessionId: string; result: unknown }
+  | { v: 1; type: 'live.exit'; sessionId: string; code: number | null; signal: string | null; cancelled: boolean; error?: string };
+export type OperatorLiveMessage =
+  | { v: 1; type: 'live.started'; sessionId: string; node: string }
+  | { v: 1; type: 'live.output'; sessionId: string; stream: 'stdout' | 'stderr'; data: string }
+  | { v: 1; type: 'live.result'; sessionId: string; value: unknown }
+  | { v: 1; type: 'live.exit'; sessionId: string; code: number }
+  | { v: 1; type: 'live.error'; sessionId?: string; message: string };
+
 /** Response from the long-poll fallback used when a WebSocket cannot be established. */
 export type WakeResponse = { type: 'work-available' | 'timeout'; cursor: number; project?: string };
 

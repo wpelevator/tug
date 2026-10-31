@@ -39,6 +39,7 @@ The project column says how a scoped token's allowed projects are checked: the p
 | `POST /api/v1/rollback` | `deploy` | Body |
 | `POST /api/v1/restart` | `deploy` | Body |
 | `POST /api/v1/logs` | `deploy` | Body |
+| `GET /api/v1/live` | `deploy` | First WebSocket frame |
 | `GET /api/v1/commands/:id` | `deploy` | Command's project; commands without a project (diagnostics, key rotation) need `admin` |
 | `POST /api/v1/secrets` | `admin` | Control-wide |
 | `DELETE /api/v1/secrets/:name` | `admin` | Control-wide |
@@ -129,7 +130,7 @@ jobs:
 
 ## Limits
 
-- A `deploy` token can run any image or Compose configuration on the nodes of its projects, so treat it as access to those nodes. It can also read service logs, which may contain whatever the application prints. Scope tokens to the projects they need and expire short-lived ones.
+- A `deploy` token can run any image or Compose configuration on the nodes of its projects, execute commands in those containers, and read their logs and raw Docker inspection data. Treat it as access to those nodes: inspection data can include environment variables, and logs can contain whatever the application prints. Scope tokens to the projects they need and expire short-lived ones.
 - Control-wide state (nodes, registry credentials, backups, diagnostics, tokens, secrets and volume deletion) is admin only. There is no per-project secret management role.
 - Roles and project scopes are fixed at creation; to change them, create a new token and revoke the old one.
 - A `deploy` event is written when a deployment is published. A build that fails before publishing appears only in its deployment record (with its `actor`), not as an event.

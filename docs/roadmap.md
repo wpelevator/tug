@@ -44,10 +44,10 @@ Bare hosts: add an opt-in Docker Engine + Compose install step to `node-install`
 
 `exec` and `logs -f` need a live stream, which the poll-based command queue cannot provide (how this fits logs and metrics is in [Observability](observability.md#live-commands)). Add an agent-initiated persistent connection to control (WebSocket, falling back to long-poll), keeping the property that agents only dial out so NAT'd nodes still work. On top of it build:
 
-- `tug exec SERVICE [-- cmd]`, including interactive TTY shells
-- `tug logs SERVICE -f` streaming, plus agent/daemon logs for troubleshooting
-- `tug ps` and `tug inspect SERVICE` with per-container state
-- faster convergence: control can push "work available" instead of waiting for the next poll
+- `tug exec SERVICE [-- cmd]`: non-TTY execution and stdin forwarding are built; true PTY shells and resize still need an agent PTY adapter
+- `tug logs SERVICE -f` streaming is built for service containers; agent/daemon logs remain for troubleshooting
+- `tug ps` and `tug inspect SERVICE` with per-container state are built
+- faster convergence through control-pushed "work available" is built
 
 ### M6 — Placement and scheduling
 
@@ -111,7 +111,9 @@ The test layers, the metrics milestones are held to and the backlog of mocked te
 - [x] M5 wake-channel design folded into [Architecture](architecture.md#agent-wake-channel)
 - [x] M5 agent-initiated persistent wake channel (WebSocket, cursor-based long-poll fallback), dial-out only
 - [x] M5 faster convergence for deployments, configuration changes and queued commands
-- [ ] M5 `exec` (incl. TTY), `logs -f`, `ps`, `inspect`
+- [x] M5 non-TTY `exec` with stdin forwarding, service `logs -f`, `ps`, and `inspect`
+- [ ] M5 true PTY allocation and resize for `exec -t`, plus agent/daemon log streams
+- [ ] M5 remote process termination when an exec session is cancelled or disconnected
 - [ ] M6 node labels, label placement, replicas spread, `global` mode, `scale` command
 - [ ] M7 `nfs` volume type for shared docroot over the mesh
 - [x] M8 scoped API tokens and CI deploy example ([Access control](access-control.md))
