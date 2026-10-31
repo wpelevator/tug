@@ -120,6 +120,11 @@ test('install commands render the shipped templates (src in dev, dist in the ima
     );
     assert.doesNotMatch(script, unrenderedVariable, 'no unrendered template variables');
     assert.doesNotMatch(script, /NET_ADMIN|TUG_MESH/, 'agents join no mesh unless asked');
+    assert.match(
+      script,
+      /docker run -d --name tug-agent [^\n]*--network host /,
+      'the agent shares the host network so health checks can reach container IPs on any Docker version',
+    );
 
     await fs.rm(ssh.log);
     const agentControlUrl = 'https://agent-control.test';

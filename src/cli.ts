@@ -6,7 +6,10 @@ import {
   dockerRunSnippet,
   enrollmentCloudInit,
   shellQuote as sh,
+  HOST_NETWORK_FLAG,
   MESH_RUN_FLAGS,
+  controlPortCheck,
+  localImageBuildArgs,
   meshPortCheck,
 } from './cli-install.ts';
 import { createSourceArchive, prepareLocalImages } from './cli-build.ts';
@@ -177,8 +180,8 @@ function preflightRemote(
   for (const port of ports) {
     checks.push([
       `port.${port}.free`,
-      `! ( command -v ss >/dev/null 2>&1 && ss -ltn | awk '{print $4}' | grep -qE "[.:]${port}$" )`,
-      `Port ${port} is already in use on the target host; stop the conflicting service or choose another port.`,
+      controlPortCheck(port),
+      `Port ${port} is already in use on the target host by something other than the Tug control container; stop the conflicting service or choose another port.`,
     ]);
   }
   if (mesh) {
@@ -211,7 +214,8 @@ async function transferTugImage(target: string, imageTag: string): Promise<void>
   const archive = path.join(directory, 'image.tar.gz');
   const remote = `/tmp/${path.basename(directory)}.tar.gz`;
   try {
-    runLocal('docker', ['build', '-t', imageTag, '.']);
+    const uname = runCapture('ssh', ['--', target, 'uname -m']);
+    runLocal('docker', localImageBuildArgs(imageTag, uname));
     await saveImageArchive(imageTag, archive);
     runLocal('scp', ['--', archive, `${target}:${remote}`]);
     runLocal('ssh', [
@@ -549,7 +553,7 @@ program
         ENV: env,
         DOCKER_LOGIN: dockerLogin,
         IMAGE_SH: sh(image),
-        RUN_FLAGS: o.mesh ? `${MESH_RUN_FLAGS} ` : '',
+        RUN_FLAGS: `${o.mesh ? MESH_RUN_FLAGS : HOST_NETWORK_FLAG} `,
       });
       runLocal('ssh', ['--', sshTarget, remote]);
       console.log(
