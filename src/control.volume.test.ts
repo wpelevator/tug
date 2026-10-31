@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { normalized } from '../tests/fake-docker.ts';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -55,7 +56,7 @@ test('volume metadata is protected and delete-data queues deletion after unrefer
     const first = await post(s.base, '/api/v1/deployments', {
       project: 'site',
       version: 'v1',
-      compose: withVolume,
+      compose: normalized(withVolume),
     });
     let res = await fetch(`${s.base}/agent/v1/status`, {
       method: 'POST',

@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { normalized } from '../tests/fake-docker.ts';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -68,7 +69,7 @@ test('label placement spreads replicas, scale resizes them and NFS volumes get t
     const dep = await post(s.base, '/api/v1/deployments', {
       project: 'site',
       version: 'v1',
-      compose,
+      compose: normalized(compose),
     });
     const svcs = dep.desiredState.services;
     assert.deepEqual(
