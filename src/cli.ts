@@ -6,6 +6,7 @@ import {
   dockerRunSnippet,
   enrollmentCloudInit,
   shellQuote as sh,
+  HOST_NETWORK_FLAG,
   MESH_RUN_FLAGS,
   meshPortCheck,
 } from './cli-install.ts';
@@ -532,7 +533,7 @@ program
         ENV: env,
         DOCKER_LOGIN: dockerLogin,
         IMAGE_SH: sh(image),
-        RUN_FLAGS: o.mesh ? `${MESH_RUN_FLAGS} ` : '',
+        RUN_FLAGS: `${o.mesh ? MESH_RUN_FLAGS : HOST_NETWORK_FLAG} `,
       });
       runLocal('ssh', ['--', sshTarget, remote]);
       console.log(

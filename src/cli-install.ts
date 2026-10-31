@@ -1,12 +1,14 @@
 import yaml from 'js-yaml';
 
-export const MESH_RUN_FLAGS = '--network host --cap-add NET_ADMIN';
+/** The agent dials container IPs for health checks; from the default bridge they are unreachable on current Docker (29.x), so it always shares the host network namespace. */
+export const HOST_NETWORK_FLAG = '--network host';
+export const MESH_RUN_FLAGS = `${HOST_NETWORK_FLAG} --cap-add NET_ADMIN`;
 export function shellQuote(value: unknown): string {
   return `'${String(value).replace(/'/g, `'\\''`)}'`;
 }
 
 export function dockerRunSnippet(image: string, joinKey: string, mesh = false): string {
-  return `docker run -d --name tug-agent --restart unless-stopped ${mesh ? `${MESH_RUN_FLAGS} -e TUG_MESH=true ` : ''}-v /var/run/docker.sock:/var/run/docker.sock -v tug-agent:/var/lib/tug -e TUG_JOIN_KEY=${shellQuote(joinKey)} ${shellQuote(image)} agent`;
+  return `docker run -d --name tug-agent --restart unless-stopped ${mesh ? `${MESH_RUN_FLAGS} -e TUG_MESH=true ` : `${HOST_NETWORK_FLAG} `}-v /var/run/docker.sock:/var/run/docker.sock -v tug-agent:/var/lib/tug -e TUG_JOIN_KEY=${shellQuote(joinKey)} ${shellQuote(image)} agent`;
 }
 
 /** The bootstrap runs in its own shell so its idempotent early exit cannot skip enrollment. */
