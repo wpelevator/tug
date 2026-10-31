@@ -8,6 +8,7 @@ import {
   shellQuote as sh,
   HOST_NETWORK_FLAG,
   MESH_RUN_FLAGS,
+  controlPortCheck,
   meshPortCheck,
 } from './cli-install.ts';
 import { createSourceArchive, prepareLocalImages } from './cli-build.ts';
@@ -166,8 +167,8 @@ function preflightRemote(
   for (const port of ports) {
     checks.push([
       `port.${port}.free`,
-      `! ( command -v ss >/dev/null 2>&1 && ss -ltn | awk '{print $4}' | grep -qE "[.:]${port}$" )`,
-      `Port ${port} is already in use on the target host; stop the conflicting service or choose another port.`,
+      controlPortCheck(port),
+      `Port ${port} is already in use on the target host by something other than the Tug control container; stop the conflicting service or choose another port.`,
     ]);
   }
   if (mesh) {
