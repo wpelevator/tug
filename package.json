@@ -33,6 +33,7 @@
     "changeset": "changeset",
     "version-packages": "changeset version && npm install --package-lock-only --ignore-scripts",
     "release": "changeset publish",
+    "test:integration:rollout": "node tools/scripts/integration-rollout.js",
     "test:integration:no-registry": "node tools/scripts/integration-no-registry.js",
     "test:smoke:image": "node tools/scripts/smoke-runtime-image.js"
   },

@@ -27,7 +27,7 @@ Run `npm run test:smoke:image` to build the actual shipped runtime image and exe
 
 ## Continuous integration and releases
 
-`.github/workflows/ci.yml` runs on pushes to `main` and on pull requests: typecheck, lint, unit tests and the dist smoke test on Node 22 and 24, plus the Docker integration tests (fake VPS containers, registry-free image delivery and the WireGuard mesh) as separate jobs. `.github/workflows/release.yml` versions and publishes; see [Releases](releases.md). Every user-facing change needs a changeset (`npm run changeset`).
+`.github/workflows/ci.yml` runs on pushes to `main` and on pull requests: typecheck, lint, unit tests and the dist smoke test on Node 22 and 24, plus the Docker integration tests (fake VPS containers, registry-free image delivery, the WireGuard mesh and rolling rollouts) as separate jobs. `.github/workflows/release.yml` versions and publishes; see [Releases](releases.md). Every user-facing change needs a changeset (`npm run changeset`).
 
 Published images are `ghcr.io/wpelevator/tug`. To test an unreleased CLI against a checkout, use `--build-local-image` on `control-install` and `node-install` (builds `tug:local` from the working directory and copies it over SSH). The dev Compose files (`docker-compose*.yml`) and the integration tests always build the image from the checkout with `build: .` and never pull from GHCR.
 
@@ -93,6 +93,14 @@ npm run test:integration:no-registry
 ```
 
 The Node-driven `tools/scripts/integration-no-registry.js` uses `docker-compose.integration-no-registry.yml` with isolated control and node Docker daemons and no registry service or registry configuration. It verifies remote builds with changed application contents under a reused display version, rollback, agent restart, local application builds and backup/restore with a fresh image download. Separate daemons ensure a node cannot accidentally reuse control's already-built image instead of downloading the archive. The API port defaults to `18081` (`TUG_IMAGE_TEST_PORT` overrides it); use a unique `COMPOSE_PROJECT_NAME` when running alongside other tests. `KEEP_INTEGRATION_STACK=true` preserves the stack for inspection. These container tests do not establish real SSH installation, public ACME certificate issuance or a real-host NAT/WireGuard baseline.
+
+### Rolling rollout integration test
+
+```bash
+npm run test:integration:rollout
+```
+
+Layers `docker-compose.integration-rollout.yml` over the same stack with a single fake VPS (`vps-a`) that runs the app and is the Caddy ingress node, then runs `tools/scripts/integration-rollout.js`. It deploys v1 of a rolling nginx service next to an unchanged recreated service, keeps requesting the app through Caddy from inside the VPS every ~50 ms while v2 rolls out (zero failed requests, v1 then v2 observed, the old container removed after the drain, the recreated service's container id unchanged), then deploys v3 whose health check fails and asserts that v2 kept serving the whole time, v3 never received a request, control recorded `deployment.auto_rollback` and the rollback deployment succeeded. It uses the compose project `tug-it-rollout` and the same host ports as the other integration tests, so run them one at a time; `KEEP_INTEGRATION_STACK=true` keeps the stack.
 
 ## Test VPS with Lima
 

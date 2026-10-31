@@ -73,7 +73,7 @@ What a single control plane makes easy:
 
 ## Sequencing notes
 
-The current priority is M3 design → M3 implementation. Real-server validation of M2 and M4 has been done on two Ubuntu 24.04 hosts (Linux 6.8): SSH installation including the Docker bootstrap, a WireGuard mesh with handshakes between hosts, an agent behind bridge NAT on a real host, a publicly trusted Let's Encrypt certificate issued by the managed Caddy, service names resolving across nodes over the mesh, a remote-build deploy, an operator-local `--build-local` deploy and rollback from the retained image. Not yet validated on real hosts: a physically separate node behind NAT, certificate renewal, `node-enroll --install-docker` cloud-init on a cloud-init host, and arm64 nodes.
+M3 is implemented; the current priority is M5. Real-server validation of M2 and M4 has been done on two Ubuntu 24.04 hosts (Linux 6.8): SSH installation including the Docker bootstrap, a WireGuard mesh with handshakes between hosts, an agent behind bridge NAT on a real host, a publicly trusted Let's Encrypt certificate issued by the managed Caddy, service names resolving across nodes over the mesh, a remote-build deploy, an operator-local `--build-local` deploy and rollback from the retained image. Not yet validated on real hosts: a physically separate node behind NAT, certificate renewal, `node-enroll --install-docker` cloud-init on a cloud-init host, and arm64 nodes.
 
 M3 depends on M2's ingress and needs a design decision about reaching old and new containers concurrently: either routable container addresses over the mesh or per-version host ports with Caddy upstream switching. Today's service names depend on published host ports, so this decision belongs in the M3 spec before implementation. M4 is technically independent of M2/M3. After M3, prioritize M5's day-to-day operations; M8 can provide small independent wins, while M6/M7 primarily serve the WordPress topology. M5 should follow M1 so the stream protocol lives in `protocol.ts`. M6 is independent; M7 depends on M2.
 
@@ -83,10 +83,11 @@ Rough parity with uncloud after M2 + M3 + M4 + M5. M3's automatic rollback and M
 
 - [x] M1 TypeScript adoption merged
 - [x] M2 networking, DNS, ingress/TLS: WireGuard mesh, `node-rotate-wg-key`, service DNS, `x-tug.ingress`, managed Caddy with `auto`/`custom`/`off` TLS ([Networking](networking.md))
-- [ ] M3 spec written (`plan-rolling-deploys.md`)
-- [ ] M3 rolling deploys with ingress upstream switching
-- [ ] M3 `x-tug.rollout` options, `recreate` default for stateful services
-- [ ] M3 opt-in automatic rollback on failed health
+- [x] M3 spec written (design folded into [Architecture](architecture.md#rolling-rollouts-and-automatic-rollback), [Compose extensions](compose.md#rolling-rollouts) and [Networking](networking.md#rolling-services-and-service-names))
+- [x] M3 rolling deploys with ingress upstream switching (unit-tested, and `npm run test:integration:rollout` against a fake VPS with Caddy; not run on a real multi-node host)
+- [x] M3 `x-tug.rollout` options (`strategy`, `drain`), `recreate` default for stateful services; `maxSurge` is not implemented
+- [x] M3 opt-in automatic rollback on failed health (`x-tug.rollback: auto`)
+- [ ] M3 later: a stable name and port for rolling services (cross-node name access on the declared port), and a rolling rollout verified on real multi-node hosts
 - [x] M4 spec written
 - [x] M4 `--registry` optional; built images stored on control and downloaded by agents, bring-your-own registry still supported
 - [x] M4 image file retention tied to rollback history, and image pruning on agents

@@ -1,0 +1,7 @@
+# Override for docker-compose.integration.yml for the rolling-rollout test: a single fake VPS (vps-a)
+# that runs the app and is also the Caddy ingress node. Used by tools/scripts/integration-rollout.js.
+services:
+  provisioner:
+    environment:
+      TUG_NODES: vps-a
+      TUG_INGRESS_NODES: vps-a
