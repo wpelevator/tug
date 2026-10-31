@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { Command } from 'commander';
+import { Command, Option } from 'commander';
 import { openAsBlob } from 'node:fs';
 import { resolveCliConfig, integerOption, normalizeControlUrl } from './cli-config.ts';
 import { dockerRunSnippet, enrollmentCloudInit, shellQuote as sh, MESH_RUN_FLAGS, meshPortCheck } from './cli-install.ts';
@@ -13,6 +13,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readCompose, composeHash } from './compose.ts';
 import { errMessage, token, loadTemplate } from './util.ts';
+import { PROJECT_NAME_PATTERN, ROLES, TOKEN_NAME_PATTERN } from './tokens.ts';
 import { packageVersion, resolveImage } from './image.ts';
 import { TERMINAL_DEPLOYMENT_STATES } from './protocol.ts';
 import type { DeploymentState, EnrollTokenResponse, JoinKey, RegisterResponse } from './protocol.ts';
@@ -236,6 +237,19 @@ program.command('secret-set <name>').option('--value <value>').action(async (nam
 program.command('secret-list').action(async (o: CommonOpts) => console.log(JSON.stringify(await request('GET', `/api/v1/secrets?project=${encodeURIComponent(o.project || (await loadCfg()).project || 'site')}`), null, 2)));
 program.command('secret-remove <name>').action(async (name: string, o: CommonOpts) => console.log(await request('DELETE', `/api/v1/secrets/${encodeURIComponent(name)}?project=${encodeURIComponent(o.project || (await loadCfg()).project || 'site')}`)));
 
+program.command('token-create <name>')
+  .description('create a named API token for CI or a teammate; the secret is printed once and cannot be shown again')
+  .addOption(new Option('--role <role>', 'read: status and listings; deploy: read plus deploy, rollback, cancel, restart, logs; admin: everything').choices(ROLES).makeOptionMandatory())
+  .addOption(new Option('--project <name>', 'limit a read or deploy token to this project; repeat for several').default([] as string[], 'all projects').argParser((value: string, previous: string[]) => [...previous, value]))
+  .option('--expires-in-days <n>', 'expire the token after this many days (default: never)')
+  .action(async (name: string, o: { role: string; project: string[]; expiresInDays?: string }) => {
+    const created = await request('POST', '/api/v1/tokens', { name, role: o.role, projects: o.project.length ? o.project : undefined, expiresInSeconds: o.expiresInDays ? Number(o.expiresInDays) * 86400 : undefined });
+    console.error('Store this token now (for example as the TUG_TOKEN secret in CI); it is not shown again.');
+    console.log(JSON.stringify(created, null, 2));
+  });
+program.command('token-list').description('list API tokens with role, projects, expiry and last use; secrets are never shown').action(async () => console.log(JSON.stringify(await request('GET', '/api/v1/tokens'), null, 2)));
+program.command('token-revoke <name>').description('revoke an API token immediately; its name stays reserved for the audit trail').action(async (name: string) => console.log(JSON.stringify(await request('DELETE', `/api/v1/tokens/${encodeURIComponent(name)}`), null, 2)));
+
 async function makeContext(): Promise<string> {
   const tmp = path.join(os.tmpdir(), `tug-${Date.now()}.tgz`);
   try { await createSourceArchive(process.cwd(), tmp, [cfgPath()]); }
@@ -266,8 +280,9 @@ program.command('deploy').option('-f, --file <file>', 'compose file', 'docker-co
   console.log(JSON.stringify(response, null, 2));
 });
 program.command('status').action(async () => console.log(JSON.stringify(await request('GET', '/api/v1/status'), null, 2)));
-program.command('events').option('--limit <n>', 'number of events', '100').action(async (o: CommonOpts & { limit: string }) => {
-  const cfg = await loadCfg(); const project = o.project || cfg.project;
+program.command('events').description('list recent events with the token that caused each control action; defaults to the resolved project').option('--limit <n>', 'number of events', '100').option('--all', 'list events across all projects (limited to your projects for scoped tokens)').action(async (o: CommonOpts & { limit: string; all?: boolean }) => {
+  if (o.all && o.project) throw new Error('--all and --project cannot be combined');
+  const cfg = await loadCfg(); const project = o.all ? undefined : o.project || cfg.project;
   const query = `limit=${encodeURIComponent(o.limit)}${project ? `&project=${encodeURIComponent(project)}` : ''}`;
   console.log(JSON.stringify(await request('GET', `/api/v1/events?${query}`), null, 2));
 });
@@ -327,7 +342,7 @@ program.command('logs <service>').description('fetch logs from the assigned node
 
 program.hook('preAction', async (_root, command) => {
   const options = command.opts();
-  for (const [key, min, max] of [['port', 1, 65535], ['wgPort', 1, 65535], ['timeout', 1, 86400], ['ttl', 1, 31536000], ['uses', 1, 1000000], ['limit', 1, 500], ['tail', 1, 1000000]] as const) {
+  for (const [key, min, max] of [['port', 1, 65535], ['wgPort', 1, 65535], ['timeout', 1, 86400], ['ttl', 1, 31536000], ['uses', 1, 1000000], ['expiresInDays', 1, 3650], ['limit', 1, 500], ['tail', 1, 1000000]] as const) {
     if (options[key] !== undefined) integerOption(String(options[key]), '--' + key.replace(/[A-Z]/g, c => '-' + c.toLowerCase()), min, max);
   }
   if (options.buildLocal && options.buildUpload === false) throw new Error('--build-local and --no-build-upload cannot be combined');
@@ -335,12 +350,22 @@ program.hook('preAction', async (_root, command) => {
   if (command.name() === 'control-restore' && !options.confirm) throw new Error('control-restore requires --confirm');
   for (const value of [...command.args, ...Object.values(options), ...Object.values(program.opts())]) if (typeof value === 'string' && /[\r\n\0]/.test(value)) throw new Error('arguments and option values must not contain line breaks or NUL');
   if (options.name && !/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(options.name)) throw new Error('--name must contain only letters, numbers, dots, underscores or hyphens');
-  resolvedConfig = await resolveCliConfig(command.optsWithGlobals(), process.env, process.cwd(), command.name() === 'init');
+  const connection = command.optsWithGlobals();
+  if (command.name() === 'token-create') {
+    // --project is repeatable here and scopes the new token, so it must not also select the connection project.
+    if (!TOKEN_NAME_PATTERN.test(command.args[0])) throw new Error('token name must be 1-64 letters, numbers, dots, underscores or hyphens, starting with a letter or number');
+    for (const project of options.project as string[]) if (!PROJECT_NAME_PATTERN.test(project)) throw new Error('--project must contain only letters, numbers, dots, underscores or hyphens');
+    if (options.role === 'admin' && options.project.length) throw new Error('admin tokens cannot be limited to projects; use --role read or --role deploy with --project');
+    connection.project = undefined;
+  }
+  resolvedConfig = await resolveCliConfig(connection, process.env, process.cwd(), command.name() === 'init');
 });
-for (const command of program.commands) command
-  .option('--config <file>', 'CLI JSON config file (default: TUG_CONFIG or .tug.json)')
-  .option('--control-url <url>', 'control API URL (overrides TUG_CONTROL_URL and config)')
-  .option('--project <name>', 'project (overrides TUG_PROJECT and config; default: site)');
+for (const command of program.commands) {
+  command
+    .option('--config <file>', 'CLI JSON config file (default: TUG_CONFIG or .tug.json)')
+    .option('--control-url <url>', 'control API URL (overrides TUG_CONTROL_URL and config)');
+  if (!command.options.some(option => option.long === '--project')) command.option('--project <name>', 'project (overrides TUG_PROJECT and config; default: site)');
+}
 for (const command of [program, ...program.commands]) command.allowExcessArguments(false);
 program.showHelpAfterError();
 program.parseAsync().catch((e: unknown) => { console.error(`${errMessage(e)}\nRun tug <command> --help for usage.`); process.exit(1); });
