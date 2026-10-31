@@ -117,7 +117,19 @@ export async function waitForHealth(ctx: AgentContext, project: string, service:
       return;
     } catch (e) { last = e; await new Promise(r => setTimeout(r, intervalMs)); }
   }
-  throw last || new Error(`${service}: health check failed`);
+  throw new Error(`${service}: ${describeHealthCheck(health)} failed after ${retries} attempt${retries === 1 ? '' : 's'}: ${describeError(last)}`);
+}
+
+/** Node's fetch reports every network failure as "fetch failed"; the system error that explains it is on `cause`. */
+function describeError(error: unknown): string {
+  const e = error as { message?: string; cause?: { code?: string; message?: string } } | undefined;
+  const cause = e?.cause?.code || e?.cause?.message;
+  return cause ? `${e?.message ?? 'error'} (${cause})` : (e?.message ?? 'no response');
+}
+function describeHealthCheck(health: HealthCheck): string {
+  if (health.type === 'http') return `http health check on port ${health.port || 80}${health.path || '/'}`;
+  if (health.type === 'tcp') return `tcp health check on port ${health.port}`;
+  return 'docker health check';
 }
 
 export { parseDuration };
