@@ -525,7 +525,7 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
     const state: DesiredState = JSON.parse(dsRow.state_json);
     if (!state.services?.[service]) throw httpError(404, `service ${service} not found in project ${project}`);
     const nodeRows = await db.all<NodeRow[]>('SELECT name,labels_json,created_at FROM nodes ORDER BY created_at,name');
-    const nodeInfos = nodeRows.map(row => ({ name: row.name, labels: row.labels_json ? (JSON.parse(row.labels_json) as unknown[]).filter((x): x is string => typeof x === 'string') : [] }));
+    const nodeInfos = nodeRows.map(row => ({ name: row.name, labels: row.labels_json ? JSON.parse(row.labels_json) as string[] : [] }));
     const composeSvc = state.compose?.services?.[service] || {};
     const ext = composeSvc['x-tug'] || {};
     const placement = ext.placement || {};
@@ -589,7 +589,7 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
     await wakeAll();
     const row = await db.get<NodeRow>(NODE_INFO_SQL, name);
     if (!row) throw httpError(500, 'node not found after registration');
-    const node: NodeInfo = { id: row.id, name: row.name, address: row.address, public_address: row.public_address, overlay_ip: row.overlay_ip, labels: row.labels_json ? (JSON.parse(row.labels_json) as unknown[]).filter((x): x is string => typeof x === 'string') : [], status: row.status, created_at: row.created_at, updated_at: row.updated_at };
+    const node: NodeInfo = { id: row.id, name: row.name, address: row.address, public_address: row.public_address, overlay_ip: row.overlay_ip, labels: row.labels_json ? JSON.parse(row.labels_json) as string[] : [], status: row.status, created_at: row.created_at, updated_at: row.updated_at };
     return { node, agentToken, registryToken };
   }
   api('post', '/api/v1/nodes/register', null, async (req, res) => {
@@ -632,7 +632,7 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
   });
   api('get', '/api/v1/nodes', null, async (req, res) => {
     const rows = await db.all<NodeRow[]>('SELECT id,name,address,public_address,overlay_ip,ingress,ingress_status_json,status,labels_json,last_seen_at,created_at,updated_at FROM nodes ORDER BY name');
-    res.json({ nodes: rows.map(row => { const { labels_json, ...rest } = row; return { ...rest, labels: labels_json ? (JSON.parse(labels_json) as unknown[]).filter((x): x is string => typeof x === 'string') : [] }; }) });
+    res.json({ nodes: rows.map(row => { const { labels_json, ...rest } = row; return { ...rest, labels: labels_json ? JSON.parse(labels_json) as string[] : [] }; }) });
   });
   api('post', '/api/v1/nodes/:name/rotate-registry-token', null, async (req, res) => {
     const node = await db.get('SELECT id,name FROM nodes WHERE name=? OR id=?', req.params.name, req.params.name);
@@ -778,7 +778,7 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
       if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(project) || typeof version !== 'string' || !version.length) throw httpError(400, 'invalid project or version');
       if (version.startsWith(ROLLBACK_VERSION_PREFIX)) throw httpError(400, `version cannot start with "${ROLLBACK_VERSION_PREFIX}" (reserved for rollback deployments)`);
       const nodeRows = await db.all<NodeRow[]>('SELECT name,labels_json,created_at FROM nodes ORDER BY created_at,name');
-      const nodeInfos = nodeRows.map(row => ({ name: row.name, labels: row.labels_json ? (JSON.parse(row.labels_json) as unknown[]).filter((x): x is string => typeof x === 'string') : [], created_at: row.created_at }));
+      const nodeInfos = nodeRows.map(row => ({ name: row.name, labels: row.labels_json ? JSON.parse(row.labels_json) as string[] : [], created_at: row.created_at }));
       // Resolve label-based and global placement into concrete node lists before validation.
       for (const svc of Object.values(compose.services || {})) {
         const ext = (svc['x-tug'] ||= {}) as { placement?: { nodes?: string[]; labels?: string[]; global?: boolean }; replicas?: number; global?: boolean };
