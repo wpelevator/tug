@@ -28,10 +28,10 @@ async function server() {
     return body as { deployment: { id: string }; desiredState: { revision: string } };
   };
   /** Posts a node status for the project's current desired revision. */
-  const report = async (token: string, node: string, health: 'serving' | 'failed', services: Record<string, Record<string, unknown>>, project = 'site') => {
+  const report = async (token: string, node: string, health: 'serving' | 'failed', services: Record<string, Record<string, unknown>>, project = 'site', error?: string) => {
     const w = await json(await fetch(`${base}/agent/v1/work`, { headers: agent(token) }));
     const state = w.desiredStates.find((st: { project: string }) => st.project === project);
-    const res = await post('/agent/v1/status', { node, commandResults: [], projects: [{ project, observedVersion: state.version, observedRevision: state.revision, health, services: Object.keys(services), serviceStates: services }] }, agent(token));
+    const res = await post('/agent/v1/status', { node, commandResults: [], projects: [{ project, observedVersion: state.version, observedRevision: state.revision, health, ...(error ? { error } : {}), services: Object.keys(services), serviceStates: services }] }, agent(token));
     assert.equal(res.status, 200);
   };
   const deployment = async (id: string) => get(`/api/v1/deployments/${id}`);
@@ -118,11 +118,30 @@ test('deployment convergence: serving succeeds, a failed node marks the deployme
     assert.equal((await s.deployment(v1.deployment.id)).state, 'succeeded', 'all nodes serving the revision succeeds the deployment');
 
     const v2 = await s.deploy(stack('web:2'), 'v2');
-    await s.report(app.agentToken, 'app', 'failed', serving(20000, { rolloutError: 'http 503' }));
+    await s.report(app.agentToken, 'app', 'failed', serving(20000, { rolloutError: 'http 503' }), 'site', 'dependency failed to start: container wp1-db-1 has no healthcheck configured');
     const failed = await s.deployment(v2.deployment.id);
     assert.equal(failed.state, 'failed', 'a node reporting failed health for the new revision fails the deployment');
     assert.match(failed.error_message, /failed health/, 'the reason is recorded');
+    assert.match(failed.error_message, /\bapp:/, 'the failure names the node that reported it');
+    assert.match(failed.error_message, /no healthcheck configured/, 'the node apply error is included so tug deploy can show why the node failed');
+    assert.match(failed.error_message, /web: http 503/, 'a rollout error is included when the node reports one');
     assert.equal((await s.events()).some(e => e.type.startsWith('deployment.auto_rollback')), false, 'nothing rolls back without opting in');
+  } finally { await s.close(); }
+});
+
+test('logs and restart name the project when the service is not in it', async () => {
+  const s = await server();
+  try {
+    await s.register('app');
+    await s.deploy(stack('web:1'), 'v1');
+    const logs = await s.post('/api/v1/logs', { project: 'site', service: 'wordpress' });
+    const logsBody = await json(logs);
+    assert.equal(logs.status, 404, 'a service that is not in the project is not found');
+    assert.equal(logsBody.error, 'service wordpress not found in project site', 'the error names the service and the project that was searched');
+    const restart = await s.post('/api/v1/restart', { project: 'site', service: 'wordpress' });
+    assert.equal((await json(restart)).error, 'service wordpress not found in project site', 'restart uses the same project-qualified message');
+    const other = await s.post('/api/v1/logs', { project: 'other', service: 'web' });
+    assert.equal((await json(other)).error, 'project other has no desired state', 'a project with no deployment is named instead of looking like a missing service');
   } finally { await s.close(); }
 });
 

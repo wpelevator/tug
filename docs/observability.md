@@ -13,7 +13,7 @@ Verified against the code on `main`.
 | Audit trail | Deployments and events record the acting token, and `system:auto-rollback` for automatic rollbacks. See [Access control](access-control.md). | Answers who acted, not how the system behaves |
 | `tug status` | Prints `GET /api/v1/status` as JSON: projects, the 20 latest deployments, nodes with `status` and `last_seen_at`, and per-node project status including health, rollout state, port and rollout error. | Raw JSON. A node is marked `stale` only when this endpoint is called, using `TUG_STALE_SECONDS` (default 60) |
 | `tug events` | Lists events from `GET /api/v1/events`, newest first, at most 500 per call, 100 by default. | Agents report on change only, see [Events](#events) |
-| `tug doctor` | Local checks, control checks (SQLite, operator token, master key, Docker, Compose, mesh keys, ingress state) and, with `--nodes`, diagnostics queued on agents. | A point-in-time check, not a time series |
+| `tug doctor` | Local checks, control checks (SQLite, operator token, master key, Docker, Compose, mesh keys, ingress state) and, with `--nodes` or `--node`, agent diagnostics. It waits for those results. | A point-in-time check, not a time series |
 | `tug logs <service>` | Queues a `logs.fetch` command on the service's node and prints the tail. | A tail through the poll-based command queue; no follow mode |
 | `GET /healthz` | Returns `{"ok":true}` without authentication. | Checks nothing: it answers even if the database or the writer queue is stuck |
 | Process logs | Control and agent write plain `console.log` and `console.error` text. | No timestamps, levels, structure or request ids |

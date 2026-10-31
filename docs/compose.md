@@ -31,6 +31,8 @@ services:
   - `type: http` requests `http://<container-ip>:<port><path>` (defaults `80` and `/`) and expects a 2xx response after following redirects.
   - `interval` (default `2s`), `timeout` (default `2s`) and `retries` (default `10`) accept numbers in milliseconds or `ms`/`s`/`m` suffixes.
 
+`depends_on` is copied into the generated Compose file. `condition: service_healthy` waits on Docker's `HEALTHCHECK`, not on `x-tug.health`. Tug removes `x-tug` before `docker compose up`, so that condition fails the deploy when the image has no `HEALTHCHECK` and the service has no `healthcheck:` block. MariaDB 11.4 is one such image. Use `depends_on: [db]` and `x-tug.health` on each service. A failed apply is included in the deployment error `tug deploy` prints, and recorded once as `service.failed`.
+
 ```yaml
     x-tug:
       placement:
@@ -111,7 +113,57 @@ Control records volumes per project. A volume is included in a node's Compose fi
 
 ## Secrets in services
 
-Reference secrets through `environment`, either as keys (`DB_PASSWORD:` or `- DB_PASSWORD=...`) or as `${NAME}` / `${NAME:-default}` substitutions. Only referenced secrets are released to a node. Set them with `tug secret-set NAME`.
+Reference secrets through `environment`, either as keys (`DB_PASSWORD:` or `- DB_PASSWORD=...`) or as `${NAME}` / `${NAME:-default}` substitutions. Only referenced secrets are released to a node. Set them with `tug secret-set NAME`. A value that is not exactly a `${NAME}` substitution is a literal, and that key is also treated as a secret name, so a project secret with the same name is released too. The generated `.env` does not quote values; keep `#`, `$`, spaces and newlines out of secret values.
+
+## A database on the same node
+
+An app reaches a database by Compose's own DNS only when they are on the same node. A name injected for a service on another node points at that node's address, and the client has to use the published host port, so an unpublished database is not reachable across nodes. Shared volumes and replica spread are not implemented.
+
+```yaml
+services:
+  db:
+    image: mariadb:11.4
+    command: ["--innodb-buffer-pool-size=48M"]
+    environment:
+      MARIADB_DATABASE: app
+      MARIADB_USER: app
+      MARIADB_PASSWORD: ${DB_PASSWORD}
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+    volumes:
+      - db-data:/var/lib/mysql
+    x-tug:
+      placement:
+        nodes: [app]
+      health:
+        type: tcp
+        port: 3306
+
+  web:
+    image: nginx:1.27-alpine
+    depends_on: [db]
+    ports:
+      - "8080:80"
+    x-tug:
+      placement:
+        nodes: [app]
+      health:
+        type: http
+        port: 80
+      ingress:
+        host: app.example.com
+        port: 80
+        tls: auto
+
+volumes:
+  db-data:
+    x-tug:
+      type: local
+      persistent: true
+      placement:
+        nodes: [app]
+```
+
+Set `DB_PASSWORD` and `DB_ROOT_PASSWORD` with `tug secret-set` before deploying. The MariaDB flag keeps the buffer pool small enough for a 1 GB host that is also running the agent. Do not add `condition: service_healthy` unless the database image defines a Docker `HEALTHCHECK`.
 
 ## Not supported
 

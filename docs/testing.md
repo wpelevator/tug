@@ -22,6 +22,7 @@ Commands to run each suite are in [Development](development.md). Entries marked 
 | The first rolling deploy started two revisions of the same image | Real hosts | Not guarded yet, see backlog item 1 |
 | After control loses its data, agents would not re-report their WireGuard keys | Reading the code while resetting control for the real-host run; worked around, not reproduced | Not guarded yet, see backlog item 2 |
 | A control database from before scoped tokens lacks columns the current control writes | Real hosts | Not guarded yet, see backlog item 3 |
+| `depends_on.condition: service_healthy` fails the deploy when the image has no Docker `HEALTHCHECK`, and the deploy error omitted the compose message | Real hosts | Tier 1: `src/control.rollout.test.ts` asserts the deployment error includes the node apply error |
 
 ## Tier 1: mocked tests
 

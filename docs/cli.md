@@ -83,7 +83,7 @@ These operations use the resolved project.
 
 ## Operations
 
-- `tug doctor [--nodes] [--node <name>]` runs local and control diagnostics; `--nodes` queues agent diagnostics for all nodes and `--node` selects one. Mesh checks include WireGuard keys and ingress status.
+- `tug doctor [--nodes] [--node <name>] [--timeout <seconds>]` runs local and control diagnostics. `--nodes` runs agent diagnostics on every node and `--node` selects one; both wait for the agent result (timeout defaults to `60` seconds) instead of returning the queued command id. An unknown `--node` is an error. Mesh checks include WireGuard keys and ingress status.
 - `tug control-backup` creates a control-plane backup including retained built-image archives.
 - `tug control-restore <artifact-path> --confirm` restores a backup and requires control restart. The archive path is on the control host. See [Control plane](control-plane.md#backup-and-restore).
 

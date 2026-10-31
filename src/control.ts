@@ -36,6 +36,29 @@ declare module 'express-serve-static-core' {
 
 interface HttpError extends Error { status?: number; lock?: LockRow }
 const httpError = (status: number, message: string): HttpError => Object.assign(new Error(message), { status });
+const missingProject = (project: string) => `project ${project} has no desired state`;
+const missingService = (project: string, service: string) => `service ${service} not found in project ${project}`;
+
+/** Collapse a node report into the deployment error `tug deploy` prints. Compose failures are multi-line; keep the reason, not the progress log. */
+function deploymentFailureMessage(rows: { node_id: string; status_json: string }[]): string {
+  const limit = 500;
+  const oneLine = (value: string) => {
+    const flat = value.replace(/\s+/g, ' ').trim();
+    return flat.length > limit ? `${flat.slice(0, limit)}...` : flat;
+  };
+  const details = rows.map(row => {
+    let status: { error?: unknown; serviceStates?: Record<string, { rolloutError?: unknown }> } = {};
+    try { status = JSON.parse(row.status_json); } catch { /* a bad report still names the node */ }
+    const parts: string[] = [];
+    if (typeof status.error === 'string' && status.error.trim()) parts.push(oneLine(status.error));
+    for (const [service, state] of Object.entries(status.serviceStates || {})) {
+      if (typeof state?.rolloutError === 'string' && state.rolloutError.trim()) parts.push(`${service}: ${oneLine(state.rolloutError)}`);
+    }
+    const detail = parts.join('; ');
+    return detail ? `${row.node_id}: ${detail}` : row.node_id;
+  });
+  return `one or more assigned nodes reported failed health: ${details.join('; ')}`;
+}
 
 /** Versions of rollback deployments start with this; `tug deploy` may not use it, which is how automatic rollback tells them apart. */
 const ROLLBACK_VERSION_PREFIX = 'rollback-';
@@ -200,9 +223,9 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
     const statuses = await db.all<{ node_id: string; observed_version: string; health: string; status_json: string }[]>('SELECT node_id,observed_version,health,status_json FROM node_statuses WHERE project_id=?', projectId);
     const byNode = new Map(statuses.map(s => [s.node_id, s]));
     const reportsRevision = (node: string) => state.revision ? JSON.parse(byNode.get(node)?.status_json || '{}').observedRevision === state.revision : byNode.get(node)?.observed_version === state.version;
-    const failed = [...required].some(node => reportsRevision(node) && byNode.get(node)?.health === 'failed');
-    if (failed) {
-      const marked = await db.run('UPDATE deployments SET state=?,error_message=?,updated_at=? WHERE id=? AND state=?', 'failed', 'one or more assigned nodes reported failed health', now(), project.current_deployment_id, 'rolling_out');
+    const failedNodes = [...required].filter(node => reportsRevision(node) && byNode.get(node)?.health === 'failed').map(node => byNode.get(node)!);
+    if (failedNodes.length) {
+      const marked = await db.run('UPDATE deployments SET state=?,error_message=?,updated_at=? WHERE id=? AND state=?', 'failed', deploymentFailureMessage(failedNodes), now(), project.current_deployment_id, 'rolling_out');
       if (marked.changes === 1) scheduleAutoRollback(projectId, project.current_deployment_id, state);
     }
     const ok = [...required].every(node => (state.revision ? JSON.parse(byNode.get(node)?.status_json || '{}').observedRevision === state.revision : byNode.get(node)?.observed_version === state.version) && ['serving', 'skipped'].includes(byNode.get(node)?.health ?? ''));
@@ -725,8 +748,8 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
   }));
   async function commandForService({ project, service, type, payload }: { project: string; service?: string; type: CommandType; payload: Record<string, unknown> }) {
     if (!service) throw httpError(400, 'service required');
-    const ds = await currentDesired(project); if (!ds) throw httpError(404, 'project has no desired state');
-    const state = JSON.parse(ds.state_json); const svc = state.services?.[service]; if (!svc) throw httpError(404, 'service not found');
+    const ds = await currentDesired(project); if (!ds) throw httpError(404, missingProject(project));
+    const state = JSON.parse(ds.state_json); const svc = state.services?.[service]; if (!svc) throw httpError(404, missingService(project, service));
     const nodeName = svc.placement?.nodes?.[0]; if (!nodeName) throw httpError(400, 'service has no explicit node placement');
     const node = await db.get('SELECT id FROM nodes WHERE name=? OR id=?', nodeName, nodeName); if (!node) throw httpError(404, 'node not found');
     const cmdId = id('cmd'); const ts = now();
@@ -745,8 +768,8 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
   api('post', '/api/v1/logs', bodyProject, async (req, res) => {
     const project = req.body.project || 'site'; const service = req.body.service; const tail = Number(req.body.tail || 200);
     if (!service) return res.status(400).json({ error: 'service required' });
-    const ds = await currentDesired(project); if (!ds) return res.status(404).json({ error: 'project has no desired state' });
-    const state = JSON.parse(ds.state_json); const svc = state.services?.[service]; if (!svc) return res.status(404).json({ error: 'service not found' });
+    const ds = await currentDesired(project); if (!ds) return res.status(404).json({ error: missingProject(project) });
+    const state = JSON.parse(ds.state_json); const svc = state.services?.[service]; if (!svc) return res.status(404).json({ error: missingService(project, service) });
     const nodeName = svc.placement?.nodes?.[0]; if (!nodeName) return res.status(400).json({ error: 'service has no explicit node placement' });
     const node = await db.get('SELECT id FROM nodes WHERE name=? OR id=?', nodeName, nodeName); if (!node) return res.status(404).json({ error: 'node not found' });
     const cmdId = id('cmd'); const ts = now();
@@ -802,6 +825,7 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
   });
   api('post', '/api/v1/diagnostics/nodes', null, async (req, res) => {
     const nodes = req.body.node ? await db.all('SELECT id FROM nodes WHERE id=? OR name=?', req.body.node, req.body.node) : await db.all('SELECT id FROM nodes');
+    if (req.body.node && !nodes.length) return res.status(404).json({ error: `node ${req.body.node} not found` });
     const ts = now(); const commands = [];
     for (const node of nodes) {
       const cmdId = id('cmd');
