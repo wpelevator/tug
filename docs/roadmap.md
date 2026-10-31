@@ -104,6 +104,8 @@ A published port such as `3306:3306` listened on every interface of the node, an
 
 ### M11 — Backups, restores and run-once jobs
 
+Working plan: `plan-backups.md`.
+
 The stateful half of principle 5, and something a central control plane does better than a mesh: one schedule, one catalog, retention and restore.
 
 - `x-tug.backup` on services and volumes: `type` (`mariadb`/`mysql`, `postgres`, `volume`), `schedule`, `retention`. Control schedules backups as agent commands on the placement node; the agent runs `mariadb-dump` or `pg_dump` in a helper container, or archives the volume, and uploads with restic to a destination configured on control (S3-compatible first, SFTP second, control disk for development only), encrypted before leaving the node.

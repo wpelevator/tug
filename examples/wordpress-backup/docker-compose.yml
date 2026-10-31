@@ -1,0 +1,92 @@
+# WordPress + MariaDB with a restic backup sidecar. Interim recipe until x-tug.backup (roadmap M11); see docs/backups.md.
+# Deploy from this directory so control can build ./backup:  tug deploy -f docker-compose.yml
+# Secrets (tug secret-set NAME): DB_PASSWORD, DB_ROOT_PASSWORD, RESTIC_REPOSITORY, RESTIC_PASSWORD,
+# AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY. Optional: BACKUP_PING_URL.
+# Replace the node name "app" and the host "blog.example.com".
+
+services:
+  db:
+    image: mariadb:11.4.8
+    mem_limit: 512m
+    command: ["--innodb-buffer-pool-size=128M"]
+    environment:
+      MARIADB_DATABASE: wordpress
+      MARIADB_USER: wordpress
+      MARIADB_PASSWORD: ${DB_PASSWORD}
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+    volumes:
+      - db-data:/var/lib/mysql
+    x-tug:
+      placement:
+        nodes: [app]
+      health:
+        type: tcp
+        port: 3306
+
+  wordpress:
+    image: wordpress:6.8.3-apache
+    mem_limit: 512m
+    depends_on: [db]
+    ports:
+      - "8080:80"
+    environment:
+      WORDPRESS_DB_HOST: db
+      WORDPRESS_DB_NAME: wordpress
+      WORDPRESS_DB_USER: wordpress
+      WORDPRESS_DB_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - wp-content:/var/www/html/wp-content
+    x-tug:
+      placement:
+        nodes: [app]
+      health:
+        type: http
+        port: 80
+        path: /wp-login.php
+      ingress:
+        host: blog.example.com
+        port: 80
+        tls: auto
+
+  # Daily dump of the database plus wp-content to an encrypted restic repository.
+  # Placed on the same node as db (network dump) and the volumes (local read-only mount).
+  backup:
+    build: ./backup
+    mem_limit: 256m
+    restart: unless-stopped
+    depends_on: [db]
+    environment:
+      RESTIC_REPOSITORY: ${RESTIC_REPOSITORY}
+      RESTIC_PASSWORD: ${RESTIC_PASSWORD}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      BACKUP_PING_URL: ${BACKUP_PING_URL:-}
+      BACKUP_HOST: app
+      BACKUP_AT_UTC: "03:30"
+      DB_HOST: db
+      DB_NAME: wordpress
+      DB_USER: wordpress
+      DB_PASSWORD: ${DB_PASSWORD}
+      # Space-separated directories to archive. To back up another volume, mount it below and add its path here.
+      BACKUP_PATHS: /data/wp-content
+    volumes:
+      - wp-content:/data/wp-content:ro
+    x-tug:
+      placement:
+        nodes: [app]
+      health:
+        type: docker
+
+volumes:
+  db-data:
+    x-tug:
+      type: local
+      persistent: true
+      placement:
+        nodes: [app]
+  wp-content:
+    x-tug:
+      type: local
+      persistent: true
+      placement:
+        nodes: [app]
