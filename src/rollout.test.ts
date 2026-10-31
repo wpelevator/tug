@@ -131,7 +131,7 @@ test('rolling service runs in its own revision project on a remapped port and th
   const revision = revisionProject('proj', 'web', status.serviceStates!.web.rolloutRevision!);
   assert.deepEqual(host.running(revision), ['web@20000:web:1'], 'the revision project runs the service on the allocated port');
   const file = yaml.load(await fs.readFile(path.join(projectDir(ctx), 'rollout', `${revision}.yml`), 'utf8')) as ComposeFile;
-  assert.deepEqual(file.services.web.ports, ['20000:80'], 'the declared host port is replaced by the allocated one');
+  assert.deepEqual(file.services.web.ports, ['127.0.0.1:20000:80'], 'the declared host port is replaced by the allocated one and stays bound to the node bind address (loopback without an address)');
   assert.equal(file.services.web.depends_on, undefined, 'depends_on cannot point across Compose projects');
   assert.deepEqual(file.networks, { default: { name: 'proj_default', external: true } }, 'the revision joins the main project network');
   assert.deepEqual(file.volumes, { assets: { external: true, name: 'proj_assets' } }, 'named volumes keep using the main project volumes');
@@ -248,7 +248,7 @@ test('an agent restarted mid-rollout resumes the same candidate instead of start
   const host = fakeHost(); const ctx = await makeCtx(host);
   const v1 = await reconcile(desired(rolling('web:1'), 'v1'), ctx);
   const v2 = desired(rolling('web:2'), 'v2');
-  const full = composeForNode(v2, 'n1');
+  const full = composeForNode(v2, 'n1', { bind: { address: '127.0.0.1' } });
   const hash = serviceRevisionHash(v2, full.services.web, 'web');
   // The previous agent process had started the candidate and persisted it, then died before the takeover.
   const candidateProject = revisionProject('proj', 'web', hash);

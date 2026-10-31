@@ -16,6 +16,7 @@ Deploy Docker Compose projects to one or more ordinary Linux VPSes through a sma
 - Opt-in zero-downtime rolling rollouts for ingress-fronted services (`x-tug.rollout`) and automatic rollback of failed deployments (`x-tug.rollback: auto`). See [Compose extensions](docs/compose.md#rolling-rollouts).
 - Per-node registry pull tokens enforced by an htpasswd-backed registry you provide, with rotation and revocation.
 - Optional WireGuard mesh between nodes, health-aware cross-node service names and a managed Caddy ingress with automatic HTTPS, each opt-in. See [Networking](docs/networking.md).
+- Private-by-default published ports: generated Compose binds them to the overlay IP, loopback or the node address, never every interface unless you write `0.0.0.0`. See [Networking](docs/networking.md#published-ports-private-by-default).
 - Control-plane backup and restore, and `tug doctor` diagnostics.
 
 ## How it fits together

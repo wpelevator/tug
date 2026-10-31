@@ -4,7 +4,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { publishedPort } from './compose.ts';
+import { loopbackIngressServices, publishedPort } from './compose.ts';
 import { ensureDir, errMessage } from './util.ts';
 import type {
   DesiredState, IngressRoute, IngressSpec, IngressStatus, IngressTls, IngressWork, ProjectStatus, ServiceEndpoint, ServiceEndpoints
@@ -56,8 +56,11 @@ export function resolveServiceEndpoints(states: DesiredState[], nodes: NodeView[
 export interface IngressInput {
   states: DesiredState[];
   endpoints: ServiceEndpoints;
-  /** The ingress node being configured; its own upstreams are reached on loopback. */
+  /** The ingress node being configured. */
   node: string;
+  /** Every node name, and the ingress nodes; they decide which services on `node` listen on loopback only. */
+  nodes?: string[];
+  ingressNodes?: string[];
   /** Decrypted project secrets for custom TLS, keyed `<project>/<secret name>`. */
   secrets: Map<string, string>;
   acmeEmail?: string;
@@ -65,26 +68,32 @@ export interface IngressInput {
 
 const certFile = (host: string, ext: 'crt' | 'key') => `certs/${host.replace(/\*/g, '_wildcard_')}.${ext}`;
 
-export function buildIngressWork({ states, endpoints, node, secrets, acmeEmail }: IngressInput): IngressWork {
+/**
+ * Upstreams on the ingress node itself are dialed on `127.0.0.1` when the service's ingress port
+ * listens on loopback only (see `loopbackIngressServices`), otherwise on the address its published
+ * ports are bound to, which is the endpoint address, like every other node.
+ */
+export function buildIngressWork({ states, endpoints, node, nodes = [node], ingressNodes = [node], secrets, acmeEmail }: IngressInput): IngressWork {
   const routes: IngressRoute[] = [];
   const files: Record<string, string> = {};
   const warnings: string[] = [];
   const seenHosts = new Map<string, string>();
-  const tagged: { project: string; service: string; ingress: IngressSpec; port: number | null }[] = [];
+  const tagged: { project: string; service: string; ingress: IngressSpec; port: number | null; loopback: boolean }[] = [];
   for (const state of states) {
+    const loopback = new Set(loopbackIngressServices(state, node, ingressNodes, nodes));
     for (const [service, svc] of Object.entries(state.compose.services || {})) {
       const ingress = svc['x-tug']?.ingress;
-      if (ingress) tagged.push({ project: state.project, service, ingress, port: publishedPort(svc, ingress.port) });
+      if (ingress) tagged.push({ project: state.project, service, ingress, port: publishedPort(svc, ingress.port), loopback: loopback.has(service) });
     }
   }
   tagged.sort((a, b) => `${a.project}/${a.service}`.localeCompare(`${b.project}/${b.service}`));
-  for (const { project, service, ingress, port } of tagged) {
+  for (const { project, service, ingress, port, loopback } of tagged) {
     const label = `${project}/${service}`;
     const host = ingress.host.toLowerCase();
     const tls: IngressTls = ingress.tls || 'auto';
     if (seenHosts.has(host)) { warnings.push(`${label}: host ${host} is already routed by ${seenHosts.get(host)}; skipped`); continue; }
     if (port == null) { warnings.push(`${label}: ingress.port ${ingress.port} is not published; skipped`); continue; }
-    const upstreams = (endpoints[project]?.[service] || []).map(e => `${e.node === node ? '127.0.0.1' : e.address}:${e.port ?? port}`);
+    const upstreams = (endpoints[project]?.[service] || []).map(e => `${e.node === node && loopback ? '127.0.0.1' : upstreamHost(e.address)}:${e.port ?? port}`);
     if (!upstreams.length) { warnings.push(`${label}: no serving upstream for ${host}; route withheld`); continue; }
     if (tls === 'custom') {
       const cert = secrets.get(`${project}/${ingress.cert}`); const key = secrets.get(`${project}/${ingress.key}`);
@@ -97,6 +106,9 @@ export function buildIngressWork({ states, endpoints, node, secrets, acmeEmail }
   }
   return { caddyfile: renderCaddyfile(routes, { acmeEmail }), files, routes, warnings };
 }
+
+/** IPv6 upstream addresses need brackets before the port. */
+const upstreamHost = (address: string) => (address.includes(':') && !address.startsWith('[') ? `[${address}]` : address);
 
 export function renderCaddyfile(routes: IngressRoute[], opts: { acmeEmail?: string } = {}): string {
   const out: string[] = [];

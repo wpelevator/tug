@@ -12,24 +12,87 @@ export function composeHash(compose: ComposeFile): string {
   return crypto.createHash('sha1').update(JSON.stringify(compose)).digest('hex').slice(0, 12);
 }
 
+type PortEntry = NonNullable<ComposeService['ports']>[number];
+
+/** The host port one `ports` entry publishes for `port` (either side of the mapping), or null. */
+function entryPublishedPort(entry: PortEntry, port: number): number | null {
+  if (typeof entry === 'number') return null;
+  if (typeof entry === 'object') {
+    const published = Number(entry.published);
+    return (Number(entry.target) === port || published === port) && published > 0 ? published : null;
+  }
+  const spec = String(entry).split('/')[0].split(':');
+  if (spec.length < 2) return null;
+  const container = Number(spec[spec.length - 1]);
+  const host = Number(spec[spec.length - 2]);
+  return (container === port || host === port) && host > 0 ? host : null;
+}
+
 /**
  * The host port a service publishes for `port`, matching either side of a `ports` entry (a
  * container port resolves to its published host port). Null when the port is not published.
  */
 export function publishedPort(svc: ComposeService, port: number): number | null {
   for (const entry of svc.ports || []) {
-    if (typeof entry === 'object') {
-      const published = Number(entry.published);
-      if ((Number(entry.target) === port || published === port) && published > 0) return published;
-      continue;
-    }
-    const spec = String(entry).split('/')[0].split(':');
-    if (spec.length < 2) continue;
-    const container = Number(spec[spec.length - 1]);
-    const host = Number(spec[spec.length - 2]);
-    if ((container === port || host === port) && host > 0) return host;
+    const published = entryPublishedPort(entry, port);
+    if (published != null) return published;
   }
   return null;
+}
+
+/** True when a `ports` entry names its host IP: `127.0.0.1:8080:80`, `[::1]:8080:80`, `0.0.0.0::80` or long-syntax `host_ip`. */
+export function hasHostIp(entry: PortEntry): boolean {
+  if (typeof entry === 'number') return false;
+  if (typeof entry === 'object') return entry.host_ip !== undefined && entry.host_ip !== null && entry.host_ip !== '';
+  const spec = String(entry).split('/')[0];
+  return spec.startsWith('[') || spec.split(':').length > 2;
+}
+
+/**
+ * Binds a `ports` entry that names no host IP to `ip`, keeping ranges and the protocol suffix
+ * (`8080:80/udp` becomes `10.0.0.2:8080:80/udp`, a container-only `80` becomes `10.0.0.2::80`).
+ * Entries that already name a host IP, including `0.0.0.0`, are returned as written.
+ */
+export function bindPort(entry: PortEntry, ip: string): PortEntry {
+  if (hasHostIp(entry)) return entry;
+  if (typeof entry === 'object') return { ...entry, host_ip: ip };
+  const host = ip.includes(':') ? `[${ip}]` : ip;
+  const [spec, ...protocol] = String(entry).split('/');
+  const bound = spec.includes(':') ? `${host}:${spec}` : `${host}::${spec}`;
+  return [bound, ...protocol].join('/');
+}
+
+/** `bindPort` for every entry; entries publishing `loopbackPort` bind to `127.0.0.1` instead of `ip`. */
+export function bindPorts(ports: PortEntry[], ip: string, loopbackPort?: number): PortEntry[] {
+  return ports.map(entry => bindPort(entry, loopbackPort !== undefined && entryPublishedPort(entry, loopbackPort) != null ? '127.0.0.1' : ip));
+}
+
+/**
+ * Services of `state` whose ingress port only the managed Caddy on `node` dials, so it can listen on
+ * `127.0.0.1`: `node` is the only ingress node, the service runs there, and every service of the
+ * project runs only on nodes where this one runs too, so no node reaches it through a service name.
+ * A service with no placement nodes runs on every node in `nodes`.
+ */
+export function loopbackIngressServices(state: DesiredState, node: string, ingressNodes: readonly string[], nodes: readonly string[]): string[] {
+  if (ingressNodes.length !== 1 || ingressNodes[0] !== node) return [];
+  const placed = (service: string): readonly string[] => { const list = state.services[service]?.placement?.nodes || []; return list.length ? list : nodes; };
+  return Object.keys(state.services).filter(service => {
+    if (!state.compose.services?.[service]?.['x-tug']?.ingress) return false;
+    const here = new Set(placed(service));
+    return here.has(node) && Object.keys(state.services).every(other => placed(other).every(n => here.has(n)));
+  }).sort();
+}
+
+/** Where `composeForNode` binds published ports that name no host IP. */
+export interface PortBind { address: string; loopback?: ReadonlySet<string> }
+
+/** Services among `names` with at least one `ports` entry that `bind` puts on its address (not on loopback, not written by the operator). */
+export function addressBoundServices(compose: ComposeFile, names: Iterable<string>, loopback: ReadonlySet<string> = new Set()): string[] {
+  return [...names].filter(name => {
+    const svc = compose.services[name];
+    const ingressPort = loopback.has(name) ? svc?.['x-tug']?.ingress?.port : undefined;
+    return (svc?.ports || []).some(entry => !hasHostIp(entry) && (ingressPort === undefined || entryPublishedPort(entry, ingressPort) == null));
+  }).sort();
 }
 
 const HOSTNAME_RE = /^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i;
@@ -147,12 +210,22 @@ function extraHostsList(value: ComposeService['extra_hosts']): string[] {
   return Array.isArray(value) ? value.map(String) : Object.entries(value).map(([k, v]) => `${k}:${v}`);
 }
 
-/**
- * The Compose file for one node. `exclude` names services placed here that are managed outside the
- * node's main project (rolling services run in their own revision projects); they still count as
- * local, so they get no cross-node `extra_hosts` entry, and `depends_on` references to them are dropped.
- */
-export function composeForNode(desiredState: DesiredState, nodeName: string, secrets: Record<string, string> = {}, endpoints: Record<string, ServiceEndpoint[]> = {}, exclude: ReadonlySet<string> = new Set(), nodeAddresses: Record<string, string> = {}): ComposeFile {
+export interface NodeComposeOptions {
+  secrets?: Record<string, string>;
+  endpoints?: Record<string, ServiceEndpoint[]>;
+  /**
+   * Services placed here that are managed outside the node's main project (rolling services run in
+   * their own revision projects); they still count as local, so they get no cross-node `extra_hosts`
+   * entry, and `depends_on` references to them are dropped.
+   */
+  exclude?: ReadonlySet<string>;
+  nodeAddresses?: Record<string, string>;
+  /** Host IP for published ports that name none; without it `ports` stay as written. */
+  bind?: PortBind;
+}
+
+/** The Compose file for one node. */
+export function composeForNode(desiredState: DesiredState, nodeName: string, { secrets = {}, endpoints = {}, exclude = new Set(), nodeAddresses = {}, bind }: NodeComposeOptions = {}): ComposeFile {
   const out: ComposeFile & { volumes?: Record<string, ComposeVolume> } = { services: {}, volumes: {} };
   const outVolumes = out.volumes!;
   const usedVolumes = new Set<string>();
@@ -171,6 +244,7 @@ export function composeForNode(desiredState: DesiredState, nodeName: string, sec
       if (source && desiredState.compose?.volumes?.[source]) usedVolumes.add(source);
     }
     if (exclude.size) dropDependsOn(svc, exclude);
+    if (bind && svc.ports) svc.ports = bindPorts(svc.ports, bind.address, bind.loopback?.has(name) ? src['x-tug']?.ingress?.port : undefined);
     out.services[name] = svc;
   }
   const hosts = crossNodeHosts(desiredState.project, endpoints, placed);

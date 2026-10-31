@@ -98,9 +98,9 @@ Shipped: scoped API tokens (`read`, `deploy`, `admin`, per project), a GitHub Ac
 
 Make behavior visible without adding required services: event hygiene (done), structured logs, a Prometheus `/metrics` endpoint on control that also carries node and service stats reported by agents (Prometheus cannot scrape nodes behind NAT, which is why agents report through control), a readiness endpoint, sample alert rules and webhooks. Design and status are in [Observability](observability.md). Keep agent-reported stats small; point operators who want depth at cAdvisor or node_exporter deployed as ordinary services.
 
-### M10 — Private-by-default port exposure
+### M10 — Private-by-default port exposure (done)
 
-Today a published port such as `3306:3306` listens on every interface of the node, and Docker's iptables rules bypass host firewalls such as ufw, so a database published for cross-node service names is reachable from the internet unless a provider firewall blocks it. [Networking](networking.md#layer-c-ingress-and-tls) documents binding `127.0.0.1` or the overlay address by hand. Make it the default: when the mesh is on, the generated Compose file binds published ports that have no explicit host IP to the node's overlay address, and to `127.0.0.1` for services only the local ingress reaches; without the mesh, bind to the node's `address` and warn when that is public. An explicit host IP in `ports` (including `0.0.0.0`) is left as written. `tug doctor` reports services listening on a public address. Small, and a prerequisite for recommending the scaled topology.
+A published port such as `3306:3306` listened on every interface of the node, and Docker's iptables rules bypass host firewalls such as ufw, so a database published for cross-node service names was reachable from the internet. Now published ports without a host IP are bound to the node's overlay address with the mesh, to `127.0.0.1` when only the local ingress dials them, and otherwise to the node's `address` with a `ports.public` warning event when it is public; an explicit host IP (including `0.0.0.0`) is left as written, and `tug doctor --nodes` reports containers listening on a public address. See [Networking](networking.md#published-ports-private-by-default). This was a prerequisite for recommending the scaled topology.
 
 ### M11 — Backups, restores and run-once jobs
 
@@ -140,16 +140,17 @@ Agents download whole saved images on every deploy, which is costly for large im
 
 Current priority order:
 
-1. M10 private-by-default ports: small, closes an exposure that affects every multi-node project today.
-2. M11 backups and run-once jobs: the main gap for the target operator.
-3. M12 container networking: removes the node-address and per-revision-port workarounds and is a prerequisite for comfortable multi-node apps.
-4. M13 image layer reuse.
-5. M9 metrics and M8/M9 webhooks.
-6. Remaining M5 items (PTY, process termination).
+1. M11 backups and run-once jobs: the main gap for the target operator.
+2. M12 container networking: removes the node-address and per-revision-port workarounds and is a prerequisite for comfortable multi-node apps.
+3. M13 image layer reuse.
+4. M9 metrics and M8/M9 webhooks.
+5. Remaining M5 items (PTY, process termination).
+
+M10 (private-by-default ports) is done.
 
 Dependencies: M10 builds on M2. M11 uses the M5 command channel for job output and M8 webhooks for alerts but needs neither to start. M12 depends on M2 and changes M3's rollout mechanics, so its spec must keep rollouts zero-downtime. M13 is independent.
 
-The reference topology also needs a validated example: a scaled WordPress project with code in the image and uploads on S3-compatible storage or an NFS uploads volume, deployed on real hosts once M10 and M11 land.
+The reference topology also needs a validated example: a scaled WordPress project with code in the image and uploads on S3-compatible storage or an NFS uploads volume, deployed on real hosts once M11 lands (M10 is done).
 
 Validation so far: [real-host runs](real-host-evaluation.md) on two Ubuntu 24.04 hosts covered SSH install with the Docker bootstrap, the WireGuard mesh, an agent behind bridge NAT, a publicly trusted Let's Encrypt certificate from the managed Caddy, cross-node service names, remote and `--build-local` deploys, rollback from a retained image, a rolling rollout through the public ingress with no failed requests (over 2,200 sampled), a failing version rejected while the old revision kept serving, automatic rollback, and on freshly wiped hosts label placement, `global`, `tug scale`, an NFS volume over the mesh, `ps`/`inspect`/`exec`/`logs -f` and a cloud-init enrolled node behind a deny-all-inbound firewall ([M6, M7 and enrollment](real-host-evaluation.md#m6-m7-and-enrollment-on-fresh-hosts)). Not yet validated on real hosts: a node behind real NAT, certificate renewal, arm64 nodes and dnf-based hosts.
 
@@ -175,7 +176,7 @@ The test layers, the metrics milestones are held to and the backlog of mocked te
 - [ ] M9 structured logs (`TUG_LOG_FORMAT`, `TUG_LOG_LEVEL`)
 - [ ] M9 `GET /metrics` on control (Prometheus text, `read` token), with agent-reported node and service stats
 - [ ] M9 `/readyz`, sample alert rules, and the metrics documentation test gate
-- [ ] M10 published ports bound to the overlay, loopback or node address by default; `doctor` reports public listeners
+- [x] M10 published ports bound to the overlay, loopback or node address by default; `doctor` reports public listeners
 - [ ] M11 spec written
 - [ ] M11 `x-tug.backup`, scheduled backups to S3-compatible storage with restic, catalog, `backup run|list`, `restore`
 - [ ] M11 `tug run` and `x-tug.release` run-once jobs

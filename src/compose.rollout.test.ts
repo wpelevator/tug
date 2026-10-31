@@ -42,7 +42,7 @@ test('composeForNode can leave services out while still treating them as local',
     }
   } as ComposeFile;
   const ds = buildDesiredState({ project: 'p', version: 'v1', compose, registry: 'r' });
-  const out = composeForNode(ds, 'n1', {}, { cache: [{ node: 'n2', address: '10.0.0.2' }], web: [{ node: 'n1', address: '10.0.0.1' }] }, new Set(['web']));
+  const out = composeForNode(ds, 'n1', { endpoints: { cache: [{ node: 'n2', address: '10.0.0.2' }], web: [{ node: 'n1', address: '10.0.0.1' }] }, exclude: new Set(['web']) });
   assert.deepEqual(Object.keys(out.services), ['db'], 'the excluded service is not in the main project file');
   assert.equal(out.services.db.depends_on, undefined, 'depends_on on an excluded service is dropped, since it lives in another project');
   assert.deepEqual(out.services.db.extra_hosts, ['cache:10.0.0.2', 'cache.p.tug:10.0.0.2'], 'an excluded local service gets no cross-node host entry');

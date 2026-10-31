@@ -7,7 +7,7 @@ test('builds per-node desired compose preserving service names', () => {
   const compose = { services: { web: { build: './web', environment: { A: 'B' }, volumes: ['web-data:/data'], 'x-tug': { placement: { nodes: ['n1'] } } }, db: { image: 'postgres:16', volumes: ['db-data:/data'], 'x-tug': { placement: { nodes: ['n2'] } } } }, volumes: { 'web-data': { 'x-tug': { placement: { nodes: ['n1'] } } }, 'db-data': { 'x-tug': { placement: { nodes: ['n2'] } } } } };
   const ds = buildDesiredState({ project: 'site', version: 'git-abc', compose, registry: 'reg:5000' });
   assert.equal(ds.services.web.image, 'reg:5000/site/web:git-abc');
-  const c = composeForNode(ds, 'n1', { SECRET: 'x' });
+  const c = composeForNode(ds, 'n1', { secrets: { SECRET: 'x' } });
   assert.deepEqual(Object.keys(c.services), ['web']);
   assert.equal(c.services.web.build, undefined);
   assert.equal(c.services.web['x-tug'], undefined);
@@ -53,12 +53,12 @@ test('composeForNode injects cross-node names as extra_hosts without touching lo
   } };
   const ds = buildDesiredState({ project: 'blog', version: 'v1', compose, registry: 'reg' });
   const endpoints = { db: [{ node: 'n2', address: '10.210.0.2' }, { node: 'n3', address: '10.210.0.3' }], cache: [{ node: 'n1', address: '10.210.0.1' }] };
-  const c = composeForNode(ds, 'n1', {}, endpoints);
+  const c = composeForNode(ds, 'n1', { endpoints });
   assert.deepEqual(c.services.web.extra_hosts as string[], ['legacy:10.9.9.9', 'db:10.210.0.2', 'db.blog.tug:10.210.0.2', 'db:10.210.0.3', 'db.blog.tug:10.210.0.3'], 'every serving replica gets a record, user entries are kept');
   assert.deepEqual(c.services.cache.extra_hosts, (c.services.web.extra_hosts as string[]).slice(1), 'local services resolve via Compose DNS, so cache is not mapped');
   assert.equal((composeForNode(ds, 'n1').services.web.extra_hosts as string[]).join(), 'legacy:10.9.9.9', 'without endpoints the compose file is unchanged');
   assert.deepEqual(crossNodeHosts('blog', {}, new Set()), [], 'no endpoints, no hosts');
-  assert.equal((composeForNode(ds, 'n2', {}, { ...endpoints, web: [{ node: 'n1', address: '10.210.0.1' }] }).services.db.extra_hosts as string[]).includes('web:10.210.0.1'), true, 'the other direction resolves too');
+  assert.equal((composeForNode(ds, 'n2', { endpoints: { ...endpoints, web: [{ node: 'n1', address: '10.210.0.1' }] } }).services.db.extra_hosts as string[]).includes('web:10.210.0.1'), true, 'the other direction resolves too');
 });
 
 test('validateCompose accepts label and global placement without explicit nodes', () => {
@@ -82,11 +82,11 @@ test('buildDesiredState global mode selects every matching node', () => {
 test('composeForNode generates an NFS volume on consuming nodes', () => {
   const compose = { services: { web: { image: 'nginx', volumes: ['shared:/data'], 'x-tug': { placement: { nodes: ['n1', 'n2'] } } } }, volumes: { shared: { 'x-tug': { type: 'nfs', placement: { nodes: ['n1'] } } } } };
   const ds = buildDesiredState({ project: 'site', version: 'v1', compose, registry: 'reg' });
-  const c = composeForNode(ds, 'n2', {}, {}, new Set(), { n1: '10.0.0.1' });
+  const c = composeForNode(ds, 'n2', { nodeAddresses: { n1: '10.0.0.1' } });
   const opts = c.volumes?.shared?.driver_opts as any;
   assert.equal(opts?.type, 'nfs', 'consumers should get an nfs-typed volume');
   assert.equal(opts?.device, ':/srv/tug/shared', 'nfs device should be the default export path');
   assert.match(opts?.o, /addr=10\.0\.0\.1/, 'consumers should mount the exporter address');
-  const exp = composeForNode(ds, 'n1', {}, {}, new Set(), {});
+  const exp = composeForNode(ds, 'n1');
   assert.equal((exp.volumes?.shared?.driver_opts as any)?.o, 'bind', 'exporter should bind-mount the exported directory');
 });
