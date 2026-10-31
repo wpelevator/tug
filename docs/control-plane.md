@@ -6,7 +6,7 @@
 tug control-install root@control.example.com --token "$TUG_TOKEN"
 ```
 
-`control-install` runs SSH preflight checks on the host (Docker, Docker Compose, writable Tug paths, at least 2048 MB free under `/var/lib`, the API port free), then starts the `control` container from `src/templates/control-compose.yml`. Add `--install-docker` to install Docker Engine and Compose first on a supported Debian/Ubuntu host. It prints the operator token and the control URL (`http://<host>:<port>`, port `8080` by default).
+`control-install` runs SSH preflight checks on the host (Docker, Docker Compose, writable Tug paths, at least 2048 MB free under `/var/lib`, the API port free), then starts the `control` container from `src/templates/control-compose.yml`. Add `--install-docker` to install Docker Engine and Compose first on a supported Debian, Ubuntu, Fedora and RHEL-compatible host. It prints the operator token and the control URL (`http://<host>:<port>`, port `8080` by default).
 
 The control container runs the published image `ghcr.io/wpelevator/tug:<CLI version>` (the installed CLI's own package version, so control and the CLI match). Pass `--image <tag>` to use another tag, or `--build-local-image` to build the image from the current checkout and copy it to the host over SSH with `docker save` / `scp` / `docker load` (tagged `tug:local` unless `--image` is given); the latter is for development and needs the repository's Dockerfile in the working directory. See [Releases](releases.md).
 

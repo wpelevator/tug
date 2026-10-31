@@ -140,7 +140,7 @@ program.command('control-token').description('print local dev operator token if 
 program.command('control-install <sshTarget>')
   .description('install the control plane on a Docker-capable host over SSH; front it with your own reverse proxy/TLS if exposing it publicly')
   .option('--image <tag>', 'Tug image to run (default: ghcr.io/wpelevator/tug:<this CLI\'s version>)')
-  .option('--install-docker', 'install missing Docker Engine and Compose on Debian/Ubuntu (root required)')
+  .option('--install-docker', 'install missing Docker Engine and Compose on supported Debian, Ubuntu, Fedora and RHEL-compatible hosts (root required)')
   .option('--build-local-image', 'build the image from the current checkout and copy it to the host over SSH (tags it tug:local unless --image is set); for development')
   .option('--token <token>', 'operator token')
   .option('--port <port>', 'published API port', '8080')
@@ -178,7 +178,7 @@ program.command('node-install <sshTarget>')
   .option('--mesh', 'join the WireGuard mesh (agent runs with host networking and NET_ADMIN; control needs TUG_MESH=true)')
   .option('--wg-port <port>', 'WireGuard UDP port checked by preflight', '51820')
   .option('--image <tag>', 'Tug image to run (default: ghcr.io/wpelevator/tug:<this CLI\'s version>)')
-  .option('--install-docker', 'install missing Docker Engine and Compose on Debian/Ubuntu (root required)')
+  .option('--install-docker', 'install missing Docker Engine and Compose on supported Debian, Ubuntu, Fedora and RHEL-compatible hosts (root required)')
   .option('--build-local-image', 'build the image from the current checkout and copy it to the host over SSH (tags it tug:local unless --image is set); for development')
   .action(async (sshTarget: string, o: InstallOpts & { name: string; address?: string; publicAddress?: string; agentControlUrl?: string; registry?: string; httpOnlyDev?: boolean; mesh?: boolean; wgPort: string }) => {
     const cfg = await loadCfg();
@@ -210,7 +210,7 @@ program.command('node-enroll')
   .option('--http-only-dev', 'allow a plaintext HTTP control URL for local/private development')
   .option('--image <tag>', 'agent image used in the printed docker run (default: ghcr.io/wpelevator/tug:<this CLI\'s version>)')
   .option('--mesh', 'print a docker run that joins the WireGuard mesh (host networking, NET_ADMIN)')
-  .option('--install-docker', 'print Debian/Ubuntu cloud-init that installs Docker and starts the agent')
+  .option('--install-docker', 'print cloud-init that installs Docker and starts the agent')
   .option('--json', 'print JSON including the command or cloud-init payload')
   .action(async (o: { name?: string; agentControlUrl?: string; ttl: string; uses: string; ca?: string; httpOnlyDev?: boolean; image?: string; mesh?: boolean; json?: boolean; installDocker?: boolean }) => {
     const cfg = await loadCfg();
