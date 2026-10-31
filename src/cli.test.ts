@@ -384,6 +384,16 @@ test('the control port check passes for a free port or the control container, an
   await fs.rm(dir, { recursive: true, force: true });
 });
 
+test('the agent docker run shares the host network without NET_ADMIN unless the mesh is on', () => {
+  const plain = dockerRunSnippet('img:1', 'join-key');
+  assert.match(
+    plain,
+    /--network host /,
+    'health checks dial container IPs, which a bridge-networked agent cannot reach',
+  );
+  assert.doesNotMatch(plain, /NET_ADMIN|TUG_MESH/, 'only the mesh adds capabilities and TUG_MESH');
+});
+
 test('shell snippets quote user values and cloud-init stops enrollment after bootstrap failure', () => {
   const image = "registry.test/image:tag'; printf injected";
   const command = dockerRunSnippet(image, 'join-key', true);
