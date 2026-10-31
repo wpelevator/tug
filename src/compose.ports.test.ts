@@ -5,12 +5,12 @@ import {
   bindPort,
   bindPorts,
   buildDesiredState,
-  composeForNode,
   hasHostIp,
   loopbackIngressServices,
   publishedPort,
 } from './compose.ts';
-import { remapPublishedPort, rollingCompose } from './rollout.ts';
+import { containerSpecs, withHostPort } from './container-spec.ts';
+import { normalized } from '../tests/fake-docker.ts';
 import { isPublicAddress } from './util.ts';
 import type { ComposeFile } from './protocol.ts';
 
@@ -119,7 +119,12 @@ test('publishedPort still resolves ports that carry a host IP', () => {
 });
 
 const project = (services: ComposeFile['services']) =>
-  buildDesiredState({ project: 'blog', version: 'v1', compose: { services }, registry: '' });
+  buildDesiredState({
+    project: 'blog',
+    version: 'v1',
+    compose: normalized({ services }),
+    registry: '',
+  });
 const web = (nodes: string[], extra: Record<string, unknown> = {}) => ({
   image: 'nginx',
   ports: ['8080:80'],
@@ -179,7 +184,7 @@ test('loopbackIngressServices picks ingress services only the local Caddy reache
   );
 });
 
-test('composeForNode binds published ports and leaves them alone without a bind', () => {
+test('containerSpecs binds published ports and leaves them alone without a bind', () => {
   const ds = project({
     web: web(['n1']),
     db: {
@@ -188,22 +193,29 @@ test('composeForNode binds published ports and leaves them alone without a bind'
       'x-tug': { placement: { nodes: ['n1'] } },
     },
   });
+  const bindings = (plan: ReturnType<typeof containerSpecs>, service: string) =>
+    Object.entries(
+      (plan.specs[service].body.HostConfig?.PortBindings || {}) as Record<
+        string,
+        { HostIp: string; HostPort: string }[]
+      >,
+    ).flatMap(([key, list]) => list.map((b) => `${b.HostIp}:${b.HostPort}->${key}`));
   assert.deepEqual(
-    composeForNode(ds, 'n1').services.db.ports,
-    ['3306:3306', '0.0.0.0:3307:3307'],
-    'without bind the ports are rendered as written',
+    bindings(containerSpecs(ds, 'n1'), 'db'),
+    [':3306->3306/tcp', '0.0.0.0:3307->3307/tcp'],
+    'without bind the ports are created as written',
   );
-  const bound = composeForNode(ds, 'n1', {
+  const bound = containerSpecs(ds, 'n1', {
     bind: { address: '10.210.0.4', loopback: new Set(['web']) },
   });
   assert.deepEqual(
-    bound.services.db.ports,
-    ['10.210.0.4:3306:3306', '0.0.0.0:3307:3307'],
+    bindings(bound, 'db'),
+    ['10.210.0.4:3306->3306/tcp', '0.0.0.0:3307->3307/tcp'],
     'unbound ports go to the node address and an explicit 0.0.0.0 is kept',
   );
   assert.deepEqual(
-    bound.services.web.ports,
-    ['127.0.0.1:8080:80'],
+    bindings(bound, 'web'),
+    ['127.0.0.1:8080->80/tcp'],
     'the loopback ingress port binds to 127.0.0.1',
   );
 });
@@ -219,21 +231,16 @@ test('rolling revisions keep the bind address when their host port is remapped',
       },
     }),
   });
-  const full = composeForNode(ds, 'n1', { bind: { address: '10.210.0.4' } });
+  const spec = containerSpecs(ds, 'n1', { bind: { address: '10.210.0.4' } }).specs.web;
   assert.deepEqual(
-    rollingCompose(full, 'blog', 'web', 20003).services.web.ports,
-    ['10.210.0.4:20003:80'],
+    withHostPort(spec.body, 20003).HostConfig?.PortBindings,
+    { '80/tcp': [{ HostIp: '10.210.0.4', HostPort: '20003' }] },
     'the revision port is published on the overlay address',
   );
-  assert.deepEqual(
-    remapPublishedPort(['127.0.0.1:8080:80/tcp'], 20001),
-    ['127.0.0.1:20001:80/tcp'],
-    'a loopback short-syntax entry keeps its host IP and protocol',
-  );
-  assert.deepEqual(
-    remapPublishedPort([{ target: 80, published: 8080, host_ip: '10.0.0.5' }], 20001),
-    [{ target: 80, published: 20001, host_ip: '10.0.0.5' }],
-    'long syntax keeps host_ip',
+  assert.equal(
+    containerSpecs(ds, 'n1', { bind: { address: '10.210.0.4' } }).specs.web.hash,
+    spec.hash,
+    'the host port is not part of the hash, so allocating one never changes a revision',
   );
 });
 

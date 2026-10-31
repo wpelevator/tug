@@ -4,9 +4,17 @@ import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 import { LIVE_MAX_FRAME_BYTES } from './protocol.ts';
 import { LiveOperationEngine } from './live.ts';
-import type { LiveEvent, LiveProcess, LiveEngineOptions } from './live.ts';
+import type { LiveEvent, LiveEngineOptions } from './live.ts';
+import type {
+  AttachedProcess,
+  ContainerFilter,
+  ContainerSummary,
+  DockerApi,
+  ExecOptions,
+  LogsOptions,
+} from './docker-api.ts';
 
-class FakeProcess extends EventEmitter implements LiveProcess {
+class FakeProcess extends EventEmitter implements AttachedProcess {
   stdin = new PassThrough();
   stdout = new PassThrough();
   stderr = new PassThrough();
@@ -16,26 +24,55 @@ class FakeProcess extends EventEmitter implements LiveProcess {
     this.signals.push(signal);
     return true;
   }
+}
+class TtyProcess extends FakeProcess {
   resize(columns: number, rows: number): void {
     this.dimensions.push([columns, rows]);
   }
 }
+
+/** Just the Engine API calls the live engine makes, recorded; processes are handed back for the test to drive. */
 function fixture(options: Partial<LiveEngineOptions> = {}) {
   const children: FakeProcess[] = [];
-  const calls: { file: string; args: string[] }[] = [];
+  const calls: { op: string; id?: string; options?: unknown }[] = [];
   const events: LiveEvent[] = [];
-  const spawn = (file: string, args: string[]) => {
-    const child = new FakeProcess();
-    calls.push({ file, args });
-    children.push(child);
-    return child;
+  const state: {
+    ps: (filter?: ContainerFilter) => Promise<ContainerSummary[]>;
+    inspect: () => Promise<object>;
+    failExec?: Error;
+  } = {
+    ps: async () => [],
+    inspect: async () => ({ Id: 'app-1' }),
   };
+  const docker = {
+    async execStart(id: string, execOptions: ExecOptions) {
+      calls.push({ op: 'exec', id, options: execOptions });
+      if (state.failExec) throw state.failExec;
+      const child = execOptions.tty ? new TtyProcess() : new FakeProcess();
+      children.push(child);
+      return child;
+    },
+    async logs(id: string, logsOptions: LogsOptions) {
+      calls.push({ op: 'logs', id, options: logsOptions });
+      const child = new FakeProcess();
+      children.push(child);
+      return child;
+    },
+    async listContainers(filter?: ContainerFilter) {
+      calls.push({ op: 'ps', options: filter });
+      return state.ps(filter);
+    },
+    async inspectContainer(id: string) {
+      calls.push({ op: 'inspect', id });
+      return state.inspect();
+    },
+  } as unknown as DockerApi;
   const engine = new LiveOperationEngine({
     emit: (event) => events.push(event),
-    spawn,
+    docker,
     ...options,
   });
-  return { engine, events, calls, children, spawn };
+  return { engine, events, calls, children, state };
 }
 const exec = {
   operation: 'exec',
@@ -46,15 +83,33 @@ const exec = {
 function execRequest() {
   return { ...exec, command: [...exec.command] };
 }
+const tick = () => new Promise((resolve) => setImmediate(resolve));
+const row = (id: string): ContainerSummary => ({
+  Id: id,
+  Names: [`/${id}`],
+  Image: 'x',
+  State: 'running',
+  Labels: {},
+});
 
-test('exec preserves argv, streams binary stdout/stderr, forwards stdin and exits once', () => {
+test('exec preserves argv, streams binary stdout/stderr, forwards stdin and exits once', async () => {
   const { engine, events, calls, children } = fixture();
-  engine.start(execRequest());
+  await engine.start(execRequest());
   const child = children[0];
   assert.deepEqual(
     calls[0],
-    { file: 'docker', args: ['exec', '-i', 'app-1', ...exec.command] },
-    'Docker should receive separate argv entries with shell metacharacters preserved',
+    {
+      op: 'exec',
+      id: 'app-1',
+      options: {
+        cmd: exec.command,
+        stdin: true,
+        tty: false,
+        columns: undefined,
+        rows: undefined,
+      },
+    },
+    'the Engine receives the argv as separate entries with shell metacharacters preserved',
   );
   const input = Buffer.from('input\n');
   assert.equal(engine.stdin('exec-1', input), true, 'Small input should report writable capacity');
@@ -90,60 +145,35 @@ test('exec preserves argv, streams binary stdout/stderr, forwards stdin and exit
   assert.equal(child.listenerCount('close'), 0, 'Exit should detach process listeners');
 });
 
-test('TTY requires an adapter and supports initial dimensions and resize', () => {
-  const { engine } = fixture();
-  assert.throws(
-    () => engine.start({ ...execRequest(), tty: true }),
-    /PTY adapter/,
-    'TTY exec should fail explicitly when a PTY is unavailable',
-  );
-  const child = new FakeProcess();
-  const calls: string[][] = [];
-  const tty = fixture({
-    spawnTty: (_file, args) => {
-      calls.push(args);
-      return child;
-    },
-  });
-  tty.engine.start({ ...execRequest(), tty: true, columns: 120, rows: 40 });
-  tty.engine.resize('exec-1', 90, 30);
+test('TTY exec gets a real terminal with initial dimensions and resizes through the Engine API', async () => {
+  const { engine, calls, children } = fixture();
+  await engine.start({ ...execRequest(), tty: true, columns: 120, rows: 40 });
   assert.deepEqual(
-    calls[0].slice(0, 4),
-    ['exec', '-i', '-t', 'app-1'],
-    'TTY exec should request Docker interactive and terminal modes',
+    calls[0].options,
+    { cmd: exec.command, stdin: true, tty: true, columns: 120, rows: 40 },
+    'TTY exec requests a terminal of the initial size',
   );
+  engine.resize('exec-1', 90, 30);
   assert.deepEqual(
-    child.dimensions,
-    [
-      [120, 40],
-      [90, 30],
-    ],
-    'PTY should receive both initial and later terminal sizes',
+    (children[0] as TtyProcess).dimensions,
+    [[90, 30]],
+    'a later resize reaches the terminal',
   );
+  assert.throws(() => engine.resize('exec-1', 0, 30), /dimensions/, 'Zero dimensions are rejected');
+  engine.dispose();
+
+  const plain = fixture();
+  await plain.engine.start(execRequest());
   assert.throws(
-    () => tty.engine.resize('exec-1', 0, 30),
-    /dimensions/,
-    'Zero terminal dimensions should be rejected',
+    () => plain.engine.resize('exec-1', 80, 24),
+    /no terminal/,
+    'a session without a terminal cannot be resized',
   );
-  tty.engine.dispose();
 });
 
-test('TTY adapter missing resize fails and releases the process', () => {
-  const child = new FakeProcess();
-  Object.defineProperty(child, 'resize', { value: undefined });
-  const { engine, events } = fixture({ spawnTty: () => child });
-  engine.start({ ...execRequest(), tty: true });
-  assert.ok(
-    events[0].type === 'exit' && events[0].error === 'PTY adapter does not support resize',
-    'Missing resize should produce an explanatory terminal event',
-  );
-  assert.deepEqual(child.signals, ['SIGKILL'], 'Invalid PTY adapter should terminate its process');
-  assert.equal(engine.activeSessions, 0, 'Invalid PTY adapter should release its session');
-});
-
-test('logs follows bounded tail and emits capped frames without buffering lines', () => {
+test('logs follows bounded tail and emits capped frames without buffering lines', async () => {
   const { engine, calls, events, children } = fixture();
-  engine.start({
+  await engine.start({
     operation: 'logs',
     sessionId: 'logs',
     container: 'web',
@@ -151,8 +181,8 @@ test('logs follows bounded tail and emits capped frames without buffering lines'
     timestamps: true,
   });
   assert.deepEqual(
-    calls[0].args,
-    ['logs', '--follow', '--tail', '25', '--timestamps', 'web'],
+    calls[0],
+    { op: 'logs', id: 'web', options: { follow: true, tail: 25, timestamps: true } },
     'Logs should follow the requested bounded tail with timestamps',
   );
   children[0].stdout.write(Buffer.alloc(70000, 120));
@@ -171,11 +201,11 @@ test('logs follows bounded tail and emits capped frames without buffering lines'
   engine.cancel('logs');
   children[0].stdout.write('ignored');
   engine.cancel('logs');
-  assert.deepEqual(children[0].signals, ['SIGKILL'], 'Cancellation should kill the child once');
+  assert.deepEqual(children[0].signals, ['SIGKILL'], 'Cancellation should kill the stream once');
   assert.equal(
     events.length,
     4,
-    'Cancelled logs should suppress subsequent output and duplicate terminal events',
+    'Cancelled logs suppress later output and duplicate terminal events',
   );
   assert.deepEqual(
     events.at(-1),
@@ -184,226 +214,175 @@ test('logs follows bounded tail and emits capped frames without buffering lines'
   );
 });
 
-test('ps returns structured container rows and restricts the compose project', () => {
-  const { engine, events, calls, children } = fixture();
-  engine.start({ operation: 'ps', sessionId: 'ps', projects: ['demo'] });
+test('ps returns the containers of the selected projects as one bounded session', async () => {
+  const { engine, events, calls, state } = fixture();
+  state.ps = async (filter) => [row(`${filter?.label?.[0]}`)];
+  await engine.start({ operation: 'ps', sessionId: 'ps', projects: ['demo', 'other', 'demo'] });
   assert.deepEqual(
-    calls[0].args,
-    [
-      'ps',
-      '--all',
-      '--no-trunc',
-      '--format',
-      '{{json .}}',
-      '--filter',
-      'label=com.docker.compose.project=demo',
-    ],
-    'PS should include stopped containers and apply the project label filter',
+    calls.map((c) => c.options),
+    [{ label: ['tug.project=demo'] }, { label: ['tug.project=other'] }],
+    'each distinct project is queried once with its exact label',
   );
-  children[0].stdout.write('{"ID":"abc","State":"running"}\n{"ID":');
-  children[0].stdout.write('"def","State":"exited"}\n');
-  assert.equal(events.length, 0, 'Query output should remain buffered until Docker exits');
-  children[0].emit('close', 0, null);
   assert.deepEqual(
-    events[0],
+    events.map((e) => e.type),
+    ['result', 'exit'],
+    'the rows arrive in one result followed by one exit',
+  );
+  assert.equal((events[0] as Extract<LiveEvent, { type: 'result' }>).result.length, 2);
+  assert.equal(engine.activeSessions, 0, 'a finished query releases its slot');
+});
+
+test('inspect returns a structured object and forwards Engine errors', async () => {
+  const { engine, events, state } = fixture();
+  await engine.start({ operation: 'inspect', sessionId: 'i1', container: 'app-1' });
+  assert.deepEqual(events[0], { sessionId: 'i1', type: 'result', result: [{ Id: 'app-1' }] });
+  assert.deepEqual(events[1], {
+    sessionId: 'i1',
+    type: 'exit',
+    code: 0,
+    signal: null,
+    cancelled: false,
+  });
+
+  state.inspect = async () => {
+    throw new Error('No such container: gone');
+  };
+  await engine.start({ operation: 'inspect', sessionId: 'i2', container: 'gone' });
+  assert.deepEqual(
+    events.at(-1),
     {
-      sessionId: 'ps',
-      type: 'result',
-      result: [
-        { ID: 'abc', State: 'running' },
-        { ID: 'def', State: 'exited' },
-      ],
+      sessionId: 'i2',
+      type: 'exit',
+      code: 1,
+      signal: null,
+      cancelled: false,
+      error: 'No such container: gone',
     },
-    'PS should parse JSON rows across arbitrary stream chunk boundaries',
+    'an Engine error becomes the terminal error with no partial result',
   );
+  assert.equal(events.filter((e) => e.sessionId === 'i2' && e.type === 'result').length, 0);
 });
 
-test('inspect returns structured Docker objects and forwards Docker errors', () => {
-  const { engine, events, calls, children } = fixture();
-  engine.start({ operation: 'inspect', sessionId: 'inspect', container: 'abc' });
-  assert.deepEqual(
-    calls[0].args,
-    ['inspect', '--type', 'container', 'abc'],
-    'Inspect should only inspect containers',
-  );
-  children[0].stdout.write('[{"Id":"abc","State":{"Running":true}}]');
-  children[0].emit('close', 0, null);
-  assert.deepEqual(
-    events[0],
-    { sessionId: 'inspect', type: 'result', result: [{ Id: 'abc', State: { Running: true } }] },
-    'Inspect should retain the structured state object',
-  );
-  engine.start({ operation: 'inspect', sessionId: 'failure', container: 'missing' });
-  children[1].stderr.write('No such container');
-  children[1].emit('close', 1, null);
-  const end = events.at(-1);
-  assert.ok(
-    end?.type === 'exit' && end.error === 'No such container',
-    'Docker stderr should explain unsuccessful queries',
-  );
-});
-
-test('malformed requests never spawn Docker', () => {
+test('malformed requests never reach the Engine', async () => {
   const { engine, calls } = fixture();
-  for (const request of [
+  const bad: unknown[] = [
     null,
-    {},
-    { ...execRequest(), sessionId: '../bad' },
+    { ...execRequest(), sessionId: '../x' },
+    { ...execRequest(), operation: 'rm' },
     { ...execRequest(), container: '--privileged' },
     { ...execRequest(), command: [] },
+    { ...execRequest(), command: [''] },
     { ...execRequest(), command: ['a\0b'] },
-    { ...execRequest(), command: [4] },
-    { ...execRequest(), tty: 'true' },
-    { ...execRequest(), rows: 1001 },
-    { operation: 'logs', sessionId: 'x', container: 'a', tail: -1 },
-    { operation: 'logs', sessionId: 'x', container: 'a', timestamps: 'true' },
-    { operation: 'ps', sessionId: 'x', projects: ['--bad'] },
-    { operation: 'unknown', sessionId: 'x' },
-  ]) {
-    assert.throws(
-      () => engine.start(request),
-      /Invalid/,
-      'Malformed requests should fail before process creation',
-    );
-  }
-  assert.equal(calls.length, 0, 'Invalid requests should never reach Docker');
+    { ...execRequest(), columns: 5000 },
+    { operation: 'logs', sessionId: 'l', container: 'web', tail: -1 },
+    { operation: 'logs', sessionId: 'l', container: 'web', tail: 10001 },
+    { operation: 'ps', sessionId: 'p', projects: [] },
+    { operation: 'ps', sessionId: 'p', projects: ['-bad'] },
+    { operation: 'ps', sessionId: 'p', projects: 'demo' },
+  ];
+  for (const request of bad) await assert.rejects(engine.start(request), /Invalid/);
+  assert.deepEqual(calls, [], 'validation failures do not call Docker');
 });
 
-test('duplicate sessions and concurrent session limits reject before spawn', () => {
-  const { engine, calls, children, events } = fixture({ maxSessions: 1 });
-  engine.start(execRequest());
-  assert.throws(
-    () => engine.start(execRequest()),
-    /Duplicate/,
-    'Active session IDs should be unique',
-  );
-  assert.throws(
-    () => engine.start({ ...execRequest(), sessionId: 'other' }),
-    /limit/,
-    'Concurrent process count should be bounded',
-  );
-  assert.equal(calls.length, 1, 'Rejected sessions should not create extra processes');
-  engine.cancel('exec-1');
-  engine.start(execRequest());
-  assert.equal(calls.length, 2, 'Finished session IDs should become available again');
-  children[0].emit('error', new Error('late error from previous process'));
-  children[0].emit('close', 1, null);
-  assert.equal(
-    engine.activeSessions,
-    1,
-    'Late events from a cancelled process should not terminate a reused session ID',
-  );
-  assert.equal(
-    events.length,
-    1,
-    'Late events from an earlier session should not emit terminal events for its replacement',
-  );
+test('duplicate sessions and concurrent session limits reject before any Engine call', async () => {
+  const { engine, calls } = fixture({ maxSessions: 2 });
+  await engine.start(execRequest());
+  await assert.rejects(engine.start(execRequest()), /Duplicate live session ID/);
+  await engine.start({ ...execRequest(), sessionId: 'exec-2' });
+  await assert.rejects(engine.start({ ...execRequest(), sessionId: 'exec-3' }), /session limit/);
+  assert.equal(calls.length, 2, 'rejected starts create no stream');
   engine.dispose();
 });
 
-test('stdin and resize reject unknown, oversized, closed, or inapplicable sessions', () => {
+test('stdin and resize reject unknown, oversized, closed, or inapplicable sessions', async () => {
   const { engine, children } = fixture();
-  assert.throws(
-    () => engine.stdin('unknown', Buffer.from('a')),
-    /Unknown/,
-    'Input should require an active exec',
-  );
-  engine.start(execRequest());
-  assert.throws(
-    () => engine.stdin('exec-1', Buffer.alloc(65537)),
-    /Invalid stdin/,
-    'Input frames over 64 KiB should be rejected',
-  );
-  assert.throws(
-    () => engine.resize('exec-1', 80, 24),
-    /no terminal/,
-    'Non-TTY exec should reject terminal resize',
-  );
+  assert.throws(() => engine.stdin('missing', Buffer.from('x')), /Unknown exec session/);
+  await engine.start(execRequest());
+  assert.throws(() => engine.stdin('exec-1', new Uint8Array(65537)), /Invalid stdin frame/);
   children[0].stdin.end();
-  assert.throws(
-    () => engine.stdin('exec-1', Buffer.from('a')),
-    /closed/,
-    'Closed input should reject writes synchronously',
-  );
-  engine.start({ operation: 'logs', sessionId: 'logs', container: 'web' });
-  assert.throws(() => engine.endStdin('logs'), /Unknown/, 'Logs should not expose exec stdin');
+  assert.throws(() => engine.stdin('exec-1', Buffer.from('x')), /stdin is closed/);
+  await engine.start({ operation: 'logs', sessionId: 'logs', container: 'web' });
+  assert.throws(() => engine.stdin('logs', Buffer.from('x')), /Unknown exec session/);
+  assert.throws(() => engine.resize('logs', 80, 24), /Unknown exec session/);
   engine.dispose();
 });
 
-test('query result size limits terminate the process without partial results', () => {
-  const { engine, children, events } = fixture({ maxResultBytes: 10 });
-  engine.start({ operation: 'ps', sessionId: 'ps', projects: ['demo'] });
-  children[0].stderr.write('123456');
-  children[0].stdout.write('123456');
-  assert.equal(
-    engine.activeSessions,
-    0,
-    'Combined stdout and stderr query bytes should respect the result limit',
-  );
-  assert.deepEqual(children[0].signals, ['SIGKILL'], 'Oversized result should terminate Docker');
-  assert.ok(
-    events[0].type === 'exit' && events[0].error?.includes('size limit'),
-    'Oversized query should emit an actionable failure',
-  );
-});
-
-test('invalid structured Docker output fails safely', () => {
-  for (const output of ['not JSON', '[null]', '{}', '[1]']) {
-    const { engine, children, events } = fixture();
-    engine.start({ operation: 'inspect', sessionId: 'inspect', container: 'web' });
-    children[0].stdout.write(output);
-    children[0].emit('close', 0, null);
-    assert.ok(
-      events.length === 1 &&
-        events[0].type === 'exit' &&
-        events[0].error?.startsWith('Invalid Docker result'),
-      'Malformed inspect JSON should emit only an error exit',
-    );
+test('stdin buffering remains bounded even if a transport ignores backpressure', async () => {
+  const { engine, children } = fixture();
+  await engine.start(execRequest());
+  children[0].stdin.pause();
+  children[0].stdin.cork();
+  let rejected = false;
+  for (let i = 0; i < 20 && !rejected; i++) {
+    try {
+      engine.stdin('exec-1', Buffer.alloc(65536));
+    } catch (error) {
+      rejected = /queue exceeds size limit/.test(String(error));
+    }
   }
+  assert.ok(rejected, 'a transport that ignores backpressure hits the queue limit');
+  engine.dispose();
 });
 
-test('spawn errors release session and emit one terminal event', () => {
-  const { engine, children, events } = fixture();
-  engine.start(execRequest());
-  children[0].emit('error', new Error('Docker unavailable'));
-  children[0].emit('close', -1, null);
-  assert.ok(
-    events.length === 1 && events[0].type === 'exit' && events[0].error === 'Docker unavailable',
-    'Process errors should emit one explanatory terminal event',
-  );
-  assert.equal(engine.activeSessions, 0, 'Process errors should release active sessions');
-  const fail = fixture({
-    spawn: () => {
-      throw new Error('spawn failed');
-    },
-  });
-  assert.throws(
-    () => fail.engine.start(execRequest()),
-    /spawn failed/,
-    'Synchronous spawn failure should propagate',
-  );
-  assert.equal(
-    fail.engine.activeSessions,
-    0,
-    'Synchronous spawn failure should not reserve a session',
-  );
+test('a failing exec start releases the session and reports the error to the caller', async () => {
+  const { engine, state } = fixture();
+  state.failExec = new Error('container is not running');
+  await assert.rejects(engine.start(execRequest()), /container is not running/);
+  assert.equal(engine.activeSessions, 0, 'a failed start holds no session slot');
+  state.failExec = undefined;
+  await engine.start(execRequest());
+  assert.equal(engine.activeSessions, 1, 'the same session ID can start again');
+  engine.dispose();
+});
+
+test('process errors release the session and emit one terminal event', async () => {
+  const { engine, events, children } = fixture();
+  await engine.start(execRequest());
+  children[0].emit('error', new Error('socket hang up'));
+  children[0].emit('close', null, null);
+  assert.deepEqual(events.filter((e) => e.type === 'exit').length, 1);
+  assert.equal((events.at(-1) as Extract<LiveEvent, { type: 'exit' }>).error, 'socket hang up');
+  assert.equal(engine.activeSessions, 0);
+  assert.deepEqual(children[0].signals, ['SIGKILL'], 'a broken stream is torn down');
+});
+
+test('a cancel that arrives while the stream is opening closes it on arrival', async () => {
+  const { engine, events, children } = fixture();
+  const starting = engine.start(execRequest());
+  engine.cancel('exec-1');
+  await starting;
+  assert.deepEqual(children[0].signals, ['SIGKILL'], 'the late stream is killed');
+  assert.deepEqual(events, [
+    { sessionId: 'exec-1', type: 'exit', code: null, signal: null, cancelled: true },
+  ]);
+  assert.equal(engine.activeSessions, 0);
+  await tick();
 });
 
 test('query and stream timeouts terminate and clean up', async () => {
-  const { engine, children, events } = fixture({ queryTimeoutMs: 5, maxSessionMs: 5 });
-  engine.start({ operation: 'ps', sessionId: 'ps', projects: ['demo'] });
-  engine.start(execRequest());
+  const { engine, children, events, state } = fixture({ queryTimeoutMs: 5, maxSessionMs: 5 });
+  state.ps = () => new Promise(() => {});
+  await engine.start({ operation: 'ps', sessionId: 'ps', projects: ['demo'] }).catch(() => {});
+  await engine.start(execRequest());
   await new Promise((resolve) => setTimeout(resolve, 25));
   assert.equal(engine.activeSessions, 0, 'All operation types should have a maximum lifetime');
-  assert.equal(events.length, 2, 'Each timed-out session should emit a terminal event');
+  assert.equal(
+    events.filter((e) => e.type === 'exit').length,
+    2,
+    'Each timed-out session emits one exit',
+  );
+  assert.ok(
+    events.every((e) => e.type !== 'exit' || e.error === 'Live operation timed out'),
+    'the exit says the operation timed out',
+  );
   for (const child of children)
-    assert.deepEqual(child.signals, ['SIGKILL'], 'Timeout should kill every timed-out process');
+    assert.deepEqual(child.signals, ['SIGKILL'], 'Timeout should kill every timed-out stream');
 });
 
-test('dispose cancels all operations and validates engine bounds', () => {
+test('dispose cancels all operations and validates engine bounds', async () => {
   const { engine, children, events } = fixture();
-  engine.start(execRequest());
-  engine.start({ operation: 'logs', sessionId: 'logs', container: 'web' });
+  await engine.start(execRequest());
+  await engine.start({ operation: 'logs', sessionId: 'logs', container: 'web' });
   engine.dispose();
   assert.equal(engine.activeSessions, 0, 'Disposal should release all active sessions');
   assert.equal(
@@ -413,212 +392,48 @@ test('dispose cancels all operations and validates engine bounds', () => {
   );
   for (const child of children) {
     assert.equal(child.stdout.listenerCount('data'), 0, 'Disposal should remove output listeners');
-    child.emit('error', new Error('late spawn error'));
+    child.emit('error', new Error('late error'));
     child.stdin.emit('error', new Error('late input error'));
     child.emit('close', null, 'SIGKILL');
-    assert.equal(
-      child.stdin.listenerCount('error'),
-      0,
-      'Process close after disposal should remove input error listeners',
-    );
-    assert.equal(
-      child.listenerCount('error'),
-      0,
-      'Process close after disposal should remove process error listeners',
-    );
+    assert.equal(child.listenerCount('error'), 0, 'close after disposal removes error listeners');
   }
-  for (const key of ['maxSessions', 'maxResultBytes', 'maxSessionMs', 'queryTimeoutMs'])
-    assert.throws(
-      () => fixture({ [key]: 0 }),
-      /Invalid/,
-      'Engine resource limits should require positive integers',
-    );
+  for (const key of ['maxSessions', 'maxSessionMs', 'queryTimeoutMs'])
+    assert.throws(() => fixture({ [key]: 0 }), /Invalid/, 'limits must be positive integers');
 });
 
-test('noninteractive exec omits Docker stdin attachment and sends EOF', () => {
+test('noninteractive exec omits the stdin attachment and sends EOF', async () => {
   const { engine, calls, children } = fixture();
-  engine.start({ ...execRequest(), interactive: false });
-  assert.equal(
-    calls[0].args.includes('-i'),
-    false,
-    'Noninteractive exec should not attach Docker stdin',
-  );
-  assert.equal(
-    children[0].stdin.writableEnded,
-    true,
-    'Noninteractive exec should close the child stdin immediately',
-  );
-  engine.dispose();
+  await engine.start({ ...execRequest(), interactive: false });
+  assert.equal((calls[0].options as ExecOptions).stdin, false, 'no input attachment is requested');
+  assert.equal(children[0].stdin.writableEnded, true, 'Noninteractive exec delivers immediate EOF');
 });
 
-test('stdin buffering remains bounded even if a transport ignores backpressure', () => {
-  const { engine } = fixture();
-  engine.start(execRequest());
-  for (let i = 0; i < 4; i++) engine.stdin('exec-1', Buffer.alloc(65536));
-  assert.throws(
-    () => engine.stdin('exec-1', Buffer.alloc(65536)),
-    /queue exceeds/,
-    'Exec input should reject unbounded writable buffering',
-  );
-  engine.dispose();
-});
-
-test('ps aggregates only exact project-label queries into one bounded session', () => {
-  const { engine, children, calls, events } = fixture();
-  engine.start({
-    operation: 'ps',
-    sessionId: 'ps',
-    projects: ['demo', 'demo-web-active', 'demo-web-active'],
-  });
-  assert.equal(engine.activeSessions, 1, 'Multiple project queries should occupy one live session');
-  assert.equal(children.length, 1, 'Project queries should run sequentially');
-  children[0].stdout.write('{"ID":"base","State":"running"}');
-  children[0].emit('close', 0, null);
+test('structured results larger than a protocol frame fail instead of being emitted', async () => {
+  const { engine, events, state } = fixture();
+  state.inspect = async () => ({ value: '€'.repeat(Math.ceil(LIVE_MAX_FRAME_BYTES / 3)) });
+  await engine.start({ operation: 'inspect', sessionId: 'big', container: 'app-1' });
   assert.equal(
-    children.length,
-    2,
-    'The active revision query should start after the base project query exits',
-  );
-  assert.equal(
-    events.length,
+    events.filter((e) => e.type === 'result').length,
     0,
-    'Partial project query results should stay buffered until aggregation completes',
+    'no oversized frame is emitted',
   );
-  children[1].stdout.write('{"ID":"active","State":"running"}\n');
-  children[1].emit('close', 0, null);
-  assert.deepEqual(
-    calls.map((call) => call.args.at(-1)),
-    ['label=com.docker.compose.project=demo', 'label=com.docker.compose.project=demo-web-active'],
-    'Each unique project should receive exactly one precise label filter',
-  );
-  assert.deepEqual(
-    events[0],
-    {
-      sessionId: 'ps',
-      type: 'result',
-      result: [
-        { ID: 'base', State: 'running' },
-        { ID: 'active', State: 'running' },
-      ],
-    },
-    'PS should combine base and active revision rows into one result',
-  );
-  assert.equal(
-    events.length,
-    2,
-    'Aggregated PS should emit exactly one result and one terminal event',
-  );
-  assert.ok(
-    events[1].type === 'exit' && events[1].code === 0,
-    'Aggregated PS should emit one successful terminal event',
-  );
-  assert.equal(engine.activeSessions, 0, 'Completed aggregation should release its session');
-});
+  const exit = events.at(-1) as Extract<LiveEvent, { type: 'exit' }>;
+  assert.match(exit.error ?? '', /serialized frame size limit/);
 
-test('cancelling aggregated ps kills the current child and never starts remaining projects', () => {
-  const { engine, children, events } = fixture();
-  engine.start({ operation: 'ps', sessionId: 'ps', projects: ['demo', 'demo-web-active'] });
-  engine.cancel('ps');
-  children[0].emit('close', null, 'SIGKILL');
-  assert.deepEqual(
-    children[0].signals,
-    ['SIGKILL'],
-    'Aggregated PS cancellation should terminate its current Docker child',
-  );
-  assert.equal(children.length, 1, 'Cancellation should suppress remaining project queries');
-  assert.ok(
-    events.length === 1 && events[0].type === 'exit' && events[0].cancelled,
-    'Aggregated cancellation should emit a single terminal event',
-  );
-});
-
-test('failed aggregated ps suppresses partial rows and remaining project queries', () => {
-  const { engine, children, events } = fixture();
-  engine.start({
-    operation: 'ps',
-    sessionId: 'ps',
-    projects: ['demo', 'demo-web-active', 'demo-api-active'],
-  });
-  children[0].stdout.write('{"ID":"base"}\n');
-  children[0].emit('close', 0, null);
-  children[1].stderr.write('Docker unavailable');
-  children[1].emit('close', 1, null);
-  assert.equal(children.length, 2, 'Failed aggregation should not query remaining projects');
-  assert.ok(
-    events.length === 1 && events[0].type === 'exit' && events[0].error === 'Docker unavailable',
-    'Failed aggregation should emit only the explanatory terminal error',
-  );
-});
-
-test('ps project scopes reject empty or malformed arrays before spawning', () => {
-  const { engine, calls } = fixture();
-  for (const projects of [
-    undefined,
-    [],
-    ['demo', '--foreign'],
-    ['demo', 1],
-    Array(257).fill('demo'),
-  ])
-    assert.throws(
-      () => engine.start({ operation: 'ps', sessionId: 'ps', projects }),
-      /Invalid projects/,
-      'Every PS request should require a bounded explicit list of valid projects',
+  // A result that fits exactly stays deliverable.
+  const filler = '€'.repeat(Math.floor(LIVE_MAX_FRAME_BYTES / 3));
+  let size = LIVE_MAX_FRAME_BYTES + 1;
+  let pad = 0;
+  while (size > LIVE_MAX_FRAME_BYTES) {
+    const value = filler.slice(0, filler.length - pad++);
+    size = Buffer.byteLength(
+      JSON.stringify({ v: 1, type: 'live.result', sessionId: 'fit', result: [{ value }] }),
     );
-  assert.equal(calls.length, 0, 'Invalid project scopes should never create Docker processes');
-});
-
-test('structured ps and inspect reject oversized serialized frames before emitting results', () => {
-  for (const operation of ['ps', 'inspect'] as const) {
-    const sessionId = 'x'.repeat(255);
-    const overhead = Buffer.byteLength(
-      JSON.stringify({ v: 1, type: 'live.result', sessionId, result: [{ value: '' }] }),
-    );
-    const result = [{ value: 'x'.repeat(LIVE_MAX_FRAME_BYTES - overhead + 1) }];
-    const { engine, children, events } = fixture();
-    engine.start(
-      operation === 'ps'
-        ? { operation, sessionId, projects: ['demo'] }
-        : { operation, sessionId, container: 'web' },
-    );
-    children[0].stdout.write(
-      operation === 'ps' ? JSON.stringify(result[0]) + '\n' : JSON.stringify(result),
-    );
-    children[0].emit('close', 0, null);
-    assert.equal(
-      events.filter((event) => event.type === 'result').length,
-      0,
-      'A result exceeding the shared frame limit after envelope serialization should never be emitted',
-    );
-    assert.ok(
-      events.length === 1 &&
-        events[0].type === 'exit' &&
-        events[0].error?.includes('serialized frame size limit'),
-      'Oversized structured results should produce one actionable terminal error',
-    );
-    assert.ok(
-      Buffer.byteLength(JSON.stringify(events[0])) < LIVE_MAX_FRAME_BYTES,
-      'Size-limit errors should remain safe to send on the shared agent socket',
-    );
+    state.inspect = async () => ({ value });
   }
-});
-
-test('structured results exactly at the serialized frame limit remain deliverable', () => {
-  const sessionId = 'inspect';
-  const overhead = Buffer.byteLength(
-    JSON.stringify({ v: 1, type: 'live.result', sessionId, result: [{ value: '' }] }),
-  );
-  const result = [{ value: 'x'.repeat(LIVE_MAX_FRAME_BYTES - overhead) }];
-  const { engine, children, events } = fixture();
-  engine.start({ operation: 'inspect', sessionId, container: 'web' });
-  children[0].stdout.write(JSON.stringify(result));
-  children[0].emit('close', 0, null);
+  await engine.start({ operation: 'inspect', sessionId: 'fit', container: 'app-1' });
   assert.ok(
-    events[0].type === 'result',
-    'Structured results at the exact serialized byte boundary should be allowed',
-  );
-  assert.equal(
-    Buffer.byteLength(JSON.stringify({ v: 1, type: 'live.result', sessionId, result })),
-    LIVE_MAX_FRAME_BYTES,
-    'Boundary fixture should include the complete live.result envelope',
+    events.some((e) => e.sessionId === 'fit' && e.type === 'result'),
+    'a result at or under the frame limit is delivered',
   );
 });

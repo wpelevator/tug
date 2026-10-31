@@ -6,6 +6,7 @@ import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { WebSocket } from 'ws';
 import { AgentWakeChannel } from './agent.ts';
+import { FakeDocker } from '../tests/fake-docker.ts';
 import type { AgentContext } from './agent.ts';
 import { createApp, listen } from './control.ts';
 import { LIVE_MAX_SESSIONS } from './protocol.ts';
@@ -207,7 +208,7 @@ test('stream rejects invalid agent credentials', async () => {
 test('agent wake channel falls back to long polling when WebSockets are unavailable', async () => {
   const s = await server();
   const ctx: AgentContext = {
-    docker: async () => ({ out: '', err: '' }),
+    docker: new FakeDocker(),
     http: fetch,
     nodeName: 'n1',
     stateDir: await fs.mkdtemp(path.join(os.tmpdir(), 'tug-stream-agent-')),

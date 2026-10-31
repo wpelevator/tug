@@ -1,19 +1,13 @@
-import fs from 'node:fs/promises';
-import yaml from 'js-yaml';
 import crypto from 'node:crypto';
 import { isDuration } from './util.ts';
+import { sentinelNames } from './normalize.ts';
 import type {
   ComposeFile,
   ComposeService,
-  ComposeVolume,
   DesiredState,
   ServiceEndpoint,
   ServiceSpec,
 } from './protocol.ts';
-
-export async function readCompose(file = 'docker-compose.yml'): Promise<ComposeFile> {
-  return yaml.load(await fs.readFile(file, 'utf8')) as ComposeFile;
-}
 
 export function composeHash(compose: ComposeFile): string {
   return crypto.createHash('sha1').update(JSON.stringify(compose)).digest('hex').slice(0, 12);
@@ -226,6 +220,118 @@ function validateProjectExtension(compose: ComposeFile, errors: string[]): void 
     errors.push('x-tug.rollback must be auto or manual');
 }
 
+/** Service keys the agent can create a container from; anything else is rejected with its name. */
+export const SUPPORTED_SERVICE_KEYS: readonly string[] = [
+  'image',
+  'build',
+  'command',
+  'entrypoint',
+  'environment',
+  'ports',
+  'expose',
+  'volumes',
+  'tmpfs',
+  'healthcheck',
+  'restart',
+  'labels',
+  'depends_on',
+  'extra_hosts',
+  'user',
+  'working_dir',
+  'hostname',
+  'init',
+  'read_only',
+  'shm_size',
+  'mem_limit',
+  'mem_reservation',
+  'cpus',
+  'pids_limit',
+  'cap_add',
+  'cap_drop',
+  'ulimits',
+  'logging',
+  'stop_grace_period',
+  'stop_signal',
+  'x-tug',
+];
+/** Keys Compose adds or that Tug ignores on purpose: the default network, and `pull_policy` because Tug decides when images change. */
+const IGNORED_SERVICE_KEYS = ['networks', 'pull_policy'];
+const SUPPORTED_TOP_LEVEL = ['services', 'volumes', 'networks', 'name', 'x-tug'];
+const SUPPORTED_VOLUME_KEYS = ['name', 'driver', 'driver_opts', 'labels', 'external', 'x-tug'];
+
+const isObject = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+const isExtension = (key: string) => key.startsWith('x-');
+
+function validateSubset(
+  name: string,
+  svc: ComposeService,
+  compose: ComposeFile,
+  errors: string[],
+): void {
+  for (const key of Object.keys(svc)) {
+    if (SUPPORTED_SERVICE_KEYS.includes(key) || IGNORED_SERVICE_KEYS.includes(key)) continue;
+    if (isExtension(key)) continue;
+    errors.push(
+      key === 'deploy'
+        ? `${name}: deploy (swarm) is not supported; use x-tug placement`
+        : `${name}: ${key} is not supported`,
+    );
+  }
+  if (svc.networks !== undefined && svc.networks !== null) {
+    const nets = svc.networks as unknown;
+    const names = Array.isArray(nets) ? nets.map(String) : isObject(nets) ? Object.keys(nets) : [];
+    if (names.some((n) => n !== 'default'))
+      errors.push(`${name}: networks other than the default network are not supported`);
+  }
+  if (!svc.image && !svc.build) errors.push(`${name}: image or build is required`);
+  for (const mount of svc.volumes || []) {
+    if (typeof mount === 'string') {
+      errors.push(`${name}: volumes must be normalized by docker compose config (got "${mount}")`);
+      continue;
+    }
+    const type = String(mount.type ?? '');
+    if (type === 'bind') {
+      if (!String(mount.source ?? '').startsWith('/'))
+        errors.push(
+          `${name}: bind mount source ${JSON.stringify(mount.source)} must be an absolute path on the node`,
+        );
+    } else if (type === 'volume') {
+      const source = String(mount.source ?? '');
+      if (!source) errors.push(`${name}: anonymous volumes are not supported; name the volume`);
+      else if (!compose.volumes?.[source])
+        errors.push(`${name}: volume ${source} is not defined in top-level volumes`);
+    } else if (type !== 'tmpfs')
+      errors.push(`${name}: volume type ${JSON.stringify(type)} is not supported`);
+  }
+  const deps = svc.depends_on;
+  if (isObject(deps))
+    for (const [dep, spec] of Object.entries(deps)) {
+      const condition = isObject(spec) ? String(spec.condition ?? 'service_started') : '';
+      if (!compose.services[dep]) errors.push(`${name}: depends_on ${dep} is not a service`);
+      else if (!['service_started', 'service_healthy'].includes(condition))
+        errors.push(`${name}: depends_on condition ${JSON.stringify(condition)} is not supported`);
+    }
+}
+
+function validateTopLevel(compose: ComposeFile, errors: string[]): void {
+  for (const key of Object.keys(compose))
+    if (!SUPPORTED_TOP_LEVEL.includes(key) && !isExtension(key))
+      errors.push(`${key} is not supported at the top level of the Compose file`);
+  const networks = compose.networks;
+  if (isObject(networks)) {
+    for (const [key, def] of Object.entries(networks))
+      if (key !== 'default' || (isObject(def) && def.external))
+        errors.push(`networks.${key}: custom networks are not supported`);
+  }
+  for (const [key, def] of Object.entries(compose.volumes || {})) {
+    if (!isObject(def)) continue;
+    for (const field of Object.keys(def))
+      if (!SUPPORTED_VOLUME_KEYS.includes(field) && !isExtension(field))
+        errors.push(`volumes.${key}: ${field} is not supported`);
+  }
+}
+
 export function validateCompose(
   compose: ComposeFile | undefined,
   nodes: string[] = [],
@@ -235,8 +341,7 @@ export function validateCompose(
   const errors: string[] = [];
   const ingressHosts = new Map<string, string>();
   for (const [name, svc] of Object.entries(compose.services)) {
-    if (svc.container_name) errors.push(`${name}: container_name is not supported`);
-    if (svc.deploy) errors.push(`${name}: swarm deploy semantics are not supported`);
+    validateSubset(name, svc, compose, errors);
     const lp = svc['x-tug'] || {};
     const placement = lp.placement || {};
     const selected = placement.nodes || [];
@@ -257,6 +362,7 @@ export function validateCompose(
     validateIngress(name, svc, ingressHosts, errors);
     validateRollout(name, svc, errors);
   }
+  validateTopLevel(compose, errors);
   validateProjectExtension(compose, errors);
   if (errors.length) throw new Error(errors.join('; '));
 }
@@ -326,158 +432,18 @@ export function crossNodeHosts(
   return hosts;
 }
 
-/** Removes `depends_on` references to `names` (services that live in another Compose project). */
-export function dropDependsOn(svc: ComposeService, names: ReadonlySet<string>): void {
-  const deps = svc.depends_on;
-  if (Array.isArray(deps)) {
-    const kept = deps.filter((d) => !names.has(String(d)));
-    if (kept.length) svc.depends_on = kept;
-    else delete svc.depends_on;
-  } else if (deps && typeof deps === 'object') {
-    const kept = Object.fromEntries(Object.entries(deps).filter(([dep]) => !names.has(dep)));
-    if (Object.keys(kept).length) svc.depends_on = kept;
-    else delete svc.depends_on;
-  }
-}
-
-function extraHostsList(value: ComposeService['extra_hosts']): string[] {
-  if (!value) return [];
-  return Array.isArray(value)
-    ? value.map(String)
-    : Object.entries(value).map(([k, v]) => `${k}:${v}`);
-}
-
-export interface NodeComposeOptions {
-  secrets?: Record<string, string>;
-  endpoints?: Record<string, ServiceEndpoint[]>;
-  /**
-   * Services placed here that are managed outside the node's main project (rolling services run in
-   * their own revision projects); they still count as local, so they get no cross-node `extra_hosts`
-   * entry, and `depends_on` references to them are dropped.
-   */
-  exclude?: ReadonlySet<string>;
-  nodeAddresses?: Record<string, string>;
-  /** Host IP for published ports that name none; without it `ports` stay as written. */
-  bind?: PortBind;
-}
-
-/** The Compose file for one node. */
-export function composeForNode(
-  desiredState: DesiredState,
-  nodeName: string,
-  {
-    secrets = {},
-    endpoints = {},
-    exclude = new Set(),
-    nodeAddresses = {},
-    bind,
-  }: NodeComposeOptions = {},
-): ComposeFile {
-  const out: ComposeFile & { volumes?: Record<string, ComposeVolume> } = {
-    services: {},
-    volumes: {},
-  };
-  const outVolumes = out.volumes!;
-  const usedVolumes = new Set<string>();
-  const placed = new Set<string>();
-  for (const [name, src] of Object.entries(desiredState.compose.services || {})) {
-    const nodes = desiredState.services[name].placement?.nodes || [];
-    if (nodes.length && !nodes.includes(nodeName)) continue;
-    placed.add(name);
-    if (exclude.has(name)) continue;
-    const svc: ComposeService = { ...src, image: desiredState.services[name].image };
-    delete svc.build;
-    delete svc['x-tug'];
-    delete svc.deploy;
-    delete svc.container_name;
-    if (desiredState.services[name].artifact) svc.pull_policy = 'never';
-    if (Object.keys(secrets).length)
-      svc.env_file = Array.from(
-        new Set([
-          ...(Array.isArray(svc.env_file) ? svc.env_file : svc.env_file ? [svc.env_file] : []),
-          '.env',
-        ]),
-      );
-    for (const vol of svc.volumes || []) {
-      const source = typeof vol === 'string' ? vol.split(':')[0] : vol.source;
-      if (source && desiredState.compose?.volumes?.[source]) usedVolumes.add(source);
-    }
-    if (exclude.size) dropDependsOn(svc, exclude);
-    if (bind && svc.ports)
-      svc.ports = bindPorts(
-        svc.ports,
-        bind.address,
-        bind.loopback?.has(name) ? src['x-tug']?.ingress?.port : undefined,
-      );
-    out.services[name] = svc;
-  }
-  const hosts = crossNodeHosts(desiredState.project, endpoints, placed);
-  if (hosts.length) {
-    for (const svc of Object.values(out.services)) {
-      const existing = extraHostsList(svc.extra_hosts);
-      const taken = new Set(existing.map((h) => h.split(':')[0]));
-      svc.extra_hosts = [...existing, ...hosts.filter((h) => !taken.has(h.split(':')[0]))];
-    }
-  }
-  for (const name of usedVolumes) {
-    const vol = desiredState.compose.volumes?.[name] || {};
-    const xe = vol['x-tug'] || {};
-    const nodes = xe.placement?.nodes || [];
-    const isNfs =
-      xe.type === 'nfs' || xe.driver === 'nfs' || (xe.type === 'shared' && xe.driver === 'nfs');
-    if (isNfs) {
-      const exporter = nodes[0];
-      const exportPath = xe.export || `/srv/tug/${name}`;
-      if (!exporter) {
-        // unplaced: nothing to export, plain local volume
-        const cleaned = { ...vol };
-        delete cleaned['x-tug'];
-        outVolumes[name] = cleaned;
-      } else if (nodes.includes(nodeName)) {
-        // The exporter mounts the exported directory directly; an NFS server on this node must export it.
-        outVolumes[name] = {
-          driver: 'local',
-          driver_opts: { type: 'none', o: 'bind', device: exportPath },
-        };
-      } else {
-        const addr = xe.address || nodeAddresses[exporter] || exporter;
-        outVolumes[name] = {
-          driver: 'local',
-          driver_opts: { type: 'nfs', o: `addr=${addr},rw,nolock,soft`, device: `:${exportPath}` },
-        };
-      }
-      continue;
-    }
-    if (!nodes.length || nodes.includes(nodeName)) outVolumes[name] = vol;
-  }
-  if (!Object.keys(outVolumes).length) delete out.volumes;
-  return out;
-}
-
+/**
+ * Control secrets a service uses: the sentinels in its definition. Their versions decide whether the
+ * service is recreated, so a secret change touches exactly the services that reference it.
+ */
 export function serviceSecretNames(
   compose: ComposeFile | undefined,
   serviceNames: Iterable<string>,
 ): Set<string> {
-  const allowed = new Set<string>();
-  for (const serviceName of serviceNames) {
-    const env = compose?.services?.[serviceName]?.environment || {};
-    if (Array.isArray(env)) {
-      for (const entry of env) {
-        const [key, value = ''] = String(entry).split('=');
-        if (key) allowed.add(key);
-        for (const match of String(value).matchAll(/\$\{?([A-Z_][A-Z0-9_]*)[^}]*\}?/g))
-          allowed.add(match[1]);
-      }
-    } else {
-      for (const [key, value] of Object.entries(env)) {
-        if (typeof value === 'string' && value.match(/^\$\{?[A-Z_][A-Z0-9_]*(?::-[^}]*)?\}?$/)) {
-          const m = value.match(/^\$\{?([A-Z_][A-Z0-9_]*)/);
-          if (m) allowed.add(m[1]);
-        } else allowed.add(key);
-      }
-    }
-  }
-  return allowed;
+  const names = new Set<string>();
+  for (const service of serviceNames)
+    for (const name of sentinelNames(compose?.services?.[service])) names.add(name);
+  return names;
 }
 
 export function serviceSecretVersions(
@@ -493,8 +459,4 @@ export function serviceSecretVersions(
     );
   }
   return out;
-}
-
-export function dumpYaml(obj: unknown): string {
-  return yaml.dump(obj, { noRefs: true, lineWidth: 120 });
 }

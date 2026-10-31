@@ -15,7 +15,7 @@ import {
 } from './ingress.ts';
 import type { NodeView, ReportedStatus } from './ingress.ts';
 import type { ComposeFile, DesiredState, IngressWork } from './protocol.ts';
-import type { DockerRunner } from './runners.ts';
+import { FakeDocker } from '../tests/fake-docker.ts';
 
 const FRESH = '2026-01-01T00:00:10.000Z';
 const STALE_BEFORE = '2026-01-01T00:00:00.000Z';
@@ -330,29 +330,6 @@ test('a hostname claimed by two projects is served by the first and warned about
 
 // ---- agent side: managed Caddy container -------------------------------------------------------
 
-interface FakeCaddy {
-  docker: DockerRunner;
-  calls: string[];
-  state: { exists: boolean; running: boolean; failReload: boolean };
-}
-function fakeCaddy(initial: Partial<FakeCaddy['state']> = {}): FakeCaddy {
-  const state = { exists: false, running: false, failReload: false, ...initial };
-  const calls: string[] = [];
-  const docker: DockerRunner = async (args) => {
-    const line = args.join(' ');
-    calls.push(line);
-    if (args[0] === 'container' && args[1] === 'inspect') {
-      if (!state.exists) throw new Error('No such container');
-      return { out: String(state.running), err: '' };
-    }
-    if (args[0] === 'create') state.exists = true;
-    if (args[0] === 'start') state.running = true;
-    if (args[0] === 'exec' && args.includes('reload') && state.failReload)
-      throw new Error('adapting config: unknown directive');
-    return { out: '', err: '' };
-  };
-  return { docker, calls, state };
-}
 const work = (caddyfile: string, files: Record<string, string> = {}): IngressWork => ({
   caddyfile,
   files,
@@ -360,81 +337,79 @@ const work = (caddyfile: string, files: Record<string, string> = {}): IngressWor
   warnings: [],
 });
 const stateDirFor = () => fs.mkdtemp(path.join(os.tmpdir(), 'tug-ingress-'));
+const reload = (c: string) => c.startsWith(`exec ${CADDY_CONTAINER} caddy reload`);
 
 test('first reconcile creates the Caddy container with persistent volumes, loads config and starts it', async () => {
-  const f = fakeCaddy();
+  const docker = new FakeDocker();
   const stateDir = await stateDirFor();
   const status = await reconcileIngress(
-    { docker: f.docker, stateDir },
+    { docker, stateDir },
     work('a.example.com {\n}\n', { 'certs/a.crt': 'C' }),
   );
   assert.equal(status.state, 'serving');
-  const create = f.calls.find((c) => c.startsWith('create'))!;
-  assert.match(create, /--name tug-caddy/);
-  assert.match(create, /--network host/, 'host networking so 80/443 and loopback upstreams work');
-  assert.match(
-    create,
-    /-v tug-caddy-data:\/data/,
-    'ACME state lives on a named volume that survives container recreation',
+  const caddy = docker.byName(CADDY_CONTAINER)!;
+  assert.equal(
+    caddy.body.HostConfig?.NetworkMode,
+    'host',
+    'host networking so 80/443 and loopback upstreams work',
   );
   assert.ok(
-    f.calls.indexOf(create) < f.calls.findIndex((c) => c.startsWith('cp')) &&
-      f.calls.findIndex((c) => c.startsWith('cp')) <
-        f.calls.findIndex((c) => c.startsWith('start')),
-    'config is copied in before Caddy starts',
+    (caddy.body.HostConfig?.Binds as string[]).includes('tug-caddy-data:/data'),
+    'ACME state lives on a named volume that survives container recreation',
   );
-  assert.ok(!f.calls.some((c) => c.includes('reload')), 'no reload on a fresh container');
+  assert.deepEqual(
+    docker.calls,
+    [
+      'pull caddy:2-alpine',
+      `create ${CADDY_CONTAINER}`,
+      `archive ${CADDY_CONTAINER} /etc/caddy`,
+      `start ${CADDY_CONTAINER}`,
+    ],
+    'the image is pulled, then config is uploaded before Caddy starts, with no reload on a fresh container',
+  );
+  assert.ok(docker.archives[0].bytes > 0, 'the staged Caddyfile and certs travel as a tar archive');
 });
 
 test('unchanged config is a no-op and changed config reloads gracefully without restarting', async () => {
-  const f = fakeCaddy();
+  const docker = new FakeDocker();
   const stateDir = await stateDirFor();
-  const ctx = { docker: f.docker, stateDir };
+  const ctx = { docker, stateDir };
   await reconcileIngress(ctx, work('v1\n'));
-  f.calls.length = 0;
+  docker.calls.length = 0;
   await reconcileIngress(ctx, work('v1\n'));
-  assert.deepEqual(
-    f.calls,
-    ['container inspect -f {{.State.Running}} tug-caddy'],
-    'quiet tick only inspects the container',
-  );
+  assert.deepEqual([...docker.calls], [], 'a quiet tick only inspects the container');
 
-  f.calls.length = 0;
   const status = await reconcileIngress(ctx, work('v2\n'));
   assert.equal(status.state, 'serving');
   assert.ok(
-    f.calls.includes(
+    docker.calls.includes(
       `exec ${CADDY_CONTAINER} caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile`,
     ),
     'config applied with caddy reload',
   );
   assert.ok(
-    !f.calls.some(
-      (c) =>
-        c.startsWith('restart') ||
-        c.startsWith('stop') ||
-        c.startsWith('rm') ||
-        c.startsWith('start'),
-    ),
+    !docker.calls.some((c) => /^(restart|stop|rm|start) /.test(c)),
     'the container is never restarted, so connections are not dropped',
   );
 });
 
 test('a rejected config is reported, keeps the old config on disk and is retried next tick', async () => {
-  const f = fakeCaddy();
+  const docker = new FakeDocker();
   const stateDir = await stateDirFor();
-  const ctx = { docker: f.docker, stateDir };
+  const ctx = { docker, stateDir };
   await reconcileIngress(ctx, work('good\n'));
-  f.state.failReload = true;
-  f.calls.length = 0;
+  docker.failExec = (cmd) =>
+    cmd.includes('reload') ? { code: 1, err: 'adapting config: unknown directive' } : undefined;
+  docker.calls.length = 0;
   const status = await reconcileIngress(ctx, work('bad\n'));
   assert.equal(status.state, 'failed');
   assert.match(status.error!, /unknown directive/);
-  assert.ok(
-    f.calls.some((c) => c.startsWith('cp') && c.includes('/applied/.')),
-    'previously applied config is restored into the container',
+  assert.equal(
+    docker.calls.filter((c) => c.startsWith('archive')).length,
+    2,
+    'the rejected config is uploaded and then the previously applied config is restored',
   );
-  f.state.failReload = false;
+  docker.failExec = undefined;
   assert.equal(
     (await reconcileIngress(ctx, work('bad\n'))).state,
     'serving',
@@ -443,13 +418,18 @@ test('a rejected config is reported, keeps the old config on disk and is retried
 });
 
 test('a stopped Caddy container is started again and config hash covers files', async () => {
-  const f = fakeCaddy({ exists: true, running: false });
+  const docker = new FakeDocker();
   const stateDir = await stateDirFor();
-  await reconcileIngress({ docker: f.docker, stateDir }, work('x\n'));
+  await reconcileIngress({ docker, stateDir }, work('x\n'));
+  docker.byName(CADDY_CONTAINER)!.state = 'exited';
+  await fs.rm(path.join(stateDir, 'ingress', 'applied.hash'));
+  docker.calls.length = 0;
+  await reconcileIngress({ docker, stateDir }, work('x\n'));
   assert.ok(
-    f.calls.some((c) => c === `start ${CADDY_CONTAINER}`),
+    docker.calls.includes(`start ${CADDY_CONTAINER}`),
     'existing stopped container is started',
   );
+  assert.ok(!docker.calls.some(reload), 'a stopped container needs no reload');
   assert.notEqual(
     ingressConfigHash(work('x\n', { a: '1' })),
     ingressConfigHash(work('x\n', { a: '2' })),
@@ -458,16 +438,16 @@ test('a stopped Caddy container is started again and config hash covers files', 
 });
 
 test('removeIngress deletes the container but keeps ACME volumes, and is a no-op on non-ingress nodes', async () => {
-  const f = fakeCaddy();
+  const docker = new FakeDocker();
   const stateDir = await stateDirFor();
-  assert.equal(await removeIngress({ docker: f.docker, stateDir }), false, 'nothing to remove');
-  assert.deepEqual(f.calls, []);
-  await reconcileIngress({ docker: f.docker, stateDir }, work('x\n'));
-  f.calls.length = 0;
-  assert.equal(await removeIngress({ docker: f.docker, stateDir }), true);
+  assert.equal(await removeIngress({ docker, stateDir }), false, 'nothing to remove');
+  assert.deepEqual([...docker.calls], []);
+  await reconcileIngress({ docker, stateDir }, work('x\n'));
+  docker.calls.length = 0;
+  assert.equal(await removeIngress({ docker, stateDir }), true);
   assert.deepEqual(
-    f.calls,
-    [`rm -f ${CADDY_CONTAINER}`],
-    'only the container is removed; no volume rm',
+    docker.calls,
+    [`rm ${CADDY_CONTAINER}`],
+    'only the container is removed; no volume is touched',
   );
 });

@@ -8,11 +8,11 @@ import test from 'node:test';
 import { WebSocket } from 'ws';
 import { AgentLiveOperations, AgentWakeChannel, resolveLiveContainer } from './agent.ts';
 import type { AgentContext, AgentLiveControlFrame, AgentLiveOutputFrame } from './agent.ts';
-import type { LiveProcess } from './live.ts';
 import { LIVE_MAX_FRAME_BYTES } from './protocol.ts';
+import type { AttachedProcess, ExecOptions } from './docker-api.ts';
+import { FakeDocker } from '../tests/fake-docker.ts';
 
-const containerId = 'a'.repeat(64);
-class Child extends EventEmitter implements LiveProcess {
+class Child extends EventEmitter implements AttachedProcess {
   stdin = new PassThrough();
   stdout = new PassThrough();
   stderr = new PassThrough();
@@ -40,10 +40,32 @@ class Socket extends EventEmitter {
     this.emit('message', Buffer.from(JSON.stringify(data)));
   }
 }
+
+/** A node with one `demo/web` container whose exec and logs streams the test drives through `children`. */
 async function fixture(t: test.TestContext, override: Partial<AgentContext> = {}) {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-live-agent-'));
   t.after(() => fs.rm(stateDir, { recursive: true, force: true }));
-  const dockerCalls: string[][] = [];
+  const docker = new FakeDocker();
+  docker.addImage('app');
+  const containerId = await docker.createContainer('tug-demo-web-1', {
+    Image: 'app',
+    Labels: { 'tug.project': 'demo', 'tug.service': 'web' },
+  });
+  await docker.startContainer(containerId);
+  const children: Child[] = [];
+  const execs: { id: string; options: ExecOptions }[] = [];
+  docker.execStart = async (id, options) => {
+    const child = new Child();
+    children.push(child);
+    execs.push({ id, options });
+    if (options.stdin === false) child.stdin.end();
+    return child as unknown as AttachedProcess;
+  };
+  docker.logs = async () => {
+    const child = new Child();
+    children.push(child);
+    return child as unknown as AttachedProcess;
+  };
   const ctx: AgentContext = {
     stateDir,
     nodeName: 'n1',
@@ -51,25 +73,13 @@ async function fixture(t: test.TestContext, override: Partial<AgentContext> = {}
     token: 'secret',
     controlUrl: 'http://control.test',
     http: fetch,
-    docker: async (args) => {
-      dockerCalls.push(args);
-      return { out: containerId, err: '' };
-    },
+    docker,
     ...override,
   };
-  const children: Child[] = [];
-  const calls: string[][] = [];
   const events: AgentLiveOutputFrame[] = [];
-  const live = new AgentLiveOperations(ctx, (frame) => events.push(frame), {
-    spawn: (_file, args) => {
-      const child = new Child();
-      children.push(child);
-      calls.push(args);
-      return child;
-    },
-  });
+  const live = new AgentLiveOperations(ctx, (frame) => events.push(frame));
   t.after(() => live.dispose());
-  return { ctx, live, events, children, calls, dockerCalls };
+  return { ctx, live, events, children, execs, docker, containerId };
 }
 const open = (
   operation: 'exec' | 'logs' | 'ps' | 'inspect' = 'exec',
@@ -83,6 +93,7 @@ const open = (
         : { ...base, operation };
   return { v: 1, type: 'live.open', sessionId: 'session-1', request };
 };
+const settle = () => new Promise((resolve) => setImmediate(resolve));
 
 test('wake channel discriminates live frames before cursor arithmetic and preserves fallback cursor', async (t) => {
   const requests: string[] = [];
@@ -165,50 +176,72 @@ test('wake channel bounds outbound buffering and disposes sessions on close', as
   assert.equal(disconnected, 1, 'A backlogged socket should dispose its live sessions once');
 });
 
-test('recreate service resolution pins a unique full container ID by exact Docker labels', async (t) => {
-  const { ctx, dockerCalls } = await fixture(t);
+test('service resolution pins the unique full container ID by exact Tug labels', async (t) => {
+  const { ctx, containerId, docker } = await fixture(t);
   const id = await resolveLiveContainer(ctx, { project: 'demo', service: 'web' });
   assert.equal(id, containerId, 'Resolution should return the concrete full container ID');
-  assert.deepEqual(
-    dockerCalls[0],
-    [
-      'ps',
-      '--all',
-      '--no-trunc',
-      '--quiet',
-      '--filter',
-      'label=com.docker.compose.project=demo',
-      '--filter',
-      'label=com.docker.compose.service=web',
-      '--filter',
-      'label=com.docker.compose.oneoff=False',
-    ],
-    'Resolution should scope both project and service and exclude one-off containers',
+
+  const other = await docker.createContainer('tug-demo-api-1', {
+    Image: 'app',
+    Labels: { 'tug.project': 'demo-other', 'tug.service': 'web' },
+  });
+  await docker.startContainer(other);
+  assert.equal(
+    await resolveLiveContainer(ctx, { project: 'demo', service: 'web' }),
+    containerId,
+    'a service of the same name in another project is never selected',
   );
 });
 
+test('resolution rejects missing, ambiguous and malformed selections', async (t) => {
+  const { ctx, docker } = await fixture(t);
+  await assert.rejects(
+    resolveLiveContainer(ctx, { project: 'demo', service: 'api' }),
+    /no container on this node/,
+    'a service with no container fails explicitly',
+  );
+  const dup = await docker.createContainer('tug-demo-web-2', {
+    Image: 'app',
+    Labels: { 'tug.project': 'demo', 'tug.service': 'web' },
+  });
+  await docker.startContainer(dup);
+  await assert.rejects(
+    resolveLiveContainer(ctx, { project: 'demo', service: 'web' }),
+    /multiple containers/,
+    'two containers for one service are ambiguous',
+  );
+  for (const request of [
+    { project: '../x', service: 'web' },
+    { project: 'demo', service: '--all' },
+    { project: 'demo' },
+  ])
+    await assert.rejects(resolveLiveContainer(ctx, request), /valid project and service/);
+});
+
 test('rolling resolution selects only the active revision and rejects candidate-only services', async (t) => {
-  const { ctx, dockerCalls } = await fixture(t);
+  const { ctx, docker } = await fixture(t);
   const dir = path.join(ctx.stateDir, 'projects', 'demo');
   await fs.mkdir(dir, { recursive: true });
+  const labels = { 'tug.project': 'demo', 'tug.service': 'web' };
+  for (const name of ['tug-demo-web-active', 'tug-demo-web-candidate'])
+    await docker.startContainer(
+      await docker.createContainer(name, { Image: 'app', Labels: labels }),
+    );
   const state = {
     services: {
       web: {
-        active: { project: 'demo-web-active' },
-        candidate: { project: 'demo-web-candidate' },
-        draining: [{ project: 'demo-web-old' }],
+        active: { container: 'tug-demo-web-active' },
+        candidate: { container: 'tug-demo-web-candidate' },
+        draining: [{ container: 'tug-demo-web-1' }],
       },
     },
   };
   await fs.writeFile(path.join(dir, 'rollout.json'), JSON.stringify(state));
-  await resolveLiveContainer(ctx, { project: 'demo', service: 'web' });
-  assert.ok(
-    dockerCalls[0].includes('label=com.docker.compose.project=demo-web-active'),
-    'Rolling resolution should select the serving revision project',
-  );
-  assert.ok(
-    !dockerCalls[0].some((arg) => /candidate|old/.test(arg)),
-    'Rolling resolution should exclude candidates and draining revisions',
+  const id = await resolveLiveContainer(ctx, { project: 'demo', service: 'web' });
+  assert.equal(
+    id,
+    docker.byName('tug-demo-web-active')!.id,
+    'Rolling resolution should select the serving revision, not a candidate or draining container',
   );
   await fs.writeFile(
     path.join(dir, 'rollout.json'),
@@ -224,11 +257,20 @@ test('rolling resolution selects only the active revision and rejects candidate-
 });
 
 test('agent exec acknowledges startup, preserves argv and binary input/output, and forwards exit', async (t) => {
-  const { live, calls, events, children } = await fixture(t);
+  const { live, execs, events, children, containerId } = await fixture(t);
   await live.handle(open());
   assert.deepEqual(
-    calls[0],
-    ['exec', '-i', containerId, 'printf', 'hello; $HOME'],
+    execs[0],
+    {
+      id: containerId,
+      options: {
+        cmd: ['printf', 'hello; $HOME'],
+        stdin: true,
+        tty: false,
+        columns: undefined,
+        rows: undefined,
+      },
+    },
     'Agent exec should use the pinned container and preserve command arguments',
   );
   assert.deepEqual(
@@ -270,47 +312,66 @@ test('agent exec acknowledges startup, preserves argv and binary input/output, a
   );
 });
 
-test('ps uses only selected project labels and inspect returns structured results', async (t) => {
-  const { live, calls, children, events, dockerCalls } = await fixture(t);
-  await live.handle(open('ps'));
-  assert.equal(
-    dockerCalls.length,
-    0,
-    'Project ps should not select an arbitrary service container',
-  );
-  assert.ok(
-    calls[0].includes('label=com.docker.compose.project=demo'),
-    'Project ps should filter the selected project label',
-  );
-  children[0].stdout.write('{"ID":"abc","State":"running"}\n');
-  children[0].emit('close', 0, null);
-  assert.ok(
-    events.some((event) => event.type === 'live.result' && Array.isArray(event.result)),
-    'Project ps should emit a structured result',
-  );
-  await live.handle(open('inspect'));
+test('TTY exec is allocated a terminal of the requested size', async (t) => {
+  const { live, execs, events } = await fixture(t);
+  const request = open();
+  await live.handle({
+    ...request,
+    request: { ...request.request, tty: true, columns: 100, rows: 30 },
+  } as AgentLiveControlFrame);
   assert.deepEqual(
-    calls[1],
-    ['inspect', '--type', 'container', containerId],
-    'Inspect should use a pinned service container',
+    execs[0].options,
+    { cmd: ['printf', 'hello; $HOME'], stdin: true, tty: true, columns: 100, rows: 30 },
+    'the Engine API exec is created with a TTY and its console size',
+  );
+  assert.deepEqual(events[0], { v: 1, type: 'live.started', sessionId: 'session-1' });
+});
+
+test('ps lists the selected project from the Engine and inspect returns structured results', async (t) => {
+  const { live, events, containerId } = await fixture(t);
+  await live.handle(open('ps'));
+  const result = events.find((event) => event.type === 'live.result');
+  assert.ok(
+    result?.type === 'live.result' &&
+      Array.isArray(result.result) &&
+      result.result.length === 1 &&
+      result.result[0].Id === containerId,
+    'Project ps emits the project containers as a structured result',
+  );
+  assert.deepEqual(
+    events.map((event) => event.type),
+    ['live.started', 'live.result', 'live.exit'],
+    'a query is acknowledged, answers once and exits',
+  );
+
+  await live.handle({ ...open('inspect'), sessionId: 'session-2' });
+  const inspected = events.find(
+    (event) => event.type === 'live.result' && event.sessionId === 'session-2',
+  );
+  assert.ok(
+    inspected?.type === 'live.result' &&
+      (inspected.result as { Id: string }[])[0].Id === containerId,
+    'Inspect returns the pinned service container',
   );
 });
 
 test('cancellation while resolution is pending prevents process creation and buffered stdin replay', async (t) => {
-  let resolve!: (value: { out: string; err: string }) => void;
-  const { live, calls, events } = await fixture(t, {
-    docker: async () =>
-      new Promise((done) => {
-        resolve = done;
-      }),
-  });
+  const { live, events, execs, docker } = await fixture(t);
+  let release!: () => void;
+  const list = docker.listContainers.bind(docker);
+  docker.listContainers = async (filter, all) => {
+    await new Promise<void>((done) => {
+      release = done;
+    });
+    return list(filter, all);
+  };
   const starting = live.handle(open());
-  while (!resolve) await new Promise((done) => setImmediate(done));
+  while (!release) await settle();
   const input = live.handle({ v: 1, type: 'live.stdin', sessionId: 'session-1', data: 'eA==' });
   await live.handle({ v: 1, type: 'live.cancel', sessionId: 'session-1' });
-  resolve({ out: containerId, err: '' });
+  release();
   await Promise.all([starting, input]);
-  assert.equal(calls.length, 0, 'Cancelled pending resolution should never create a process');
+  assert.equal(execs.length, 0, 'Cancelled pending resolution should never create a process');
   assert.ok(
     events.length === 1 && events[0].type === 'live.exit' && events[0].cancelled,
     'Pending cancellation should emit one terminal cancelled frame',
@@ -318,18 +379,20 @@ test('cancellation while resolution is pending prevents process creation and buf
 });
 
 test('stdin arriving during resolution is delivered after startup in order', async (t) => {
-  let resolve!: (value: { out: string; err: string }) => void;
-  const { live, children } = await fixture(t, {
-    docker: async () =>
-      new Promise((done) => {
-        resolve = done;
-      }),
-  });
+  const { live, children, docker } = await fixture(t);
+  let release!: () => void;
+  const list = docker.listContainers.bind(docker);
+  docker.listContainers = async (filter, all) => {
+    await new Promise<void>((done) => {
+      release = done;
+    });
+    return list(filter, all);
+  };
   const starting = live.handle(open());
   const first = live.handle({ v: 1, type: 'live.stdin', sessionId: 'session-1', data: 'YQ==' });
   const second = live.handle({ v: 1, type: 'live.stdin', sessionId: 'session-1', data: 'Yg==' });
-  while (!resolve) await new Promise((done) => setImmediate(done));
-  resolve({ out: containerId, err: '' });
+  while (!release) await settle();
+  release();
   await Promise.all([starting, first, second]);
   const chunks: Buffer[] = [];
   for (let chunk = children[0].stdin.read(); chunk !== null; chunk = children[0].stdin.read())
@@ -342,9 +405,8 @@ test('stdin arriving during resolution is delivered after startup in order', asy
 });
 
 test('channel disconnect disposes active exec and logs processes', async (t) => {
-  const { ctx } = await fixture(t);
+  const { ctx, children } = await fixture(t);
   const socket = new Socket();
-  const children: Child[] = [];
   const channel = new AgentWakeChannel(
     ctx,
     () => {
@@ -353,19 +415,9 @@ test('channel disconnect disposes active exec and logs processes', async (t) => 
     },
     { onLive: (frame) => live.handle(frame), onDisconnect: () => live.dispose() },
   );
-  const live = new AgentLiveOperations(
-    ctx,
-    (frame) => {
-      channel.send(frame);
-    },
-    {
-      spawn: () => {
-        const child = new Child();
-        children.push(child);
-        return child;
-      },
-    },
-  );
+  const live = new AgentLiveOperations(ctx, (frame) => {
+    channel.send(frame);
+  });
   t.after(() => {
     channel.close();
     live.dispose();
@@ -374,37 +426,25 @@ test('channel disconnect disposes active exec and logs processes', async (t) => 
   await live.handle(open());
   await live.handle({ ...open('logs'), sessionId: 'logs' });
   socket.close();
-  assert.equal(children.length, 2, 'Exec and logs should each create their own child process');
+  assert.equal(children.length, 2, 'Exec and logs should each create their own stream');
   assert.ok(
     children.every((child) => child.killed),
-    'Disconnect should terminate every active live child',
+    'Disconnect should terminate every active live stream',
   );
 });
 
-test('agent sends terminal errors for TTY unavailability, invalid input, selection errors, and wrong node', async (t) => {
-  const { live, events, children } = await fixture(t);
-  await live.handle({
-    ...open(),
-    request: { ...open().request, tty: true },
-  } as AgentLiveControlFrame);
-  assert.ok(
-    events[0].type === 'live.exit' && events[0].error?.includes('PTY adapter'),
-    'Unavailable TTY should fail explicitly through the protocol',
-  );
+test('agent sends terminal errors for invalid input, selection errors, wrong node and a daemon failure', async (t) => {
+  const { live, events, children, docker } = await fixture(t);
   await live.handle(open());
   await live.handle({ v: 1, type: 'live.stdin', sessionId: 'session-1', data: '!not-base64!' });
   assert.ok(
     events.at(-1)?.type === 'live.exit' && 'error' in events.at(-1)!,
     'Malformed base64 should produce a terminal protocol error',
   );
-  assert.equal(
-    children[0].killed,
-    true,
-    'Invalid input should terminate the corresponding process',
-  );
+  assert.equal(children[0].killed, true, 'Invalid input should terminate the corresponding stream');
   assert.equal(
     events.filter((event) => event.type === 'live.exit').length,
-    2,
+    1,
     'Failure cleanup should not emit an extra cancelled exit',
   );
   await live.handle({
@@ -416,19 +456,31 @@ test('agent sends terminal errors for TTY unavailability, invalid input, selecti
     end?.type === 'live.exit' && end.error?.includes('different node'),
     'Wrong-node requests should be rejected',
   );
-  for (const out of ['', containerId + '\n' + 'b'.repeat(64), '--invalid']) {
-    const f = await fixture(t, { docker: async () => ({ out, err: '' }) });
-    await f.live.handle(open());
-    assert.ok(
-      f.events[0].type === 'live.exit' && f.events[0].error,
-      'Missing, ambiguous, or malformed container selections should produce a terminal error',
-    );
-    assert.equal(f.calls.length, 0, 'Failed selections should never spawn exec');
-  }
+
+  const missing = await fixture(t);
+  await missing.live.handle({
+    ...open(),
+    request: { ...open().request, service: 'nope' },
+  } as AgentLiveControlFrame);
+  assert.ok(
+    missing.events[0].type === 'live.exit' && missing.events[0].error,
+    'A service with no container produces a terminal error',
+  );
+  assert.equal(missing.execs.length, 0, 'Failed selections should never start an exec');
+
+  docker.execStart = async () => {
+    throw new Error('container is paused');
+  };
+  await live.handle({ ...open(), sessionId: 'session-3' });
+  const failure = events.at(-1);
+  assert.ok(
+    failure?.type === 'live.exit' && failure.error === 'container is paused',
+    'An Engine failure while starting the exec is reported to the operator',
+  );
 });
 
 test('noninteractive agent exec closes stdin and repeated open is idempotent', async (t) => {
-  const { live, calls, children } = await fixture(t);
+  const { live, execs, children } = await fixture(t);
   const request = open();
   assert.equal(request.request.operation, 'exec', 'Fixture should create an exec request');
   await live.handle({
@@ -436,16 +488,8 @@ test('noninteractive agent exec closes stdin and repeated open is idempotent', a
     request: { ...request.request, interactive: false },
   } as AgentLiveControlFrame);
   await live.handle(request);
-  assert.equal(
-    calls.length,
-    1,
-    'Replayed open frames should not create duplicate Docker processes',
-  );
-  assert.equal(
-    calls[0].includes('-i'),
-    false,
-    'Noninteractive protocol requests should omit Docker input attachment',
-  );
+  assert.equal(execs.length, 1, 'Replayed open frames should not create duplicate execs');
+  assert.equal(execs[0].options.stdin, false, 'Noninteractive requests omit the input attachment');
   assert.equal(
     children[0].stdin.writableEnded,
     true,
@@ -453,75 +497,36 @@ test('noninteractive agent exec closes stdin and repeated open is idempotent', a
   );
 });
 
-test('project ps includes base and active rolling revisions while excluding candidate, draining and foreign projects', async (t) => {
-  const { ctx, live, calls, children, events } = await fixture(t);
+test('project ps returns only the selected project and never a rolling candidate state of another', async (t) => {
+  const { ctx, live, events, docker } = await fixture(t);
+  const foreign = await docker.createContainer('tug-foreign-web-1', {
+    Image: 'app',
+    Labels: { 'tug.project': 'foreign', 'tug.service': 'web' },
+  });
+  await docker.startContainer(foreign);
   const dir = path.join(ctx.stateDir, 'projects', 'demo');
   await fs.mkdir(dir, { recursive: true });
   await fs.writeFile(
     path.join(dir, 'rollout.json'),
-    JSON.stringify({
-      services: {
-        web: {
-          active: { project: 'demo-web-active' },
-          candidate: { project: 'demo-web-candidate' },
-          draining: [{ project: 'demo-web-old' }],
-        },
-        api: { active: { project: 'demo-api-active' }, draining: [] },
-        legacy: { active: { project: 'demo' }, draining: [] },
-        pending: {
-          candidate: { project: 'demo-pending-candidate' },
-          draining: [{ project: 'demo-pending-old' }],
-        },
-      },
-    }),
-  );
-  const foreign = path.join(ctx.stateDir, 'projects', 'foreign');
-  await fs.mkdir(foreign, { recursive: true });
-  await fs.writeFile(
-    path.join(foreign, 'rollout.json'),
-    JSON.stringify({
-      services: { web: { active: { project: 'foreign-web-active' }, draining: [] } },
-    }),
+    JSON.stringify({ services: { web: { candidate: { container: 'x' }, draining: [] } } }),
   );
   await live.handle(open('ps'));
-  for (let index = 0; index < 3; index++) {
-    assert.ok(children[index], 'Every selected active project should have a Docker query');
-    children[index].stdout.write(JSON.stringify({ ID: String(index), State: 'running' }) + '\n');
-    children[index].emit('close', 0, null);
-  }
-  assert.deepEqual(
-    calls.map((args) => args.at(-1)),
-    [
-      'label=com.docker.compose.project=demo',
-      'label=com.docker.compose.project=demo-web-active',
-      'label=com.docker.compose.project=demo-api-active',
-    ],
-    'PS should query the base and every unique active rolling project with exact label filters only',
-  );
-  assert.equal(
-    calls.length,
-    3,
-    'PS should exclude candidate, draining, foreign, and duplicate legacy project queries',
-  );
   const result = events.find((event) => event.type === 'live.result');
   assert.ok(
-    result?.type === 'live.result' && Array.isArray(result.result) && result.result.length === 3,
-    'Project PS should return the combined base and active revision container rows',
+    result?.type === 'live.result' && (result.result as unknown[]).length === 1,
+    'only the selected project containers are listed',
   );
-  assert.equal(
-    events.filter((event) => event.type === 'live.exit').length,
-    1,
-    'Project aggregation should produce exactly one terminal exit',
-  );
+  assert.equal(events.filter((event) => event.type === 'live.exit').length, 1);
 });
 
 test('oversized structured results fail within frame limits while subsequent sessions remain usable', async (t) => {
-  const { live, children, events } = await fixture(t);
+  const { live, events, docker, containerId } = await fixture(t);
+  const inspect = docker.inspectContainer.bind(docker);
+  docker.inspectContainer = async (id) => ({
+    ...(await inspect(id)),
+    big: '€'.repeat(Math.ceil(LIVE_MAX_FRAME_BYTES / 3)),
+  });
   await live.handle(open('inspect'));
-  children[0].stdout.write(
-    JSON.stringify([{ value: '€'.repeat(Math.ceil(LIVE_MAX_FRAME_BYTES / 3)) }]),
-  );
-  children[0].emit('close', 0, null);
   assert.equal(
     events.filter((event) => event.type === 'live.result').length,
     0,
@@ -537,11 +542,11 @@ test('oversized structured results fail within frame limits while subsequent ses
       Buffer.byteLength(JSON.stringify(frame)) <= LIVE_MAX_FRAME_BYTES,
       'Every emitted agent frame should fit the shared protocol byte limit',
     );
-  await live.handle(open('ps'));
-  children[1].stdout.write('{"ID":"healthy"}\n');
-  children[1].emit('close', 0, null);
+  docker.inspectContainer = inspect;
+  await live.handle({ ...open('ps'), sessionId: 'session-2' });
   assert.ok(
-    events.some((event) => event.type === 'live.result'),
+    events.some((event) => event.type === 'live.result' && event.sessionId === 'session-2'),
     'Rejecting an oversized result should leave the shared channel usable for later operations',
   );
+  assert.ok(containerId);
 });
