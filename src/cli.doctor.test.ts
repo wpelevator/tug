@@ -23,7 +23,7 @@ test('doctor waits for the node diagnostic instead of returning the queued comma
     const registered = await fetch(`${base}/api/v1/nodes/register`, { method: 'POST', headers: { Authorization: 'Bearer op-doctor-wait', 'content-type': 'application/json' }, body: JSON.stringify({ name: 'n1' }) });
     assert.equal(registered.status, 200, 'the diagnostic target should register');
     const started = Date.now();
-    const env = { ...process.env, TUG_CONTROL_URL: base, TUG_TOKEN: 'op-doctor-wait' };
+    const env: NodeJS.ProcessEnv = { ...process.env, TUG_CONTROL_URL: base, TUG_TOKEN: 'op-doctor-wait' };
     delete env.TUG_CONFIG;
     await assert.rejects(
       exec(process.execPath, [entry, 'doctor', '--node', 'n1', '--timeout', '1'], { cwd: dir, env }),
