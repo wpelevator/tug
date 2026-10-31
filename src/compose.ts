@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import yaml from 'js-yaml';
 import crypto from 'node:crypto';
+import { isDuration } from './util.ts';
 import type { ComposeFile, ComposeService, ComposeVolume, DesiredState, ServiceEndpoint, ServiceSpec } from './protocol.ts';
 
 export async function readCompose(file = 'docker-compose.yml'): Promise<ComposeFile> {
@@ -49,6 +50,33 @@ function validateIngress(name: string, svc: ComposeService, seen: Map<string, st
   if (tls === 'custom' && (!ingress.cert || !ingress.key)) errors.push(`${name}: ingress.tls custom requires cert and key (names of project secrets holding the PEM certificate and private key)`);
 }
 
+/** True when the service opted in to `x-tug.rollout.strategy: rolling`. */
+export function isRolling(svc: ComposeService | undefined): boolean { return svc?.['x-tug']?.rollout?.strategy === 'rolling'; }
+
+function validateRollout(name: string, svc: ComposeService, errors: string[]): void {
+  const rollout = svc['x-tug']?.rollout;
+  if (rollout === undefined) return;
+  if (!rollout || typeof rollout !== 'object' || Array.isArray(rollout)) { errors.push(`${name}: x-tug.rollout must be an object`); return; }
+  for (const key of Object.keys(rollout)) if (key !== 'strategy' && key !== 'drain') errors.push(`${name}: x-tug.rollout.${key} is not supported (supported: strategy, drain)`);
+  const strategy = rollout.strategy ?? 'recreate';
+  if (!['recreate', 'rolling'].includes(strategy)) { errors.push(`${name}: rollout.strategy must be recreate or rolling`); return; }
+  if (rollout.drain !== undefined && !isDuration(rollout.drain)) errors.push(`${name}: rollout.drain must be a duration such as 30s, 500ms or 1m`);
+  if (strategy !== 'rolling') return;
+  const lp = svc['x-tug']!;
+  if (!lp.ingress) errors.push(`${name}: rollout.strategy rolling requires x-tug.ingress (the edge is what switches traffic between revisions)`);
+  if (!lp.health) errors.push(`${name}: rollout.strategy rolling requires x-tug.health (a new revision only takes over once it is healthy)`);
+  const ports = svc.ports || [];
+  if (ports.length !== 1) errors.push(`${name}: rollout.strategy rolling requires exactly one entry in ports (the ingress port); each revision gets its own host port`);
+}
+
+function validateProjectExtension(compose: ComposeFile, errors: string[]): void {
+  const ext = compose['x-tug'];
+  if (ext === undefined) return;
+  if (!ext || typeof ext !== 'object' || Array.isArray(ext)) { errors.push('x-tug must be an object'); return; }
+  for (const key of Object.keys(ext)) if (key !== 'rollback') errors.push(`x-tug.${key} is not supported (supported: rollback)`);
+  if (ext.rollback !== undefined && !['auto', 'manual'].includes(ext.rollback)) errors.push('x-tug.rollback must be auto or manual');
+}
+
 export function validateCompose(compose: ComposeFile | undefined, nodes: string[] = []): asserts compose is ComposeFile {
   if (!compose?.services || typeof compose.services !== 'object') throw new Error('compose file must define services');
   const errors: string[] = [];
@@ -61,7 +89,9 @@ export function validateCompose(compose: ComposeFile | undefined, nodes: string[
     if (nodes.length > 1 && selected.length === 0) errors.push(`${name}: multi-node deployments require x-tug.placement.nodes`);
     if (lp.replicas && selected.length && lp.replicas !== selected.length) errors.push(`${name}: replicas must match placement node count in v1`);
     validateIngress(name, svc, ingressHosts, errors);
+    validateRollout(name, svc, errors);
   }
+  validateProjectExtension(compose, errors);
   if (errors.length) throw new Error(errors.join('; '));
 }
 
@@ -88,18 +118,36 @@ export function crossNodeHosts(project: string, endpoints: Record<string, Servic
   return hosts;
 }
 
+/** Removes `depends_on` references to `names` (services that live in another Compose project). */
+export function dropDependsOn(svc: ComposeService, names: ReadonlySet<string>): void {
+  const deps = svc.depends_on;
+  if (Array.isArray(deps)) { const kept = deps.filter(d => !names.has(String(d))); if (kept.length) svc.depends_on = kept; else delete svc.depends_on; }
+  else if (deps && typeof deps === 'object') {
+    const kept = Object.fromEntries(Object.entries(deps).filter(([dep]) => !names.has(dep)));
+    if (Object.keys(kept).length) svc.depends_on = kept; else delete svc.depends_on;
+  }
+}
+
 function extraHostsList(value: ComposeService['extra_hosts']): string[] {
   if (!value) return [];
   return Array.isArray(value) ? value.map(String) : Object.entries(value).map(([k, v]) => `${k}:${v}`);
 }
 
-export function composeForNode(desiredState: DesiredState, nodeName: string, secrets: Record<string, string> = {}, endpoints: Record<string, ServiceEndpoint[]> = {}): ComposeFile {
+/**
+ * The Compose file for one node. `exclude` names services placed here that are managed outside the
+ * node's main project (rolling services run in their own revision projects); they still count as
+ * local, so they get no cross-node `extra_hosts` entry, and `depends_on` references to them are dropped.
+ */
+export function composeForNode(desiredState: DesiredState, nodeName: string, secrets: Record<string, string> = {}, endpoints: Record<string, ServiceEndpoint[]> = {}, exclude: ReadonlySet<string> = new Set()): ComposeFile {
   const out: ComposeFile & { volumes?: Record<string, ComposeVolume> } = { services: {}, volumes: {} };
   const outVolumes = out.volumes!;
   const usedVolumes = new Set<string>();
+  const placed = new Set<string>();
   for (const [name, src] of Object.entries(desiredState.compose.services || {})) {
     const nodes = desiredState.services[name].placement?.nodes || [];
     if (nodes.length && !nodes.includes(nodeName)) continue;
+    placed.add(name);
+    if (exclude.has(name)) continue;
     const svc: ComposeService = { ...src, image: desiredState.services[name].image };
     delete svc.build; delete svc['x-tug']; delete svc.deploy; delete svc.container_name;
     if (desiredState.services[name].artifact) svc.pull_policy = 'never';
@@ -108,9 +156,10 @@ export function composeForNode(desiredState: DesiredState, nodeName: string, sec
       const source = typeof vol === 'string' ? vol.split(':')[0] : vol.source;
       if (source && desiredState.compose?.volumes?.[source]) usedVolumes.add(source);
     }
+    if (exclude.size) dropDependsOn(svc, exclude);
     out.services[name] = svc;
   }
-  const hosts = crossNodeHosts(desiredState.project, endpoints, new Set(Object.keys(out.services)));
+  const hosts = crossNodeHosts(desiredState.project, endpoints, placed);
   if (hosts.length) {
     for (const svc of Object.values(out.services)) {
       const existing = extraHostsList(svc.extra_hosts);

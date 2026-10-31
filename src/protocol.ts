@@ -30,8 +30,23 @@ export interface IngressSpec {
   key?: string;
 }
 
+export type RolloutStrategy = 'recreate' | 'rolling';
+
+/** `x-tug.rollout`: how a service is replaced on a new deployment. `recreate` (default) is `docker compose up -d`. */
+export interface RolloutSpec {
+  strategy?: RolloutStrategy;
+  /** How long the previous revision keeps running after the new one takes over (default `30s`); covers the ingress switch. */
+  drain?: string | number;
+}
+
 /** The `x-tug` extension on a Compose service. */
-export interface ServiceExtension { placement?: Placement; replicas?: number; health?: HealthCheck; ingress?: IngressSpec }
+export interface ServiceExtension { placement?: Placement; replicas?: number; health?: HealthCheck; ingress?: IngressSpec; rollout?: RolloutSpec }
+
+/** The top-level `x-tug` extension of a Compose file. */
+export interface ProjectExtension {
+  /** `auto` creates a rollback deployment when a deployment fails on health; `manual` (default) only reports it. */
+  rollback?: 'auto' | 'manual';
+}
 
 /** The `x-tug` extension on a top-level Compose volume. */
 export interface VolumeExtension {
@@ -54,6 +69,7 @@ export interface ComposeService {
   deploy?: unknown;
   ports?: (string | number | { target?: number; published?: number | string; [key: string]: unknown })[];
   extra_hosts?: string[] | Record<string, string>;
+  depends_on?: string[] | Record<string, unknown>;
   'x-tug'?: ServiceExtension;
   [key: string]: unknown;
 }
@@ -63,6 +79,7 @@ export interface ComposeVolume { 'x-tug'?: VolumeExtension; [key: string]: unkno
 export interface ComposeFile {
   services: Record<string, ComposeService>;
   volumes?: Record<string, ComposeVolume>;
+  'x-tug'?: ProjectExtension;
   [key: string]: unknown;
 }
 
@@ -175,7 +192,12 @@ export interface NetworkConfig {
 /** Body of `POST /agent/v1/wireguard/key` (also accepted as `wgPublicKey` on register and enroll). */
 export interface WgKeyRequest { publicKey: string }
 
-export interface ServiceEndpoint { node: string; address: string }
+export interface ServiceEndpoint {
+  node: string;
+  address: string;
+  /** Host port of the serving revision; set only for rolling services, whose port changes per revision. */
+  port?: number;
+}
 /** project -> service -> endpoints of nodes whose copy of the service reports `serving`. */
 export type ServiceEndpoints = Record<string, Record<string, ServiceEndpoint[]>>;
 
@@ -211,7 +233,17 @@ export interface IngressStatus {
 export type ProjectHealth = 'serving' | 'skipped' | 'failed';
 export type RolloutState = 'pending' | 'pulling' | 'starting' | 'health_checking' | 'serving';
 
-export interface ServiceState { rolloutState: RolloutState; image?: string; healthyAt?: string }
+export interface ServiceState {
+  rolloutState: RolloutState;
+  image?: string;
+  healthyAt?: string;
+  /** Rolling services: published host port of the revision that is serving. */
+  port?: number;
+  /** Rolling services: hash identifying the serving revision. */
+  rolloutRevision?: string;
+  /** Rolling services: why the newest revision was rejected while this (older) one keeps serving. */
+  rolloutError?: string;
+}
 
 export interface ProjectStatus {
   project: string;

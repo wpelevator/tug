@@ -35,6 +35,8 @@ declare module 'express-serve-static-core' {
 interface HttpError extends Error { status?: number; lock?: LockRow }
 const httpError = (status: number, message: string): HttpError => Object.assign(new Error(message), { status });
 
+/** Versions of rollback deployments start with this; `tug deploy` may not use it, which is how automatic rollback tells them apart. */
+const ROLLBACK_VERSION_PREFIX = 'rollback-';
 const ACTIVE_STATES_SQL = ACTIVE_DEPLOYMENT_STATES.map(s => `'${s}'`).join(',');
 
 const PORT = Number(process.env.PORT || 8080);
@@ -163,10 +165,68 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
     if (!required.size) return;
     const statuses = await db.all<{ node_id: string; observed_version: string; health: string; status_json: string }[]>('SELECT node_id,observed_version,health,status_json FROM node_statuses WHERE project_id=?', projectId);
     const byNode = new Map(statuses.map(s => [s.node_id, s]));
-    const failed = [...required].some(node => (state.revision ? JSON.parse(byNode.get(node)?.status_json || '{}').observedRevision === state.revision : byNode.get(node)?.observed_version === state.version) && byNode.get(node)?.health === 'failed');
-    if (failed) await db.run('UPDATE deployments SET state=?,error_message=?,updated_at=? WHERE id=? AND state=?', 'failed', 'one or more assigned nodes reported failed health', now(), project.current_deployment_id, 'rolling_out');
+    const reportsRevision = (node: string) => state.revision ? JSON.parse(byNode.get(node)?.status_json || '{}').observedRevision === state.revision : byNode.get(node)?.observed_version === state.version;
+    const failed = [...required].some(node => reportsRevision(node) && byNode.get(node)?.health === 'failed');
+    if (failed) {
+      const marked = await db.run('UPDATE deployments SET state=?,error_message=?,updated_at=? WHERE id=? AND state=?', 'failed', 'one or more assigned nodes reported failed health', now(), project.current_deployment_id, 'rolling_out');
+      if (marked.changes === 1) scheduleAutoRollback(projectId, project.current_deployment_id, state);
+    }
     const ok = [...required].every(node => (state.revision ? JSON.parse(byNode.get(node)?.status_json || '{}').observedRevision === state.revision : byNode.get(node)?.observed_version === state.version) && ['serving', 'skipped'].includes(byNode.get(node)?.health ?? ''));
     if (ok) await db.run('UPDATE deployments SET state=?,updated_at=? WHERE id=? AND state=?', 'succeeded', now(), project.current_deployment_id, 'rolling_out');
+  }
+
+  async function recordEvent(projectId: string, deploymentId: string | null, level: string, type: string, message: string, metadata: Record<string, unknown> = {}): Promise<void> {
+    await db.run('INSERT INTO events(id,project_id,deployment_id,node_id,level,type,message,metadata_json,created_at) VALUES(?,?,?,?,?,?,?,?,?)', id('evt'), projectId, deploymentId, null, level, type, message, JSON.stringify(metadata), now());
+  }
+
+  /**
+   * Creates a rollback deployment that copies the most recent earlier deployment's desired state under a
+   * new revision. Shared by `POST /api/v1/rollback` and automatic rollback; the caller holds the writer queue.
+   * `auto` only considers `succeeded` deployments and requires `failedDeploymentId` to still be current.
+   */
+  async function createRollback(project: string, opts: { force?: boolean; auto?: boolean; failedDeploymentId?: string }): Promise<{ deployment: DeploymentRow | undefined; desiredState: DesiredState }> {
+    let lock;
+    try {
+      lock = await acquireProjectLock(project, opts.auto ? 'auto-rollback' : 'rollback');
+      const active = await db.get<Pick<DeploymentRow, 'id' | 'state'>>(`SELECT id,state FROM deployments WHERE project_id=? AND state IN (${ACTIVE_STATES_SQL}) ORDER BY created_at DESC LIMIT 1`, project);
+      if (active && !opts.force) throw httpError(409, `deployment ${active.id} is already ${active.state}; retry with force to rollback anyway`);
+      const current = await db.get('SELECT current_deployment_id FROM projects WHERE id=?', project);
+      if (opts.failedDeploymentId && current?.current_deployment_id !== opts.failedDeploymentId) throw httpError(409, `deployment ${opts.failedDeploymentId} is no longer the current deployment`);
+      const states = opts.auto ? `'succeeded'` : `'succeeded','rolling_out'`;
+      const previousDs = await db.get(`SELECT ds.*, d.version AS deployment_version FROM desired_states ds JOIN deployments d ON d.id=ds.deployment_id
+        WHERE ds.project_id=? AND ds.deployment_id != ? AND d.state IN (${states}) ORDER BY ds.created_at DESC LIMIT 1`, project, current?.current_deployment_id || '');
+      if (!previousDs) throw httpError(404, 'no previous deployment found');
+      const ts = now(); const depId = id('dep');
+      const previousState: DesiredState = JSON.parse(previousDs.state_json);
+      previousState.revision = depId;
+      await db.run('INSERT INTO deployments(id,project_id,version,state,created_at,updated_at) VALUES(?,?,?,?,?,?)', depId, project, `${ROLLBACK_VERSION_PREFIX}${previousState.version}-${Date.now()}`, 'rolling_out', ts, ts);
+      await db.run('INSERT INTO desired_states(id,project_id,deployment_id,version,state_json,created_at) VALUES(?,?,?,?,?,?)', id('ds'), project, depId, previousState.version, JSON.stringify(previousState), ts);
+      await db.run('UPDATE projects SET current_deployment_id=?,updated_at=? WHERE id=?', depId, now(), project);
+      return { deployment: await db.get<DeploymentRow>('SELECT * FROM deployments WHERE id=?', depId), desiredState: previousState };
+    } finally { await releaseLock(lock); }
+  }
+
+  /**
+   * With `x-tug.rollback: auto`, a deployment that just turned `failed` is rolled back to the previous
+   * `succeeded` one. Rollback deployments are never rolled back (their versions carry a reserved prefix
+   * that `tug deploy` cannot use), so a bad rollback target cannot loop. Runs in the background so a
+   * busy writer queue never blocks agent status reports; the outcome is recorded as an event either way.
+   */
+  function scheduleAutoRollback(projectId: string, deploymentId: string, state: DesiredState): void {
+    if (state.compose['x-tug']?.rollback !== 'auto') return;
+    void (async () => {
+      const failed = await db.get<DeploymentRow>('SELECT * FROM deployments WHERE id=?', deploymentId);
+      if (failed?.version.startsWith(ROLLBACK_VERSION_PREFIX)) {
+        await recordEvent(projectId, deploymentId, 'warn', 'deployment.auto_rollback_skipped', `rollback deployment ${failed.version} failed; not rolling back a rollback`);
+        return;
+      }
+      try {
+        const out = await withWriter(() => createRollback(projectId, { auto: true, failedDeploymentId: deploymentId }));
+        await recordEvent(projectId, out.deployment!.id, 'warn', 'deployment.auto_rollback', `deployment ${deploymentId} (${failed?.version}) reported failed health; rolled back to ${out.desiredState.version} as deployment ${out.deployment!.id}`, { failedDeploymentId: deploymentId, rollbackDeploymentId: out.deployment!.id, version: out.desiredState.version });
+      } catch (e) {
+        await recordEvent(projectId, deploymentId, 'warn', 'deployment.auto_rollback_skipped', `deployment ${deploymentId} failed but automatic rollback was not possible: ${errMessage(e)}`).catch(() => {});
+      }
+    })().catch(e => console.error('auto rollback failed:', errMessage(e)));
   }
 
   async function currentDesired(projectId: string): Promise<DesiredStateRow | undefined> {
@@ -397,6 +457,7 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
       if (!body || typeof body !== 'object') throw httpError(400, 'deployment payload is required');
       const project: string = body.project || 'site'; const compose: ComposeFile = body.compose; const version = body.version || `git-${Date.now()}`;
       if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(project) || typeof version !== 'string' || !version.length) throw httpError(400, 'invalid project or version');
+      if (version.startsWith(ROLLBACK_VERSION_PREFIX)) throw httpError(400, `version cannot start with "${ROLLBACK_VERSION_PREFIX}" (reserved for rollback deployments)`);
       const nodes = await db.all<{ name: string }[]>('SELECT name FROM nodes ORDER BY created_at,name');
       try { validateCompose(compose, nodes.map(n => n.name)); } catch (e) { throw httpError(400, errMessage(e)); }
       const builtServices = Object.entries(compose.services).filter(([, service]) => service.build).map(([name]) => name);
@@ -512,25 +573,7 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
     res.json({ ok: true });
   }));
   post('/api/v1/rollback', authOperator, async (req, res) => withWriter(async () => {
-    const project = req.body.project || 'site';
-    let lock;
-    try {
-      lock = await acquireProjectLock(project, 'rollback');
-      const active = await db.get<Pick<DeploymentRow, 'id' | 'state'>>(`SELECT id,state FROM deployments WHERE project_id=? AND state IN (${ACTIVE_STATES_SQL}) ORDER BY created_at DESC LIMIT 1`, project);
-      if (active && !req.body.force) return res.status(409).json({ error: `deployment ${active.id} is already ${active.state}; retry with force to rollback anyway` });
-      const current = await db.get('SELECT current_deployment_id FROM projects WHERE id=?', project);
-      const previousDs = await db.get(`SELECT ds.*, d.version AS deployment_version FROM desired_states ds JOIN deployments d ON d.id=ds.deployment_id
-        WHERE ds.project_id=? AND ds.deployment_id != ? AND d.state IN ('succeeded','rolling_out') ORDER BY ds.created_at DESC LIMIT 1`, project, current?.current_deployment_id || '');
-      if (!previousDs) return res.status(404).json({ error: 'no previous deployment found' });
-      const ts = now(); const depId = id('dep');
-      const previousState = JSON.parse(previousDs.state_json);
-      previousState.revision = depId;
-      await db.run('INSERT INTO deployments(id,project_id,version,state,created_at,updated_at) VALUES(?,?,?,?,?,?)', depId, project, `rollback-${previousState.version}-${Date.now()}`, 'rolling_out', ts, ts);
-      await db.run('INSERT INTO desired_states(id,project_id,deployment_id,version,state_json,created_at) VALUES(?,?,?,?,?,?)', id('ds'), project, depId, previousState.version, JSON.stringify(previousState), ts);
-      await db.run('UPDATE projects SET current_deployment_id=?,updated_at=? WHERE id=?', depId, now(), project);
-      res.json({ deployment: await db.get('SELECT * FROM deployments WHERE id=?', depId), desiredState: previousState });
-    } catch (e) { sendError(res, e); }
-    finally { await releaseLock(lock); }
+    try { res.json(await createRollback(req.body.project || 'site', { force: Boolean(req.body.force) })); } catch (e) { sendError(res, e); }
   }));
   get('/api/v1/volumes', authOperator, async (req, res) => res.json({ volumes: await db.all('SELECT * FROM volumes WHERE project_id=? ORDER BY name', req.query.project || 'site') }));
   remove('/api/v1/volumes/:name', authOperator, async (req, res) => {
