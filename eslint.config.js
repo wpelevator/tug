@@ -24,7 +24,7 @@ export default [
         },
     },
     {
-        files: ["test/**/*.ts", "src/**/*.test.ts"],
+        files: ["tests/**/*.ts", "src/**/*.test.ts"],
         languageOptions: {
             globals: {
                 ...globals.node,

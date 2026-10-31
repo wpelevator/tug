@@ -1,6 +1,6 @@
 services:
   registry:
-    build: ./services/registry
+    build: ./tools/docker/registry
     container_name: tug-registry-it
     ports:
       - "15000:5000"
@@ -31,7 +31,7 @@ services:
   provisioner:
     build: .
     entrypoint: ["node"]
-    command: ["scripts/integration-provision.js"]
+    command: ["tools/scripts/integration-provision.js"]
     restart: "no"
     environment:
       TUG_CONTROL_URL: http://control:8080
@@ -46,7 +46,7 @@ services:
   vps-a:
     build:
       context: .
-      dockerfile: integration/Dockerfile.fake-vps
+      dockerfile: tools/docker/fake-vps/Dockerfile
     privileged: true
     environment:
       TUG_NODE_NAME: vps-a
@@ -64,7 +64,7 @@ services:
   vps-b:
     build:
       context: .
-      dockerfile: integration/Dockerfile.fake-vps
+      dockerfile: tools/docker/fake-vps/Dockerfile
     privileged: true
     environment:
       TUG_NODE_NAME: vps-b
@@ -82,7 +82,7 @@ services:
   vps-c:
     build:
       context: .
-      dockerfile: integration/Dockerfile.fake-vps
+      dockerfile: tools/docker/fake-vps/Dockerfile
     privileged: true
     environment:
       TUG_NODE_NAME: vps-c

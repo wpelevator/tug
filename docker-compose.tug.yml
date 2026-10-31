@@ -1,6 +1,6 @@
 services:
   registry:
-    build: ./services/registry
+    build: ./tools/docker/registry
     container_name: tug-registry
     ports:
       - "5000:5000"

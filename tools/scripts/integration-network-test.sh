@@ -32,6 +32,6 @@ TUG_CONFIG=$(mktemp)
 export TUG_CONFIG TUG_TOKEN="$TOKEN" TUG_CONTROL_URL="$CONTROL"
 node src/cli.ts init --control-url "$CONTROL" --token "$TOKEN" --project netdemo
 node src/cli.ts deploy -f docker-compose.network-sample.yml --project netdemo --no-build-upload --timeout 240
-COMPOSE_PROJECT_NAME="$PROJECT" node scripts/integration-verify-network.js
+COMPOSE_PROJECT_NAME="$PROJECT" node tools/scripts/integration-verify-network.js
 
 echo "network integration test passed"
