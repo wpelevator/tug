@@ -58,7 +58,7 @@ function appCompose(version, { healthPort = 80 } = {}) {
           '-c',
           `echo ${version} > /usr/share/nginx/html/index.html && exec nginx -g 'daemon off;'`,
         ],
-        ports: ['8080:80'],
+        ports: [{ mode: 'ingress', target: 80, published: '8080', protocol: 'tcp' }],
         'x-tug': {
           placement: { nodes: ['vps-a'] },
           health: { type: 'http', port: healthPort, path: '/', retries: 4, interval: '1s' },
