@@ -140,8 +140,9 @@ program.command('node-revoke-registry-token <name>').description('revoke a node\
   console.log(JSON.stringify(await request('POST', `/api/v1/nodes/${encodeURIComponent(name)}/revoke-registry-token`, {}), null, 2));
 });
 
-program.command('scale <service> <replicas>').description('scale a service to N replicas across matching nodes').action(async (service: string, replicas: string, o: { project?: string }) => {
-  const cfg = await loadCfg(); const project = o.project || cfg.project!;
+program.command('scale <service> <replicas>').description('scale a service to N replicas across matching nodes').action(async (service: string, replicas: string, o: CommonOpts) => {
+  const cfg = await loadCfg(); const project = o.project || cfg.project || 'site';
+  if (!/^[1-9]\d*$/.test(replicas)) throw new Error('replicas must be a positive integer');
   console.log(JSON.stringify(await request('POST', '/api/v1/scale', { project, service, replicas: Number(replicas) }), null, 2));
 });
 program.command('control-token').description('print local dev operator token if available').action(async()=> console.log((await fs.readFile('./data/operator.token','utf8')).trim()));

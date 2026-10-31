@@ -115,7 +115,9 @@ The test layers, the metrics milestones are held to and the backlog of mocked te
 - [ ] M5 true PTY allocation and resize for `exec -t`, plus agent/daemon log streams
 - [ ] M5 remote process termination when an exec session is cancelled or disconnected
 - [x] M6 node labels, label placement, replicas spread, `global` mode, `scale` command
-- [x] M7 `nfs` volume type for shared docroot over the mesh
+- [x] M7 `nfs` volume type for shared docroot over the mesh (exporter must already run an NFS server)
+- [ ] M7 later: Tug installs and configures the NFS server on the exporter node
+- [ ] M6/M7 verified on real hosts
 - [x] M8 scoped API tokens and CI deploy example ([Access control](access-control.md))
 - [ ] M8 outbound webhooks
 - [x] M8 named multi-operator tokens in the audit trail

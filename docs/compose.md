@@ -112,7 +112,7 @@ volumes:
 ```
 
 Control records volumes per project. A volume is included in a node's Compose file only when a service on that node uses it and, if the volume has `placement.nodes`, the node is listed. `tug volume-remove` refuses to remove a persistent volume without `--delete-data`, and refuses any volume still referenced by a service in the current deployment. `--delete-data` queues a `docker volume rm` on the volume's placement node.
-Volumes with `x-tug.type: nfs` (or `driver: nfs`) are exported by their placement node and generated as NFS-driver volumes on consuming nodes, so a shared document root can be mounted by several app nodes over the mesh. The exporter is a single point of failure.
+Volumes with `x-tug.type: nfs` share a directory exported by their placement node. Tug does not install or start an NFS server: the exporter node must already export `x-tug.export` (default `/srv/tug/<volume>`) to the other nodes, ideally restricted to the mesh. On the exporter, services bind-mount that directory; on every other node using the volume, Tug generates a Compose volume that mounts `<exporter>:<export>` over NFS. Control stamps the exporter's overlay IP (with the mesh) or node address into `x-tug.address` at deploy time unless you set it. The exporter is a single point of failure.
 
 ## Secrets in services
 

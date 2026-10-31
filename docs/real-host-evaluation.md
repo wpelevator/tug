@@ -17,7 +17,7 @@ Each site is `wordpress:6.8-apache` plus `mariadb:11.4` on the same node, with a
 
 The second `wp1` deploy, images already pulled, reached `succeeded` in 20 seconds. `wp2`, including the image pull onto the other host, took 57 seconds. After both were up, `app` had 263 MB available of 961 MB and `edge` had 331 MB. MariaDB RSS was 85 MB and 116 MB only because the compose file sets `--innodb-buffer-pool-size=48M`. WordPress RSS was about 120 MB on each host.
 
-This did not exercise the plan.md topology: three PHP-FPM nodes, a front node speaking FastCGI, a separate database node, Memcached, and an NFS docroot. Those need M6 and M7, which are not built. With two 1 GB hosts, that layout would not fit even if the fields existed.
+This did not exercise the plan.md topology: three PHP-FPM nodes, a front node speaking FastCGI, a separate database node, Memcached, and an NFS docroot. Those needed M6 and M7, which have since been implemented but not validated on real hosts. With two 1 GB hosts, that layout would not fit even if the fields existed.
 
 ## What I followed, and what I actually did
 
@@ -80,7 +80,7 @@ Caddy dials `127.0.0.1` for a service on the ingress node and the overlay addres
 
 Names injected with `extra_hosts` point at the node address, and the client must use the published host port. A MariaDB that is not published is reachable only on the Compose network, which means the same node. Publishing `3306` so WordPress on the other node can use the name puts the database on an address the mesh can route to. Binding it to the overlay IP only is the same undocumented trick as the app port. The generated `wp2` compose file had no `extra_hosts`, which is correct: both of its services are on `edge`.
 
-So the deployable WordPress shape is app and database on one node, one project per site. The plan.md shape, app nodes talking to a database node over a service name, is not the shape this tool deploys. Copying that example fails for more than missing nodes. It uses `domains`, `upstream`, `upstreamProtocol`, `sticky`, and `type: shared` / `driver: nfs`. Current validation accepts `placement`, `replicas` (must equal the node count), `health`, `ingress`, and `rollout`. The rest is either ignored or not implemented. M7 is still the NFS docroot. M6 is still label placement and `replicas: N` spread. Ingress is an HTTP reverse proxy, not FastCGI.
+So the deployable WordPress shape is app and database on one node, one project per site. The plan.md shape, app nodes talking to a database node over a service name, is not the shape this tool deploys. Copying that example fails for more than missing nodes. It uses `domains`, `upstream`, `upstreamProtocol`, `sticky`, and `type: shared` / `driver: nfs`. Current validation accepts `placement`, `replicas` (must equal the node count), `health`, `ingress`, and `rollout`. The rest is either ignored or not implemented. At the time of this evaluation M6 (label placement, `replicas: N` spread) and M7 (NFS docroot) were not built; both are implemented now but unvalidated on real hosts. Ingress is an HTTP reverse proxy, not FastCGI.
 
 Rolling the WordPress container would be the wrong next step. A rolling revision publishes a different host port and shares the named volume with the old revision. Two PHP processes on one `wp-content` is how you corrupt uploads. The rollout docs say volumes are shared and that databases should stay on `recreate`. They do not say that about a PHP docroot. I left both sites on recreate.
 

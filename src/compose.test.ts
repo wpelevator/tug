@@ -80,9 +80,13 @@ test('buildDesiredState global mode selects every matching node', () => {
 });
 
 test('composeForNode generates an NFS volume on consuming nodes', () => {
-  const compose = { services: { web: { image: 'nginx', volumes: ['shared:/data'], 'x-tug': { placement: { nodes: ['n2'] } } } }, volumes: { shared: { 'x-tug': { type: 'nfs', placement: { nodes: ['n1'] } } } } };
+  const compose = { services: { web: { image: 'nginx', volumes: ['shared:/data'], 'x-tug': { placement: { nodes: ['n1', 'n2'] } } } }, volumes: { shared: { 'x-tug': { type: 'nfs', placement: { nodes: ['n1'] } } } } };
   const ds = buildDesiredState({ project: 'site', version: 'v1', compose, registry: 'reg' });
   const c = composeForNode(ds, 'n2', {}, {}, new Set(), { n1: '10.0.0.1' });
-  assert.equal(c.volumes?.shared?.driver, 'nfs', 'consumers should get an nfs driver volume');
-  assert.equal((c.volumes?.shared?.driver_opts as any)?.device, ':/shared', 'nfs device should name the volume');
+  const opts = c.volumes?.shared?.driver_opts as any;
+  assert.equal(opts?.type, 'nfs', 'consumers should get an nfs-typed volume');
+  assert.equal(opts?.device, ':/srv/tug/shared', 'nfs device should be the default export path');
+  assert.match(opts?.o, /addr=10\.0\.0\.1/, 'consumers should mount the exporter address');
+  const exp = composeForNode(ds, 'n1', {}, {}, new Set(), {});
+  assert.equal((exp.volumes?.shared?.driver_opts as any)?.o, 'bind', 'exporter should bind-mount the exported directory');
 });

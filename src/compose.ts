@@ -188,16 +188,16 @@ export function composeForNode(desiredState: DesiredState, nodeName: string, sec
     const isNfs = xe.type === 'nfs' || xe.driver === 'nfs' || (xe.type === 'shared' && xe.driver === 'nfs');
     if (isNfs) {
       const exporter = nodes[0];
-      if (!exporter || exporter === nodeName || nodes.includes(nodeName)) {
-        // Exporter node (or unplaced volume): keep the volume definition as-is.
+      const exportPath = xe.export || `/srv/tug/${name}`;
+      if (!exporter) { // unplaced: nothing to export, plain local volume
         const cleaned = { ...vol }; delete cleaned['x-tug'];
-        outVolumes[name] = Object.keys(cleaned).length ? cleaned : vol;
+        outVolumes[name] = cleaned;
+      } else if (nodes.includes(nodeName)) {
+        // The exporter mounts the exported directory directly; an NFS server on this node must export it.
+        outVolumes[name] = { driver: 'local', driver_opts: { type: 'none', o: 'bind', device: exportPath } };
       } else {
-        const addr = nodeAddresses[exporter] || xe.address || exporter;
-        outVolumes[name] = {
-          driver: 'nfs',
-          driver_opts: { type: 'nfs', o: `addr=${addr},rw,nolock,soft`, device: `:/${name}` }
-        };
+        const addr = xe.address || nodeAddresses[exporter] || exporter;
+        outVolumes[name] = { driver: 'local', driver_opts: { type: 'nfs', o: `addr=${addr},rw,nolock,soft`, device: `:${exportPath}` } };
       }
       continue;
     }

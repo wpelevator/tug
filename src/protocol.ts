@@ -54,8 +54,10 @@ export interface VolumeExtension {
   driver?: string;
   persistent?: boolean;
   placement?: Placement;
-  /** NFS exporter address override (defaults to the placement node name). */
+  /** NFS exporter address; control fills in the exporter's overlay IP (or node address) at deploy time. */
   address?: string;
+  /** Directory exported by the NFS server on the exporter node (default `/srv/tug/<volume>`). */
+  export?: string;
 }
 
 export type BuildConfig = string | { context?: string; dockerfile?: string; [key: string]: unknown };

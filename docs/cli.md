@@ -31,9 +31,9 @@ Remote source uploads always exclude `.tug.json` files and the selected CLI conf
 
 ## Nodes
 
-- `tug node-install <ssh-target> --name <node> [--agent-control-url <url>] [--install-docker] [--address <ip>] [--public-address <ip>] [--registry <host>] [--mesh] [--wg-port <port>] [--image <tag>] [--build-local-image] [--http-only-dev]` registers a node and installs its agent. `--mesh` enables host networking and `NET_ADMIN` and adds WireGuard kernel and UDP-port checks; `--wg-port` defaults to `51820`.
-- `tug node-enroll [--name <node>] [--agent-control-url <url>] [--install-docker] [--ttl <seconds>] [--uses <n>] [--ca <ca.pem>] [--image <tag>] [--mesh] [--json] [--http-only-dev]` mints an enrollment key and prints a Docker command, or cloud-init with `--install-docker`. TTL defaults to `3600` seconds and uses to `1`. Without `--name`, the host uses its hostname. The printed image must be pullable by the new host; a development `tug:local` override must already be loaded there.
-- `tug node-register <node> [--address <ip>] [--public-address <ip>]` registers a node and prints its tokens without installing it.
+- `tug node-install <ssh-target> --name <node> [--agent-control-url <url>] [--install-docker] [--address <ip>] [--public-address <ip>] [--label <label>]... [--registry <host>] [--mesh] [--wg-port <port>] [--image <tag>] [--build-local-image] [--http-only-dev]` registers a node and installs its agent. `--mesh` enables host networking and `NET_ADMIN` and adds WireGuard kernel and UDP-port checks; `--wg-port` defaults to `51820`.
+- `tug node-enroll [--name <node>] [--agent-control-url <url>] [--install-docker] [--label <label>]... [--ttl <seconds>] [--uses <n>] [--ca <ca.pem>] [--image <tag>] [--mesh] [--json] [--http-only-dev]` mints an enrollment key and prints a Docker command, or cloud-init with `--install-docker`. TTL defaults to `3600` seconds and uses to `1`. Without `--name`, the host uses its hostname. The printed image must be pullable by the new host; a development `tug:local` override must already be loaded there.
+- `tug node-register <node> [--address <ip>] [--public-address <ip>] [--label <label>]...` registers a node and prints its tokens without installing it.
 - `tug node-rotate-wg-key <node> [--timeout <seconds>]` requests a new WireGuard keypair and waits for the result; timeout defaults to `60` seconds.
 - `tug node-ingress <node> [--disable]` enables the managed Caddy ingress role, or removes it with `--disable`.
 - `tug node-rotate-registry-token <node>` and `tug node-revoke-registry-token <node>` manage registry pull tokens.
@@ -75,6 +75,7 @@ Use a created token anywhere `TUG_TOKEN` works, for example `TUG_TOKEN=tug_tok_.
 ## Services and volumes
 
 - `tug restart <service> [--timeout <seconds>]` restarts a service and waits for the result; timeout defaults to `60` seconds.
+- `tug scale <service> <replicas>` changes how many matching nodes run a service, spreading by count over nodes that carry the service's `placement.labels` (all nodes without labels), and updates the current desired state without a new deployment. `global` services run on every matching node and are scaled to that set. The next `deploy` re-resolves placement from the Compose file.
 - `tug exec <service> [-i, --interactive] [-t, --tty] [--node <name>] [-- <command> ...]` executes a command in the current service container, defaulting to `sh`. Arguments are passed directly without a shell. `-i` forwards stdin. `-t` requires a local terminal but currently fails explicitly because the agent runtime has no PTY backend; use non-TTY `-i` for interactive programs until PTY support lands. Use `--node` when a service has more than one placement.
 - `tug logs <service> [--tail <n>] [-f, --follow] [--node <name>]` fetches recent service logs through the durable command queue, or follows them live with `-f`; the default is `200` lines. `--node` applies to followed logs and is required when the service has more than one eligible node.
 - `tug ps [--node <name>]` prints live per-container state as JSON. Without `--node`, the project must resolve to exactly one eligible connected node.
