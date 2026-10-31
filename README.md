@@ -18,6 +18,38 @@ Deploy Docker Compose projects to one or more ordinary Linux VPSes through a sma
 - Optional WireGuard mesh between nodes, health-aware cross-node service names and a managed Caddy ingress with automatic HTTPS, each opt-in. See [Networking](docs/networking.md).
 - Control-plane backup and restore, and `tug doctor` diagnostics.
 
+## How it fits together
+
+```text
+  tug CLI / CI (API token)
+       |
+       |  HTTPS: deploy, status, logs, exec
+       v
++-------------------------------------+
+| Control plane                       |
+|   Control API (role-checked)        |
+|   SQLite: desired states, secrets   |
+|   image builds, saved images        |
+|   registry (optional)               |
++-------------------------------------+
+       ^                       ^
+       |  agents dial out: work, status,
+       |  WebSocket wake and live sessions
+       |                       |
++------+------------+   +------+------------------+
+| Node app1         |   | Node app2 (ingress node)|
+|   Agent           |<->|   Agent                 |
+|   Docker Compose  |   |   Docker Compose        |
+|   services        |   |   services              |
+|                   |   |   managed Caddy ingress |
++-------------------+   +-------------------------+
+        <-> optional WireGuard mesh between nodes
+
+  SSH is used only by the CLI to install the control plane and nodes.
+```
+
+Operators and CI talk to the control API. The control plane stores desired state and builds images; each agent dials out to fetch the work for its node, applies it with Docker Compose and reports health back, so nodes behind NAT need no inbound ports. SSH is used only to install control and agents. The optional WireGuard mesh and Caddy ingress are described in [Networking](docs/networking.md), and every flow in detail in [Architecture](docs/architecture.md).
+
 ## Quick start
 
 Install the CLI (Node >= 22.18), or run it without installing through `npx @wpelevator/tug`:
