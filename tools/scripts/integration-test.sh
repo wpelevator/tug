@@ -28,8 +28,9 @@ done
 
 TUG_CONFIG=$(mktemp)
 export TUG_CONFIG TUG_TOKEN="$TOKEN" TUG_CONTROL_URL="$CONTROL"
+node -e 'require("node:fs").writeFileSync(process.env.TUG_CONFIG, "{}")'
 node src/cli.ts init --control-url "$CONTROL" --token "$TOKEN" --project sample
-node src/cli.ts secret:set SAMPLE_SECRET --project sample --value integration-secret
+node src/cli.ts secret-set SAMPLE_SECRET --project sample --value integration-secret
 node src/cli.ts deploy -f docker-compose.sample.yml --project sample --no-build-upload
 node tools/scripts/integration-verify.js
 TUG_REGISTRY_URL=http://localhost:15000 node tools/scripts/integration-verify-registry-auth.js

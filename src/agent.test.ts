@@ -38,7 +38,7 @@ function fakeControl(secrets: () => SecretsResponse): FakeControl {
 }
 
 async function makeCtx(overrides: Partial<AgentContext> = {}): Promise<AgentContext> {
-  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'lp-agent-unit-'));
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-agent-unit-'));
   return { docker: fakeDocker().docker, http: fakeControl(() => ({ secrets: {}, versions: {} })).http, nodeName: 'n1', stateDir, apply: true, controlUrl: 'http://control.test', token: 'tok', ...overrides };
 }
 

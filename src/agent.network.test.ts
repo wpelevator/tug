@@ -33,7 +33,7 @@ function harness(work: () => Partial<WorkResponse>) {
   return { log, posts, docker, host, http };
 }
 const makeCtx = async (h: ReturnType<typeof harness>, overrides: Partial<AgentContext> = {}): Promise<AgentContext> => ({
-  docker: h.docker, host: h.host, http: h.http, nodeName: 'n1', stateDir: await fs.mkdtemp(path.join(os.tmpdir(), 'lp-agent-net-')),
+  docker: h.docker, host: h.host, http: h.http, nodeName: 'n1', stateDir: await fs.mkdtemp(path.join(os.tmpdir(), 'tug-agent-net-')),
   apply: true, controlUrl: 'http://control.test', token: 'tok', mesh: true, ...overrides
 });
 

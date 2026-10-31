@@ -1,4 +1,4 @@
-set -euo pipefail
+set -eu
 mkdir -p /opt/tug-control /var/lib/tug-control
 cat > /opt/tug-control/docker-compose.yml <<'YAML'
 {{COMPOSE}}YAML

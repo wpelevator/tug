@@ -19,7 +19,7 @@ function dockerInspect(name: string) {
 }
 
 test('changing one secret only recreates the service that references it', { timeout: 120000 }, async (t) => {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'lp-secret-restart-'));
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-secret-restart-'));
   projectDir = path.join(dir, 'projects', 'lpsecrettest');
 
   let secretVersions = { SECRET_A: 1 };

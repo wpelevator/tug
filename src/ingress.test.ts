@@ -106,7 +106,7 @@ function fakeCaddy(initial: Partial<FakeCaddy['state']> = {}): FakeCaddy {
   return { docker, calls, state };
 }
 const work = (caddyfile: string, files: Record<string, string> = {}): IngressWork => ({ caddyfile, files, routes: [], warnings: [] });
-const stateDirFor = () => fs.mkdtemp(path.join(os.tmpdir(), 'lp-ingress-'));
+const stateDirFor = () => fs.mkdtemp(path.join(os.tmpdir(), 'tug-ingress-'));
 
 test('first reconcile creates the Caddy container with persistent volumes, loads config and starts it', async () => {
   const f = fakeCaddy();

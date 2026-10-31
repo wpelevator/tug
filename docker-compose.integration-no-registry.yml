@@ -1,0 +1,52 @@
+services:
+  control:
+    build: .
+    command: control
+    environment:
+      PORT: 8080
+      TUG_DATA_DIR: /data
+      TUG_OPERATOR_TOKEN: integration-token
+    ports:
+      - "127.0.0.1:${TUG_IMAGE_TEST_PORT:-18081}:8080"
+    volumes:
+      - control-data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  provisioner:
+    build: .
+    entrypoint: ["node"]
+    command: ["tools/scripts/integration-provision.js"]
+    environment:
+      TUG_CONTROL_URL: http://control:8080
+      TUG_TOKEN: integration-token
+      TUG_TOKEN_DIR: /tokens
+      TUG_NODES: image-node
+    volumes:
+      - node-tokens:/tokens
+    depends_on:
+      - control
+
+  node:
+    build:
+      context: .
+      dockerfile: tools/docker/fake-vps/Dockerfile
+    privileged: true
+    tmpfs:
+      - /run
+    environment:
+      TUG_NODE_NAME: image-node
+      TUG_CONTROL_URL: http://control:8080
+      TUG_APPLY: "true"
+      TUG_POLL_INTERVAL_MS: 500
+    volumes:
+      - node-tokens:/tokens:ro
+      - node-docker:/var/lib/docker
+      - node-state:/var/lib/tug
+    depends_on:
+      - provisioner
+
+volumes:
+  control-data:
+  node-tokens:
+  node-docker:
+  node-state:

@@ -9,7 +9,7 @@ import type { AddressInfo } from 'node:net';
 import { json } from '../tests/helpers.ts';
 
 async function makeServer() {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'lp-cbak-'));
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-cbak-'));
   process.env.TUG_DATA_DIR = dir;
   process.env.TUG_CONTROL_BACKUP_DIR = path.join(dir, 'control-backups');
   process.env.TUG_CONTROL_RESTORE_DIR = path.join(dir, 'control-restore');

@@ -12,7 +12,7 @@ import { json } from '../tests/helpers.ts';
 const NETWORK_ENV = ['TUG_MESH', 'TUG_MESH_CIDR', 'TUG_SERVICE_DNS', 'TUG_WG_PORT', 'TUG_ACME_EMAIL'];
 
 async function server(env: Record<string, string> = {}) {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'lp-net-'));
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-net-'));
   for (const key of NETWORK_ENV) delete process.env[key];
   Object.assign(process.env, { TUG_DATA_DIR: dir, TUG_OPERATOR_TOKEN: 'op-net-token', TUG_REGISTRY: 'registry.test', TUG_PUSH: 'false' }, env);
   const app = await createApp();
@@ -23,9 +23,9 @@ async function server(env: Record<string, string> = {}) {
   const agent = (token: string) => ({ Authorization: `Bearer ${token}`, 'content-type': 'application/json' });
   const work = async (token: string) => json(await fetch(`${base}/agent/v1/work`, { headers: agent(token) }));
   const register = async (name: string, body: Record<string, unknown> = {}) => json(await post('/api/v1/nodes/register', { name, ...body }));
-  const report = (token: string, node: string, project: string, services: string[]) => post('/agent/v1/status', {
+  const report = async (token: string, node: string, project: string, services: string[]) => post('/agent/v1/status', {
     node, commandResults: [],
-    projects: [{ project, observedVersion: 'v1', health: 'serving', services, serviceStates: Object.fromEntries(services.map(s => [s, { rolloutState: 'serving' }])) }]
+    projects: [{ project, observedVersion: 'v1', observedRevision: (await work(token)).desiredStates.find((state: { project: string }) => state.project === project)?.revision, health: 'serving', services, serviceStates: Object.fromEntries(services.map(s => [s, { rolloutState: 'serving' }])) }]
   }, agent(token));
   return { base, post, agent, work, register, report, close: () => new Promise(resolve => srv.close(resolve)) };
 }
@@ -36,7 +36,7 @@ test('with every networking layer off, the work response and node info are uncha
     const reg = await s.register('n1', { wgPublicKey: undefined });
     assert.equal(reg.node.overlay_ip, null, 'no overlay address is allocated');
     const w = await s.work(reg.agentToken);
-    assert.deepEqual(Object.keys(w).sort(), ['commands', 'desiredStates', 'nodeId', 'serverTime'], 'no network, serviceEndpoints or ingress keys');
+    assert.deepEqual(Object.keys(w).sort(), ['commands', 'desiredStates', 'nodeId', 'retainedImages', 'serverTime'], 'no network, serviceEndpoints or ingress keys');
     assert.equal((await s.post('/agent/v1/wireguard/key', { publicKey: generateWgKeyPair().publicKey }, s.agent(reg.agentToken))).status, 409, 'key endpoint refuses when the mesh is off');
     assert.equal((await s.post('/api/v1/nodes/n1/rotate-wg-key', {})).status, 409, 'rotation refuses when the mesh is off');
   } finally { await s.close(); }

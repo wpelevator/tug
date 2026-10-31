@@ -68,7 +68,11 @@ export interface ComposeFile {
 
 // ---- Desired state -----------------------------------------------------------------------------
 
+export interface ImageArtifact { buildId: string; imageRef: string; imageId: string; platform: string; sha256: string; sizeBytes: number }
+export interface LocalImageUpload { service: string; imageRef: string; imageId: string; platform: string; sha256: string; sizeBytes: number; field: string }
+
 export interface ServiceSpec {
+  artifact?: ImageArtifact;
   image?: string;
   build: BuildConfig | null;
   placement: Placement;
@@ -77,6 +81,7 @@ export interface ServiceSpec {
 }
 
 export interface DesiredState {
+  revision?: string;
   project: string;
   version: string;
   services: Record<string, ServiceSpec>;
@@ -136,6 +141,7 @@ export interface WorkResponse {
   nodeId: string;
   desiredStates: DesiredState[];
   commands: Command[];
+  retainedImages?: string[];
   /** WireGuard mesh config for this node; present only when the mesh is enabled on control. */
   network?: NetworkConfig;
   /** Healthy cross-node endpoints per project and service; present only when service DNS is enabled. */
@@ -210,6 +216,7 @@ export interface ServiceState { rolloutState: RolloutState; image?: string; heal
 export interface ProjectStatus {
   project: string;
   observedVersion: string;
+  observedRevision?: string;
   health: ProjectHealth;
   services?: string[];
   serviceStates?: Record<string, ServiceState>;

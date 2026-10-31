@@ -18,7 +18,7 @@ export interface SecretRow { id: string; project_id: string; name: string; encry
 export interface VolumeRow { id: string; project_id: string; name: string; type: string; driver: string | null; node_id: string | null; config_json: string; created_at: string; updated_at: string }
 export interface CommandRow { id: string; node_id: string; project_id: string | null; type: string; state: string; payload_json: string | null; result_json: string | null; attempts: number; run_after: string | null; deadline: string | null; created_at: string; updated_at: string }
 export interface LockRow { name: string; owner: string; expires_at: string; created_at: string }
-export interface AppliedStateRow { project: string; version: string; applied_at: string; service_states_json: string; secret_versions_json: string }
+export interface AppliedStateRow { project: string; version: string; revision: string | null; applied_at: string; service_states_json: string; secret_versions_json: string }
 
 export async function openDb(filename: string): Promise<Db> {
   await ensureDir(path.dirname(filename));
@@ -36,6 +36,7 @@ export async function openAgentDb(filename: string): Promise<Db> {
 CREATE TABLE IF NOT EXISTS applied_state(
   project TEXT PRIMARY KEY,
   version TEXT,
+  revision TEXT,
   applied_at TEXT,
   service_states_json TEXT,
   secret_versions_json TEXT
@@ -54,7 +55,7 @@ CREATE TABLE IF NOT EXISTS enroll_tokens(token_hash TEXT PRIMARY KEY, name TEXT,
 CREATE TABLE IF NOT EXISTS deployments(id TEXT PRIMARY KEY, project_id TEXT, version TEXT, state TEXT, created_at TEXT, updated_at TEXT, error_message TEXT);
 CREATE TABLE IF NOT EXISTS desired_states(id TEXT PRIMARY KEY, project_id TEXT, deployment_id TEXT, version TEXT, state_json TEXT, created_at TEXT);
 CREATE TABLE IF NOT EXISTS node_statuses(id TEXT PRIMARY KEY, node_id TEXT, project_id TEXT, observed_version TEXT, status_json TEXT, health TEXT, updated_at TEXT, UNIQUE(node_id, project_id));
-CREATE TABLE IF NOT EXISTS builds(id TEXT PRIMARY KEY, project_id TEXT, deployment_id TEXT, service TEXT, source_hash TEXT, image_ref TEXT, state TEXT, logs_path TEXT, created_at TEXT, updated_at TEXT);
+CREATE TABLE IF NOT EXISTS builds(id TEXT PRIMARY KEY, project_id TEXT, deployment_id TEXT, service TEXT, source_hash TEXT, image_ref TEXT, image_id TEXT, platform TEXT, sha256 TEXT, size_bytes INTEGER, artifact_path TEXT, state TEXT, logs_path TEXT, created_at TEXT, updated_at TEXT);
 CREATE TABLE IF NOT EXISTS secrets(id TEXT PRIMARY KEY, project_id TEXT, name TEXT, encrypted_value TEXT, version INTEGER, created_at TEXT, updated_at TEXT, UNIQUE(project_id, name));
 CREATE TABLE IF NOT EXISTS volumes(id TEXT PRIMARY KEY, project_id TEXT, name TEXT, type TEXT, driver TEXT, node_id TEXT, config_json TEXT, created_at TEXT, updated_at TEXT, UNIQUE(project_id, name));
 CREATE TABLE IF NOT EXISTS backups(id TEXT PRIMARY KEY, project_id TEXT, target TEXT, node_id TEXT, state TEXT, artifact_ref TEXT, metadata_json TEXT, created_at TEXT, completed_at TEXT);

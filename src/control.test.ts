@@ -9,7 +9,7 @@ import type { AddressInfo } from 'node:net';
 import { json } from '../tests/helpers.ts';
 
 async function server() {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'lp-'));
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-'));
   process.env.TUG_DATA_DIR = dir;
   process.env.TUG_OPERATOR_TOKEN = 'op-test-token';
   process.env.TUG_REGISTRY = 'registry.test';
@@ -49,7 +49,7 @@ test('registers node, stores secret, creates desired state, serves agent work', 
     work = await json(res);
     assert.equal(work.commands[0].id, restart.commandId);
     assert.equal(work.commands[1].id, command.commandId);
-    res = await fetch(`${s.base}/agent/v1/status`, { method: 'POST', headers: { Authorization: `Bearer ${registered.agentToken}`, 'content-type': 'application/json' }, body: JSON.stringify({ projects: [{ project: 'site', observedVersion: 'git-a', health: 'serving' }], commandResults: [{ commandId: restart.commandId, state: 'succeeded', result: { restarted: true } }, { commandId: command.commandId, state: 'succeeded', result: { stdout: 'ok' } }] }) });
+    res = await fetch(`${s.base}/agent/v1/status`, { method: 'POST', headers: { Authorization: `Bearer ${registered.agentToken}`, 'content-type': 'application/json' }, body: JSON.stringify({ projects: [{ project: 'site', observedVersion: 'git-a', observedRevision: work.desiredStates[0].revision, health: 'serving' }], commandResults: [{ commandId: restart.commandId, state: 'succeeded', result: { restarted: true } }, { commandId: command.commandId, state: 'succeeded', result: { stdout: 'ok' } }] }) });
     assert.equal(res.status, 200);
     res = await fetch(`${s.base}/api/v1/commands/${command.commandId}`, { headers: op() });
     assert.equal((await json(res)).state, 'succeeded');
@@ -69,7 +69,7 @@ test('failed node status fails deployment and unblocks future deploys', async ()
     assert.equal(res.status, 200);
     res = await fetch(`${s.base}/api/v1/deployments`, { method: 'POST', headers: op(), body: JSON.stringify({ project: 'site', version: 'blocked', compose }) });
     assert.equal(res.status, 409);
-    res = await fetch(`${s.base}/agent/v1/status`, { method: 'POST', headers: { Authorization: `Bearer ${registered.agentToken}`, 'content-type': 'application/json' }, body: JSON.stringify({ projects: [{ project: 'site', observedVersion: 'bad', health: 'failed' }] }) });
+    res = await fetch(`${s.base}/agent/v1/status`, { method: 'POST', headers: { Authorization: `Bearer ${registered.agentToken}`, 'content-type': 'application/json' }, body: JSON.stringify({ projects: [{ project: 'site', observedVersion: 'bad', observedRevision: (await json(await fetch(`${s.base}/agent/v1/work`, { headers: { Authorization: `Bearer ${registered.agentToken}` } }))).desiredStates[0].revision, health: 'failed' }] }) });
     assert.equal(res.status, 200);
     res = await fetch(`${s.base}/api/v1/deployments`, { method: 'POST', headers: op(), body: JSON.stringify({ project: 'site', version: 'good', compose }) });
     assert.equal(res.status, 200);

@@ -10,7 +10,7 @@ import { json } from '../tests/helpers.ts';
 import { openDb } from './db.ts';
 
 async function server() {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'lp-lock-'));
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-lock-'));
   const dbFile = path.join(dir, 'tug.db');
   process.env.TUG_DATA_DIR = dir;
   process.env.TUG_OPERATOR_TOKEN = 'op-lock-token';
