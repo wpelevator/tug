@@ -17,7 +17,7 @@ Each site is `wordpress:6.8-apache` plus `mariadb:11.4` on the same node, with a
 
 The second `wp1` deploy, images already pulled, reached `succeeded` in 20 seconds. `wp2`, including the image pull onto the other host, took 57 seconds. After both were up, `app` had 263 MB available of 961 MB and `edge` had 331 MB. MariaDB RSS was 85 MB and 116 MB only because the compose file sets `--innodb-buffer-pool-size=48M`. WordPress RSS was about 120 MB on each host.
 
-This did not exercise the plan.md topology: three PHP-FPM nodes, a front node speaking FastCGI, a separate database node, Memcached, and an NFS docroot. Those needed M6 and M7, which have since been implemented but not validated on real hosts. With two 1 GB hosts, that layout would not fit even if the fields existed.
+This did not exercise the original specification's topology (plan.md, since removed in favor of the roadmap's [reference topology](roadmap.md#reference-topology)): three PHP-FPM nodes, a front node speaking FastCGI, a separate database node, Memcached, and an NFS docroot. Those needed M6 and M7, which have since been implemented but not validated on real hosts. With two 1 GB hosts, that layout would not fit even if the fields existed.
 
 ## What I followed, and what I actually did
 
@@ -80,7 +80,7 @@ Caddy dials `127.0.0.1` for a service on the ingress node and the overlay addres
 
 Names injected with `extra_hosts` point at the node address, and the client must use the published host port. A MariaDB that is not published is reachable only on the Compose network, which means the same node. Publishing `3306` so WordPress on the other node can use the name puts the database on an address the mesh can route to. Binding it to the overlay IP only is the same undocumented trick as the app port. The generated `wp2` compose file had no `extra_hosts`, which is correct: both of its services are on `edge`.
 
-So the deployable WordPress shape is app and database on one node, one project per site. The plan.md shape, app nodes talking to a database node over a service name, is not the shape this tool deploys. Copying that example fails for more than missing nodes. It uses `domains`, `upstream`, `upstreamProtocol`, `sticky`, and `type: shared` / `driver: nfs`. Current validation accepts `placement`, `replicas` (must equal the node count), `health`, `ingress`, and `rollout`. The rest is either ignored or not implemented. At the time of this evaluation M6 (label placement, `replicas: N` spread) and M7 (NFS docroot) were not built; both are implemented now but unvalidated on real hosts. Ingress is an HTTP reverse proxy, not FastCGI.
+So the deployable WordPress shape is app and database on one node, one project per site. The original specification's shape, app nodes talking to a database node over a service name, is not the shape this tool deploys. Copying that example fails for more than missing nodes. It uses `domains`, `upstream`, `upstreamProtocol`, `sticky`, and `type: shared` / `driver: nfs`. Current validation accepts `placement`, `replicas` (must equal the node count), `health`, `ingress`, and `rollout`. The rest is either ignored or not implemented. At the time of this evaluation M6 (label placement, `replicas: N` spread) and M7 (NFS docroot) were not built; both are implemented now but unvalidated on real hosts. Ingress is an HTTP reverse proxy, not FastCGI.
 
 Rolling the WordPress container would be the wrong next step. A rolling revision publishes a different host port and shares the named volume with the old revision. Two PHP processes on one `wp-content` is how you corrupt uploads. The rollout docs say volumes are shared and that databases should stay on `recreate`. They do not say that about a PHP docroot. I left both sites on recreate.
 
@@ -108,7 +108,7 @@ The pages disagree with the path that works.
 - There is no compose example with a database, a secret, a volume, and an ingress host. The samples are nginx, busybox, and redis, placed on `vps-a`, `vps-b`, and `vps-c`. These nodes are named `app` and `edge`. A person copying the sample will fail placement and learn nothing about `depends_on` or TLS.
 - `sslip.io` is how both real-host runs got a trusted certificate without owning a domain. It belongs in the networking page next to `tls: auto`, including the rate-limit warning: sslip.io is one registered domain, and Let's Encrypt's per-domain cap is shared with everyone else using it. Two hostnames worked today. A third batch might not.
 - Preflight checks free disk (2048 MB under `/var/lib` for control, 1024 MB for a node) and never checks RAM. Both hosts have 1 GB and no swap. An unmodified MariaDB on the control host, next to the agent and the control container, is a bad idea. The control-plane page says the control VPS is not in the request path. It does not say not to put a database on that same 1 GB machine. This cluster does, because there are only two machines.
-- plan.md is still the "original specification" linked from the README, and its WordPress compose file is not a file this CLI accepts. The roadmap already says M6 and M7 serve that topology. The README does not. Someone who starts at the README and opens plan.md will try to deploy it.
+- plan.md is still the "original specification" linked from the README, and its WordPress compose file is not a file this CLI accepts. The roadmap already says M6 and M7 serve that topology. The README does not. Someone who starts at the README and opens plan.md will try to deploy it. Resolved since: plan.md was removed and the [roadmap](roadmap.md#reference-topology) now holds the reference topology.
 
 ## What I would change first
 
@@ -116,7 +116,7 @@ The pages disagree with the path that works.
 2. Make `tug deploy` print one line on success (`wp1 wp1-2 succeeded, 2 services`) and keep the JSON behind a flag. Same for `status`: project, version, health, node, without a nested string.
 3. Name the selected project in "service not found" errors.
 4. Stop publishing application ports on `0.0.0.0` by default when an ingress is set. Bind the overlay address, or `127.0.0.1` on the ingress node, in the generated file. The operator should not have to paste `10.210.0.1` into the source compose.
-5. Say in the README that the plan.md WordPress stack is not deployable yet, and point at the example that is.
+5. Say in the README that the plan.md WordPress stack is not deployable yet, and point at the example that is. (Done differently: plan.md was removed and the roadmap describes the topology Tug targets.)
 
 I would not treat this run as evidence for rolling deploys, image build, or rollback. Those were not on this path. I would treat it as evidence that a person can get two real sites up, and that the first failure still requires SSH.
 

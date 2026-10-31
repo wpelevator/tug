@@ -1,92 +1,157 @@
 # Roadmap
 
+This is the canonical statement of what Tug is for, the shape of deployment it targets, and the milestones that get it there. A milestone that is being worked on gets a `plan-{task-name}.md` working file (see [AGENTS.md](../AGENTS.md)); when it lands, its lasting decisions move into the docs and its item here is checked off.
+
 ## Goal
 
-Make Tug as useful as [uncloud](https://github.com/psviderski/uncloud) for deploying Compose apps across a handful of VPSes, then pull ahead where its central control plane is an advantage. This is the canonical roadmap. A milestone that is being worked on gets a `plan-{task-name}.md` working file (see [AGENTS.md](../AGENTS.md)); when it lands, its lasting decisions move into the docs and its item here is checked off.
+Run a few Docker Compose applications, WordPress sites first, across a handful of ordinary Linux VPSes from one small self-hosted control plane, without Kubernetes, a hosted PaaS or a cloud provider's API.
 
-Comparison baseline: uncloud around v0.20 (WireGuard mesh, service DNS, Caddy with automatic HTTPS, rolling deploys, unregistry image push, `uc exec`/`logs`/`ps`, secrets, bare-host install over SSH, no control plane). Re-check its releases before starting each milestone, since it moves quickly.
+The operator this is for runs one to a few dozen sites on two to ten VPSes, deploys from a laptop or CI, and needs the day-2 jobs covered as well as the deploy: backups and restores, one-off commands such as `wp` CLI and database upgrades, logs, safe rollouts and rollbacks, and an audit of who changed what. Feature parity with other tools is not the goal; [uncloud](https://github.com/psviderski/uncloud) and Kamal are useful baselines for what operators expect (see [Positioning](#positioning)).
+
+## Principles
+
+1. **Compose stays the app format.** `docker compose up` works locally; `x-tug` adds deployment metadata, and Compose features that cannot work across nodes are rejected rather than half-supported ([Compose extensions](compose.md#not-supported)).
+2. **Production runs immutable images.** Application code, including WordPress core, themes and plugins, ships inside an image built on control or on the operator's machine. Nothing is built or synced into a running node during reconciliation, so rollback is switching image references.
+3. **Agents reconcile desired state and only dial out.** Normal deploys need no SSH and no inbound port on nodes, so nodes behind NAT or a deny-all firewall work. Running containers keep serving while control is down.
+4. **One writer.** Desired state, locks, secrets and history live in one control plane. This keeps ordering, rollback and audit simple; availability comes from control backups and, if needed later, a warm standby.
+5. **Stateful things are pinned and backed up.** Databases and data volumes stay on their placement node unless the operator moves them, are never deleted by a deploy, and every first-class stateful service has a backup and restore path.
+6. **Private by default.** Nothing Tug deploys should become reachable from the internet unless it is routed through the ingress or the operator asked for it.
+7. **Start simple.** No distributed storage, no autoscaling, no bin-packing scheduler, no database failover. Single points of failure are allowed when they are documented.
+
+Non-goals: Kubernetes compatibility, provisioning VPSes through provider APIs, autoscaling, distributed block or file storage, database HA, a multi-tenant hosted control plane.
+
+## Reference topology
+
+These are the shapes Tug is tested against and the ones the docs should steer people toward.
+
+**Small: one node per site, or several sites per node.** App and database on the same node, the managed Caddy ingress on that node, data in local named volumes. This is what most WordPress sites need and what was validated first ([Real-host evaluation](real-host-evaluation.md)). Many sites per node is the common case, so per-project isolation, ingress routing for many hostnames and per-site backups matter more than multi-node features.
+
+**Scaled WordPress:**
+
+```text
+Internet -> ingress node (managed Caddy, TLS)
+              | HTTP, over the mesh
+              v
+         app1, app2, app3: nginx + php-fpm, image with core/themes/plugins
+              | uploads             | SQL / cache
+              v                     v
+         uploads store         db node (MariaDB), cache (Memcached)
+         (S3-compatible or NFS export of wp-content/uploads only)
+```
+
+- WordPress code is in the image (Bedrock or Composer style), so every app node runs exactly the deployed version and a rolling rollout or rollback swaps images atomically per node.
+- Only `wp-content/uploads` is shared: preferably on S3-compatible object storage through an offload plugin, otherwise on an `x-tug.type: nfs` volume. PHP code is never served from NFS, which avoids opcache stat latency, mixed versions during a sync and non-atomic rollbacks.
+- Each app node serves its own static files with nginx next to php-fpm, and the ingress balances HTTP across app nodes. There is no FastCGI across hosts and no front node that needs the shared filesystem.
+- The database, cache, uploads store and ingress are each single instances. Scaling the app tier adds PHP capacity, not availability; the docs say so, and backups are the recovery story.
+
+The earlier specification (a front nginx speaking FastCGI to app nodes over a shared NFS docroot, with WordPress files synced to NFS on deploy) was dropped for the reasons above.
 
 ## Positioning
 
-Keep the single-writer control plane rather than decentralizing it like uncloud. Tug's deploy locks, ordered deployments and rollbacks, secret versions and build-then-deploy sequencing are simple and correct with one writer and hard to get right with several. The target is one control host plus a few app nodes, running containers keep serving while control is down, and control backup/restore covers recovery. If higher availability is needed later, add a warm-standby control host before considering anything multi-writer. Close the setup and operations gaps where uncloud is ahead, and invest in what a central API makes easy and a peer mesh makes hard: deploy safety, auditability, automation, and multi-operator access.
+Keep the single-writer control plane rather than decentralizing it like uncloud. Deploy locks, ordered deployments and rollbacks, secret versions and build-then-deploy sequencing are simple and correct with one writer and hard to get right with several. Invest in what a central API makes easy and a peer mesh makes hard: deploy safety, scheduled backups with a catalog, auditability, CI automation and multi-operator access.
+
+Alternatives considered:
+
+- **uncloud** (decentralized, WireGuard mesh, container-routable networking, unregistry image push). Closest in spirit. Tug differs by having one control plane and agents that only dial out; it should match uncloud's networking model ([M12](#m12--container-networking-over-the-mesh)) rather than keep its own node-address scheme.
+- **Docker Swarm** gives an overlay network, service VIPs, rolling updates, secrets, labels and global mode out of the box, which overlaps M2, M3 and M6. It needs inbound manager and overlay ports on every node (no NAT), three managers for HA, has MTU and overlay reliability issues on VPS providers, and offers no builds, audit trail or scoped API. Not adopted; it remains the yardstick for how much Tug should build itself.
+- **Kamal** pushes over SSH with no control plane. Simpler, but no reconciliation, no central audit or scoped CI tokens, and no state for scheduled jobs such as backups.
+
+Re-check uncloud's releases at the start of each milestone; last baseline: around v0.20 (WireGuard mesh, service DNS, Caddy with automatic HTTPS, rolling deploys, unregistry image push, `uc exec`/`logs`/`ps`, secrets, bare-host install over SSH, no control plane).
 
 ## Milestones
 
+Numbers are identifiers, not order; the order is in [Sequencing](#sequencing).
+
 ### M1 — TypeScript adoption (done)
 
-Typed `src/protocol.ts` control↔agent contract and injectable agent runners, so later milestones build on typed payloads and unit-testable reconcile logic. Source and tests run as `.ts` through Node type stripping, and only the Docker image is compiled to `dist/`. See [Development](development.md) and [Architecture](architecture.md).
+Typed `src/protocol.ts` control↔agent contract and injectable agent runners. Source and tests run as `.ts` through Node type stripping; only the Docker image is compiled to `dist/`. See [Development](development.md) and [Architecture](architecture.md).
 
 ### M2 — Cross-node networking, DNS, ingress/TLS (done)
 
-WireGuard mesh with control as the IP allocator and peer registry, health-aware service DNS through `extra_hosts`, and a managed Caddy ingress with `x-tug.ingress` routes and automatic TLS. Each layer is opt-in. See [Networking](networking.md). Deferred: routable container networks over the mesh (per-project subnets in `AllowedIPs`), load-balanced service names, multiple routes per service and wildcard certificates.
+WireGuard mesh with control as the IP allocator and peer registry, health-aware service names through `extra_hosts`, and a managed Caddy ingress with `x-tug.ingress` routes and automatic TLS, each opt-in. See [Networking](networking.md). Service names resolve to node addresses and need published host ports; [M12](#m12--container-networking-over-the-mesh) replaces that.
 
-### M3 — Zero-downtime rolling deploys + automatic rollback
+### M3 — Zero-downtime rolling deploys + automatic rollback (done)
 
-Today the agent runs `docker compose up -d`, which recreates containers in place and drops traffic during a deploy. Using the M2 ingress, roll each service as: start the new container alongside the old one, health-check it, switch the ingress upstream, drain and stop the old one. Add `x-tug.rollout` options (`strategy: rolling|recreate`, `maxSurge`, drain timeout); `recreate` stays the default for stateful services such as databases.
+Rolling rollouts for ingress-fronted services (start the new revision on its own host port, health-check it, switch the Caddy upstream, drain the old one), `x-tug.rollout` options and opt-in `x-tug.rollback: auto`. See [Architecture](architecture.md#rolling-rollouts-and-automatic-rollback) and [Compose extensions](compose.md#rolling-rollouts). The numbers it is held to are in [Testing](testing.md#metrics). Rolling services have no stable cross-node name and port; M12 fixes that.
 
-Automatic rollback: convergence in `control.ts` already detects a node reporting `failed` health; add an opt-in `x-tug.rollback: auto` (or a project setting) that creates the rollback desired state automatically, reusing the existing `/api/v1/rollback` path. uncloud still lists this as upcoming.
+### M4 — Images without a registry, bare-host install (done)
 
-The numbers M3 is held to (failed requests, switchover gap, revisions started per deployment) are defined in [Testing](testing.md#metrics).
+Control stores built images as saved image files and agents download them with their own token, so no registry or daemon change is needed; bring-your-own registry stays supported. `deploy --build-local` uploads an image built on the operator's machine. `--install-docker` bootstraps Docker on apt and dnf hosts and in `node-enroll` cloud-init. See [Architecture](architecture.md#image-artifacts). Each deploy transfers the whole image; [M13](#m13--image-layer-reuse) adds layer reuse.
 
-### M4 — Setup friction: images without a registry, bare-host install
+### M5 — Streaming channel between agent and control (mostly done)
 
-Registry: a registry is only needed for services with `build:` (published images are pulled from their own source), but `control-install` requires `--registry` today. Make it optional: when no registry is configured, control keeps each built image as a compressed `docker save` file recorded in the `builds` table, and agents download it from a new agent endpoint (for example `GET /agent/v1/images/:buildId`, served only to nodes that run the service) and `docker load` it when it is missing locally, with `pull_policy: never` on those services in the generated Compose file. Bring-your-own registry stays supported for teams that already run one.
+Agent-initiated WebSocket with long-poll fallback that wakes agents when work is queued and carries live sessions: non-TTY `tug exec` with stdin, `logs -f`, `ps` and `inspect` ([Architecture](architecture.md#agent-wake-channel), [Observability](observability.md#live-commands)). Remaining, at low priority: PTY allocation and resize for `exec -t`, agent and daemon log streams, and terminating the remote process when an exec session is cancelled.
 
-Why not an internal registry container: Docker only pulls from HTTPS registries unless every node's daemon lists the registry as insecure, and control installs over plain HTTP by default, so a Tug-run registry would need certificates or per-node daemon changes. Downloading from control reuses the agent's existing token and TLS trust, needs nothing new on the nodes, and keeps agents dial-out only, so nodes behind NAT still work.
+### M6 — Placement and scheduling (done)
 
-Image files on control are kept for every version that rollback can still reach and deleted after that; agents prune old images the same way. The trade-off is that each deploy transfers the whole image with no layer reuse. If that becomes costly, a later step is for control to serve the read-only registry API from its own image store (as uncloud's unregistry does), so agents pull only missing layers.
+Node labels, `placement.labels`, `replicas: N` spread across matching nodes, `global: true` and `tug scale`. Scheduling stays central and simple: spread by count, skip stale nodes, no bin-packing. See [Compose extensions](compose.md).
 
-Local builds: allow `tug deploy --build-local` to build on the operator's machine and upload the saved image to control, which stores and serves it the same way, alongside the existing remote build on control.
+### M7 — Shared volumes (done, narrowed)
 
-Bare hosts: add an opt-in Docker Engine + Compose install step to `node-install` and `control-install`, and an `--install-docker` flag on `node-enroll` that prints a cloud-init/user-data snippet, so a bare VPS becomes a working node in one step.
+`x-tug.type: nfs` volumes: services on the exporter node bind-mount the export and other nodes mount it over NFS, through the mesh when it is on. The exporter must already run an NFS server; one exporter, a documented single point of failure. Its intended use is shared uploads in the [reference topology](#reference-topology), not shared application code. Remaining: Tug installs and configures the NFS server on the exporter node, once a host-level agent helper exists.
 
-### M5 — Streaming channel between agent and control (day-2 operations)
+### M8 — Central API advantages (partly done)
 
-`exec` and `logs -f` need a live stream, which the poll-based command queue cannot provide (how this fits logs and metrics is in [Observability](observability.md#live-commands)). Add an agent-initiated persistent connection to control (WebSocket, falling back to long-poll), keeping the property that agents only dial out so NAT'd nodes still work. On top of it build:
-
-- `tug exec SERVICE [-- cmd]`: non-TTY execution and stdin forwarding are built; true PTY shells and resize still need an agent PTY adapter
-- `tug logs SERVICE -f` streaming is built for service containers; agent/daemon logs remain for troubleshooting
-- `tug ps` and `tug inspect SERVICE` with per-container state are built
-- faster convergence through control-pushed "work available" is built
-
-### M6 — Placement and scheduling
-
-Multi-node projects currently require explicit `x-tug.placement.nodes` on every service, with `replicas` equal to the node count. Add node labels (set at `node-install`/`node-enroll`), placement by label (`placement.labels`), `replicas: N` spread across matching nodes, a `global: true` mode (one per matching node), and `tug scale SERVICE N`. The control plane already knows every node and its health, so scheduling stays central and simple: spread by count, no bin-packing.
-
-### M7 — Shared volumes for the target topology
-
-The primary use case in `plan.md` needs an NFS-backed WordPress docroot on a storage node, mounted by several app nodes. Add an `x-tug` volume type `nfs` that runs or uses an NFS export on its placement node and generates matching NFS-driver volume definitions on consuming nodes over the M2 mesh. Not distributed storage; one exporter node, documented as a single point of failure.
-
-### M8 — Central API advantages
-
-What a single control plane makes easy (the events worth sending as webhooks, and where a dashboard fits, are in [Observability](observability.md#alerting)):
-
-- scoped API tokens (deploy-only, read-only, per-project) for CI, alongside the operator token: shipped, see [Access control](access-control.md)
-- `tug deploy` from CI with a documented GitHub Actions example: shipped, in [Access control](access-control.md)
-- outbound webhooks for deployment state changes and failed health checks
-- multiple operators with named tokens, recorded in the events audit trail: shipped, in [Access control](access-control.md)
-- a minimal read-only web dashboard over the existing `/api/v1/status` and `/api/v1/events`
+Shipped: scoped API tokens (`read`, `deploy`, `admin`, per project), a GitHub Actions deploy example and named operator tokens in the audit trail ([Access control](access-control.md)). Remaining: outbound webhooks for deployment state changes, failed health checks and backup results (shared with M9 alerting). The read-only web dashboard is dropped to [Later](#later--only-if-needed): `tug status`, `/metrics` and webhooks cover the need.
 
 ### M9 — Observability
 
-Make the system's behavior visible without adding required services: event hygiene, structured logs, a Prometheus `/metrics` endpoint on control that also carries node and service stats reported by agents, a readiness endpoint, sample alert rules and webhooks. The design, the proposed metric list and what exists today are in [Observability](observability.md); event hygiene is built and the rest is proposed, not built.
+Make behavior visible without adding required services: event hygiene (done), structured logs, a Prometheus `/metrics` endpoint on control that also carries node and service stats reported by agents (Prometheus cannot scrape nodes behind NAT, which is why agents report through control), a readiness endpoint, sample alert rules and webhooks. Design and status are in [Observability](observability.md). Keep agent-reported stats small; point operators who want depth at cAdvisor or node_exporter deployed as ordinary services.
 
-Sequencing: it complements M5 (live `logs -f`, `ps`, `inspect`) and M8 (webhooks, dashboard) and its first steps depend on neither. Event hygiene came first and is done, then logs and `/metrics`, then agent-reported stats, then alerts and webhooks.
+### M10 — Private-by-default port exposure
 
-### Later / only if needed
+Today a published port such as `3306:3306` listens on every interface of the node, and Docker's iptables rules bypass host firewalls such as ufw, so a database published for cross-node service names is reachable from the internet unless a provider firewall blocks it. [Networking](networking.md#layer-c-ingress-and-tls) documents binding `127.0.0.1` or the overlay address by hand. Make it the default: when the mesh is on, the generated Compose file binds published ports that have no explicit host IP to the node's overlay address, and to `127.0.0.1` for services only the local ingress reaches; without the mesh, bind to the node's `address` and warn when that is public. An explicit host IP in `ports` (including `0.0.0.0`) is left as written. `tug doctor` reports services listening on a public address. Small, and a prerequisite for recommending the scaled topology.
 
-- Warm-standby control plane (WAL shipping or periodic backup + promote), see [Positioning](#positioning)
-- Metrics per service and node (CPU, memory, restarts): see [M9](#m9--observability) and [Observability](observability.md)
-- Managed DNS convenience domain for ingress, similar to uncloud's `*.uncloud.run`
+### M11 — Backups, restores and run-once jobs
 
-- Standalone Bun-compiled `tug` binaries and a Homebrew tap, so operators need no Node.js; see [Standalone binary](standalone-binary.md)
-## Sequencing notes
+The stateful half of principle 5, and something a central control plane does better than a mesh: one schedule, one catalog, retention and restore.
 
-M3 is implemented; the current priority is M5. [Real-server validation](real-host-evaluation.md) of M2, M3, M4, M6 and M7 has been done on two Ubuntu 24.04 hosts (Linux 6.8): SSH installation including the Docker bootstrap, a WireGuard mesh with handshakes between hosts, an agent behind bridge NAT on a real host, a publicly trusted Let's Encrypt certificate issued by the managed Caddy, service names resolving across nodes over the mesh, a remote-build deploy, an operator-local `--build-local` deploy, rollback from the retained image, a rolling rollout through the public ingress with no failed requests (over 2,200 sampled from the internet and from the ingress host), a version whose health check fails being rejected while the old revision kept serving, and the automatic rollback that followed. A later pass on freshly wiped hosts covered label placement, `global`, `tug scale`, an NFS volume mounted over the mesh, `ps`/`inspect`/`exec`/`logs -f`, and a cloud-init enrolled node behind a deny-all-inbound firewall (see [Real-host evaluation](real-host-evaluation.md#m6-m7-and-enrollment-on-fresh-hosts)). Not yet validated on real hosts: a node behind real NAT (a node behind a deny-all-inbound firewall without a public address was verified), certificate renewal, and arm64 nodes.
+- `x-tug.backup` on services and volumes: `type` (`mariadb`/`mysql`, `postgres`, `volume`), `schedule`, `retention`. Control schedules backups as agent commands on the placement node; the agent runs `mariadb-dump` or `pg_dump` in a helper container, or archives the volume, and uploads with restic to a destination configured on control (S3-compatible first, SFTP second, control disk for development only), encrypted before leaving the node.
+- A backup catalog in the control database, `tug backup run|list` and `tug restore SERVICE|VOLUME [--from ID]`, with restores taking the project lock and stopping writers first.
+- Failed or missed backups emit events and, with M8, webhooks.
+- Run-once jobs: `tug run SERVICE -- cmd` runs a one-off container from the service's current image on one of its nodes with its secrets and networks, and `x-tug.release` declares a command (for example `wp core update-db`) that runs once per deployment before or after rollout, with its output and exit code recorded on the deployment and a failure stopping the rollout.
+- Moving a stateful service to another node (`tug move SERVICE --to NODE`) as backup, stop, restore and re-place, since the pieces are the same.
 
-M3 depends on M2's ingress and needs a design decision about reaching old and new containers concurrently: either routable container addresses over the mesh or per-version host ports with Caddy upstream switching. Today's service names depend on published host ports, so this decision belongs in the M3 spec before implementation. M4 is technically independent of M2/M3. After M3, prioritize M5's day-to-day operations; M8 can provide small independent wins, while M6/M7 primarily serve the WordPress topology. M5 should follow M1 so the stream protocol lives in `protocol.ts`. M6 is independent; M7 depends on M2.
+### M12 — Container networking over the mesh
 
-Rough parity with uncloud after M2 + M3 + M4 + M5. M3's automatic rollback and M8 are where Tug pulls ahead.
+Replace node-address service names with container addressing, which removes the need to publish ports for internal traffic and gives rolling services a stable name and port.
+
+- Each node gets a fixed container subnet from control (for example a `/24` out of a mesh-wide `/16`); the agent creates the project networks inside it and adds the other nodes' subnets to their WireGuard `AllowedIPs`, with the forwarding rules this needs.
+- A small DNS resolver per node, fed by control's endpoint list, answers `service` and `service.project.tug` with the IPs of healthy containers and forwards everything else; containers use it instead of `extra_hosts`, so endpoint changes no longer recreate client containers.
+- Rolling revisions become reachable by container IP on the declared port, so per-revision host ports (`TUG_ROLLOUT_PORTS`) and the "M3 later" stable-name gap go away, and the ingress dials containers directly.
+- Published ports remain only for traffic that genuinely comes from outside the mesh.
+
+Without the mesh, today's node-address names stay as the fallback. This is the largest remaining design change; it gets its own spec before implementation, including MTU, IPv6 and how an existing project's networks are recreated.
+
+### M13 — Image layer reuse
+
+Agents download whole saved images on every deploy, which is costly for large images on several nodes. Docker treats registries on `127.0.0.0/8` as insecure-allowed by default, so the agent can serve a registry endpoint on localhost that forwards to control with the agent's existing token, and control serves the read-only registry API (manifests and blobs) from its image store. Nodes then pull only missing layers with no daemon configuration, certificates or inbound ports, and agents still only dial out. The saved-image download stays as the fallback, and bring-your-own registries are unchanged.
+
+## Later / only if needed
+
+- Warm-standby control plane (WAL shipping or periodic backup plus promote), see [Positioning](#positioning).
+- A host-level agent helper or standalone agent binary, for work a container should not do: installing the NFS server (M7), host mounts and WireGuard outside Docker. Shares the build with the standalone CLI binary ([Standalone binary](standalone-binary.md)).
+- Standalone Bun-compiled `tug` binaries and a Homebrew tap, so operators need no Node.js.
+- A minimal read-only web dashboard over `/api/v1/status` and `/api/v1/events`.
+- Load-balanced service names and multiple routes per service, wildcard certificates.
+- Managed DNS convenience domain for ingress, similar to uncloud's `*.uncloud.run`.
+
+## Sequencing
+
+Current priority order:
+
+1. M10 private-by-default ports: small, closes an exposure that affects every multi-node project today.
+2. M11 backups and run-once jobs: the main gap for the target operator.
+3. M12 container networking: removes the node-address and per-revision-port workarounds and is a prerequisite for comfortable multi-node apps.
+4. M13 image layer reuse.
+5. M9 metrics and M8/M9 webhooks.
+6. Remaining M5 items (PTY, process termination).
+
+Dependencies: M10 builds on M2. M11 uses the M5 command channel for job output and M8 webhooks for alerts but needs neither to start. M12 depends on M2 and changes M3's rollout mechanics, so its spec must keep rollouts zero-downtime. M13 is independent.
+
+The reference topology also needs a validated example: a scaled WordPress project with code in the image and uploads on S3-compatible storage or an NFS uploads volume, deployed on real hosts once M10 and M11 land.
+
+Validation so far: [real-host runs](real-host-evaluation.md) on two Ubuntu 24.04 hosts covered SSH install with the Docker bootstrap, the WireGuard mesh, an agent behind bridge NAT, a publicly trusted Let's Encrypt certificate from the managed Caddy, cross-node service names, remote and `--build-local` deploys, rollback from a retained image, a rolling rollout through the public ingress with no failed requests (over 2,200 sampled), a failing version rejected while the old revision kept serving, automatic rollback, and on freshly wiped hosts label placement, `global`, `tug scale`, an NFS volume over the mesh, `ps`/`inspect`/`exec`/`logs -f` and a cloud-init enrolled node behind a deny-all-inbound firewall ([M6, M7 and enrollment](real-host-evaluation.md#m6-m7-and-enrollment-on-fresh-hosts)). Not yet validated on real hosts: a node behind real NAT, certificate renewal, arm64 nodes and dnf-based hosts.
 
 The test layers, the metrics milestones are held to and the backlog of mocked tests are in [Testing](testing.md).
 
@@ -94,43 +159,32 @@ The test layers, the metrics milestones are held to and the backlog of mocked te
 
 - [x] M1 TypeScript adoption merged
 - [x] M2 networking, DNS, ingress/TLS: WireGuard mesh, `node-rotate-wg-key`, service DNS, `x-tug.ingress`, managed Caddy with `auto`/`custom`/`off` TLS ([Networking](networking.md))
-- [x] M3 spec written (design folded into [Architecture](architecture.md#rolling-rollouts-and-automatic-rollback), [Compose extensions](compose.md#rolling-rollouts) and [Networking](networking.md#rolling-services-and-service-names))
-- [x] M3 rolling deploys with ingress upstream switching (unit-tested, `npm run test:integration:rollout` against a fake VPS with Caddy, and run on two real hosts through the public ingress)
-- [x] M3 `x-tug.rollout` options (`strategy`, `drain`), `recreate` default for stateful services; `maxSurge` is not implemented
-- [x] M3 opt-in automatic rollback on failed health (`x-tug.rollback: auto`)
-- [ ] M3 later: a stable name and port for rolling services (cross-node name access on the declared port)
-- [x] M4 spec written
-- [x] M4 `--registry` optional; built images stored on control and downloaded by agents, bring-your-own registry still supported
-- [x] M4 image file retention tied to rollback history, and image pruning on agents
-- [x] M4 `deploy --build-local` uploads the saved image to control
-- [ ] M4 later, if transfer size matters: control serves the read-only registry API for layer reuse
-- [x] M4 opt-in Docker install for `node-install`/`control-install`, verified on fresh Ubuntu 24.04 hosts
-- [x] M4 `--install-docker` selects apt or dnf by `/etc/os-release` (unit-tested detection)
-- [ ] M4 dnf bootstrap verified on real Fedora and Rocky/AlmaLinux hosts (not yet run outside detection tests)
-- [x] M4 `node-enroll --install-docker` cloud-init verified on a real cloud-init host (Ubuntu 24.04 droplet with Docker removed; applied by re-running cloud-init, not from first-boot user data)
-- [x] M5 wake-channel design folded into [Architecture](architecture.md#agent-wake-channel)
-- [x] M5 agent-initiated persistent wake channel (WebSocket, cursor-based long-poll fallback), dial-out only
-- [x] M5 faster convergence for deployments, configuration changes and queued commands
-- [x] M5 non-TTY `exec` with stdin forwarding, service `logs -f`, `ps`, and `inspect`
-- [ ] M5 true PTY allocation and resize for `exec -t`, plus agent/daemon log streams
+- [x] M3 rolling deploys with ingress upstream switching, `x-tug.rollout` (`strategy`, `drain`; `maxSurge` not implemented), opt-in automatic rollback, run on real hosts through the public ingress
+- [x] M4 `--registry` optional with images stored on control, retention tied to rollback history, agent image pruning, `deploy --build-local`
+- [x] M4 opt-in Docker install for `node-install`/`control-install` (verified on Ubuntu 24.04) and `node-enroll --install-docker` cloud-init (verified on a cloud-init host)
+- [ ] M4 dnf bootstrap verified on real Fedora and Rocky/AlmaLinux hosts
+- [x] M5 wake channel, faster convergence, non-TTY `exec` with stdin, `logs -f`, `ps`, `inspect`
+- [ ] M5 PTY allocation and resize for `exec -t`, agent/daemon log streams
 - [ ] M5 remote process termination when an exec session is cancelled or disconnected
-- [x] M6 node labels, label placement, replicas spread, `global` mode, `scale` command
-- [x] M7 `nfs` volume type for shared docroot over the mesh (exporter must already run an NFS server)
-- [ ] M7 later: Tug installs and configures the NFS server on the exporter node
-- [x] M6/M7 verified on real hosts (31 Oct 2026, [Real-host evaluation](real-host-evaluation.md#m6-m7-and-enrollment-on-fresh-hosts))
-- [x] M8 scoped API tokens and CI deploy example ([Access control](access-control.md))
+- [x] M6 node labels, label placement, replicas spread, `global` mode, `scale` command, verified on real hosts
+- [x] M7 `nfs` volume type over the mesh (exporter must already run an NFS server), verified on real hosts
+- [ ] M7 Tug installs and configures the NFS server on the exporter node (needs the host-level helper)
+- [x] M8 scoped API tokens, CI deploy example, named operator tokens in the audit trail ([Access control](access-control.md))
 - [ ] M8 outbound webhooks
-- [x] M8 named multi-operator tokens in the audit trail
-- [ ] M8 read-only web dashboard
-- [x] M9 event hygiene: lifecycle events only on change, retention by age and row count ([Architecture](architecture.md#events))
+- [x] M9 event hygiene ([Architecture](architecture.md#events)) and observability design ([Observability](observability.md))
 - [ ] M9 structured logs (`TUG_LOG_FORMAT`, `TUG_LOG_LEVEL`)
-- [ ] M9 `GET /metrics` on control (Prometheus text, `read` token)
-- [ ] M9 agent-reported node and service stats exposed on `/metrics`
-- [ ] M9 `/readyz` readiness endpoint
-- [ ] M9 sample alert rules and outbound webhooks
-- [ ] M9 metrics test gate: every registered metric documented and vice versa
-- [x] M9 observability setup documented ([Observability](observability.md))
-- [ ] Later: standalone CLI binary and Homebrew tap ([Standalone binary](standalone-binary.md))
+- [ ] M9 `GET /metrics` on control (Prometheus text, `read` token), with agent-reported node and service stats
+- [ ] M9 `/readyz`, sample alert rules, and the metrics documentation test gate
+- [ ] M10 published ports bound to the overlay, loopback or node address by default; `doctor` reports public listeners
+- [ ] M11 spec written
+- [ ] M11 `x-tug.backup`, scheduled backups to S3-compatible storage with restic, catalog, `backup run|list`, `restore`
+- [ ] M11 `tug run` and `x-tug.release` run-once jobs
+- [ ] M11 `tug move` for stateful services
+- [ ] M12 spec written (subnets, resolver, rollout changes, MTU, IPv6, network recreation)
+- [ ] M12 per-node container subnets over WireGuard and per-node service DNS
+- [ ] M12 rolling services reachable by stable name and port; per-revision host ports removed
+- [ ] M13 localhost registry endpoint on agents with layer reuse from control's image store
+- [ ] Scaled WordPress reference example (code in image, shared uploads) validated on real hosts
 - [ ] Mocked tests from the [Testing](testing.md#backlog-of-mocked-tests-proposed) backlog: revisions started per deployment, WireGuard key re-report, old-schema database, preflight remedies
-- [ ] Re-check uncloud releases at the start of each milestone and update the baseline above
+- [ ] Re-check uncloud releases at the start of each milestone and update the baseline in [Positioning](#positioning)
 - [ ] Each milestone: tests added, README.md and docs updated, its own plan file folded into docs and deleted when done

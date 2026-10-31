@@ -2,7 +2,7 @@
 
 The name: tugboats pull ships into place, like the pull-based agents here; `tug` is the CLI.
 
-Deploy Docker Compose projects to one or more ordinary Linux VPSes through a small self-hosted control plane and a pull-based agent on each node, without Kubernetes or a hosted PaaS. The original specification is in [plan.md](plan.md).
+Deploy Docker Compose projects to one or more ordinary Linux VPSes through a small self-hosted control plane and a pull-based agent on each node, without Kubernetes or a hosted PaaS. What it is for, the deployment shapes it targets and the planned milestones are in the [Roadmap](docs/roadmap.md).
 
 ## Features
 
@@ -82,7 +82,7 @@ The CLI installs the matching `ghcr.io/wpelevator/tug:<version>` image on your h
 - [Observability](docs/observability.md): what can be observed today, and the proposed logs, metrics and alerting.
 - [Releases](docs/releases.md): changesets, npm and Docker image publishing.
 - [Standalone binary](docs/standalone-binary.md): proposed Bun-compiled CLI binaries and Homebrew distribution.
-- [Roadmap](docs/roadmap.md): planned milestones toward parity with and beyond uncloud.
+- [Roadmap](docs/roadmap.md): goals, principles, the reference WordPress topology and planned milestones.
 
 ## Development
 
