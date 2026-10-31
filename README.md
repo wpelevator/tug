@@ -5,7 +5,7 @@ A Node.js MVP of the Portable VPS Launch Pad described in `plan.md`.
 ## Implemented MVP
 
 - Control API with bearer-token auth and SQLite metadata.
-- Node registration with per-node agent and registry tokens, via SSH push (`node install`) or self-service pull enrollment (`node:enroll` + a single `docker run` on the host).
+- Node registration with per-node agent and registry tokens, via SSH push (`node install`) or self-service pull enrollment (`node enroll` + a single `docker run` on the host).
 - Agent pull reconciliation via `/agent/v1/work` and status reporting.
 - Compose parsing with `x-launchpad.placement`, build-to-immutable-image desired state, and generated per-node Compose files.
 - Optional remote Docker builds on the control host when `launchpad deploy` uploads a source tarball.
@@ -43,7 +43,7 @@ The control service prints and stores the initial operator token in `./data/oper
 3. **Set any secrets your services need**: `launchpad secret:set NAME --value ...`. Secrets are encrypted at rest and only released to agents for services that reference them.
 4. **Bootstrap each node**, either way:
    - **Push (you have SSH to the host):** `launchpad node install root@app1.example.com --name app1 --control-url https://control.example.com --registry registry.example.com`. This registers the node with the control plane (issuing an agent token and a registry pull token), ships the agent container over SSH, writes `/etc/launchpad/agent.env`, runs `docker login` against the registry, and starts the agent container polling the control plane.
-   - **Pull (the host enrolls itself, no SSH):** `launchpad node:enroll --name app1` mints a short-lived, single-use enrollment key and prints a ready-to-paste `docker run`. Run that one command on the freshly provisioned host (or drop it into cloud-init/user-data) and the agent exchanges the key for its durable agent + registry tokens on first boot. See [Self-service node enrollment](#self-service-node-enrollment-launchpad-nodeenroll).
+   - **Pull (the host enrolls itself, no SSH):** `launchpad node enroll --name app1` mints a short-lived, single-use enrollment key and prints a ready-to-paste `docker run`. Run that one command on the freshly provisioned host (or drop it into cloud-init/user-data) and the agent exchanges the key for its durable agent + registry tokens on first boot. See [Self-service node enrollment](#self-service-node-enrollment-launchpad-node-enroll).
 5. **Deploy a Compose project**: `launchpad deploy -f docker-compose.yml`. The control plane validates placement, optionally builds/pushes images from an uploaded source tarball, and creates a desired-state record.
 6. **Wait for convergence**: `launchpad deploy` waits by default (or run `launchpad status` / `launchpad events`) until each agent pulls, applies, and health-checks its services and reports back, at which point the deployment is marked `succeeded`.
 7. **Operate**: use `launchpad rollback`, `launchpad restart <service>`, `launchpad logs <service>`, and `launchpad doctor [--nodes]` for day-to-day operations.
@@ -75,6 +75,53 @@ sequenceDiagram
         Ctrl->>DB: update last_seen_at, status=online
     end
     CLI-->>Op: { ok, node, registryToken }
+```
+
+### Self-service node enrollment (`launchpad node enroll`)
+
+A pull-based alternative to `node install`, modeled on how Portainer Edge agents join: the operator never needs SSH to the host. You mint an enrollment key on the control plane first, then run a single self-contained `docker run` on the freshly provisioned host (DigitalOcean droplet, etc.) — or paste it into cloud-init/user-data so the host enrolls itself on first boot. The agent reaches *out* to control, so this works behind NAT/firewalls.
+
+The enrollment key (`LAUNCHPAD_JOIN_KEY`) is base64url-encoded JSON bundling the control URL, a short-lived single-use `enrollToken`, and (optionally, via `--ca`) the control plane's CA certificate. The **durable** agent token is minted by control during enrollment and persisted to the agent's state volume (`/var/lib/launchpad/agent.json`) — it never appears on the `docker run` command line or in `docker inspect`. On container restart the agent loads the persisted token and skips enrollment; on a fresh volume it re-enrolls. A leaked join key is therefore spent on first use and expires on its own.
+
+```bash
+# On the operator's machine:
+launchpad node enroll --name app1
+# prints, e.g.:
+#   docker run -d --name launchpad-agent --restart unless-stopped \
+#     -v /var/run/docker.sock:/var/run/docker.sock \
+#     -v launchpad-agent:/var/lib/launchpad \
+#     -e LAUNCHPAD_JOIN_KEY=<key> \
+#     ghcr.io/you/launchpad-agent agent
+```
+
+Useful flags: `--uses <n>` to let one key enroll several hosts (each self-names from its hostname when `--name` is omitted), `--ttl <seconds>` for the key lifetime (default 1h), `--ca <ca.pem>` to embed a self-signed/private control CA (removes the need to ship `NODE_EXTRA_CA_CERTS` separately), and `--json` for scripting. To keep the key out of shell history / `docker inspect`, mount it and set `LAUNCHPAD_JOIN_KEY_FILE=/path/to/key` instead of `LAUNCHPAD_JOIN_KEY`.
+
+```mermaid
+sequenceDiagram
+    participant Op as Operator
+    participant CLI as launchpad CLI
+    participant Ctrl as Control plane
+    participant DB as SQLite
+    participant Host as Fresh host
+    participant Agent as Agent container
+
+    Op->>CLI: node enroll --name app1
+    CLI->>Ctrl: POST /api/v1/nodes/enroll-token { name, ttl, uses }
+    Ctrl->>DB: insert enroll_token (hash, name, uses, expiry)
+    Ctrl-->>CLI: { enrollToken, expiresAt }
+    CLI-->>Op: docker run ... -e LAUNCHPAD_JOIN_KEY=<key> ... agent
+    Op->>Host: paste docker run (or cloud-init)
+    Host->>Agent: start container
+    Agent->>Agent: no token on volume -> decode join key
+    Agent->>Ctrl: POST /agent/v1/enroll (enrollToken + hostname/ip)
+    Ctrl->>DB: validate & consume enroll_token, insert node, mint agentToken + registryToken
+    Ctrl->>Ctrl: write htpasswd entry, restart registry container
+    Ctrl-->>Agent: { node, agentToken, registryToken, registry }
+    Agent->>Agent: persist creds to volume, docker login registry
+    loop every LAUNCHPAD_POLL_INTERVAL_MS
+        Agent->>Ctrl: GET /agent/v1/work (Bearer agentToken)
+        Ctrl->>DB: update last_seen_at, status=online
+    end
 ```
 
 ### Deploy (`launchpad deploy`)
@@ -210,6 +257,7 @@ The test provisions `vps-a`, `vps-b`, and `vps-c`, sets a sample secret, deploys
 - `launchpad init`
 - `launchpad control install root@host --domain <control-domain> --registry-domain <registry-domain> --email <acme-email>`
 - `launchpad node install root@host --name <node> [--address <ip>] --control-url https://control.example.com [--registry registry.example.com]`
+- `launchpad node enroll [--name <node>] [--ttl <seconds>] [--uses <n>] [--ca <ca.pem>] [--image <tag>] [--json]`
 - `launchpad node:register --name <node> [--address <ip>]`
 - `launchpad node:rotate-registry-token <node>`
 - `launchpad node:revoke-registry-token <node>`
@@ -230,9 +278,12 @@ The test provisions `vps-a`, `vps-b`, and `vps-c`, sets a sample secret, deploys
 Agents write generated state under:
 
 ```text
+/var/lib/launchpad/agent.json                                # durable creds persisted after self-service enrollment
 /var/lib/launchpad/projects/<project>/docker-compose.yml
 /var/lib/launchpad/projects/<project>/.env
 /var/lib/launchpad/projects/<project>/last-applied.json
 ```
+
+When agents enroll via `node enroll`, mount the state directory as a named volume (`-v launchpad-agent:/var/lib/launchpad`) so `agent.json` survives container recreation and the agent does not need to re-enroll after an image update or reboot.
 
 Set `LAUNCHPAD_STATE_DIR` to change this path during development.
