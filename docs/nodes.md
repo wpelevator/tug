@@ -71,7 +71,7 @@ It adds Docker's official apt or dnf repository, installs Engine and Buildx, and
 
 `node-install` and `node-enroll` default `--image` to `ghcr.io/wpelevator/tug:<version>`, where `<version>` is the installed CLI's own package version, so the CLI and the agents it installs stay on the same release. Pass `--image <tag>` to run another image, for example `ghcr.io/wpelevator/tug:edge` for the latest build of `main` or a mirror in your own registry.
 
-`node-install --build-local-image` is for development: it builds the image from the current checkout, copies it to the host with `docker save` / `scp` / `docker load` and runs it, tagging it `tug:local` unless `--image` is also given. It needs a Tug checkout (the Dockerfile) in the working directory. See [Releases](releases.md) for how images are published.
+`node-install --build-local-image` is for development: it builds the image from the current checkout, copies it to the host with `docker save` / `scp` / `docker load` and runs it, tagging it `tug:local` unless `--image` is also given. It needs a Tug checkout (the Dockerfile) in the working directory. See [Releases](releases.md) for how images are published. The image is built for the target host's architecture (read with `uname -m` over SSH), so an arm64 laptop can install an amd64 VPS; x86_64 and aarch64 hosts are supported.
 
 ## Node labels
 
@@ -79,7 +79,7 @@ It adds Docker's official apt or dnf repository, installs Engine and Buildx, and
 
 ## Joining the WireGuard mesh
 
-Add `--mesh` to `node-install` or `node-enroll` (and set `TUG_MESH=true` on control) to run the agent with host networking and `NET_ADMIN`, so it can create `wg0` and join the overlay. Give nodes that other nodes must dial a `--public-address`; nodes behind NAT can omit it. See [Networking](networking.md).
+The agent always runs with host networking (`--network host`): it dials container IPs for TCP and HTTP health checks, which a bridge-networked agent cannot reach on current Docker (29.x). Add `--mesh` to `node-install` or `node-enroll` (and set `TUG_MESH=true` on control) to also give it `NET_ADMIN`, so it can create `wg0` and join the overlay. Give nodes that other nodes must dial a `--public-address`; nodes behind NAT can omit it. See [Networking](networking.md).
 
 ## Register only (`node-register`)
 

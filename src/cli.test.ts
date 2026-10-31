@@ -9,7 +9,14 @@ import yaml from 'js-yaml';
 import * as tar from 'tar';
 import { resolveCliConfig, integerOption } from './cli-config.ts';
 import { createSourceArchive, prepareLocalImages } from './cli-build.ts';
-import { dockerRunSnippet, enrollmentCloudInit, shellQuote } from './cli-install.ts';
+import {
+  controlPortCheck,
+  dockerPlatform,
+  dockerRunSnippet,
+  enrollmentCloudInit,
+  localImageBuildArgs,
+  shellQuote,
+} from './cli-install.ts';
 
 const exec = promisify(execFile);
 const entry = path.resolve('src/cli.ts');
@@ -340,6 +347,72 @@ test('failed local build/save still removes only generated tags without masking 
       `failed ${failure} should report a cleanup warning when Docker refuses removal`,
     );
   }
+});
+
+test('local image builds target the host architecture, not the build machine', () => {
+  assert.equal(
+    dockerPlatform('x86_64\n'),
+    'linux/amd64',
+    'an amd64 VPS needs an amd64 image even when built on arm64',
+  );
+  assert.equal(dockerPlatform('aarch64'), 'linux/arm64', 'an arm64 VPS needs an arm64 image');
+  assert.throws(
+    () => dockerPlatform('riscv64'),
+    /unsupported host architecture 'riscv64'/,
+    'unknown architectures fail before a build starts',
+  );
+  assert.deepEqual(
+    localImageBuildArgs('tug:local', 'x86_64'),
+    ['build', '--platform', 'linux/amd64', '-t', 'tug:local', '.'],
+    'docker build receives the target platform',
+  );
+});
+
+test('the control port check passes for a free port or the control container, and fails for another listener', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-portcheck-'));
+  const bin = path.join(dir, 'bin');
+  await fs.mkdir(bin);
+  const stub = async (name: string, body: string) =>
+    fs.writeFile(path.join(bin, name), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+  const run = async (listening: boolean, controlOwnsIt: boolean) => {
+    await stub(
+      'ss',
+      listening
+        ? 'echo "LISTEN 0 4096 0.0.0.0:8080 0.0.0.0:*"'
+        : 'echo "State Recv-Q Send-Q Local"',
+    );
+    await stub('docker', controlOwnsIt ? 'echo abc123' : 'true');
+    try {
+      await exec('sh', ['-c', controlPortCheck(8080)], {
+        env: { PATH: `${bin}${path.delimiter}/usr/bin${path.delimiter}/bin` },
+      });
+      return 0;
+    } catch (e) {
+      return (e as { code: number }).code;
+    }
+  };
+  assert.equal(await run(false, false), 0, 'a free port passes the preflight');
+  assert.equal(
+    await run(true, true),
+    0,
+    'the port held by the existing control container passes, so control-install can upgrade in place',
+  );
+  assert.notEqual(
+    await run(true, false),
+    0,
+    'a port held by anything else still fails the preflight',
+  );
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test('the agent docker run shares the host network without NET_ADMIN unless the mesh is on', () => {
+  const plain = dockerRunSnippet('img:1', 'join-key');
+  assert.match(
+    plain,
+    /--network host /,
+    'health checks dial container IPs, which a bridge-networked agent cannot reach',
+  );
+  assert.doesNotMatch(plain, /NET_ADMIN|TUG_MESH/, 'only the mesh adds capabilities and TUG_MESH');
 });
 
 test('shell snippets quote user values and cloud-init stops enrollment after bootstrap failure', () => {
