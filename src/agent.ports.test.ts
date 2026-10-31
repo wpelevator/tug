@@ -72,6 +72,13 @@ test('a public bind address raises one ports.public warning until it changes', a
   assert.equal(events.filter(e => e.type === 'ports.public').length, 2, 'a changed set of exposed services is reported again');
 });
 
+test('reconcile does not resolve the node address when no port binds to it', async () => {
+  const { ctx } = await makeCtx();
+  const portless = buildDesiredState({ project: 'proj', version: 'v1', compose: { services: { worker: { image: 'busybox', 'x-tug': { placement: { nodes: ['n1'] } } } } }, registry: '' });
+  const status = await reconcile(portless, ctx, {}, { address: 'unresolvable.invalid', loopback: {} });
+  assert.equal(status.health, 'serving', 'a project without published ports applies even when the node address is a hostname that does not resolve');
+});
+
 test('publicListeners finds Tug project containers listening on all interfaces or a public IP', () => {
   const ps = [
     'proj\tproj-db-1\t0.0.0.0:3306->3306/tcp, [::]:3306->3306/tcp',

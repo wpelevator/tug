@@ -556,7 +556,9 @@ export async function reconcile(desiredState: DesiredState, ctx: AgentContext = 
   const sameDesiredVersion = desiredState.revision ? previous.revision === desiredState.revision : previous.version === desiredState.version;
   // Rolling services run in their own revision projects; the main project holds only the recreated ones.
   const loopback = new Set(ports.loopback[desiredState.project] || []);
-  const bind: PortBind = { address: await resolveBindAddress(ports.address), loopback };
+  // Resolve only when some port actually binds to the node address; a hostname nobody needs must not fail the apply.
+  const needsAddress = addressBoundServices(desiredState.compose, serviceNames, loopback).length > 0;
+  const bind: PortBind = { address: needsAddress ? await resolveBindAddress(ports.address) : '127.0.0.1', loopback };
   const nodeCompose = composeForNode(desiredState, ctx.nodeName, { secrets: sec.secrets || {}, endpoints, exclude: rollingSet, bind });
   await warnPublicPorts(ctx, desiredState, serviceNames, bind);
   await fs.writeFile(path.join(dir, 'docker-compose.yml'), dumpYaml(nodeCompose));
