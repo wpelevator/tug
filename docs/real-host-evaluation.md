@@ -157,6 +157,18 @@ A single freshly wiped Ubuntu 24.04 host (Docker 29.9.2, 1 GB RAM) with control 
 | `tug exec backup -- backup.sh once`, then `restic snapshots` | Exit 0, one `db` and one `files` snapshot, `restic check` reported no errors |
 | Restore drill into a scratch project (`db` and `backup` only) | The two seeded database rows and the seeded file came back; the repository was a local path, not S3 |
 
+### Second node and S3
+
+The second host (a cloud-init rebuilt Ubuntu 24.04, Docker 29.9.2) was wiped and joined with `node-install` from the PR 27 branch; its agent came up with `net=host`. `node-install` over an already registered node name worked.
+
+| Check | Result |
+|---|---|
+| `wp1` redeployed with a `backup-edge` sidecar and an `uploads` volume placed on the second node | Succeeded in 53 s; the sidecar image was built on control and downloaded by the second node's agent; the sidecar was healthy |
+| Both sidecars `backup.sh once` into one S3-compatible repository | Snapshots tagged host `app` (`db`, `files`) and host `edge` (`files`) in one repository; `restic check` reported no errors |
+| Restore of the `edge` snapshot from the first node into a scratch directory | The text file matched and the 3 MB random file had the same SHA-256 as the original |
+
+The store was RustFS in a container on the second node with random credentials, because the `quay.io/minio/minio` image answers 401 and the `minio/minio` Docker Hub image can no longer be pulled. It is not a hosted provider, and the repository was reached over plain HTTP on a public address, so treat the result as a protocol check, not a production recommendation.
+
 ### Findings
 
 - **Fixed: health checks cannot reach containers from a bridge-networked agent.** `node-install` starts the agent on the default bridge. On Docker 29.9.2 it cannot dial the container IPs of a project's Compose network, so every TCP or HTTP health check timed out (`tcp timeout 172.19.0.2:3306`) while MariaDB was ready, and the first deploy failed. Restarting the agent with `--network host` (what mesh mode already does) fixed it. Earlier runs on older Docker did not hit this. `node-install` and `node-enroll` now start the agent with `--network host` always, not only with `--mesh`.
