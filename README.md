@@ -8,7 +8,7 @@ Deploy Docker Compose projects to one or more ordinary Linux VPSes through a sma
 
 - Control API with bearer-token auth, scoped `read`/`deploy`/`admin` API tokens for CI and teammates, an audit trail naming who acted, and SQLite metadata.
 - Nodes join over SSH (`node-install`) or enroll themselves with a single `docker run` (`node-enroll`), with per-node agent and registry tokens. Agents only dial out, so nodes behind NAT work.
-- Agents pull desired state from control, apply a generated per-node Compose file, run TCP/HTTP/Docker health checks and report status. An outbound WebSocket wakes them as soon as control queues work, with long-poll and periodic-poll fallbacks.
+- Agents pull desired state from control, apply a generated per-node Compose file, run TCP/HTTP/Docker health checks and report status. An outbound WebSocket wakes them as soon as control queues work and carries live `exec`, followed logs, `ps` and `inspect` sessions, with long-poll and periodic-poll fallbacks for ordinary work.
 - `x-tug` placement of services and volumes on nodes, with immutable desired-state records per deployment.
 - Build application images on control from uploaded source, or locally with `deploy --build-local`. Agents download saved images directly from control by default; a bring-your-own registry is optional.
 - Secrets encrypted at rest, released only to the nodes whose services reference them, with targeted service recreation when only a secret changes.
@@ -33,7 +33,7 @@ The CLI installs the matching `ghcr.io/wpelevator/tug:<version>` image on your h
 3. Set the secrets your services need: `tug secret-set DB_PASSWORD`.
 4. Add nodes with `tug node-install root@app1.example.com --name app1 --install-docker`, or `tug node-enroll --name app1` and run the printed Docker command. For a bare cloud host, `tug node-enroll --name app1 --install-docker` prints cloud-init user-data.
 5. Deploy: `tug deploy -f docker-compose.yml`. It waits until every node reports the new version healthy.
-6. Operate with `tug status`, `events`, `logs`, `restart`, `rollback` and `doctor`.
+6. Operate with `tug status`, `events`, `exec`, `logs`, `ps`, `inspect`, `restart`, `rollback` and `doctor`.
 
 ## Documentation
 

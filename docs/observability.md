@@ -40,7 +40,7 @@ Everything below is **Proposed** unless a status line says otherwise.
 | Readiness endpoint | [Health endpoints](#health-endpoints) | Proposed |
 | Ingress metrics | [Ingress metrics](#ingress-metrics) | Proposed, with open questions |
 | Sample alerts and webhooks | [Alerting](#alerting) | Proposed |
-| Live commands | [Live commands](#live-commands) | Proposed, depends on M5 |
+| Live commands | [Live commands](#live-commands) | Partly built in M5 |
 | Metrics test gate | [Test gate](#test-gate) | Proposed |
 
 ### Structured logs
@@ -170,9 +170,9 @@ Outbound webhooks (M8) are the lightweight alternative for operators without Pro
 
 ### Live commands
 
-Status: proposed, depends on M5.
+Status: non-TTY container commands built in M5; agent/daemon logs and `top` remain proposed.
 
-Today's `tug logs` is a tail through the command queue. The M5 streaming channel would add `tug logs <service> -f`, agent and daemon logs for troubleshooting, and `tug ps` and `tug inspect <service>` with per-container state. These answer what is happening right now on a node and complement metrics, which answer what has been happening. An optional `tug top` would render the agent-reported stats as a refreshing table of CPU, memory and restarts per service, reading `GET /metrics` or a read-only JSON view rather than a new data path.
+`tug logs <service>` keeps its durable tail through the command queue, while `-f` follows the current container over the live channel. `tug exec`, `tug ps` and `tug inspect <service>` use that channel too; true TTY allocation remains pending a PTY-capable agent adapter. Agent and daemon log streams are still proposed for troubleshooting. These commands answer what is happening right now on a node and complement metrics, which answer what has been happening. An optional `tug top` would render the agent-reported stats as a refreshing table of CPU, memory and restarts per service, reading `GET /metrics` or a read-only JSON view rather than a new data path.
 
 ### Test gate
 
@@ -195,7 +195,7 @@ For Tug the equivalent check would assert:
 3. Agent-reported node and service stats, then ingress metrics once the open questions are settled.
 4. Sample alert rules (they need steps 2 and 3) and outbound webhooks.
 
-Dependencies: the live commands need M5 (the streaming channel), and webhooks and the dashboard are M8 items. Steps 1 to 3 need neither.
+Dependencies: the remaining agent/daemon live log streams and TTY backend extend M5, while webhooks and the dashboard are M8 items. Steps 1 to 3 need neither.
 
 ## Open questions and non-goals
 

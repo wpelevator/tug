@@ -10,7 +10,11 @@ import net from 'node:net';
 import { WebSocket } from 'ws';
 import { createHash } from 'node:crypto';
 import { composeForNode, dumpYaml, isRolling, serviceSecretVersions } from './compose.ts';
-import { activeRollingStates, composeBase, hasLegacyContainers, reconcileRolling, retireAll } from './rollout.ts';
+import { LIVE_MAX_FRAME_BYTES, LIVE_START_TIMEOUT_MS } from './protocol.ts';
+import type { AgentLiveCommand, AgentLiveFrame, LiveRequest as ProtocolLiveRequest } from './protocol.ts';
+import { LiveOperationEngine } from './live.ts';
+import type { LiveEngineOptions } from './live.ts';
+import { loadRolloutState, activeRollingStates, composeBase, hasLegacyContainers, reconcileRolling, retireAll } from './rollout.ts';
 import { ensureDir, errMessage, now, parseDuration } from './util.ts';
 import { openAgentDb } from './db.ts';
 import type { AppliedStateRow, Db, EventStateRow } from './db.ts';
@@ -20,7 +24,7 @@ import { CADDY_CONTAINER, reconcileIngress, removeIngress } from './ingress.ts';
 import { WG_INTERFACE, ensureWgKeys, readReportedKey, reconcileMesh, rotateWgKeys, writeReportedKey } from './mesh.ts';
 import type {
   Command, CommandResult, DesiredState, DiagnosticCheck, EnrollResponse, HealthCheck, IngressStatus, JoinKey, ProjectStatus,
-  ImageArtifact, SecretsResponse, ServiceEndpoint, ServiceState, StatusReport, StreamMessage, WakeResponse, WorkResponse
+  ImageArtifact, SecretsResponse, ServiceEndpoint, ServiceState, StatusReport, WakeResponse, WorkResponse
 } from './protocol.ts';
 
 const CONTROL_URL_FROM_ENV = Boolean(process.env.TUG_CONTROL_URL);
@@ -74,6 +78,14 @@ async function api<T = unknown>(ctx: AgentContext, route: string, opts: RequestI
   return res.json() as Promise<T>;
 }
 
+export type AgentLiveControlFrame = AgentLiveCommand;
+export type AgentLiveOutputFrame = AgentLiveFrame;
+type LiveAgentRequest = ProtocolLiveRequest & { sessionId: string };
+interface LiveChannelHandlers {
+  onLive?: (frame: AgentLiveControlFrame) => void | Promise<void>;
+  onDisconnect?: () => void;
+}
+
 type WebSocketFactory = (url: string, token: string) => WebSocket;
 
 /** Keeps one outbound stream open and falls back to a bounded HTTP wait when an intermediary rejects WebSockets. */
@@ -84,10 +96,12 @@ export class AgentWakeChannel {
   private cursor = 0;
   private pending = false;
   private waiter?: () => void;
+  private readonly handlers: LiveChannelHandlers;
 
-  constructor(ctx: AgentContext, createSocket: WebSocketFactory = (url, token) => new WebSocket(url, { headers: { Authorization: `Bearer ${token}` } })) {
+  constructor(ctx: AgentContext, createSocket: WebSocketFactory = (url, token) => new WebSocket(url, { headers: { Authorization: `Bearer ${token}` }, maxPayload: LIVE_MAX_FRAME_BYTES }), handlers: LiveChannelHandlers = {}) {
     this.ctx = ctx;
     this.createSocket = createSocket;
+    this.handlers = handlers;
   }
 
   private notify(): void {
@@ -113,17 +127,32 @@ export class AgentWakeChannel {
       const timer = setTimeout(() => { socket.terminate(); finish(false); }, 1500);
       socket.on('open', () => finish(true));
       socket.on('message', data => {
-        let message: StreamMessage;
-        try { message = JSON.parse(data.toString()) as StreamMessage; } catch { return; }
-        this.cursor = Math.max(this.cursor, message.cursor);
-        if (message.type === 'work-available') this.notify();
+        if (this.socket !== socket) return;
+        let message: unknown;
+        const json = data.toString();
+        if (Buffer.byteLength(json) > LIVE_MAX_FRAME_BYTES) { this.close(); return; }
+        try { message = JSON.parse(json); } catch { return; }
+        if (!message || typeof message !== 'object') return;
+        const frame = message as Record<string, unknown>;
+        if (typeof frame.type === 'string' && frame.type.startsWith('live.')) {
+          if (frame.v === 1) void Promise.resolve(this.handlers.onLive?.(message as AgentLiveControlFrame)).catch(error => console.error('agent live frame failed:', errMessage(error)));
+          return;
+        }
+        if ((frame.type !== 'ready' && frame.type !== 'work-available') || !Number.isSafeInteger(frame.cursor) || Number(frame.cursor) < 0) return;
+        this.cursor = Math.max(this.cursor, Number(frame.cursor));
+        if (frame.type === 'work-available') this.notify();
       });
       socket.on('close', () => {
-        if (this.socket === socket) this.socket = undefined;
+        if (this.socket === socket) { this.socket = undefined; this.handlers.onDisconnect?.(); }
         if (settled) this.waiter?.();
         else finish(false);
       });
-      socket.on('error', () => finish(false));
+      socket.on('error', () => {
+        if (this.socket === socket) { this.socket = undefined; this.handlers.onDisconnect?.(); }
+        socket.terminate();
+        this.waiter?.();
+        finish(false);
+      });
     });
   }
 
@@ -151,8 +180,135 @@ export class AgentWakeChannel {
     await this.longPoll(timeoutMs);
   }
 
-  close(): void { this.socket?.close(); this.socket = undefined; }
+  send(frame: AgentLiveOutputFrame): boolean {
+    const socket = this.socket;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+    if (socket.bufferedAmount > 1048576) { this.close(); socket.terminate(); return false; }
+    try { socket.send(JSON.stringify(frame)); return true; } catch { this.close(); return false; }
+  }
+
+  close(): void {
+    const socket = this.socket;
+    this.socket = undefined;
+    this.handlers.onDisconnect?.();
+    socket?.close();
+    this.waiter?.();
+  }
 }
+interface PendingLiveSession { ready: Promise<void>; queuedBytes: number }
+
+/** Resolves a service once before starting a process so rollouts cannot silently retarget an open session. */
+export async function resolveLiveContainer(ctx: AgentContext, request: { project: string; service?: string }): Promise<string> {
+  const name = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/;
+  if (!name.test(request.project) || request.project === '..' || !request.service || !name.test(request.service)) throw new Error('A valid project and service are required');
+  const state = await loadRolloutState(path.join(ctx.stateDir, 'projects', request.project));
+  const rolling = state.services[request.service];
+  if (rolling && !rolling.active) throw new Error('Rolling service has no active revision');
+  const project = rolling?.active?.project ?? request.project;
+  if (!name.test(project)) throw new Error('Invalid active rollout project');
+  const result = await ctx.docker(['ps', '--all', '--no-trunc', '--quiet', '--filter', 'label=com.docker.compose.project=' + project, '--filter', 'label=com.docker.compose.service=' + request.service, '--filter', 'label=com.docker.compose.oneoff=False']);
+  const ids = result.out.trim().split(/\s+/).filter(Boolean);
+  if (ids.length !== 1) throw new Error(ids.length ? 'Service has multiple containers; select an unambiguous service' : 'Service has no container on this node');
+  if (!/^[a-f0-9]{12,64}$/.test(ids[0])) throw new Error('Docker returned an invalid container ID');
+  return ids[0];
+}
+
+export class AgentLiveOperations {
+  private readonly ctx: AgentContext;
+  private readonly emit: (frame: AgentLiveOutputFrame) => void;
+  private readonly engine: LiveOperationEngine;
+  private readonly sessions = new Map<string, PendingLiveSession>();
+  constructor(ctx: AgentContext, emit: (frame: AgentLiveOutputFrame) => void, options: Omit<LiveEngineOptions, 'emit'> = {}) {
+    this.ctx = ctx;
+    this.emit = emit;
+    this.engine = new LiveOperationEngine({ ...options, emit: event => {
+      if (!this.sessions.has(event.sessionId)) return;
+      if (event.type === 'exit') this.sessions.delete(event.sessionId);
+      if (event.type === 'output') this.emit({ v: 1, type: 'live.output', sessionId: event.sessionId, stream: event.stream, data: event.data });
+      else if (event.type === 'result') this.emit({ v: 1, type: 'live.result', sessionId: event.sessionId, result: event.result });
+      else this.emit({ ...event, v: 1, type: 'live.exit' });
+    } });
+  }
+  async handle(frame: AgentLiveControlFrame): Promise<void> {
+    if (frame.v !== 1 || typeof frame.sessionId !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,255}$/.test(frame.sessionId)) return;
+    if (frame.type === 'live.open') {
+      // An existing open belongs to its original request; replaying it must not start another process.
+      if (this.sessions.has(frame.sessionId)) return;
+      const entry: PendingLiveSession = { ready: Promise.resolve(), queuedBytes: 0 };
+      this.sessions.set(frame.sessionId, entry);
+      entry.ready = this.open({ ...frame.request, sessionId: frame.sessionId }, entry);
+      await entry.ready;
+      return;
+    }
+    const entry = this.sessions.get(frame.sessionId);
+    if (!entry) return;
+    if (frame.type === 'live.cancel') {
+      this.engine.cancel(frame.sessionId);
+      if (this.sessions.delete(frame.sessionId)) this.emit({ v: 1, type: 'live.exit', sessionId: frame.sessionId, code: null, signal: null, cancelled: true });
+      return;
+    }
+    let queued = 0;
+    try {
+      let input: Buffer | undefined;
+      if (frame.type === 'live.stdin') {
+        if (typeof frame.data !== 'string' || frame.data.length > 87384) throw new Error('Invalid stdin frame');
+        input = Buffer.from(frame.data, 'base64');
+        if (input.toString('base64') !== frame.data || input.length > 65536) throw new Error('Invalid base64 stdin');
+        queued = input.length;
+        entry.queuedBytes += queued;
+        if (entry.queuedBytes > 262144) throw new Error('Live stdin queue exceeds size limit');
+      }
+      await entry.ready;
+      if (this.sessions.get(frame.sessionId) !== entry) return;
+      if (frame.type === 'live.stdin' && input) this.engine.stdin(frame.sessionId, input);
+      else if (frame.type === 'live.stdin-end') this.engine.endStdin(frame.sessionId);
+      else if (frame.type === 'live.resize') this.engine.resize(frame.sessionId, frame.columns, frame.rows);
+    } catch (error) { this.fail(frame.sessionId, entry, error); }
+    finally { entry.queuedBytes -= queued; }
+  }
+  dispose(): void {
+    const ids = [...this.sessions.keys()];
+    this.engine.dispose();
+    for (const id of ids) if (this.sessions.delete(id)) this.emit({ v: 1, type: 'live.exit', sessionId: id, code: null, signal: null, cancelled: true });
+  }
+  private fail(id: string, entry: PendingLiveSession, error: unknown): void {
+    if (this.sessions.get(id) !== entry) return;
+    this.sessions.delete(id);
+    this.emit({ v: 1, type: 'live.exit', sessionId: id, code: null, signal: null, cancelled: false, error: errMessage(error) });
+    this.engine.cancel(id);
+  }
+  private async open(request: LiveAgentRequest, entry: PendingLiveSession): Promise<void> {
+    try {
+      if (this.sessions.size > 16) throw new Error('Live session limit reached');
+      if (!this.ctx.apply) throw new Error('Live operations require an applying agent');
+      if (request.node && request.node !== this.ctx.nodeName) throw new Error('Live request selected a different node');
+      if (typeof request.project !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(request.project)) throw new Error('Invalid project');
+      if (request.operation === 'ps') {
+        const rollout = await loadRolloutState(path.join(this.ctx.stateDir, 'projects', request.project));
+        if (this.sessions.get(request.sessionId) !== entry) return;
+        const projects = [...new Set([request.project, ...Object.values(rollout.services).flatMap(service => service.active ? [service.active.project] : [])])];
+        this.engine.start({ operation: 'ps', sessionId: request.sessionId, projects });
+      }
+      else {
+        if (!['exec', 'logs', 'inspect'].includes(request.operation)) throw new Error('Invalid live operation');
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        let container: string;
+        try {
+          container = await Promise.race([
+            resolveLiveContainer(this.ctx, request),
+            new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error('Live container resolution timed out')), LIVE_START_TIMEOUT_MS); timer.unref(); }),
+          ]);
+        } finally { clearTimeout(timer); }
+        if (this.sessions.get(request.sessionId) !== entry) return;
+        if (request.operation === 'exec') this.engine.start({ operation: 'exec', sessionId: request.sessionId, container, command: request.command, interactive: request.interactive, tty: request.tty, columns: request.columns, rows: request.rows });
+        else if (request.operation === 'logs') this.engine.start({ operation: 'logs', sessionId: request.sessionId, container, tail: request.tail });
+        else this.engine.start({ operation: 'inspect', sessionId: request.sessionId, container });
+      }
+      if (this.sessions.get(request.sessionId) === entry) this.emit({ v: 1, type: 'live.started', sessionId: request.sessionId });
+    } catch (error) { this.fail(request.sessionId, entry, error); }
+  }
+}
+
 async function writeEnv(file: string, secrets: Record<string, string>): Promise<void> {
   const body = Object.entries(secrets).map(([k,v]) => `${k}=${String(v).replace(/\n/g, '\\n')}`).join('\n') + '\n';
   await fs.writeFile(file, body, { mode: 0o600 });
@@ -554,7 +710,8 @@ export async function main(): Promise<void> {
   await loadOrEnroll();
   console.log(`tug-agent node=${NODE_NAME} control=${CONTROL_URL} apply=${APPLY}`);
   const ctx = defaultContext();
-  const wake = new AgentWakeChannel(ctx);
+  const wake = new AgentWakeChannel(ctx, undefined, { onLive: frame => live.handle(frame), onDisconnect: () => live.dispose() });
+  const live = new AgentLiveOperations(ctx, frame => { wake.send(frame); });
   for (;;) {
     try { await pollOnce(ctx); } catch (e) { console.error(errMessage(e)); }
     try { await wake.wait(INTERVAL); } catch (e) {

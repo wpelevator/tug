@@ -15,7 +15,7 @@ A positional argument names the primary target: the SSH host for `node-install`,
 
 Global options can appear before or after a command. Explicit options take precedence over environment variables, then the selected config, then defaults. Relative config paths resolve from the working directory. A missing default `.tug.json` is allowed; an explicitly selected missing file, invalid JSON or invalid known setting is an error. `init` can create a new selected file. `--project` applies only to project-scoped operations; status and node operations retain their control-wide scope.
 
-Most commands print the API result as JSON. `init` prints the written config path, `control-token` prints a token, `logs` writes service output to stdout/stderr, and enrollment prints a runnable command or cloud-init document. `node-enroll --json` returns JSON with `command`, and also `cloudInit` with `--install-docker`; its stdout contains no explanatory prose. There is no global `--json` flag. Install preflight and image-transfer tools may also print progress. Errors go to stderr and exit nonzero.
+Most commands print the API result as JSON. `init` prints the written config path, `control-token` prints a token, `exec` and `logs` write container output to stdout/stderr, and enrollment prints a runnable command or cloud-init document. `ps` and `inspect` print live Docker data as JSON. `node-enroll --json` returns JSON with `command`, and also `cloudInit` with `--install-docker`; its stdout contains no explanatory prose. There is no global `--json` flag. Install preflight and image-transfer tools may also print progress. Errors go to stderr and exit nonzero.
 
 Prefer `TUG_TOKEN` to a token argument, since arguments can appear in process listings and shell history. `secret-set --value` has the same exposure; omit it to read the value from stdin. Config files contain the operator token and should be kept private and out of version control.
 
@@ -75,11 +75,14 @@ Use a created token anywhere `TUG_TOKEN` works, for example `TUG_TOKEN=tug_tok_.
 ## Services and volumes
 
 - `tug restart <service> [--timeout <seconds>]` restarts a service and waits for the result; timeout defaults to `60` seconds.
-- `tug logs <service> [--tail <n>]` fetches recent service logs; the default is `200` lines.
+- `tug exec <service> [-i, --interactive] [-t, --tty] [--node <name>] [-- <command> ...]` executes a command in the current service container, defaulting to `sh`. Arguments are passed directly without a shell. `-i` forwards stdin. `-t` requires a local terminal but currently fails explicitly because the agent runtime has no PTY backend; use non-TTY `-i` for interactive programs until PTY support lands. Use `--node` when a service has more than one placement.
+- `tug logs <service> [--tail <n>] [-f, --follow] [--node <name>]` fetches recent service logs through the durable command queue, or follows them live with `-f`; the default is `200` lines. `--node` applies to followed logs and is required when the service has more than one eligible node.
+- `tug ps [--node <name>]` prints live per-container state as JSON. Without `--node`, the project must resolve to exactly one eligible connected node.
+- `tug inspect <service> [--node <name>]` prints the live Docker inspection object as JSON. It can include container environment variables, so it requires the `deploy` role and should be handled as sensitive output. Use `--node` when a service has more than one placement.
 - `tug volume-list` lists recorded volumes.
 - `tug volume-remove <name> [--delete-data]` removes a volume record; `--delete-data` also removes the Docker volume on its node. See [Compose extensions](compose.md#volumes).
 
-These operations use the resolved project.
+These operations use the resolved project. Live operations use an authenticated WebSocket from the CLI through control to the agent's existing outbound connection. They are ephemeral: control does not queue or replay them, and disconnecting any hop closes the local session. Cancelling or disconnecting `exec` kills the agent's Docker client, but an already-started process inside the container may continue because the Docker exec stream does not expose a remote process identifier.
 
 ## Operations
 

@@ -93,6 +93,7 @@ test('expired tokens are rejected and last_used_at is recorded', async () => {
 
 /** A concrete, harmless request for each route; the matrix test fails if a route in ROUTE_ROLES has no sample. */
 const SAMPLES: Record<string, { path: string; body?: unknown }> = {
+  'GET /api/v1/live': { path: '/api/v1/live' },
   'GET /api/v1/status': { path: '/api/v1/status' },
   'GET /api/v1/events': { path: '/api/v1/events' },
   'GET /api/v1/projects/:project': { path: '/api/v1/projects/site' },

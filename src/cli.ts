@@ -17,6 +17,9 @@ import { PROJECT_NAME_PATTERN, ROLES, TOKEN_NAME_PATTERN } from './tokens.ts';
 import { packageVersion, resolveImage } from './image.ts';
 import { TERMINAL_DEPLOYMENT_STATES } from './protocol.ts';
 import type { DeploymentState, EnrollTokenResponse, JoinKey, RegisterResponse } from './protocol.ts';
+import { CliLiveError, parseLiveRequest, runCliLive } from './cli-live.ts';
+import type { LiveInput, LiveRequest } from './cli-live.ts';
+import { createCliLiveTransport } from './cli-live-transport.ts';
 
 // Templates live next to this file: src/templates in dev (`node src/cli.ts`), dist/templates in the
 // built image (`node dist/cli.js`; tools/scripts/copy-templates.js puts them there).
@@ -339,7 +342,22 @@ program.command('restart <service>').option('--timeout <seconds>', 'wait timeout
   if (cmd.state === 'failed') throw new Error(JSON.parse(cmd.result_json || '{}').error || 'restart failed');
   console.log(JSON.stringify(cmd, null, 2));
 });
-program.command('logs <service>').description('fetch logs from the assigned node agent').option('--tail <n>', 'number of lines', '200').action(async (svc: string, o: CommonOpts & { tail: string }) => {
+async function runLive(operation: LiveRequest['operation'], input: Omit<LiveInput, 'project'>): Promise<void> {
+  const cfg = await loadCfg();
+  process.exitCode = await runCliLive(parseLiveRequest(operation, { ...input, project: cfg.project || 'site' }), createCliLiveTransport(cfg.controlUrl!, cfg.operatorToken));
+}
+program.command('exec <service> [command...]').description('execute a command on a service container (default: sh)')
+  .option('-i, --interactive', 'forward stdin to the remote command')
+  .option('-t, --tty', 'allocate a terminal (requires a local terminal and agent TTY support)')
+  .option('--node <name>', 'select the node when a service has multiple placements')
+  .action(async (service: string, command: string[], o: { interactive?: boolean; tty?: boolean; node?: string }) => { await runLive('exec', { service, command, ...o }); });
+program.command('ps').description('print per-container state as JSON').option('--node <name>', 'select one node')
+  .action(async (o: { node?: string }) => { await runLive('ps', o); });
+program.command('inspect <service>').description('print container details as JSON').option('--node <name>', 'select one node')
+  .action(async (service: string, o: { node?: string }) => { await runLive('inspect', { service, ...o }); });
+program.command('logs <service>').description('fetch logs from the assigned node agent').option('--tail <n>', 'number of lines', '200').option('-f, --follow', 'follow live logs').option('--node <name>', 'select a node for followed logs').action(async (svc: string, o: CommonOpts & { tail: string; follow?: boolean; node?: string }) => {
+  if (o.follow) { await runLive('logs', { service: svc, node: o.node, tail: o.tail }); return; }
+  if (o.node) throw new Error('--node requires --follow for logs');
   const cfg = await loadCfg(); const project = o.project || cfg.project || 'site';
   const created = await request('POST', '/api/v1/logs', { project, service: svc, tail: Number(o.tail) });
   const cmd = await waitForCommand(created.commandId, 60);
@@ -351,13 +369,15 @@ program.command('logs <service>').description('fetch logs from the assigned node
 
 program.hook('preAction', async (_root, command) => {
   const options = command.opts();
-  for (const [key, min, max] of [['port', 1, 65535], ['wgPort', 1, 65535], ['timeout', 1, 86400], ['ttl', 1, 31536000], ['uses', 1, 1000000], ['expiresInDays', 1, 3650], ['limit', 1, 500], ['tail', 1, 1000000]] as const) {
+  for (const [key, min, max] of [['port', 1, 65535], ['wgPort', 1, 65535], ['timeout', 1, 86400], ['ttl', 1, 31536000], ['uses', 1, 1000000], ['expiresInDays', 1, 3650], ['limit', 1, 500], ['tail', 0, 1000000]] as const) {
     if (options[key] !== undefined) integerOption(String(options[key]), '--' + key.replace(/[A-Z]/g, c => '-' + c.toLowerCase()), min, max);
   }
   if (options.buildLocal && options.buildUpload === false) throw new Error('--build-local and --no-build-upload cannot be combined');
   if ((options.registryAuthPath || options.registryContainer) && !options.registry) throw new Error('--registry-auth-path and --registry-container require --registry');
   if (command.name() === 'control-restore' && !options.confirm) throw new Error('control-restore requires --confirm');
-  for (const value of [...command.args, ...Object.values(options), ...Object.values(program.opts())]) if (typeof value === 'string' && /[\r\n\0]/.test(value)) throw new Error('arguments and option values must not contain line breaks or NUL');
+  const positional = command.name() === 'exec' ? command.args.slice(0, 1) : command.args;
+  for (const value of [...positional, ...Object.values(options), ...Object.values(program.opts())]) if (typeof value === 'string' && /[\r\n\0]/.test(value)) throw new Error('arguments and option values must not contain line breaks or NUL');
+  if (command.name() === 'exec' && command.args.slice(1).some(value => value.includes('\0'))) throw new Error('exec command arguments must not contain NUL');
   if (options.name && !/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(options.name)) throw new Error('--name must contain only letters, numbers, dots, underscores or hyphens');
   const connection = command.optsWithGlobals();
   if (command.name() === 'token-create') {
@@ -377,4 +397,4 @@ for (const command of program.commands) {
 }
 for (const command of [program, ...program.commands]) command.allowExcessArguments(false);
 program.showHelpAfterError();
-program.parseAsync().catch((e: unknown) => { console.error(`${errMessage(e)}\nRun tug <command> --help for usage.`); process.exit(1); });
+program.parseAsync().catch((e: unknown) => { console.error(`${errMessage(e)}\nRun tug <command> --help for usage.`); process.exitCode = e instanceof CliLiveError ? e.exitCode : 1; });

@@ -24,11 +24,11 @@ import { ensureDir, errMessage, hashToken, id, now, token } from './util.ts';
 import { DEFAULT_MESH_CIDR, DEFAULT_WG_PORT, WG_INTERFACE, WG_KEEPALIVE, allocateOverlayIp, isWgKey, parseCidr, wgEndpoint } from './mesh.ts';
 import { buildIngressWork, resolveServiceEndpoints } from './ingress.ts';
 import type { NodeView } from './ingress.ts';
-import { ACTIVE_DEPLOYMENT_STATES } from './protocol.ts';
-import { AUTO_ROLLBACK_ACTOR, ROUTE_ROLES, assertProject, bodyProject, createGuard, createToken, listTokens, parseTokenRequest, queryProject, recordEvent, revokeToken } from './tokens.ts';
+import { ACTIVE_DEPLOYMENT_STATES, LIVE_MAX_FRAME_BYTES, LIVE_MAX_BUFFERED_BYTES, LIVE_MAX_SESSIONS, LIVE_START_TIMEOUT_MS } from './protocol.ts';
+import { AUTO_ROLLBACK_ACTOR, ROUTE_ROLES, PROJECT_NAME_PATTERN, authenticate, hasRole, assertProject, bodyProject, createGuard, createToken, listTokens, parseTokenRequest, queryProject, recordEvent, revokeToken } from './tokens.ts';
 import type { Actor, ProjectResolver, RouteRole } from './tokens.ts';
 import type {
-  ImageArtifact, LocalImageUpload, AgentEvent, CommandResult, CommandType, ComposeFile, DesiredState, EnrollRequest, EnrollResponse, NetworkConfig, NodeInfo,
+  LiveRequest, LiveInput, OperatorLiveMessage, ImageArtifact, LocalImageUpload, AgentEvent, CommandResult, CommandType, ComposeFile, DesiredState, EnrollRequest, EnrollResponse, NetworkConfig, NodeInfo,
   RegisterResponse, SecretsResponse, ServiceEndpoints, StatusReport, StreamMessage, WakeResponse, WgKeyRequest, WorkResponse
 } from './protocol.ts';
 
@@ -84,9 +84,124 @@ class WakeHub {
   }
 }
 
+interface LiveSession { id: string; operator: WebSocket; agent: WebSocket; request: LiveRequest; node: string; started: boolean; timer: NodeJS.Timeout }
+const objectFrame = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
+const frameKeys = (value: Record<string, unknown>, keys: string[]) => Object.keys(value).every(key => keys.includes(key));
+const liveDimension = (value: unknown) => Number.isInteger(value) && Number(value) >= 1 && Number(value) <= 65535;
+const liveBase64 = (value: unknown): value is string => typeof value === 'string' && /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value);
+function parseLiveRequest(value: unknown): LiveRequest {
+  if (!objectFrame(value) || typeof value.project !== 'string' || !PROJECT_NAME_PATTERN.test(value.project) || value.project.length > 128 || (value.node !== undefined && (typeof value.node !== 'string' || !PROJECT_NAME_PATTERN.test(value.node) || value.node.length > 128))) throw new Error('invalid live request project or node');
+  const common = ['operation', 'project', 'node'];
+  if (value.operation === 'ps' && frameKeys(value, common)) return value as unknown as LiveRequest;
+  if (typeof value.service !== 'string' || !PROJECT_NAME_PATTERN.test(value.service) || value.service.length > 128) throw new Error('invalid live request service');
+  if (value.operation === 'inspect' && frameKeys(value, [...common, 'service'])) return value as unknown as LiveRequest;
+  if (value.operation === 'logs' && frameKeys(value, [...common, 'service', 'follow', 'tail']) && value.follow === true && Number.isSafeInteger(value.tail) && Number(value.tail) >= 0 && Number(value.tail) <= 10_000) return value as unknown as LiveRequest;
+  if (value.operation === 'exec' && frameKeys(value, [...common, 'service', 'command', 'interactive', 'tty', 'columns', 'rows']) && Array.isArray(value.command) && value.command.length > 0 && value.command.length <= 256 && typeof value.command[0] === 'string' && value.command[0].length > 0 && value.command.every(part => typeof part === 'string' && !part.includes('\0') && part.length <= 32768) && typeof value.interactive === 'boolean' && typeof value.tty === 'boolean' && (value.columns === undefined || liveDimension(value.columns)) && (value.rows === undefined || liveDimension(value.rows))) return value as unknown as LiveRequest;
+  throw new Error('invalid or unsupported live request');
+}
+
+/** Ephemeral sessions are bound to socket identities; reconnecting never replays work. */
+class LiveHub {
+  private readonly agents = new Map<string, WebSocket>();
+  private readonly sessions = new Map<string, LiveSession>();
+  private readonly retired = new WeakMap<WebSocket, Set<string>>();
+  private readonly startTimeoutMs: number;
+  private readonly resolve: (actor: Actor, request: LiveRequest) => Promise<NodeRow>;
+  constructor(resolve: (actor: Actor, request: LiveRequest) => Promise<NodeRow>, startTimeoutMs = LIVE_START_TIMEOUT_MS) { this.resolve = resolve; this.startTimeoutMs = startTimeoutMs; }
+  private send(ws: WebSocket, frame: unknown): boolean {
+    if (ws.readyState !== WebSocket.OPEN || ws.bufferedAmount > LIVE_MAX_BUFFERED_BYTES) return false;
+    const data = JSON.stringify(frame);
+    if (Buffer.byteLength(data) + ws.bufferedAmount > LIVE_MAX_BUFFERED_BYTES) return false;
+    try { ws.send(data); return true; } catch { return false; }
+  }
+  private finish(session: LiveSession, frame?: OperatorLiveMessage, cancel = true): void {
+    if (!this.sessions.delete(session.id)) return;
+    clearTimeout(session.timer);
+    const retired = this.retired.get(session.agent) ?? new Set<string>();
+    retired.add(session.id);
+    if (retired.size > 1024) retired.delete(retired.values().next().value!);
+    this.retired.set(session.agent, retired);
+    // If cancellation cannot enter a congested agent socket, disconnect it so its local engine disposes every operation.
+    if (cancel && !this.send(session.agent, { v: 1, type: 'live.cancel', sessionId: session.id })) session.agent.terminate();
+    if (frame) this.send(session.operator, frame);
+    session.operator.close(1000, 'live operation finished');
+  }
+  private fail(session: LiveSession, message: string): void { this.finish(session, { v: 1, type: 'live.error', sessionId: session.id, message }); }
+  agent(nodeId: string, ws: WebSocket): void {
+    const previous = this.agents.get(nodeId);
+    if (previous && previous !== ws) for (const session of this.sessions.values()) if (session.agent === previous) this.fail(session, 'agent connection replaced');
+    this.agents.set(nodeId, ws);
+    ws.on('error', () => {});
+    ws.on('close', () => {
+      if (this.agents.get(nodeId) === ws) this.agents.delete(nodeId);
+      for (const session of this.sessions.values()) if (session.agent === ws) this.fail(session, 'agent disconnected');
+    });
+    ws.on('message', (data, binary) => {
+      try {
+        if (binary || Buffer.byteLength(data.toString()) > LIVE_MAX_FRAME_BYTES) throw new Error('invalid frame');
+        const frame: unknown = JSON.parse(data.toString());
+        if (!objectFrame(frame) || frame.v !== 1 || typeof frame.sessionId !== 'string') throw new Error('invalid frame');
+        const session = this.sessions.get(frame.sessionId);
+        if (!session && this.retired.get(ws)?.has(frame.sessionId)) return;
+        if (!session || session.agent !== ws) throw new Error('foreign or unknown session');
+        const keys = ['v', 'type', 'sessionId'];
+        if (frame.type === 'live.started' && frameKeys(frame, keys) && !session.started) {
+          session.started = true; clearTimeout(session.timer);
+          if (!this.send(session.operator, { v: 1, type: 'live.started', sessionId: session.id, node: session.node })) this.fail(session, 'operator buffer limit exceeded');
+        } else if (frame.type === 'live.output' && frameKeys(frame, [...keys, 'stream', 'data']) && (frame.stream === 'stdout' || frame.stream === 'stderr') && liveBase64(frame.data)) {
+          if (!this.send(session.operator, frame)) this.fail(session, 'operator buffer limit exceeded');
+        } else if (frame.type === 'live.result' && frameKeys(frame, [...keys, 'result']) && Object.hasOwn(frame, 'result') && ['ps', 'inspect'].includes(session.request.operation)) {
+          if (!this.send(session.operator, { v: 1, type: 'live.result', sessionId: session.id, value: frame.result })) this.fail(session, 'operator buffer limit exceeded');
+        } else if (frame.type === 'live.exit' && frameKeys(frame, [...keys, 'code', 'signal', 'cancelled', 'error']) && (frame.code === null || (Number.isInteger(frame.code) && Number(frame.code) >= 0 && Number(frame.code) <= 255)) && (frame.signal === null || typeof frame.signal === 'string') && typeof frame.cancelled === 'boolean' && (frame.error === undefined || typeof frame.error === 'string')) {
+          if (frame.error) this.fail(session, frame.error as string);
+          else this.finish(session, { v: 1, type: 'live.exit', sessionId: session.id, code: typeof frame.code === 'number' ? frame.code : frame.cancelled ? 130 : 1 }, false);
+        } else throw new Error('unsupported agent frame');
+      } catch { ws.close(1008, 'invalid live session frame'); }
+    });
+  }
+  operator(actor: Actor, ws: WebSocket): void {
+    let opening = false; let session: LiveSession | undefined;
+    const timer = setTimeout(() => { if (!session) reject('live.open timeout'); }, this.startTimeoutMs);
+    const reject = (message: string) => { clearTimeout(timer); if (session) this.fail(session, message); else { this.send(ws, { v: 1, type: 'live.error', message }); ws.close(1008, message.slice(0, 100)); } };
+    ws.on('error', () => {});
+    ws.on('close', () => { clearTimeout(timer); if (session) this.finish(session); });
+    ws.on('message', (data, binary) => {
+      void (async () => {
+        if (binary || Buffer.byteLength(data.toString()) > LIVE_MAX_FRAME_BYTES) throw new Error('invalid or oversized live frame');
+        const frame: unknown = JSON.parse(data.toString());
+        if (!objectFrame(frame) || frame.v !== 1) throw new Error('invalid live frame');
+        if (!session) {
+          if (opening || frame.type !== 'live.open' || !frameKeys(frame, ['v', 'type', 'request'])) throw new Error('first frame must be live.open');
+          opening = true;
+          const request = parseLiveRequest(frame.request);
+          const node = await this.resolve(actor, request);
+          if (ws.readyState !== WebSocket.OPEN) return;
+          const agent = this.agents.get(node.id);
+          if (!agent || agent.readyState !== WebSocket.OPEN) throw new Error('agent is not connected');
+          if (this.sessions.size >= LIVE_MAX_SESSIONS) throw new Error('too many live sessions');
+          clearTimeout(timer);
+          const sessionId = id('live');
+          session = { id: sessionId, operator: ws, agent, node: node.name, request, started: false, timer: setTimeout(() => { if (session) this.fail(session, 'agent live startup timeout'); }, this.startTimeoutMs) };
+          this.sessions.set(sessionId, session);
+          if (!this.send(agent, { v: 1, type: 'live.open', sessionId, request })) this.fail(session, 'agent buffer limit exceeded');
+          return;
+        }
+        if (!this.sessions.has(session.id)) return;
+        if (!frameKeys(frame, ['v', 'type', ...(frame.type === 'live.stdin' ? ['data'] : frame.type === 'live.resize' ? ['columns', 'rows'] : [])])) throw new Error('invalid live input');
+        if (frame.type === 'live.cancel') { this.finish(session, { v: 1, type: 'live.exit', sessionId: session.id, code: 130 }); return; }
+        if (session.request.operation !== 'exec') throw new Error('operation does not accept input');
+        if (frame.type === 'live.stdin' ? !session.request.interactive || !liveBase64(frame.data) : frame.type === 'live.stdin-end' ? !session.request.interactive : frame.type === 'live.resize' ? !session.request.tty || !liveDimension(frame.columns) || !liveDimension(frame.rows) : true) throw new Error('invalid live input');
+        if (!this.send(session.agent, { ...frame, sessionId: session.id } as LiveInput & { sessionId: string })) this.fail(session, 'agent buffer limit exceeded');
+      })().catch(error => reject(errMessage(error)));
+    });
+  }
+}
+
 interface StreamRuntime {
   hub: WakeHub;
   authenticate(token: string): Promise<NodeRow | undefined>;
+  authenticateOperator(token: string): Promise<Actor | null>;
+  live: LiveHub;
 }
 
 const streamRuntimes = new WeakMap<express.Express, StreamRuntime>();
@@ -134,7 +249,7 @@ export interface ControlImageOperations {
   validate: typeof validateImageArchive;
   run: typeof runCommand;
 }
-export async function createApp(options: { images?: Partial<ControlImageOperations>; openDatabase?: typeof openDb; /** Minimum time between event prunes triggered by agent reports; default one hour. */ eventPruneIntervalMs?: number } = {}) {
+export async function createApp(options: { images?: Partial<ControlImageOperations>; openDatabase?: typeof openDb; /** Minimum time between event prunes triggered by agent reports; default one hour. */ eventPruneIntervalMs?: number; /** Override the live open/agent startup timeout in milliseconds. */ liveStartTimeoutMs?: number } = {}) {
   const images: ControlImageOperations = { build: buildAndPush, save: saveImageArchive, inspect: inspectImage, validate: validateImageArchive, run: runCommand, ...options.images };
   const DATA_DIR = process.env.TUG_DATA_DIR || './data';
   const MAX_IMAGE_BYTES = Number(process.env.TUG_MAX_IMAGE_BYTES || 5 * 1024 ** 3);
@@ -226,7 +341,6 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
 
   const app = express();
   const authenticateAgent = async (raw: string): Promise<NodeRow | undefined> => raw ? db.get<NodeRow>('SELECT * FROM nodes WHERE agent_token_hash=?', hashToken(raw)) : undefined;
-  streamRuntimes.set(app, { hub: wakeHub, authenticate: authenticateAgent });
   let restartRequired = false;
   app.use((_req, res, next) => restartRequired ? res.status(503).json({ error: 'control restored; restart required', restartRequired: true }) : next());
   app.use(express.json({ limit: '20mb' }));
@@ -359,6 +473,25 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
   async function currentDesired(projectId: string): Promise<DesiredStateRow | undefined> {
     return db.get<DesiredStateRow>('SELECT ds.* FROM desired_states ds JOIN projects p ON p.current_deployment_id=ds.deployment_id WHERE p.id=?', projectId);
   }
+
+  const live = new LiveHub(async (actor, request) => {
+    assertProject(actor, request.project);
+    const row = await currentDesired(request.project);
+    if (!row) throw httpError(404, missingProject(request.project));
+    const desired: DesiredState = JSON.parse(row.state_json);
+    const nodes = await db.all<NodeRow[]>('SELECT * FROM nodes');
+    const eligible = new Set<string>();
+    const services = request.operation === 'ps' ? Object.values(desired.services) : [desired.services[request.service]];
+    if (services.some(service => !service)) throw httpError(404, missingService(request.project, 'service' in request ? request.service : ''));
+    for (const service of services) for (const node of nodes) if (!service.placement?.nodes?.length || service.placement.nodes.includes(node.name)) eligible.add(node.name);
+    if (request.node && !eligible.has(request.node)) throw httpError(400, 'requested node is not placed for this operation');
+    if (!request.node && eligible.size !== 1) throw httpError(400, 'operation requires --node because placement is ambiguous');
+    const node = nodes.find(node => node.name === (request.node || [...eligible][0]));
+    if (!node) throw httpError(404, 'no eligible node for this operation');
+    return node;
+  }, options.liveStartTimeoutMs);
+  streamRuntimes.set(app, { hub: wakeHub, authenticate: authenticateAgent, authenticateOperator: raw => authenticate(db, raw), live });
+  api('get', '/api/v1/live', null, (_req, res) => { res.status(426).json({ error: 'WebSocket upgrade required' }); });
 
   async function acquireProjectLock(project: string, operation: string, ttlMs = Number(process.env.TUG_LOCK_TTL_MS || 10 * 60 * 1000)) {
     const name = `project:${project}`;
@@ -1015,26 +1148,24 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
 function attachAgentStream(app: express.Express, server: http.Server | https.Server): void {
   const runtime = streamRuntimes.get(app);
   if (!runtime) throw new Error('control app is missing its stream runtime');
-  const wss = new WebSocketServer({ noServer: true });
+  const wss = new WebSocketServer({ noServer: true, maxPayload: LIVE_MAX_FRAME_BYTES });
   server.on('upgrade', (request, socket, head) => {
+    const reject = (status: number, reason: string) => { socket.write(`HTTP/1.1 ${status} ${reason}\r\nConnection: close\r\n\r\n`); socket.destroy(); };
     const pathname = new URL(request.url || '/', 'http://localhost').pathname;
-    if (pathname !== '/agent/v1/stream') {
-      socket.write('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n');
-      socket.destroy();
-      return;
-    }
+    if (!['/agent/v1/stream', '/api/v1/live'].includes(pathname)) { reject(404, 'Not Found'); return; }
     const raw = String(request.headers.authorization || '').replace(/^Bearer /, '');
-    void runtime.authenticate(raw).then(node => {
-      if (!node) {
-        socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
-        socket.destroy();
-        return;
+    void (async () => {
+      if (pathname === '/api/v1/live') {
+        const actor = await runtime.authenticateOperator(raw);
+        if (!actor) { reject(401, 'Unauthorized'); return; }
+        if (!hasRole(actor, 'deploy')) { reject(403, 'Forbidden'); return; }
+        wss.handleUpgrade(request, socket, head, ws => runtime.live.operator(actor, ws));
+      } else {
+        const node = await runtime.authenticate(raw);
+        if (!node) { reject(401, 'Unauthorized'); return; }
+        wss.handleUpgrade(request, socket, head, ws => { runtime.live.agent(node.id, ws); runtime.hub.connect(node.id, ws); });
       }
-      wss.handleUpgrade(request, socket, head, ws => runtime.hub.connect(node.id, ws));
-    }).catch(() => {
-      socket.write('HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n');
-      socket.destroy();
-    });
+    })().catch(() => reject(500, 'Internal Server Error'));
   });
   server.once('close', () => wss.close());
 }

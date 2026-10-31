@@ -24,6 +24,7 @@ const LAST_USED_INTERVAL_MS = 60_000;
  * credential check (the registry hook) and are not behind the token guard. docs/access-control.md mirrors this table.
  */
 export const ROUTE_ROLES: Record<string, RouteRole> = {
+  'GET /api/v1/live': 'deploy',
   'GET /api/v1/status': 'read',
   'GET /api/v1/events': 'read',
   'GET /api/v1/projects/:project': 'read',
