@@ -16,6 +16,8 @@ The working example is [`examples/wordpress-backup`](../examples/wordpress-backu
 
 `wp-config.php` is rebuilt from environment variables on every start, so it is not backed up. If you set fixed `WORDPRESS_AUTH_KEY` and the other salts as secrets they survive a rebuild; otherwise users are logged out after a restore.
 
+The WordPress HTTP health check calls `/wp-includes/version.php`, which executes PHP and returns directly without canonical-host redirects. Avoid `/wp-login.php` for this check: after installation it can redirect to the public site URL, making ingress availability depend on a health check that itself needs ingress. Database health is checked separately over TCP.
+
 ## The sidecar recipe
 
 The `backup` service in the example is built by control from `examples/wordpress-backup/backup/` (an Alpine image with `restic` and `mariadb-client`, plus `backup.sh`). Deploy from the example directory so the build context is uploaded. Once a day (`BACKUP_AT_UTC`, default 03:30 UTC) it:
@@ -32,7 +34,7 @@ The image's tools come from Alpine 3.21 packages at build time (restic 0.17 and 
 
 ### Required secrets
 
-Set these once, before the first deploy. Values must not contain `#`, `$`, spaces or newlines (see [Compose extensions](compose.md#secrets-in-services)); generate passwords with `openssl rand -hex 24`. Use a bucket and an access key that exist only for backups, with no permission to change bucket policy or lifecycle rules, so a compromised web server cannot rewrite history.
+Set these once, before the first deploy. Credentials are passed directly into container environments through the Engine API; use stdin to keep them out of shell history. Random hex passwords remain a convenient choice. Use a bucket and an access key that exist only for backups, with no permission to change bucket policy or lifecycle rules, so a compromised web server cannot rewrite history.
 
 ```bash
 tug secret-set DB_PASSWORD

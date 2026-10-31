@@ -589,8 +589,14 @@ export class DockerEngine implements DockerApi {
     const { fromImage, tag } = splitImageRef(ref);
     const res = await this.request('POST', '/images/create', {
       query: { fromImage, tag },
+      // Docker uses Go's padded base64.URLEncoding; Node's base64url encoding omits required '='.
       headers: auth
-        ? { 'x-registry-auth': Buffer.from(JSON.stringify(auth)).toString('base64url') }
+        ? {
+            'x-registry-auth': Buffer.from(JSON.stringify(auth))
+              .toString('base64')
+              .replaceAll('+', '-')
+              .replaceAll('/', '_'),
+          }
         : {},
     });
     await this.progress(res, `pull ${ref}`);
