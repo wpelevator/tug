@@ -1,0 +1,24 @@
+services:
+  caddy:
+    image: caddy:2-alpine
+    volumes:
+      - ./Caddyfile.php:/etc/caddy/Caddyfile:ro
+      - assets:/app:ro
+      - ./certs:/certs:ro
+    depends_on:
+      - php
+  php:
+    image: php:8.4-fpm-alpine
+    volumes:
+      - assets:/app:ro
+      - ./php-fpm.conf:/usr/local/etc/php-fpm.d/zz-benchmark.conf:ro
+  load:
+    image: node:24-alpine
+    profiles: [load]
+    volumes:
+      - ./load.mjs:/load.mjs:ro
+    entrypoint: [node, /load.mjs]
+volumes:
+  assets:
+    external: true
+    name: ${BENCH_ASSET_VOLUME:?Run the benchmark via run.mjs}

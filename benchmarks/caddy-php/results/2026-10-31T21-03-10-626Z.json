@@ -1,0 +1,1458 @@
+{
+  "timestamp": "2026-10-31T21:03:10.626Z",
+  "duration": 10,
+  "rounds": 3,
+  "concurrencyLevels": [1, 32, 128],
+  "cases": {
+    "direct": {
+      "stack": "direct",
+      "target": "nginx",
+      "services": ["nginx", "php"],
+      "workload": "php"
+    },
+    "proxy": {
+      "stack": "proxy",
+      "target": "caddy",
+      "services": ["caddy", "nginx", "php"],
+      "workload": "php"
+    },
+    "caddy-php": {
+      "stack": "caddy-php",
+      "target": "caddy",
+      "services": ["caddy", "php"],
+      "workload": "php"
+    },
+    "static-nginx": {
+      "stack": "static",
+      "target": "nginx",
+      "services": ["nginx"],
+      "workload": "static"
+    },
+    "static-proxy": {
+      "stack": "static",
+      "target": "caddy",
+      "services": ["caddy", "nginx"],
+      "workload": "static"
+    },
+    "static-caddy": {
+      "stack": "static",
+      "target": "caddy-direct",
+      "services": ["caddy-direct"],
+      "workload": "static"
+    }
+  },
+  "assetStorage": "shared native Docker volume, mounted read-only in application containers",
+  "docker": {
+    "ServerVersion": "29.9.2",
+    "OperatingSystem": "Docker Desktop",
+    "Architecture": "aarch64",
+    "NCPU": 6,
+    "MemTotal": 8320028672,
+    "ContainersRunning": 27,
+    "KernelVersion": "7.0.14-linuxkit"
+  },
+  "runs": [
+    {
+      "name": "direct",
+      "concurrency": 1,
+      "round": 1,
+      "requests": 21711,
+      "errors": 0,
+      "connections": 1,
+      "elapsedMs": 10000.215129,
+      "requestsPerSecond": 2171.0532943475837,
+      "meanMs": 0.4347169005112516,
+      "p50Ms": 0.39650000000006,
+      "p95Ms": 0.6506249999993088,
+      "p99Ms": 0.9770409999999856,
+      "clientCpuPercent": 43.38665662719464,
+      "services": {
+        "nginx": {
+          "cpuSeconds": 3.462824,
+          "sampledMemoryMiB": 10.97265625
+        },
+        "php": {
+          "cpuSeconds": 2.885727,
+          "sampledMemoryMiB": 21.4140625
+        }
+      },
+      "cpuUsecPerRequest": 292.41172677444615
+    },
+    {
+      "name": "proxy",
+      "concurrency": 1,
+      "round": 1,
+      "requests": 13770,
+      "errors": 0,
+      "connections": 1,
+      "elapsedMs": 10000.271338,
+      "requestsPerSecond": 1376.962637771179,
+      "meanMs": 0.6982995031953433,
+      "p50Ms": 0.6495000000004438,
+      "p95Ms": 0.9644579999999223,
+      "p99Ms": 1.4602500000000873,
+      "clientCpuPercent": 34.19065227767923,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 4.786973,
+          "sampledMemoryMiB": 18.99609375
+        },
+        "nginx": {
+          "cpuSeconds": 2.269692,
+          "sampledMemoryMiB": 10.453125
+        },
+        "php": {
+          "cpuSeconds": 2.006663,
+          "sampledMemoryMiB": 21.58203125
+        }
+      },
+      "cpuUsecPerRequest": 658.1937545388525
+    },
+    {
+      "name": "caddy-php",
+      "concurrency": 1,
+      "round": 1,
+      "requests": 9763,
+      "errors": 0,
+      "connections": 1,
+      "elapsedMs": 10000.477713,
+      "requestsPerSecond": 976.2533631077149,
+      "meanMs": 0.9837985090648342,
+      "p50Ms": 0.8613339999992604,
+      "p95Ms": 1.5845829999999523,
+      "p99Ms": 3.1180409999999483,
+      "clientCpuPercent": 27.947564908492485,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 7.085555,
+          "sampledMemoryMiB": 18.88671875
+        },
+        "php": {
+          "cpuSeconds": 1.695592,
+          "sampledMemoryMiB": 18.0078125
+        }
+      },
+      "cpuUsecPerRequest": 899.4312199119123
+    },
+    {
+      "name": "static-nginx",
+      "concurrency": 1,
+      "round": 1,
+      "requests": 72340,
+      "errors": 0,
+      "connections": 1,
+      "elapsedMs": 10000.085713,
+      "requestsPerSecond": 7233.9379957472565,
+      "meanMs": 0.12666595546032425,
+      "p50Ms": 0.11908300000004601,
+      "p95Ms": 0.1805000000003929,
+      "p99Ms": 0.2905829999999696,
+      "clientCpuPercent": 70.13866882042794,
+      "services": {
+        "nginx": {
+          "cpuSeconds": 2.591856,
+          "sampledMemoryMiB": 11.21484375
+        }
+      },
+      "cpuUsecPerRequest": 35.82880840475532
+    },
+    {
+      "name": "static-proxy",
+      "concurrency": 1,
+      "round": 1,
+      "requests": 23155,
+      "errors": 0,
+      "connections": 1,
+      "elapsedMs": 10000.159921,
+      "requestsPerSecond": 2315.4629708846232,
+      "meanMs": 0.4116381648456047,
+      "p50Ms": 0.2820000000001528,
+      "p95Ms": 1.0169999999998254,
+      "p99Ms": 3.015540999998848,
+      "clientCpuPercent": 38.6731715347735,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 5.545627,
+          "sampledMemoryMiB": 20.03515625
+        },
+        "nginx": {
+          "cpuSeconds": 1.080959,
+          "sampledMemoryMiB": 11.06640625
+        }
+      },
+      "cpuUsecPerRequest": 286.18380479378106
+    },
+    {
+      "name": "static-caddy",
+      "concurrency": 1,
+      "round": 1,
+      "requests": 32956,
+      "errors": 0,
+      "connections": 1,
+      "elapsedMs": 10000.064255000001,
+      "requestsPerSecond": 3295.5788242582644,
+      "meanMs": 0.28440141485616877,
+      "p50Ms": 0.172458000000006,
+      "p95Ms": 0.8186670000013692,
+      "p99Ms": 2.262666000000536,
+      "clientCpuPercent": 50.7330940145044,
+      "services": {
+        "caddy-direct": {
+          "cpuSeconds": 4.991036,
+          "sampledMemoryMiB": 20.74609375
+        }
+      },
+      "cpuUsecPerRequest": 151.44544240805922
+    },
+    {
+      "name": "static-caddy",
+      "concurrency": 1,
+      "round": 2,
+      "requests": 49964,
+      "errors": 0,
+      "connections": 1,
+      "elapsedMs": 10000.192004,
+      "requestsPerSecond": 4996.304068963354,
+      "meanMs": 0.18585012046672864,
+      "p50Ms": 0.16737499999999272,
+      "p95Ms": 0.26529199999993125,
+      "p99Ms": 0.46604100000001836,
+      "clientCpuPercent": 59.11464497517062,
+      "services": {
+        "caddy-direct": {
+          "cpuSeconds": 6.170695,
+          "sampledMemoryMiB": 20.44921875
+        }
+      },
+      "cpuUsecPerRequest": 123.50282203186295
+    },
+    {
+      "name": "static-proxy",
+      "concurrency": 1,
+      "round": 2,
+      "requests": 33799,
+      "errors": 0,
+      "connections": 1,
+      "elapsedMs": 10000.139172000001,
+      "requestsPerSecond": 3379.8529619103583,
+      "meanMs": 0.2811438621260957,
+      "p50Ms": 0.25495900000009897,
+      "p95Ms": 0.4186250000002474,
+      "p99Ms": 0.7245840000000499,
+      "clientCpuPercent": 42.40099989680423,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 6.557962,
+          "sampledMemoryMiB": 19.796875
+        },
+        "nginx": {
+          "cpuSeconds": 1.209631,
+          "sampledMemoryMiB": 11.44921875
+        }
+      },
+      "cpuUsecPerRequest": 229.81724311370158
+    },
+    {
+      "name": "static-nginx",
+      "concurrency": 1,
+      "round": 2,
+      "requests": 69409,
+      "errors": 0,
+      "connections": 1,
+      "elapsedMs": 10000.049379,
+      "requestsPerSecond": 6940.865726699129,
+      "meanMs": 0.13197529712285105,
+      "p50Ms": 0.12087500000052387,
+      "p95Ms": 0.18629199999986668,
+      "p99Ms": 0.3202079999991838,
+      "clientCpuPercent": 68.80508024739424,
+      "services": {
+        "nginx": {
+          "cpuSeconds": 2.50841,
+          "sampledMemoryMiB": 11.55859375
+        }
+      },
+      "cpuUsecPerRequest": 36.139549626129174
+    },
+    {
+      "name": "caddy-php",
+      "concurrency": 1,
+      "round": 2,
+      "requests": 10660,
+      "errors": 0,
+      "connections": 1,
+      "elapsedMs": 10000.287588000001,
+      "requestsPerSecond": 1065.9693440008296,
+      "meanMs": 0.902113745309561,
+      "p50Ms": 0.8150000000005093,
+      "p95Ms": 1.3397909999994226,
+      "p99Ms": 2.259750000001077,
+      "clientCpuPercent": 29.399464506680143,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 7.353913,
+          "sampledMemoryMiB": 22.1640625
+        },
+        "php": {
+          "cpuSeconds": 1.749695,
+          "sampledMemoryMiB": 20.8046875
+        }
+      },
+      "cpuUsecPerRequest": 853.9969981238274
+    },
+    {
+      "name": "proxy",
+      "concurrency": 1,
+      "round": 2,
+      "requests": 6092,
+      "errors": 0,
+      "connections": 1,
+      "elapsedMs": 10000.935505,
+      "requestsPerSecond": 609.1430143664346,
+      "meanMs": 1.5904530623768809,
+      "p50Ms": 0.8908330000003843,
+      "p95Ms": 5.119582999999693,
+      "p99Ms": 9.816375000000335,
+      "clientCpuPercent": 26.77284538692763,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 3.146872,
+          "sampledMemoryMiB": 15.9921875
+        },
+        "nginx": {
+          "cpuSeconds": 1.814507,
+          "sampledMemoryMiB": 7.609375
+        },
+        "php": {
+          "cpuSeconds": 1.528267,
+          "sampledMemoryMiB": 18.1796875
+        }
+      },
+      "cpuUsecPerRequest": 1065.2734734077478
+    },
+    {
+      "name": "direct",
+      "concurrency": 1,
+      "round": 2,
+      "requests": 21479,
+      "errors": 0,
+      "connections": 1,
+      "elapsedMs": 10000.364421,
+      "requestsPerSecond": 2147.8217288657743,
+      "meanMs": 0.43910971991247094,
+      "p50Ms": 0.3984169999994265,
+      "p95Ms": 0.6445409999996627,
+      "p99Ms": 1.0133749999999964,
+      "clientCpuPercent": 43.73109634701381,
+      "services": {
+        "nginx": {
+          "cpuSeconds": 3.545907,
+          "sampledMemoryMiB": 11.46484375
+        },
+        "php": {
+          "cpuSeconds": 2.914224,
+          "sampledMemoryMiB": 21.28125
+        }
+      },
+      "cpuUsecPerRequest": 300.7649797476605
+    },
+    {
+      "name": "direct",
+      "concurrency": 1,
+      "round": 3,
+      "requests": 22299,
+      "errors": 0,
+      "connections": 1,
+      "elapsedMs": 10000.331047,
+      "requestsPerSecond": 2229.826182273184,
+      "meanMs": 0.4232720209426427,
+      "p50Ms": 0.3873330000005808,
+      "p95Ms": 0.5854589999999007,
+      "p99Ms": 1.0179160000000138,
+      "clientCpuPercent": 44.283734000271046,
+      "services": {
+        "nginx": {
+          "cpuSeconds": 3.538661,
+          "sampledMemoryMiB": 8.30859375
+        },
+        "php": {
+          "cpuSeconds": 2.920221,
+          "sampledMemoryMiB": 18.14453125
+        }
+      },
+      "cpuUsecPerRequest": 289.6489528678416
+    },
+    {
+      "name": "proxy",
+      "concurrency": 1,
+      "round": 3,
+      "requests": 13725,
+      "errors": 0,
+      "connections": 1,
+      "elapsedMs": 10000.080463,
+      "requestsPerSecond": 1372.488956542109,
+      "meanMs": 0.7011060409471765,
+      "p50Ms": 0.6417079999991984,
+      "p95Ms": 0.9978750000000218,
+      "p99Ms": 1.6045829999998205,
+      "clientCpuPercent": 33.948696838600625,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 4.801957,
+          "sampledMemoryMiB": 19.58984375
+        },
+        "nginx": {
+          "cpuSeconds": 2.280906,
+          "sampledMemoryMiB": 10.77734375
+        },
+        "php": {
+          "cpuSeconds": 1.983377,
+          "sampledMemoryMiB": 21.55078125
+        }
+      },
+      "cpuUsecPerRequest": 660.5639344262295
+    },
+    {
+      "name": "caddy-php",
+      "concurrency": 1,
+      "round": 3,
+      "requests": 11462,
+      "errors": 0,
+      "connections": 1,
+      "elapsedMs": 10000.053588,
+      "requestsPerSecond": 1146.193857776355,
+      "meanMs": 0.839034294015008,
+      "p50Ms": 0.7747499999986758,
+      "p95Ms": 1.1886670000000095,
+      "p99Ms": 1.8234590000001845,
+      "clientCpuPercent": 29.41657236247202,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 7.455678,
+          "sampledMemoryMiB": 22.73046875
+        },
+        "php": {
+          "cpuSeconds": 1.753563,
+          "sampledMemoryMiB": 21.12109375
+        }
+      },
+      "cpuUsecPerRequest": 803.4584714709475
+    },
+    {
+      "name": "static-nginx",
+      "concurrency": 1,
+      "round": 3,
+      "requests": 61703,
+      "errors": 0,
+      "connections": 1,
+      "elapsedMs": 10000.166879999999,
+      "requestsPerSecond": 6170.197031751935,
+      "meanMs": 0.14687585120658597,
+      "p50Ms": 0.1172500000002401,
+      "p95Ms": 0.3199580000000424,
+      "p99Ms": 0.6959580000000187,
+      "clientCpuPercent": 74.89087022115775,
+      "services": {
+        "nginx": {
+          "cpuSeconds": 2.439595,
+          "sampledMemoryMiB": 11.3984375
+        }
+      },
+      "cpuUsecPerRequest": 39.53770481175956
+    },
+    {
+      "name": "static-proxy",
+      "concurrency": 1,
+      "round": 3,
+      "requests": 19695,
+      "errors": 0,
+      "connections": 1,
+      "elapsedMs": 10000.160172,
+      "requestsPerSecond": 1969.4684546298686,
+      "meanMs": 0.47993460776847,
+      "p50Ms": 0.31387500000073487,
+      "p95Ms": 1.1535000000001219,
+      "p99Ms": 2.9826250000000982,
+      "clientCpuPercent": 46.42758636006375,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 5.100352,
+          "sampledMemoryMiB": 20.83203125
+        },
+        "nginx": {
+          "cpuSeconds": 1.004609,
+          "sampledMemoryMiB": 8.23046875
+        }
+      },
+      "cpuUsecPerRequest": 309.9751713632902
+    },
+    {
+      "name": "static-caddy",
+      "concurrency": 1,
+      "round": 3,
+      "requests": 44721,
+      "errors": 0,
+      "connections": 1,
+      "elapsedMs": 10000.182505,
+      "requestsPerSecond": 4472.018383428493,
+      "meanMs": 0.20755463393036575,
+      "p50Ms": 0.16508299999986775,
+      "p95Ms": 0.38379100000020117,
+      "p99Ms": 0.8797910000002958,
+      "clientCpuPercent": 57.525620128669836,
+      "services": {
+        "caddy-direct": {
+          "cpuSeconds": 5.289016,
+          "sampledMemoryMiB": 17.33984375
+        }
+      },
+      "cpuUsecPerRequest": 118.26694394132511
+    },
+    {
+      "name": "direct",
+      "concurrency": 32,
+      "round": 1,
+      "requests": 74819,
+      "errors": 0,
+      "connections": 32,
+      "elapsedMs": 10001.018296,
+      "requestsPerSecond": 7481.138198689683,
+      "meanMs": 4.2473178637378375,
+      "p50Ms": 3.551749999999629,
+      "p95Ms": 8.80158399999982,
+      "p99Ms": 12.915000000000418,
+      "clientCpuPercent": 87.07174351918613,
+      "services": {
+        "nginx": {
+          "cpuSeconds": 7.733675,
+          "sampledMemoryMiB": 12.81640625
+        },
+        "php": {
+          "cpuSeconds": 7.430975,
+          "sampledMemoryMiB": 18
+        }
+      },
+      "cpuUsecPerRequest": 202.68447854154692
+    },
+    {
+      "name": "proxy",
+      "concurrency": 32,
+      "round": 1,
+      "requests": 43578,
+      "errors": 0,
+      "connections": 32,
+      "elapsedMs": 10007.825129,
+      "requestsPerSecond": 4354.392631594113,
+      "meanMs": 7.302308310294203,
+      "p50Ms": 5.958000000000538,
+      "p95Ms": 14.911957999998776,
+      "p99Ms": 25.59020899999996,
+      "clientCpuPercent": 74.17655588813994,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 8.079999,
+          "sampledMemoryMiB": 23.109375
+        },
+        "nginx": {
+          "cpuSeconds": 5.488809,
+          "sampledMemoryMiB": 10.8203125
+        },
+        "php": {
+          "cpuSeconds": 5.246777,
+          "sampledMemoryMiB": 21.33203125
+        }
+      },
+      "cpuUsecPerRequest": 431.7679792555877
+    },
+    {
+      "name": "caddy-php",
+      "concurrency": 32,
+      "round": 1,
+      "requests": 35660,
+      "errors": 0,
+      "connections": 32,
+      "elapsedMs": 10004.380005,
+      "requestsPerSecond": 3564.438774034753,
+      "meanMs": 8.920682966601225,
+      "p50Ms": 6.313375000000178,
+      "p95Ms": 24.960375000000113,
+      "p99Ms": 42.11687499999971,
+      "clientCpuPercent": 61.40323535221411,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 12.301832,
+          "sampledMemoryMiB": 32.0078125
+        },
+        "php": {
+          "cpuSeconds": 4.158347,
+          "sampledMemoryMiB": 18.11328125
+        }
+      },
+      "cpuUsecPerRequest": 461.58662366797535
+    },
+    {
+      "name": "static-nginx",
+      "concurrency": 32,
+      "round": 1,
+      "requests": 114500,
+      "errors": 0,
+      "connections": 32,
+      "elapsedMs": 10001.559795,
+      "requestsPerSecond": 11448.214313255527,
+      "meanMs": 2.773239014943227,
+      "p50Ms": 2.1150830000005953,
+      "p95Ms": 5.677332999999635,
+      "p99Ms": 9.71083299999998,
+      "clientCpuPercent": 99.79183451954756,
+      "services": {
+        "nginx": {
+          "cpuSeconds": 4.084546,
+          "sampledMemoryMiB": 13.5546875
+        }
+      },
+      "cpuUsecPerRequest": 35.67289082969432
+    },
+    {
+      "name": "static-proxy",
+      "concurrency": 32,
+      "round": 1,
+      "requests": 114371,
+      "errors": 0,
+      "connections": 32,
+      "elapsedMs": 10001.464962999999,
+      "requestsPerSecond": 11435.42475258482,
+      "meanMs": 2.7797440231614496,
+      "p50Ms": 2.300250000000233,
+      "p95Ms": 5.6079579999995985,
+      "p99Ms": 9.566000000000031,
+      "clientCpuPercent": 95.45271653020339,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 15.753764,
+          "sampledMemoryMiB": 34.0390625
+        },
+        "nginx": {
+          "cpuSeconds": 3.118321,
+          "sampledMemoryMiB": 12.60546875
+        }
+      },
+      "cpuUsecPerRequest": 165.00760682340803
+    },
+    {
+      "name": "static-caddy",
+      "concurrency": 32,
+      "round": 1,
+      "requests": 98112,
+      "errors": 0,
+      "connections": 32,
+      "elapsedMs": 10001.013045,
+      "requestsPerSecond": 9810.206181967838,
+      "meanMs": 3.2358854961880104,
+      "p50Ms": 2.5677919999998267,
+      "p95Ms": 6.508874999999989,
+      "p99Ms": 11.278915999999981,
+      "clientCpuPercent": 89.0206718053531,
+      "services": {
+        "caddy-direct": {
+          "cpuSeconds": 8.731804,
+          "sampledMemoryMiB": 21.08203125
+        }
+      },
+      "cpuUsecPerRequest": 88.99832844096542
+    },
+    {
+      "name": "static-caddy",
+      "concurrency": 32,
+      "round": 2,
+      "requests": 29125,
+      "errors": 0,
+      "connections": 32,
+      "elapsedMs": 10003.625547,
+      "requestsPerSecond": 2911.4444421337153,
+      "meanMs": 10.861973911793964,
+      "p50Ms": 7.166917000000012,
+      "p95Ms": 32.137666999999965,
+      "p99Ms": 63.414999999999964,
+      "clientCpuPercent": 51.89784419266808,
+      "services": {
+        "caddy-direct": {
+          "cpuSeconds": 3.671309,
+          "sampledMemoryMiB": 20.80859375
+        }
+      },
+      "cpuUsecPerRequest": 126.0535278969957
+    },
+    {
+      "name": "static-proxy",
+      "concurrency": 32,
+      "round": 2,
+      "requests": 123957,
+      "errors": 0,
+      "connections": 32,
+      "elapsedMs": 10001.111296,
+      "requestsPerSecond": 12394.322623884538,
+      "meanMs": 2.563196911412832,
+      "p50Ms": 2.0558340000000044,
+      "p95Ms": 5.2242089999999735,
+      "p99Ms": 8.58620800000017,
+      "clientCpuPercent": 95.10654084815816,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 15.565672,
+          "sampledMemoryMiB": 35.36328125
+        },
+        "nginx": {
+          "cpuSeconds": 3.021914,
+          "sampledMemoryMiB": 12.27734375
+        }
+      },
+      "cpuUsecPerRequest": 149.9518865413006
+    },
+    {
+      "name": "static-nginx",
+      "concurrency": 32,
+      "round": 2,
+      "requests": 98834,
+      "errors": 0,
+      "connections": 32,
+      "elapsedMs": 10002.310754999999,
+      "requestsPerSecond": 9881.11671601429,
+      "meanMs": 3.2027531700528358,
+      "p50Ms": 2.3702919999998358,
+      "p95Ms": 7.023167000000285,
+      "p99Ms": 13.059292000000028,
+      "clientCpuPercent": 94.06761327922771,
+      "services": {
+        "nginx": {
+          "cpuSeconds": 3.649853,
+          "sampledMemoryMiB": 10.40625
+        }
+      },
+      "cpuUsecPerRequest": 36.92912358095392
+    },
+    {
+      "name": "caddy-php",
+      "concurrency": 32,
+      "round": 2,
+      "requests": 42979,
+      "errors": 0,
+      "connections": 32,
+      "elapsedMs": 10002.119171999999,
+      "requestsPerSecond": 4296.989394039186,
+      "meanMs": 7.383836650596803,
+      "p50Ms": 5.923749999999927,
+      "p95Ms": 15.329499999999825,
+      "p99Ms": 26.326791999999955,
+      "clientCpuPercent": 80.42016758326223,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 15.418957,
+          "sampledMemoryMiB": 27.37890625
+        },
+        "php": {
+          "cpuSeconds": 5.222578,
+          "sampledMemoryMiB": 21.27734375
+        }
+      },
+      "cpuUsecPerRequest": 480.27024826077854
+    },
+    {
+      "name": "proxy",
+      "concurrency": 32,
+      "round": 2,
+      "requests": 26754,
+      "errors": 0,
+      "connections": 32,
+      "elapsedMs": 10006.861461999999,
+      "requestsPerSecond": 2673.5655431621085,
+      "meanMs": 11.880193878298567,
+      "p50Ms": 8.242207999999664,
+      "p95Ms": 31.046583999999996,
+      "p99Ms": 79.16845899999998,
+      "clientCpuPercent": 58.913136974934574,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 5.834895,
+          "sampledMemoryMiB": 28.72265625
+        },
+        "nginx": {
+          "cpuSeconds": 3.989528,
+          "sampledMemoryMiB": 10.67578125
+        },
+        "php": {
+          "cpuSeconds": 3.99892,
+          "sampledMemoryMiB": 21.78515625
+        }
+      },
+      "cpuUsecPerRequest": 516.6832249383269
+    },
+    {
+      "name": "direct",
+      "concurrency": 32,
+      "round": 2,
+      "requests": 51862,
+      "errors": 0,
+      "connections": 32,
+      "elapsedMs": 10001.823713000002,
+      "requestsPerSecond": 5185.254358421823,
+      "meanMs": 6.1257085444448505,
+      "p50Ms": 5.019749999999476,
+      "p95Ms": 13.231458000000202,
+      "p99Ms": 21.611291999999594,
+      "clientCpuPercent": 71.33347082219262,
+      "services": {
+        "nginx": {
+          "cpuSeconds": 6.18904,
+          "sampledMemoryMiB": 10.15234375
+        },
+        "php": {
+          "cpuSeconds": 5.757823,
+          "sampledMemoryMiB": 18.46875
+        }
+      },
+      "cpuUsecPerRequest": 230.35870193976322
+    },
+    {
+      "name": "direct",
+      "concurrency": 32,
+      "round": 3,
+      "requests": 64722,
+      "errors": 0,
+      "connections": 32,
+      "elapsedMs": 10004.083212,
+      "requestsPerSecond": 6469.558342174254,
+      "meanMs": 4.911496664596222,
+      "p50Ms": 3.8925830000000587,
+      "p95Ms": 11.225666000000047,
+      "p99Ms": 18.809875000000034,
+      "clientCpuPercent": 81.17750350435611,
+      "services": {
+        "nginx": {
+          "cpuSeconds": 7.488476,
+          "sampledMemoryMiB": 9.4453125
+        },
+        "php": {
+          "cpuSeconds": 7.300355,
+          "sampledMemoryMiB": 18.125
+        }
+      },
+      "cpuUsecPerRequest": 228.49774419826335
+    },
+    {
+      "name": "proxy",
+      "concurrency": 32,
+      "round": 3,
+      "requests": 56765,
+      "errors": 0,
+      "connections": 32,
+      "elapsedMs": 10001.679713000001,
+      "requestsPerSecond": 5675.546671047453,
+      "meanMs": 5.602106160468619,
+      "p50Ms": 4.5925000000002,
+      "p95Ms": 11.37054100000023,
+      "p99Ms": 20.602458999999726,
+      "clientCpuPercent": 83.69030243110323,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 9.386952,
+          "sampledMemoryMiB": 29.41015625
+        },
+        "nginx": {
+          "cpuSeconds": 6.52743,
+          "sampledMemoryMiB": 11.57421875
+        },
+        "php": {
+          "cpuSeconds": 6.122706,
+          "sampledMemoryMiB": 17.71875
+        }
+      },
+      "cpuUsecPerRequest": 388.21611908746587
+    },
+    {
+      "name": "caddy-php",
+      "concurrency": 32,
+      "round": 3,
+      "requests": 50297,
+      "errors": 0,
+      "connections": 32,
+      "elapsedMs": 10003.380212,
+      "requestsPerSecond": 5028.0004292613,
+      "meanMs": 6.322959396882465,
+      "p50Ms": 5.129124999999931,
+      "p95Ms": 14.774249999999483,
+      "p99Ms": 23.533124999999927,
+      "clientCpuPercent": 80.56461745133156,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 17.841871,
+          "sampledMemoryMiB": 28.10546875
+        },
+        "php": {
+          "cpuSeconds": 6.023268,
+          "sampledMemoryMiB": 21.609375
+        }
+      },
+      "cpuUsecPerRequest": 474.48434300256474
+    },
+    {
+      "name": "static-nginx",
+      "concurrency": 32,
+      "round": 3,
+      "requests": 137245,
+      "errors": 0,
+      "connections": 32,
+      "elapsedMs": 10000.905421000001,
+      "requestsPerSecond": 13723.257467450056,
+      "meanMs": 2.3144421681153973,
+      "p50Ms": 1.9619590000002063,
+      "p95Ms": 3.9757079999999405,
+      "p99Ms": 5.758874999999989,
+      "clientCpuPercent": 104.59130008404864,
+      "services": {
+        "nginx": {
+          "cpuSeconds": 4.598845,
+          "sampledMemoryMiB": 14.13671875
+        }
+      },
+      "cpuUsecPerRequest": 33.508288097927064
+    },
+    {
+      "name": "static-proxy",
+      "concurrency": 32,
+      "round": 3,
+      "requests": 155651,
+      "errors": 0,
+      "connections": 32,
+      "elapsedMs": 10000.923837999999,
+      "requestsPerSecond": 15563.662169746845,
+      "meanMs": 2.0422801570243854,
+      "p50Ms": 1.7325419999997393,
+      "p95Ms": 3.6956669999999576,
+      "p99Ms": 5.730499999999665,
+      "clientCpuPercent": 99.45048238652531,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 19.469665,
+          "sampledMemoryMiB": 36.296875
+        },
+        "nginx": {
+          "cpuSeconds": 3.799651,
+          "sampledMemoryMiB": 12.25390625
+        }
+      },
+      "cpuUsecPerRequest": 149.49673307591985
+    },
+    {
+      "name": "static-caddy",
+      "concurrency": 32,
+      "round": 3,
+      "requests": 154188,
+      "errors": 0,
+      "connections": 32,
+      "elapsedMs": 10000.798547,
+      "requestsPerSecond": 15417.568834665977,
+      "meanMs": 2.061663329357668,
+      "p50Ms": 1.8077499999999418,
+      "p95Ms": 3.3754170000001977,
+      "p99Ms": 5.023290999999972,
+      "clientCpuPercent": 103.66270204602692,
+      "services": {
+        "caddy-direct": {
+          "cpuSeconds": 12.191804,
+          "sampledMemoryMiB": 23.76953125
+        }
+      },
+      "cpuUsecPerRequest": 79.07103017096013
+    },
+    {
+      "name": "direct",
+      "concurrency": 128,
+      "round": 1,
+      "requests": 74129,
+      "errors": 0,
+      "connections": 128,
+      "elapsedMs": 10003.714588,
+      "requestsPerSecond": 7410.147435525776,
+      "meanMs": 17.160149491629582,
+      "p50Ms": 16.40604099999996,
+      "p95Ms": 26.386833999999908,
+      "p99Ms": 41.16254200000003,
+      "clientCpuPercent": 93.85640621197618,
+      "services": {
+        "nginx": {
+          "cpuSeconds": 7.74928,
+          "sampledMemoryMiB": 13.8984375
+        },
+        "php": {
+          "cpuSeconds": 7.377294,
+          "sampledMemoryMiB": 18.0859375
+        }
+      },
+      "cpuUsecPerRequest": 204.05744040793752
+    },
+    {
+      "name": "proxy",
+      "concurrency": 128,
+      "round": 1,
+      "requests": 59418,
+      "errors": 0,
+      "connections": 128,
+      "elapsedMs": 10005.264213,
+      "requestsPerSecond": 5938.673755641279,
+      "meanMs": 21.43044227377236,
+      "p50Ms": 19.643292000000656,
+      "p95Ms": 37.81458300000003,
+      "p99Ms": 49.25658300000032,
+      "clientCpuPercent": 86.21835282262325,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 10.290797,
+          "sampledMemoryMiB": 46.28515625
+        },
+        "nginx": {
+          "cpuSeconds": 6.497798,
+          "sampledMemoryMiB": 8.11328125
+        },
+        "php": {
+          "cpuSeconds": 6.083273,
+          "sampledMemoryMiB": 21.3359375
+        }
+      },
+      "cpuUsecPerRequest": 384.9316368777138
+    },
+    {
+      "name": "caddy-php",
+      "concurrency": 128,
+      "round": 1,
+      "requests": 71753,
+      "errors": 0,
+      "connections": 128,
+      "elapsedMs": 10012.953129000001,
+      "requestsPerSecond": 7166.017764747692,
+      "meanMs": 17.73986582127558,
+      "p50Ms": 15.638375000000451,
+      "p95Ms": 32.905874999999924,
+      "p99Ms": 47.48879199999999,
+      "clientCpuPercent": 87.53286754749173,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 19.960954,
+          "sampledMemoryMiB": 40.078125
+        },
+        "php": {
+          "cpuSeconds": 6.117421,
+          "sampledMemoryMiB": 18.09765625
+        }
+      },
+      "cpuUsecPerRequest": 363.4464761055287
+    },
+    {
+      "name": "static-nginx",
+      "concurrency": 128,
+      "round": 1,
+      "requests": 119694,
+      "errors": 0,
+      "connections": 128,
+      "elapsedMs": 10004.685588,
+      "requestsPerSecond": 11963.794258918593,
+      "meanMs": 10.637197325429797,
+      "p50Ms": 8.822209000000043,
+      "p95Ms": 19.579042000000015,
+      "p99Ms": 32.07195800000045,
+      "clientCpuPercent": 104.2190372529676,
+      "services": {
+        "nginx": {
+          "cpuSeconds": 4.756372,
+          "sampledMemoryMiB": 18.17578125
+        }
+      },
+      "cpuUsecPerRequest": 39.73776463314786
+    },
+    {
+      "name": "static-proxy",
+      "concurrency": 128,
+      "round": 1,
+      "requests": 132233,
+      "errors": 0,
+      "connections": 128,
+      "elapsedMs": 10005.462379999999,
+      "requestsPerSecond": 13216.080874415322,
+      "meanMs": 9.62329943961781,
+      "p50Ms": 8.683458000000428,
+      "p95Ms": 15.044249999999977,
+      "p99Ms": 20.720332999999982,
+      "clientCpuPercent": 102.18391326358673,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 18.602968,
+          "sampledMemoryMiB": 47.78515625
+        },
+        "nginx": {
+          "cpuSeconds": 3.569706,
+          "sampledMemoryMiB": 15.42578125
+        }
+      },
+      "cpuUsecPerRequest": 167.67882449917948
+    },
+    {
+      "name": "static-caddy",
+      "concurrency": 128,
+      "round": 1,
+      "requests": 128140,
+      "errors": 0,
+      "connections": 128,
+      "elapsedMs": 10003.661588,
+      "requestsPerSecond": 12809.309758509993,
+      "meanMs": 9.923501349953241,
+      "p50Ms": 8.54595899999913,
+      "p95Ms": 15.378583000000162,
+      "p99Ms": 25.047792000000015,
+      "clientCpuPercent": 104.03195778317645,
+      "services": {
+        "caddy-direct": {
+          "cpuSeconds": 11.557154,
+          "sampledMemoryMiB": 31.921875
+        }
+      },
+      "cpuUsecPerRequest": 90.19161854221944
+    },
+    {
+      "name": "static-caddy",
+      "concurrency": 128,
+      "round": 2,
+      "requests": 134605,
+      "errors": 0,
+      "connections": 128,
+      "elapsedMs": 10003.049463,
+      "requestsPerSecond": 13456.396521669383,
+      "meanMs": 9.448292758545305,
+      "p50Ms": 8.285041999999521,
+      "p95Ms": 15.035208999999668,
+      "p99Ms": 21.460125000000005,
+      "clientCpuPercent": 103.98425038758603,
+      "services": {
+        "caddy-direct": {
+          "cpuSeconds": 11.602563,
+          "sampledMemoryMiB": 30.0234375
+        }
+      },
+      "cpuUsecPerRequest": 86.1971174919208
+    },
+    {
+      "name": "static-proxy",
+      "concurrency": 128,
+      "round": 2,
+      "requests": 131967,
+      "errors": 0,
+      "connections": 128,
+      "elapsedMs": 10005.540671,
+      "requestsPerSecond": 13189.392191717572,
+      "meanMs": 9.628737794736406,
+      "p50Ms": 8.366416999999274,
+      "p95Ms": 15.168249999999716,
+      "p99Ms": 21.701583000000028,
+      "clientCpuPercent": 102.31970801610666,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 18.161855,
+          "sampledMemoryMiB": 43.30078125
+        },
+        "nginx": {
+          "cpuSeconds": 3.373942,
+          "sampledMemoryMiB": 9.2734375
+        }
+      },
+      "cpuUsecPerRequest": 163.1907749664689
+    },
+    {
+      "name": "static-nginx",
+      "concurrency": 128,
+      "round": 2,
+      "requests": 141353,
+      "errors": 0,
+      "connections": 128,
+      "elapsedMs": 10002.562087999999,
+      "requestsPerSecond": 14131.67933939447,
+      "meanMs": 9.005456293838897,
+      "p50Ms": 8.01575000000048,
+      "p95Ms": 14.112250000000131,
+      "p99Ms": 18.220374999999876,
+      "clientCpuPercent": 104.27690333972762,
+      "services": {
+        "nginx": {
+          "cpuSeconds": 4.53453,
+          "sampledMemoryMiB": 18.6171875
+        }
+      },
+      "cpuUsecPerRequest": 32.07947479006459
+    },
+    {
+      "name": "caddy-php",
+      "concurrency": 128,
+      "round": 2,
+      "requests": 66012,
+      "errors": 0,
+      "connections": 128,
+      "elapsedMs": 10004.720505,
+      "requestsPerSecond": 6598.085370501812,
+      "meanMs": 19.243505289901808,
+      "p50Ms": 16.76887499999998,
+      "p95Ms": 36.4367500000003,
+      "p99Ms": 52.427833000000646,
+      "clientCpuPercent": 91.83812776586906,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 19.213584,
+          "sampledMemoryMiB": 44.421875
+        },
+        "php": {
+          "cpuSeconds": 6.130016,
+          "sampledMemoryMiB": 21.70703125
+        }
+      },
+      "cpuUsecPerRequest": 383.9241350057565
+    },
+    {
+      "name": "proxy",
+      "concurrency": 128,
+      "round": 2,
+      "requests": 51509,
+      "errors": 0,
+      "connections": 128,
+      "elapsedMs": 10009.901254999999,
+      "requestsPerSecond": 5145.8050072443,
+      "meanMs": 24.69570809945858,
+      "p50Ms": 21.09608300000002,
+      "p95Ms": 45.25120799999968,
+      "p99Ms": 86.01966600000014,
+      "clientCpuPercent": 85.54727745913215,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 9.790881,
+          "sampledMemoryMiB": 44.1796875
+        },
+        "nginx": {
+          "cpuSeconds": 6.318892,
+          "sampledMemoryMiB": 7.6953125
+        },
+        "php": {
+          "cpuSeconds": 5.889068,
+          "sampledMemoryMiB": 21.40625
+        }
+      },
+      "cpuUsecPerRequest": 427.0873245452251
+    },
+    {
+      "name": "direct",
+      "concurrency": 128,
+      "round": 2,
+      "requests": 74878,
+      "errors": 0,
+      "connections": 128,
+      "elapsedMs": 10005.670464,
+      "requestsPerSecond": 7483.556476240949,
+      "meanMs": 16.99260232355311,
+      "p50Ms": 15.811624999999822,
+      "p95Ms": 28.929167000000234,
+      "p99Ms": 42.39562500000011,
+      "clientCpuPercent": 94.64374260647246,
+      "services": {
+        "nginx": {
+          "cpuSeconds": 8.056145,
+          "sampledMemoryMiB": 14.5546875
+        },
+        "php": {
+          "cpuSeconds": 7.451431,
+          "sampledMemoryMiB": 18.65625
+        }
+      },
+      "cpuUsecPerRequest": 207.10457010069715
+    },
+    {
+      "name": "direct",
+      "concurrency": 128,
+      "round": 3,
+      "requests": 73854,
+      "errors": 0,
+      "connections": 128,
+      "elapsedMs": 10003.450213,
+      "requestsPerSecond": 7382.852758543539,
+      "meanMs": 17.232726182941885,
+      "p50Ms": 15.833541999998488,
+      "p95Ms": 29.713917000000038,
+      "p99Ms": 37.874917000000096,
+      "clientCpuPercent": 93.47618872384744,
+      "services": {
+        "nginx": {
+          "cpuSeconds": 7.543955,
+          "sampledMemoryMiB": 17.92578125
+        },
+        "php": {
+          "cpuSeconds": 7.011885,
+          "sampledMemoryMiB": 21.19921875
+        }
+      },
+      "cpuUsecPerRequest": 197.08939258537114
+    },
+    {
+      "name": "proxy",
+      "concurrency": 128,
+      "round": 3,
+      "requests": 58682,
+      "errors": 0,
+      "connections": 128,
+      "elapsedMs": 10004.987547,
+      "requestsPerSecond": 5865.274666693195,
+      "meanMs": 21.644317280835804,
+      "p50Ms": 18.936957999999322,
+      "p95Ms": 40.22308299999986,
+      "p99Ms": 59.39333400000032,
+      "clientCpuPercent": 88.72888605105628,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 10.205874,
+          "sampledMemoryMiB": 42.625
+        },
+        "nginx": {
+          "cpuSeconds": 6.453965,
+          "sampledMemoryMiB": 7.59375
+        },
+        "php": {
+          "cpuSeconds": 5.876597,
+          "sampledMemoryMiB": 21.30078125
+        }
+      },
+      "cpuUsecPerRequest": 384.04342046964996
+    },
+    {
+      "name": "caddy-php",
+      "concurrency": 128,
+      "round": 3,
+      "requests": 68099,
+      "errors": 0,
+      "connections": 128,
+      "elapsedMs": 10004.56963,
+      "requestsPerSecond": 6806.789549027308,
+      "meanMs": 18.677012214966528,
+      "p50Ms": 16.427624999999807,
+      "p95Ms": 34.18366700000024,
+      "p99Ms": 51.724666999999954,
+      "clientCpuPercent": 91.87509648028708,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 19.40249,
+          "sampledMemoryMiB": 38.69140625
+        },
+        "php": {
+          "cpuSeconds": 6.027244,
+          "sampledMemoryMiB": 21.54296875
+        }
+      },
+      "cpuUsecPerRequest": 373.42301649069736
+    },
+    {
+      "name": "static-nginx",
+      "concurrency": 128,
+      "round": 3,
+      "requests": 139090,
+      "errors": 0,
+      "connections": 128,
+      "elapsedMs": 10002.831713,
+      "requestsPerSecond": 13905.062485379434,
+      "meanMs": 9.14721007724497,
+      "p50Ms": 8.142708000000312,
+      "p95Ms": 13.488665999999967,
+      "p99Ms": 19.902459000000135,
+      "clientCpuPercent": 104.2108904666724,
+      "services": {
+        "nginx": {
+          "cpuSeconds": 4.427529,
+          "sampledMemoryMiB": 18.6484375
+        }
+      },
+      "cpuUsecPerRequest": 31.832115896182327
+    },
+    {
+      "name": "static-proxy",
+      "concurrency": 128,
+      "round": 3,
+      "requests": 132179,
+      "errors": 0,
+      "connections": 128,
+      "elapsedMs": 10003.309171,
+      "requestsPerSecond": 13213.52741782612,
+      "meanMs": 9.624501184946366,
+      "p50Ms": 8.542625000000044,
+      "p95Ms": 15.02099999999973,
+      "p99Ms": 21.590915999999652,
+      "clientCpuPercent": 102.33043710851031,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 18.537375,
+          "sampledMemoryMiB": 45.76171875
+        },
+        "nginx": {
+          "cpuSeconds": 3.544573,
+          "sampledMemoryMiB": 9.4296875
+        }
+      },
+      "cpuUsecPerRequest": 167.06094008881894
+    },
+    {
+      "name": "static-caddy",
+      "concurrency": 128,
+      "round": 3,
+      "requests": 126563,
+      "errors": 0,
+      "connections": 128,
+      "elapsedMs": 10005.859338,
+      "requestsPerSecond": 12648.888588643478,
+      "meanMs": 10.056008926360748,
+      "p50Ms": 9.077791000000616,
+      "p95Ms": 14.90508299999999,
+      "p99Ms": 20.507541999999376,
+      "clientCpuPercent": 104.09591668397287,
+      "services": {
+        "caddy-direct": {
+          "cpuSeconds": 11.521164,
+          "sampledMemoryMiB": 31.9453125
+        }
+      },
+      "cpuUsecPerRequest": 91.0310596303817
+    }
+  ],
+  "images": [
+    {
+      "Id": "sha256:0e52bd054126cdc040b1276c0af347aeb02a41b9cfe305d6094767ac30e97949",
+      "RepoTags": ["nginx:stable-alpine"],
+      "RepoDigests": [
+        "nginx@sha256:0e52bd054126cdc040b1276c0af347aeb02a41b9cfe305d6094767ac30e97949"
+      ]
+    },
+    {
+      "Id": "sha256:93aa3f61216b73cc6f878235c9772849449f4efc18dfe3d6678eed645076c00d",
+      "RepoTags": ["php:8.4-fpm-alpine"],
+      "RepoDigests": ["php@sha256:93aa3f61216b73cc6f878235c9772849449f4efc18dfe3d6678eed645076c00d"]
+    },
+    {
+      "Id": "sha256:e70b164da81ef698b3ad19af799ea6086ce6d9e48ed4079eb9fe26f6fbf14ee5",
+      "RepoTags": ["caddy:2-alpine"],
+      "RepoDigests": [
+        "caddy@sha256:e70b164da81ef698b3ad19af799ea6086ce6d9e48ed4079eb9fe26f6fbf14ee5"
+      ]
+    },
+    {
+      "Id": "sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85",
+      "RepoTags": ["node:24-alpine"],
+      "RepoDigests": [
+        "node@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85"
+      ]
+    }
+  ],
+  "versions": {
+    "nginx": "nginx version: nginx/1.30.6",
+    "php": "PHP 8.4.27 (cli) (built: Oct 22 2026 00:12:15) (NTS)\nCopyright (c) The PHP Group\nBuilt by https://github.com/docker-library/php\nZend Engine v4.4.27, Copyright (c) Zend Technologies\n    with Zend OPcache v8.4.27, Copyright (c), by Zend Technologies",
+    "caddy": "v2.11.7 h1:yj0Y4fYZGPkSvibBJ1sTWE33xC0fxztVyXEW5iIdUT4=",
+    "load": "v24.22.2"
+  }
+}
