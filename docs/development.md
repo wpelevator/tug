@@ -1,6 +1,6 @@
 # Development
 
-The source is TypeScript. Development and tests run the `.ts` files directly through Node's built-in type stripping, so there is no build step, but it needs Node >= 22.18 (`engines.node`). Compilation to `dist/` happens when building the Docker image and when packing the npm package (`prepack`).
+The source is TypeScript. Development and tests run the `.ts` files directly through Node's built-in type stripping, so there is no build step, but it needs Node >= 24 (`engines.node`). Compilation to `dist/` happens when building the Docker image and when packing the npm package (`prepack`).
 
 ```bash
 npm install
@@ -27,7 +27,7 @@ Run `npm run test:smoke:image` to build the actual shipped runtime image and exe
 
 ## Continuous integration and releases
 
-`.github/workflows/ci.yml` runs on pushes to `main` and on pull requests: typecheck and lint (Node 24 only), unit tests and the dist smoke test on Node 22 and 24, plus the Docker integration tests (fake VPS containers, registry-free image delivery and the WireGuard mesh) as separate jobs. `.github/workflows/release.yml` versions and publishes; see [Releases](releases.md). Every user-facing change needs a changeset (`npm run changeset`).
+`.github/workflows/ci.yml` runs on pushes to `main` and on pull requests: typecheck, lint, unit tests and the dist smoke test on Node 24 (the version in `.nvmrc`), plus the Docker integration tests (fake VPS containers, registry-free image delivery and the WireGuard mesh) as separate jobs. `.github/workflows/release.yml` versions and publishes; see [Releases](releases.md). Every user-facing change needs a changeset (`npm run changeset`).
 
 ### CI caching
 

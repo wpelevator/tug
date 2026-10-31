@@ -14,23 +14,14 @@ concurrency:
 
 jobs:
   check:
-    name: Check (Node ${{ matrix.node }})
+    name: Check
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        node: [22, 24]
     steps:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/setup
-        with:
-          node-version: ${{ matrix.node }}
-      # Static checks and the build do not depend on the Node version beyond the primary one.
-      - if: matrix.node == 24
-        run: npm run typecheck
-      - if: matrix.node == 24
-        run: npm run lint
+      - run: npm run typecheck
+      - run: npm run lint
       - run: npm test
       - run: npm run test:smoke:dist
 

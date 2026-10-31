@@ -19,7 +19,7 @@ Deploy Docker Compose projects to one or more ordinary Linux VPSes through a sma
 
 ## Quick start
 
-Install the CLI (Node >= 22.18), or run it without installing through `npx @wpelevator/tug`:
+Install the CLI (Node >= 24), or run it without installing through `npx @wpelevator/tug`:
 
 ```bash
 npm install -g @wpelevator/tug
