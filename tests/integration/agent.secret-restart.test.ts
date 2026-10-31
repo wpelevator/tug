@@ -7,14 +7,21 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { spawnSync } from 'node:child_process';
 import { buildDesiredState } from '../../src/compose.ts';
-
-let projectDir = '';
+import { normalized } from '../fake-docker.ts';
 
 function dockerInspect(name: string) {
-  const r = spawnSync('docker', ['compose', '-p', 'lpsecrettest', 'ps', '-q', name], {
-    cwd: projectDir,
-    encoding: 'utf8',
-  });
+  const r = spawnSync(
+    'docker',
+    [
+      'ps',
+      '-aq',
+      '--filter',
+      'label=tug.project=lpsecrettest',
+      '--filter',
+      `label=tug.service=${name}`,
+    ],
+    { encoding: 'utf8' },
+  );
   const id = r.stdout.trim().split('\n')[0];
   if (!id) return null;
   const inspected = spawnSync('docker', ['inspect', id], { encoding: 'utf8' });
@@ -26,7 +33,6 @@ test(
   { timeout: 120000 },
   async (t) => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-secret-restart-'));
-    projectDir = path.join(dir, 'projects', 'lpsecrettest');
 
     let secretVersions = { SECRET_A: 1 };
     const server = http.createServer((req, res) => {
@@ -61,7 +67,7 @@ test(
         svc_with_secret: {
           image: 'busybox:1.36',
           command: ['sh', '-c', 'sleep 600'],
-          environment: { SECRET_A: '${SECRET_A}' },
+          environment: { SECRET_A: '@@tug:secret:SECRET_A@@' },
           'x-tug': { placement: { nodes: ['n1'] } },
         },
         svc_without_secret: {
@@ -75,15 +81,19 @@ test(
     const desired = buildDesiredState({
       project: 'lpsecrettest',
       version: 'v1',
-      compose,
+      compose: normalized(compose),
       registry: 'unused',
       defaultNode: 'n1',
     });
 
     t.after(async () => {
-      spawnSync('docker', ['compose', '-p', 'lpsecrettest', 'down', '-v', '--remove-orphans'], {
-        cwd: projectDir,
-      });
+      const ids = spawnSync('docker', ['ps', '-aq', '--filter', 'label=tug.project=lpsecrettest'], {
+        encoding: 'utf8',
+      })
+        .stdout.split('\n')
+        .filter(Boolean);
+      if (ids.length) spawnSync('docker', ['rm', '-f', ...ids]);
+      spawnSync('docker', ['network', 'rm', 'tug_lpsecrettest']);
       await new Promise((resolve) => server.close(resolve));
       await fs.rm(dir, { recursive: true, force: true });
     });

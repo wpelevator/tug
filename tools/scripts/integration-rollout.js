@@ -96,14 +96,11 @@ async function waitState(id, wanted) {
   });
 }
 const webContainers = () =>
-  vps(
-    `docker ps --filter label=com.docker.compose.service=web --format '{{.ID}} {{.Image}} {{.Ports}}'`,
-  )
+  vps(`docker ps --filter label=tug.service=web --format '{{.ID}} {{.Image}} {{.Ports}}'`)
     .out.trim()
     .split('\n')
     .filter(Boolean);
-const cacheId = () =>
-  vps(`docker ps -q --filter label=com.docker.compose.service=cache`).out.trim();
+const cacheId = () => vps(`docker ps -q --filter label=tug.service=cache`).out.trim();
 
 // Continuous client: one request every ~50 ms through the Caddy ingress, logged as "<status> <body>".
 function startLoad() {
