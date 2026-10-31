@@ -996,7 +996,7 @@ export async function reconcile(
     sec.versions || {},
   );
   const db = await agentDb(ctx.stateDir);
-  const previousRow = await db.get<AppliedStateRow>(
+  const previousRow = db.get<AppliedStateRow>(
     'SELECT version, revision FROM applied_state WHERE project = ?',
     desiredState.project,
   );
@@ -1049,7 +1049,7 @@ export async function reconcile(
     .digest('hex')
     .slice(0, 16);
   const knownEvents = mainServices.length
-    ? await db.get<EventStateRow>(
+    ? db.get<EventStateRow>(
         'SELECT fingerprint, phase FROM event_state WHERE project = ?',
         desiredState.project,
       )
@@ -1124,12 +1124,12 @@ export async function reconcile(
             },
           },
         );
-      if (mainServices.length && (announce || wasFailed)) await markEvents('serving');
+      if (mainServices.length && (announce || wasFailed)) markEvents('serving');
     } catch (e) {
       if (mainServices.length && !wasFailed) {
         // Announce a failure once; retries of the same failure stay quiet until it recovers or the inputs change.
         await emit(failing ?? mainServices.join(', '), 'failed', errMessage(e), 'error');
-        await markEvents('failed');
+        markEvents('failed');
       }
       // Rolling services are untouched by a failure here, so keep reporting their current revision as serving.
       if (!rolling.length) throw e;
@@ -1154,7 +1154,7 @@ export async function reconcile(
   } else {
     for (const service of serviceNames) serviceStates[service].rolloutState = 'serving';
   }
-  await db.run(
+  db.run(
     `INSERT INTO applied_state(project, version, revision, applied_at, service_states_json, secret_versions_json)
      VALUES(?,?,?,?,?,?)
      ON CONFLICT(project) DO UPDATE SET version=excluded.version, revision=excluded.revision, applied_at=excluded.applied_at,

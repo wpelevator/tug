@@ -1,5 +1,6 @@
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
 import type { Db } from './db.ts';
+import { isUniqueViolation } from './db-driver.ts';
 import { hashToken, id, now, token } from './util.ts';
 
 /** Roles are cumulative: `deploy` includes `read`, and `admin` includes both. */
@@ -164,14 +165,14 @@ const info = (row: TokenRow): TokenInfo => ({
 });
 
 /** Creates a token. The plaintext is returned once; only its hash is stored. */
-export async function createToken(
+export function createToken(
   db: Db,
   request: ReturnType<typeof parseTokenRequest>,
   createdBy: string,
-): Promise<TokenInfo & { token: string }> {
+): TokenInfo & { token: string } {
   const value = token(TOKEN_PREFIX);
   try {
-    await db.run(
+    db.run(
       'INSERT INTO api_tokens(id,name,token_hash,role,projects_json,created_at,created_by,expires_at) VALUES(?,?,?,?,?,?,?,?)',
       id('tok'),
       request.name,
@@ -183,7 +184,7 @@ export async function createToken(
       request.expiresAt,
     );
   } catch (e) {
-    if (/UNIQUE constraint/.test((e as Error).message))
+    if (isUniqueViolation(e))
       throw statusError(
         409,
         `token name ${request.name} is already used (revoked tokens keep their names for the audit trail)`,
@@ -191,42 +192,42 @@ export async function createToken(
     throw e;
   }
   return {
-    ...info((await db.get<TokenRow>('SELECT * FROM api_tokens WHERE name=?', request.name))!),
+    ...info(db.get<TokenRow>('SELECT * FROM api_tokens WHERE name=?', request.name)!),
     token: value,
   };
 }
 
-export async function listTokens(db: Db): Promise<TokenInfo[]> {
-  return (await db.all<TokenRow[]>('SELECT * FROM api_tokens ORDER BY created_at, name')).map(info);
+export function listTokens(db: Db): TokenInfo[] {
+  return db.all<TokenRow>('SELECT * FROM api_tokens ORDER BY created_at, name').map(info);
 }
 
 /** Revokes a token immediately. Returns false if no such token exists; revoking twice keeps the first revocation time. */
-export async function revokeToken(db: Db, name: string): Promise<boolean> {
-  const row = await db.get<TokenRow>('SELECT * FROM api_tokens WHERE name=?', name);
+export function revokeToken(db: Db, name: string): boolean {
+  const row = db.get<TokenRow>('SELECT * FROM api_tokens WHERE name=?', name);
   if (!row) return false;
-  await db.run(
-    'UPDATE api_tokens SET revoked_at=? WHERE id=? AND revoked_at IS NULL',
-    now(),
-    row.id,
-  );
+  db.run('UPDATE api_tokens SET revoked_at=? WHERE id=? AND revoked_at IS NULL', now(), row.id);
   return true;
 }
 
 /** Resolves a bearer value to an actor by hash lookup: the root operator token first, then named tokens. */
-export async function authenticate(db: Db, raw: string): Promise<Actor | null> {
+export function authenticate(db: Db, raw: string): Actor | null {
   if (!raw) return null;
   const hash = hashToken(raw);
-  const operator = await db.get<{ value: string }>(
+  const operator = db.get<{ value: string }>(
     'SELECT value FROM meta WHERE key=?',
     'operator_token_hash',
   );
   if (operator && hash === operator.value)
     return { name: OPERATOR_ACTOR, role: 'admin', projects: null };
-  const row = await db.get<TokenRow>('SELECT * FROM api_tokens WHERE token_hash=?', hash);
+  const row = db.get<TokenRow>('SELECT * FROM api_tokens WHERE token_hash=?', hash);
   if (!row || row.revoked_at || (row.expires_at && row.expires_at <= now())) return null;
-  // Best effort and throttled: a slow or failing bookkeeping write must never fail or delay the request.
+  // Best effort and throttled: bookkeeping failures must never fail authentication.
   if (!row.last_used_at || Date.parse(row.last_used_at) < Date.now() - LAST_USED_INTERVAL_MS)
-    void db.run('UPDATE api_tokens SET last_used_at=? WHERE id=?', now(), row.id).catch(() => {});
+    try {
+      db.run('UPDATE api_tokens SET last_used_at=? WHERE id=?', now(), row.id);
+    } catch {
+      /* Best-effort bookkeeping. */
+    }
   return {
     name: row.name,
     role: row.role,
@@ -257,10 +258,7 @@ export function createGuard(db: Db) {
   return (required: Role, resolve?: ProjectResolver): RequestHandler =>
     async (req: Request, res: Response, next: NextFunction) => {
       try {
-        const actor = await authenticate(
-          db,
-          (req.headers.authorization || '').replace(/^Bearer /, ''),
-        );
+        const actor = authenticate(db, (req.headers.authorization || '').replace(/^Bearer /, ''));
         if (!actor) {
           res.status(401).json({ error: 'unauthorized' });
           return;
@@ -292,7 +290,7 @@ export function createGuard(db: Db) {
 }
 
 /** Appends a control-originated audit event naming the acting token. */
-export async function recordEvent(
+export function recordEvent(
   db: Db,
   event: {
     actor: string;
@@ -302,8 +300,8 @@ export async function recordEvent(
     deploymentId?: string | null;
     metadata?: Record<string, unknown>;
   },
-): Promise<void> {
-  await db.run(
+): void {
+  db.run(
     'INSERT INTO events(id,project_id,deployment_id,node_id,level,type,message,metadata_json,created_at,actor) VALUES(?,?,?,?,?,?,?,?,?,?)',
     id('evt'),
     event.project ?? null,

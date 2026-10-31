@@ -58,6 +58,39 @@ try {
     /^v\d+\./,
     'The shipped runtime image must include a working Node.js executable',
   );
+  await docker([
+    'run',
+    '--rm',
+    '--entrypoint',
+    'node',
+    image,
+    '--input-type=module',
+    '-e',
+    `import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { openDb, openAgentDb, openSnapshotDb } from './dist/db.js';
+const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-smoke-'));
+try {
+  const db = await openDb(path.join(dir, 'control.db'));
+  try {
+    assert.deepEqual(db.run('INSERT INTO projects(id,name) VALUES(?,?)', 'smoke', 'smoke'), { changes: 1 }, 'compiled control writes must work');
+    db.run('VACUUM INTO ?', path.join(dir, 'snapshot.db'));
+  } finally { db.close(); }
+  const snapshot = openSnapshotDb(path.join(dir, 'snapshot.db'));
+  try {
+    assert.deepEqual(snapshot.get('SELECT id FROM projects'), { id: 'smoke' }, 'compiled snapshots must retain control data');
+    assert.throws(() => snapshot.run('DELETE FROM projects'), Error, 'compiled snapshots must be read-only');
+  } finally { snapshot.close(); }
+  const agent = await openAgentDb(path.join(dir, 'agent.db'));
+  try { assert.deepEqual(agent.all('SELECT * FROM applied_state'), [], 'compiled agent schema must initialize'); }
+  finally { agent.close(); }
+  for (const addon of ['sqlite', 'sqlite3']) {
+    await assert.rejects(fs.access(path.join('node_modules', addon)), 'the image must not ship SQLite npm addons');
+  }
+} finally { await fs.rm(dir, { recursive: true, force: true }); }`,
+  ]);
   console.log(
     `Runtime image packaging passed: ${client}; Compose ${compose}; Node ${node}. No host Docker socket or host plugin was mounted.`,
   );

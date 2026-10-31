@@ -37,7 +37,7 @@ test('a stale lock is purged and no longer blocks new operations', async () => {
   try {
     const db = await openDb(s.dbFile);
     const expired = new Date(Date.now() - 60_000).toISOString();
-    await db.run(
+    db.run(
       'INSERT INTO locks(name,owner,expires_at,created_at) VALUES(?,?,?,?)',
       'project:site',
       'deploy:lock_stale',
@@ -54,7 +54,7 @@ test('a stale lock is purged and no longer blocks new operations', async () => {
 
     let remaining;
     for (let i = 0; i < 20; i++) {
-      remaining = await db.get('SELECT * FROM locks WHERE name=?', 'project:site');
+      remaining = db.get('SELECT * FROM locks WHERE name=?', 'project:site');
       if (!remaining) break;
       await new Promise((r) => setTimeout(r, 25));
     }
@@ -69,7 +69,7 @@ test('an active (non-expired) lock blocks a conflicting operation with owner/exp
   try {
     const db = await openDb(s.dbFile);
     const future = new Date(Date.now() + 60_000).toISOString();
-    await db.run(
+    db.run(
       'INSERT INTO locks(name,owner,expires_at,created_at) VALUES(?,?,?,?)',
       'project:site',
       'restore:lock_active',

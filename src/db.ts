@@ -1,10 +1,27 @@
-import sqlite3 from 'sqlite3';
-import { open } from 'sqlite';
-import type { Database } from 'sqlite';
+import { connectNodeDb } from './db-node.ts';
+import type { ConnectDb, Db } from './db-driver.ts';
+export type { Db } from './db-driver.ts';
 import path from 'node:path';
 import { ensureDir, now } from './util.ts';
 
-export type Db = Database<sqlite3.Database, sqlite3.Statement>;
+// One composition point for all writable and snapshot connections.
+export const { openDb, openAgentDb, openSnapshotDb } = databaseAccess(connectNodeDb);
+
+function configure(db: Db, writable: boolean, initialize?: (db: Db) => void): Db {
+  try {
+    db.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 1000;');
+    if (writable) db.exec('PRAGMA journal_mode = WAL;');
+    initialize?.(db);
+    return db;
+  } catch (error) {
+    try {
+      db.close();
+    } catch {
+      /* Preserve the initialization failure. */
+    }
+    throw error;
+  }
+}
 
 // Row shapes for the tables the control plane and agent read back (columns mirror the DDL below).
 export interface ProjectRow {
@@ -127,19 +144,21 @@ export interface AppliedStateRow {
   secret_versions_json: string;
 }
 
-export async function openDb(filename: string): Promise<Db> {
-  await ensureDir(path.dirname(filename));
-  const db = await open({ filename, driver: sqlite3.Database });
-  await db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
-  await migrate(db);
-  return db;
-}
+/** Shared policy for every driver, including read-only restore validation. */
+export function databaseAccess(connect: ConnectDb) {
+  function openSnapshotDb(filename: string): Db {
+    return configure(connect(filename, { readOnly: true }), false);
+  }
 
-export async function openAgentDb(filename: string): Promise<Db> {
-  await ensureDir(path.dirname(filename));
-  const db = await open({ filename, driver: sqlite3.Database });
-  await db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
-  await db.exec(`
+  async function openDb(filename: string): Promise<Db> {
+    await ensureDir(path.dirname(filename));
+    return configure(connect(filename, { readOnly: false }), true, initializeControl);
+  }
+
+  async function openAgentDb(filename: string): Promise<Db> {
+    await ensureDir(path.dirname(filename));
+    return configure(connect(filename, { readOnly: false }), true, (db) =>
+      db.exec(`
 CREATE TABLE IF NOT EXISTS applied_state(
   project TEXT PRIMARY KEY,
   version TEXT,
@@ -153,12 +172,15 @@ CREATE TABLE IF NOT EXISTS event_state(
   fingerprint TEXT NOT NULL,
   phase TEXT NOT NULL
 );
-`);
-  return db;
+`),
+    );
+  }
+
+  return { openDb, openAgentDb, openSnapshotDb };
 }
 
-async function migrate(db: Db): Promise<void> {
-  await db.exec(`
+function initializeControl(db: Db): void {
+  db.exec(`
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, name TEXT UNIQUE NOT NULL, current_deployment_id TEXT, created_at TEXT, updated_at TEXT);
 CREATE TABLE IF NOT EXISTS nodes(id TEXT PRIMARY KEY, name TEXT UNIQUE NOT NULL, address TEXT, public_address TEXT, overlay_ip TEXT UNIQUE, ingress INTEGER NOT NULL DEFAULT 0, ingress_status_json TEXT, status TEXT, labels_json TEXT, agent_token_hash TEXT, registry_token_hash TEXT, last_seen_at TEXT, created_at TEXT, updated_at TEXT);
@@ -178,11 +200,6 @@ CREATE TABLE IF NOT EXISTS api_tokens(id TEXT PRIMARY KEY, name TEXT UNIQUE NOT 
 CREATE INDEX IF NOT EXISTS events_by_time ON events(created_at);
 CREATE TABLE IF NOT EXISTS locks(name TEXT PRIMARY KEY, owner TEXT, expires_at TEXT, created_at TEXT);
 `);
-  try {
-    await db.exec('ALTER TABLE nodes ADD COLUMN labels_json TEXT');
-  } catch {
-    /* column already exists */
-  }
-  const row = await db.get('SELECT value FROM meta WHERE key = ?', 'schema_created_at');
-  if (!row) await db.run('INSERT INTO meta(key,value) VALUES(?,?)', 'schema_created_at', now());
+  const row = db.get('SELECT value FROM meta WHERE key = ?', 'schema_created_at');
+  if (!row) db.run('INSERT INTO meta(key,value) VALUES(?,?)', 'schema_created_at', now());
 }

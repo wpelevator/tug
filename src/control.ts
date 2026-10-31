@@ -7,15 +7,14 @@ import { createReadStream } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
 import { saveImageArchive, inspectImage, validateImageArchive, hashArchive } from './artifacts.ts';
 import type { ArchiveInfo } from './artifacts.ts';
-import sqlite3 from 'sqlite3';
-import { open } from 'sqlite';
 import { scanArchive } from './archive.ts';
 import https from 'node:https';
 import http from 'node:http';
 import path from 'node:path';
 import { WebSocketServer, WebSocket } from 'ws';
 import * as tar from 'tar';
-import { openDb } from './db.ts';
+import { openDb, openSnapshotDb } from './db.ts';
+import { isUniqueViolation } from './db-driver.ts';
 import type {
   CommandRow,
   DeploymentRow,
@@ -25,6 +24,7 @@ import type {
   NodeRow,
   ProjectRow,
   SecretRow,
+  VolumeRow,
   WgPeerRow,
 } from './db.ts';
 import { encrypt, decrypt, loadOrCreateMasterKey } from './secrets.ts';
@@ -459,8 +459,8 @@ class LiveHub {
 
 interface StreamRuntime {
   hub: WakeHub;
-  authenticate(token: string): Promise<NodeRow | undefined>;
-  authenticateOperator(token: string): Promise<Actor | null>;
+  authenticate(token: string): NodeRow | undefined;
+  authenticateOperator(token: string): Actor | null;
   live: LiveHub;
 }
 
@@ -627,24 +627,20 @@ export async function createApp(
   const EVENT_MAX_ROWS = envCount('TUG_EVENT_MAX_ROWS', 100_000);
   const eventPruneIntervalMs = options.eventPruneIntervalMs ?? 60 * 60 * 1000;
   let lastEventPrune = Date.now();
-  async function pruneEvents(): Promise<number> {
+  function pruneEvents(): number {
     lastEventPrune = Date.now();
     let removed = 0;
     if (EVENT_RETENTION_DAYS > 0)
       removed +=
-        (
-          await db.run(
-            'DELETE FROM events WHERE created_at < ?',
-            new Date(Date.now() - EVENT_RETENTION_DAYS * 86_400_000).toISOString(),
-          )
+        db.run(
+          'DELETE FROM events WHERE created_at < ?',
+          new Date(Date.now() - EVENT_RETENTION_DAYS * 86_400_000).toISOString(),
         ).changes ?? 0;
     if (EVENT_MAX_ROWS > 0)
       removed +=
-        (
-          await db.run(
-            'DELETE FROM events WHERE id IN (SELECT id FROM events ORDER BY created_at DESC, id DESC LIMIT -1 OFFSET ?)',
-            EVENT_MAX_ROWS,
-          )
+        db.run(
+          'DELETE FROM events WHERE id IN (SELECT id FROM events ORDER BY created_at DESC, id DESC LIMIT -1 OFFSET ?)',
+          EVENT_MAX_ROWS,
         ).changes ?? 0;
     if (removed)
       console.log(
@@ -652,12 +648,16 @@ export async function createApp(
       );
     return removed;
   }
-  await pruneEvents().catch((e) => console.error(`event pruning failed: ${errMessage(e)}`));
+  try {
+    pruneEvents();
+  } catch (e) {
+    console.error(`event pruning failed: ${errMessage(e)}`);
+  }
   const masterKey = await loadOrCreateMasterKey(masterKeyFile);
-  const operator = await db.get('SELECT value FROM meta WHERE key=?', 'operator_token_hash');
+  const operator = db.get('SELECT value FROM meta WHERE key=?', 'operator_token_hash');
   if (!operator) {
     const t = process.env.TUG_OPERATOR_TOKEN || token('tug_op');
-    await db.run('INSERT INTO meta(key,value) VALUES(?,?)', 'operator_token_hash', hashToken(t));
+    db.run('INSERT INTO meta(key,value) VALUES(?,?)', 'operator_token_hash', hashToken(t));
     await fs
       .writeFile(path.join(DATA_DIR, 'operator.token'), `${t}\n`, { mode: 0o600 })
       .catch(() => {});
@@ -665,7 +665,7 @@ export async function createApp(
   }
 
   const app = express();
-  const authenticateAgent = async (raw: string): Promise<NodeRow | undefined> =>
+  const authenticateAgent = (raw: string): NodeRow | undefined =>
     raw
       ? db.get<NodeRow>('SELECT * FROM nodes WHERE agent_token_hash=?', hashToken(raw))
       : undefined;
@@ -678,7 +678,7 @@ export async function createApp(
   app.use(express.json({ limit: '20mb' }));
   // Hold the writer for the operation lifetime, including after an HTTP disconnect.
   let writer = Promise.resolve();
-  async function withWriter<T>(operation: () => Promise<T>): Promise<T> {
+  async function withWriter<T>(operation: () => T | Promise<T>): Promise<T> {
     const previous = writer;
     let release!: () => void;
     writer = new Promise<void>((resolve) => {
@@ -694,7 +694,7 @@ export async function createApp(
   }
 
   let publication = Promise.resolve();
-  async function withPublication<T>(operation: () => Promise<T>): Promise<T> {
+  async function withPublication<T>(operation: () => T): Promise<T> {
     const previous = publication;
     let release!: () => void;
     publication = new Promise<void>((resolve) => {
@@ -739,25 +739,24 @@ export async function createApp(
     apiRoutes.set(key, role);
     route(method, url, [guard(role, resolve ?? undefined), ...handlers]);
   };
-  const deploymentProject: ProjectResolver = async (req) =>
-    (
-      await db.get<{ project_id: string }>(
-        'SELECT project_id FROM deployments WHERE id=?',
-        req.params.id,
-      )
-    )?.project_id;
-  const commandProject: ProjectResolver = async (req) => {
-    const row = await db.get<{ project_id: string | null }>(
+  const deploymentProject: ProjectResolver = (req) =>
+    db.get<{ project_id: string }>('SELECT project_id FROM deployments WHERE id=?', req.params.id)
+      ?.project_id;
+  const commandProject: ProjectResolver = (req) => {
+    const row = db.get<{ project_id: string | null }>(
       'SELECT project_id FROM commands WHERE id=?',
       req.params.id,
     );
     return row ? row.project_id : undefined;
   };
   /** Audit trail entry for a control action; bookkeeping failures are logged, never returned to the caller. */
-  const audit = (actor: Actor, event: Omit<Parameters<typeof recordEvent>[1], 'actor'>) =>
-    recordEvent(db, { ...event, actor: actor.name }).catch((e) =>
-      console.error(`audit event failed: ${errMessage(e)}`),
-    );
+  const audit = (actor: Actor, event: Omit<Parameters<typeof recordEvent>[1], 'actor'>) => {
+    try {
+      recordEvent(db, { ...event, actor: actor.name });
+    } catch (e) {
+      console.error(`audit event failed: ${errMessage(e)}`);
+    }
+  };
   const projectScope = (actor: Actor, column: string) =>
     actor.projects
       ? {
@@ -767,21 +766,21 @@ export async function createApp(
       : { where: '1=1', args: [] as string[] };
   const authAgent = async (req: Request, res: Response, next: NextFunction) => {
     const raw = (req.headers.authorization || '').replace(/^Bearer /, '');
-    const node = await authenticateAgent(raw);
+    const node = authenticateAgent(raw);
     if (!node) return res.status(401).json({ error: 'unauthorized' });
     req.node = node;
     next();
   };
-  const wakeAll = async (project?: string): Promise<void> => {
-    for (const node of await db.all<Pick<NodeRow, 'id'>[]>('SELECT id FROM nodes'))
+  const wakeAll = (project?: string): void => {
+    for (const node of db.all<Pick<NodeRow, 'id'>>('SELECT id FROM nodes'))
       wakeHub.wake(node.id, project);
   };
   let endpointSnapshot = '';
 
-  async function updateDeploymentConvergence(projectId: string): Promise<void> {
-    const project = await db.get<ProjectRow>('SELECT * FROM projects WHERE id=?', projectId);
+  function updateDeploymentConvergence(projectId: string): void {
+    const project = db.get<ProjectRow>('SELECT * FROM projects WHERE id=?', projectId);
     if (!project?.current_deployment_id) return;
-    const ds = await db.get<DesiredStateRow>(
+    const ds = db.get<DesiredStateRow>(
       'SELECT * FROM desired_states WHERE deployment_id=?',
       project.current_deployment_id,
     );
@@ -791,9 +790,12 @@ export async function createApp(
     for (const svc of Object.values(state.services || {}))
       for (const node of svc.placement?.nodes || []) required.add(node);
     if (!required.size) return;
-    const statuses = await db.all<
-      { node_id: string; observed_version: string; health: string; status_json: string }[]
-    >(
+    const statuses = db.all<{
+      node_id: string;
+      observed_version: string;
+      health: string;
+      status_json: string;
+    }>(
       'SELECT node_id,observed_version,health,status_json FROM node_statuses WHERE project_id=?',
       projectId,
     );
@@ -806,7 +808,7 @@ export async function createApp(
       .filter((node) => reportsRevision(node) && byNode.get(node)?.health === 'failed')
       .map((node) => byNode.get(node)!);
     if (failedNodes.length) {
-      const marked = await db.run(
+      const marked = db.run(
         'UPDATE deployments SET state=?,error_message=?,updated_at=? WHERE id=? AND state=?',
         'failed',
         deploymentFailureMessage(failedNodes),
@@ -825,7 +827,7 @@ export async function createApp(
         ['serving', 'skipped'].includes(byNode.get(node)?.health ?? ''),
     );
     if (ok)
-      await db.run(
+      db.run(
         'UPDATE deployments SET state=?,updated_at=? WHERE id=? AND state=?',
         'succeeded',
         now(),
@@ -835,14 +837,14 @@ export async function createApp(
   }
 
   /** Events control writes when it rolls back on its own; they are attributed to a reserved system actor. */
-  async function recordAutoRollbackEvent(
+  function recordAutoRollbackEvent(
     projectId: string,
     deploymentId: string | null,
     type: string,
     message: string,
     metadata: Record<string, unknown> = {},
-  ): Promise<void> {
-    await db.run(
+  ): void {
+    db.run(
       'INSERT INTO events(id,project_id,deployment_id,node_id,level,type,message,metadata_json,created_at,actor) VALUES(?,?,?,?,?,?,?,?,?,?)',
       id('evt'),
       projectId,
@@ -862,14 +864,14 @@ export async function createApp(
    * new revision. Shared by `POST /api/v1/rollback` and automatic rollback; the caller holds the writer queue.
    * `auto` only considers `succeeded` deployments and requires `failedDeploymentId` to still be current.
    */
-  async function createRollback(
+  function createRollback(
     project: string,
     opts: { actor: string; force?: boolean; auto?: boolean; failedDeploymentId?: string },
-  ): Promise<{ deployment: DeploymentRow | undefined; desiredState: DesiredState }> {
+  ): { deployment: DeploymentRow | undefined; desiredState: DesiredState } {
     let lock;
     try {
-      lock = await acquireProjectLock(project, opts.auto ? 'auto-rollback' : 'rollback');
-      const active = await db.get<Pick<DeploymentRow, 'id' | 'state'>>(
+      lock = acquireProjectLock(project, opts.auto ? 'auto-rollback' : 'rollback');
+      const active = db.get<Pick<DeploymentRow, 'id' | 'state'>>(
         `SELECT id,state FROM deployments WHERE project_id=? AND state IN (${ACTIVE_STATES_SQL}) ORDER BY created_at DESC LIMIT 1`,
         project,
       );
@@ -878,17 +880,14 @@ export async function createApp(
           409,
           `deployment ${active.id} is already ${active.state}; retry with force to rollback anyway`,
         );
-      const current = await db.get(
-        'SELECT current_deployment_id FROM projects WHERE id=?',
-        project,
-      );
+      const current = db.get('SELECT current_deployment_id FROM projects WHERE id=?', project);
       if (opts.failedDeploymentId && current?.current_deployment_id !== opts.failedDeploymentId)
         throw httpError(
           409,
           `deployment ${opts.failedDeploymentId} is no longer the current deployment`,
         );
       const states = opts.auto ? `'succeeded'` : `'succeeded','rolling_out'`;
-      const previousDs = await db.get(
+      const previousDs = db.get<DesiredStateRow>(
         `SELECT ds.*, d.version AS deployment_version FROM desired_states ds JOIN deployments d ON d.id=ds.deployment_id
         WHERE ds.project_id=? AND ds.deployment_id != ? AND d.state IN (${states}) ORDER BY ds.created_at DESC LIMIT 1`,
         project,
@@ -899,7 +898,7 @@ export async function createApp(
       const depId = id('dep');
       const previousState: DesiredState = JSON.parse(previousDs.state_json);
       previousState.revision = depId;
-      await db.run(
+      db.run(
         'INSERT INTO deployments(id,project_id,version,state,created_at,updated_at,actor) VALUES(?,?,?,?,?,?,?)',
         depId,
         project,
@@ -909,7 +908,7 @@ export async function createApp(
         ts,
         opts.actor,
       );
-      await db.run(
+      db.run(
         'INSERT INTO desired_states(id,project_id,deployment_id,version,state_json,created_at) VALUES(?,?,?,?,?,?)',
         id('ds'),
         project,
@@ -918,19 +917,19 @@ export async function createApp(
         JSON.stringify(previousState),
         ts,
       );
-      await db.run(
+      db.run(
         'UPDATE projects SET current_deployment_id=?,updated_at=? WHERE id=?',
         depId,
         now(),
         project,
       );
-      await wakeAll(project);
+      wakeAll(project);
       return {
-        deployment: await db.get<DeploymentRow>('SELECT * FROM deployments WHERE id=?', depId),
+        deployment: db.get<DeploymentRow>('SELECT * FROM deployments WHERE id=?', depId),
         desiredState: previousState,
       };
     } finally {
-      await releaseLock(lock);
+      releaseLock(lock);
     }
   }
 
@@ -947,12 +946,9 @@ export async function createApp(
   ): void {
     if (state.compose['x-tug']?.rollback !== 'auto') return;
     void (async () => {
-      const failed = await db.get<DeploymentRow>(
-        'SELECT * FROM deployments WHERE id=?',
-        deploymentId,
-      );
+      const failed = db.get<DeploymentRow>('SELECT * FROM deployments WHERE id=?', deploymentId);
       if (failed?.version.startsWith(ROLLBACK_VERSION_PREFIX)) {
-        await recordAutoRollbackEvent(
+        recordAutoRollbackEvent(
           projectId,
           deploymentId,
           'deployment.auto_rollback_skipped',
@@ -968,7 +964,7 @@ export async function createApp(
             failedDeploymentId: deploymentId,
           }),
         );
-        await recordAutoRollbackEvent(
+        recordAutoRollbackEvent(
           projectId,
           out.deployment!.id,
           'deployment.auto_rollback',
@@ -980,17 +976,21 @@ export async function createApp(
           },
         );
       } catch (e) {
-        await recordAutoRollbackEvent(
-          projectId,
-          deploymentId,
-          'deployment.auto_rollback_skipped',
-          `deployment ${deploymentId} failed but automatic rollback was not possible: ${errMessage(e)}`,
-        ).catch(() => {});
+        try {
+          recordAutoRollbackEvent(
+            projectId,
+            deploymentId,
+            'deployment.auto_rollback_skipped',
+            `deployment ${deploymentId} failed but automatic rollback was not possible: ${errMessage(e)}`,
+          );
+        } catch {
+          /* Best-effort audit event. */
+        }
       }
     })().catch((e) => console.error('auto rollback failed:', errMessage(e)));
   }
 
-  async function currentDesired(projectId: string): Promise<DesiredStateRow | undefined> {
+  function currentDesired(projectId: string): DesiredStateRow | undefined {
     return db.get<DesiredStateRow>(
       'SELECT ds.* FROM desired_states ds JOIN projects p ON p.current_deployment_id=ds.deployment_id WHERE p.id=?',
       projectId,
@@ -999,10 +999,10 @@ export async function createApp(
 
   const live = new LiveHub(async (actor, request) => {
     assertProject(actor, request.project);
-    const row = await currentDesired(request.project);
+    const row = currentDesired(request.project);
     if (!row) throw httpError(404, missingProject(request.project));
     const desired: DesiredState = JSON.parse(row.state_json);
-    const nodes = await db.all<NodeRow[]>('SELECT * FROM nodes');
+    const nodes = db.all<NodeRow>('SELECT * FROM nodes');
     const eligible = new Set<string>();
     const services =
       request.operation === 'ps'
@@ -1035,17 +1035,17 @@ export async function createApp(
     res.status(426).json({ error: 'WebSocket upgrade required' });
   });
 
-  async function acquireProjectLock(
+  function acquireProjectLock(
     project: string,
     operation: string,
     ttlMs = Number(process.env.TUG_LOCK_TTL_MS || 10 * 60 * 1000),
   ) {
     const name = `project:${project}`;
     const ts = now();
-    await db.run('DELETE FROM locks WHERE expires_at < ?', ts);
+    db.run('DELETE FROM locks WHERE expires_at < ?', ts);
     const owner = `${operation}:${id('lock')}`;
     try {
-      await db.run(
+      db.run(
         'INSERT INTO locks(name,owner,expires_at,created_at) VALUES(?,?,?,?)',
         name,
         owner,
@@ -1053,8 +1053,8 @@ export async function createApp(
         ts,
       );
     } catch (e) {
-      if (!/UNIQUE constraint/.test(errMessage(e))) throw e;
-      const existing = await db.get<LockRow>('SELECT * FROM locks WHERE name=?', name);
+      if (!isUniqueViolation(e)) throw e;
+      const existing = db.get<LockRow>('SELECT * FROM locks WHERE name=?', name);
       const err: HttpError = new Error(
         `project ${project} is locked by ${existing?.owner} until ${existing?.expires_at}`,
       );
@@ -1064,31 +1064,35 @@ export async function createApp(
     }
     const heartbeat = setInterval(
       () => {
-        void db
-          .run(
+        try {
+          db.run(
             'UPDATE locks SET expires_at=? WHERE name=? AND owner=?',
             new Date(Date.now() + ttlMs).toISOString(),
             name,
             owner,
-          )
-          .catch(() => {});
+          );
+        } catch {
+          /* Best-effort bookkeeping. */
+        }
       },
       Math.max(10, Math.floor(ttlMs / 3)),
     );
     heartbeat.unref();
     return { name, owner, heartbeat };
   }
-  async function releaseLock(
+  function releaseLock(
     lock:
       | { name: string; owner: string; heartbeat?: ReturnType<typeof setInterval> }
       | null
       | undefined,
-  ): Promise<void> {
+  ): void {
     if (lock?.heartbeat) clearInterval(lock.heartbeat);
     if (lock)
-      await db
-        .run('DELETE FROM locks WHERE name=? AND owner=?', lock.name, lock.owner)
-        .catch(() => {});
+      try {
+        db.run('DELETE FROM locks WHERE name=? AND owner=?', lock.name, lock.owner);
+      } catch {
+        /* Best-effort bookkeeping. */
+      }
   }
   function sendError(res: Response, e: unknown): void {
     const err = e as HttpError;
@@ -1104,12 +1108,12 @@ export async function createApp(
     if (!project || !service || !Number.isInteger(replicas) || replicas < 1)
       throw httpError(400, 'project, service and a positive integer replicas are required');
     assertProject(req.actor!, project);
-    const dsRow = await currentDesired(project);
+    const dsRow = currentDesired(project);
     if (!dsRow) throw httpError(404, `project ${project} has no desired state`);
     const state: DesiredState = JSON.parse(dsRow.state_json);
     if (!state.services?.[service])
       throw httpError(404, `service ${service} not found in project ${project}`);
-    const nodeRows = await db.all<NodeRow[]>(
+    const nodeRows = db.all<NodeRow>(
       'SELECT name,labels_json,last_seen_at FROM nodes ORDER BY created_at,name',
     );
     const nodeInfos = nodeRows
@@ -1141,12 +1145,8 @@ export async function createApp(
     };
     state.services[service].replicas = selected.length;
     state.revision = id('rev');
-    await db.run(
-      'UPDATE desired_states SET state_json=? WHERE id=?',
-      JSON.stringify(state),
-      dsRow.id,
-    );
-    await wakeAll(project);
+    db.run('UPDATE desired_states SET state_json=? WHERE id=?', JSON.stringify(state), dsRow.id);
+    wakeAll(project);
     res.json({
       ok: true,
       project,
@@ -1164,22 +1164,21 @@ export async function createApp(
     async (req, res) => {
       const name = req.body.name || 'site';
       const ts = now();
-      await db.run(
+      db.run(
         'INSERT OR IGNORE INTO projects(id,name,created_at,updated_at) VALUES(?,?,?,?)',
         name,
         name,
         ts,
         ts,
       );
-      res.json(await db.get<ProjectRow>('SELECT * FROM projects WHERE id=?', name));
+      res.json(db.get<ProjectRow>('SELECT * FROM projects WHERE id=?', name));
     },
   );
   api(
     'get',
     '/api/v1/projects/:project',
     (req) => req.params.project,
-    async (req, res) =>
-      res.json(await db.get('SELECT * FROM projects WHERE id=?', req.params.project)),
+    async (req, res) => res.json(db.get('SELECT * FROM projects WHERE id=?', req.params.project)),
   );
 
   /** A node whose agent has been seen before but not within TUG_STALE_SECONDS; never-seen (just registered) nodes stay schedulable. */
@@ -1190,40 +1189,38 @@ export async function createApp(
     'SELECT id,name,address,public_address,overlay_ip,labels_json,status,created_at,updated_at FROM nodes WHERE id=?';
 
   /** Allocates the node's stable overlay IP on first registration (retrying if a concurrent register took it). */
-  async function ensureOverlayIp(nodeId: string): Promise<void> {
+  function ensureOverlayIp(nodeId: string): void {
     if (!MESH) return;
     for (let attempt = 0; attempt < 5; attempt++) {
-      const row = await db.get<Pick<NodeRow, 'overlay_ip'>>(
+      const row = db.get<Pick<NodeRow, 'overlay_ip'>>(
         'SELECT overlay_ip FROM nodes WHERE id=?',
         nodeId,
       );
       if (row?.overlay_ip) return;
-      const used = (
-        await db.all<{ overlay_ip: string }[]>(
-          'SELECT overlay_ip FROM nodes WHERE overlay_ip IS NOT NULL',
-        )
-      ).map((r) => r.overlay_ip);
+      const used = db
+        .all<{ overlay_ip: string }>('SELECT overlay_ip FROM nodes WHERE overlay_ip IS NOT NULL')
+        .map((r) => r.overlay_ip);
       try {
-        await db.run(
+        db.run(
           'UPDATE nodes SET overlay_ip=? WHERE id=? AND overlay_ip IS NULL',
           allocateOverlayIp(MESH_CIDR, used),
           nodeId,
         );
         return;
       } catch (e) {
-        if (!/UNIQUE constraint/.test(errMessage(e))) throw e;
+        if (!isUniqueViolation(e)) throw e;
       }
     }
     throw new Error('could not allocate an overlay address');
   }
   /** Stores (or refreshes) the node's WireGuard peer entry; the private key never reaches control. */
-  async function syncWgPeer(nodeId: string, publicKey?: string): Promise<void> {
+  function syncWgPeer(nodeId: string, publicKey?: string): void {
     if (!MESH) return;
-    const node = await db.get<NodeRow>('SELECT * FROM nodes WHERE id=?', nodeId);
-    const existing = await db.get<WgPeerRow>('SELECT * FROM wg_peers WHERE node_id=?', nodeId);
+    const node = db.get<NodeRow>('SELECT * FROM nodes WHERE id=?', nodeId);
+    const existing = db.get<WgPeerRow>('SELECT * FROM wg_peers WHERE node_id=?', nodeId);
     const key = publicKey ?? existing?.public_key;
     if (!node?.overlay_ip || !key) return;
-    await db.run(
+    db.run(
       `INSERT INTO wg_peers(node_id,public_key,overlay_ip,endpoint,allowed_ips,updated_at) VALUES(?,?,?,?,?,?)
       ON CONFLICT(node_id) DO UPDATE SET public_key=excluded.public_key,overlay_ip=excluded.overlay_ip,endpoint=excluded.endpoint,allowed_ips=excluded.allowed_ips,updated_at=excluded.updated_at`,
       nodeId,
@@ -1253,7 +1250,7 @@ export async function createApp(
     const agentToken = token('tug_agent');
     const registryToken = token('tug_reg');
     const ts = now();
-    await db.run(
+    db.run(
       `INSERT INTO nodes(id,name,address,public_address,status,labels_json,agent_token_hash,registry_token_hash,created_at,updated_at)
       VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,address=excluded.address,public_address=excluded.public_address,labels_json=excluded.labels_json,agent_token_hash=excluded.agent_token_hash,registry_token_hash=excluded.registry_token_hash,updated_at=excluded.updated_at`,
       name,
@@ -1267,11 +1264,11 @@ export async function createApp(
       ts,
       ts,
     );
-    await ensureOverlayIp(name);
-    await syncWgPeer(name, wgPublicKey);
+    ensureOverlayIp(name);
+    syncWgPeer(name, wgPublicKey);
     await upsertRegistryCredential(name, registryToken);
-    await wakeAll();
-    const row = await db.get<NodeRow>(NODE_INFO_SQL, name);
+    wakeAll();
+    const row = db.get<NodeRow>(NODE_INFO_SQL, name);
     if (!row) throw httpError(500, 'node not found after registration');
     const node: NodeInfo = {
       id: row.id,
@@ -1312,7 +1309,7 @@ export async function createApp(
     const uses = Math.max(1, Number(req.body.uses ?? 1));
     const enrollToken = token('tug_enroll');
     const expiresAt = new Date(Date.now() + ttlSeconds * 1000).toISOString();
-    await db.run(
+    db.run(
       'INSERT INTO enroll_tokens(token_hash,name,uses_remaining,expires_at,created_at) VALUES(?,?,?,?,?)',
       hashToken(enrollToken),
       name,
@@ -1328,12 +1325,12 @@ export async function createApp(
       body.enrollToken || (req.headers.authorization || '').replace(/^Bearer /, ''),
     ).trim();
     if (!raw) return res.status(400).json({ error: 'enrollToken required' });
-    const row = await db.get<EnrollTokenRow>(
+    const row = db.get<EnrollTokenRow>(
       'SELECT * FROM enroll_tokens WHERE token_hash=?',
       hashToken(raw),
     );
     if (!row || row.uses_remaining < 1 || row.expires_at < now()) {
-      if (row) await db.run('DELETE FROM enroll_tokens WHERE token_hash=?', hashToken(raw));
+      if (row) db.run('DELETE FROM enroll_tokens WHERE token_hash=?', hashToken(raw));
       return res.status(401).json({ error: 'invalid or expired enroll token' });
     }
     const name = row.name || body.name;
@@ -1354,9 +1351,9 @@ export async function createApp(
       return sendError(res, e);
     }
     const remaining = row.uses_remaining - 1;
-    if (remaining < 1) await db.run('DELETE FROM enroll_tokens WHERE token_hash=?', hashToken(raw));
+    if (remaining < 1) db.run('DELETE FROM enroll_tokens WHERE token_hash=?', hashToken(raw));
     else
-      await db.run(
+      db.run(
         'UPDATE enroll_tokens SET uses_remaining=? WHERE token_hash=?',
         remaining,
         hashToken(raw),
@@ -1365,7 +1362,7 @@ export async function createApp(
     res.json(enrolled);
   });
   api('get', '/api/v1/nodes', null, async (req, res) => {
-    const rows = await db.all<NodeRow[]>(
+    const rows = db.all<NodeRow>(
       'SELECT id,name,address,public_address,overlay_ip,ingress,ingress_status_json,status,labels_json,last_seen_at,created_at,updated_at FROM nodes ORDER BY name',
     );
     res.json({
@@ -1376,14 +1373,14 @@ export async function createApp(
     });
   });
   api('post', '/api/v1/nodes/:name/rotate-registry-token', null, async (req, res) => {
-    const node = await db.get(
+    const node = db.get<Pick<NodeRow, 'id' | 'name'>>(
       'SELECT id,name FROM nodes WHERE name=? OR id=?',
       req.params.name,
       req.params.name,
     );
     if (!node) return res.status(404).json({ error: 'node not found' });
     const registryToken = token('tug_reg');
-    await db.run(
+    db.run(
       'UPDATE nodes SET registry_token_hash=?,updated_at=? WHERE id=?',
       hashToken(registryToken),
       now(),
@@ -1393,36 +1390,32 @@ export async function createApp(
     res.json({ ok: true, node: node.name, registryToken });
   });
   api('post', '/api/v1/nodes/:name/revoke-registry-token', null, async (req, res) => {
-    const node = await db.get(
+    const node = db.get<Pick<NodeRow, 'id' | 'name'>>(
       'SELECT id,name FROM nodes WHERE name=? OR id=?',
       req.params.name,
       req.params.name,
     );
     if (!node) return res.status(404).json({ error: 'node not found' });
-    await db.run(
-      'UPDATE nodes SET registry_token_hash=NULL,updated_at=? WHERE id=?',
-      now(),
-      node.id,
-    );
+    db.run('UPDATE nodes SET registry_token_hash=NULL,updated_at=? WHERE id=?', now(), node.id);
     await removeRegistryCredential(node.name);
     res.json({ ok: true, node: node.name, revoked: true });
   });
-  async function findNode(nameOrId: string) {
+  function findNode(nameOrId: string) {
     return db.get<Pick<NodeRow, 'id' | 'name'>>(
       'SELECT id,name FROM nodes WHERE name=? OR id=?',
       nameOrId,
       nameOrId,
     );
   }
-  async function queueCommand(
+  function queueCommand(
     nodeId: string,
     projectId: string | null,
     type: CommandType,
     payload: Record<string, unknown> = {},
-  ): Promise<string> {
+  ): string {
     const commandId = id('cmd');
     const ts = now();
-    await db.run(
+    db.run(
       'INSERT INTO commands(id,node_id,project_id,type,state,payload_json,attempts,run_after,deadline,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
       commandId,
       nodeId,
@@ -1444,21 +1437,21 @@ export async function createApp(
   api('post', '/api/v1/nodes/:name/rotate-wg-key', null, async (req, res) => {
     if (!MESH)
       return res.status(409).json({ error: 'the WireGuard mesh is not enabled (TUG_MESH=true)' });
-    const node = await findNode(req.params.name);
+    const node = findNode(req.params.name);
     if (!node) return res.status(404).json({ error: 'node not found' });
-    res.json({ commandId: await queueCommand(node.id, null, 'wg.rotate-key'), nodeId: node.id });
+    res.json({ commandId: queueCommand(node.id, null, 'wg.rotate-key'), nodeId: node.id });
   });
   // Removes a retired node: its token, WireGuard peer, statuses and queued commands. Refused while a current deployment still places
   // something on it (redeploy without it first) or while its agent is still reporting, unless force=true.
   api('delete', '/api/v1/nodes/:name', null, async (req, res) => {
-    const node = await db.get<Pick<NodeRow, 'id' | 'name' | 'last_seen_at'>>(
+    const node = db.get<Pick<NodeRow, 'id' | 'name' | 'last_seen_at'>>(
       'SELECT id,name,last_seen_at FROM nodes WHERE name=? OR id=?',
       req.params.name,
       req.params.name,
     );
     if (!node) return res.status(404).json({ error: 'node not found' });
     const referenced: string[] = [];
-    for (const state of await currentDesiredStates()) {
+    for (const state of currentDesiredStates()) {
       for (const [name, svc] of Object.entries(state.services || {}))
         if (svc.placement?.nodes?.includes(node.name)) referenced.push(`${state.project}/${name}`);
       for (const [name, vol] of Object.entries(state.compose?.volumes || {}))
@@ -1473,28 +1466,23 @@ export async function createApp(
       return res.status(409).json({
         error: `node ${node.name} is still reporting; stop its agent first or pass force=true`,
       });
-    await db.run('DELETE FROM commands WHERE node_id=?', node.id);
-    await db.run('DELETE FROM node_statuses WHERE node_id=?', node.id);
-    await db.run('DELETE FROM wg_peers WHERE node_id=?', node.id);
-    await db.run('DELETE FROM nodes WHERE id=?', node.id);
-    await audit(req.actor!, {
+    db.run('DELETE FROM commands WHERE node_id=?', node.id);
+    db.run('DELETE FROM node_statuses WHERE node_id=?', node.id);
+    db.run('DELETE FROM wg_peers WHERE node_id=?', node.id);
+    db.run('DELETE FROM nodes WHERE id=?', node.id);
+    audit(req.actor!, {
       type: 'node.removed',
       message: `node ${node.name} removed`,
       metadata: { node: node.name },
     });
-    await wakeAll();
+    wakeAll();
     res.json({ ok: true, node: node.name });
   });
   api('post', '/api/v1/nodes/:name/ingress', null, async (req, res) => {
-    const node = await findNode(req.params.name);
+    const node = findNode(req.params.name);
     if (!node) return res.status(404).json({ error: 'node not found' });
     const enabled = req.body.enabled !== false;
-    await db.run(
-      'UPDATE nodes SET ingress=?,updated_at=? WHERE id=?',
-      enabled ? 1 : 0,
-      now(),
-      node.id,
-    );
+    db.run('UPDATE nodes SET ingress=?,updated_at=? WHERE id=?', enabled ? 1 : 0, now(), node.id);
     wakeHub.wake(node.id);
     res.json({ ok: true, node: node.name, ingress: enabled });
   });
@@ -1504,15 +1492,13 @@ export async function createApp(
     if (!isWgKey(publicKey))
       return res.status(400).json({ error: 'publicKey must be a base64 WireGuard public key' });
     try {
-      await syncWgPeer(req.node!.id, publicKey);
-      await wakeAll();
+      syncWgPeer(req.node!.id, publicKey);
+      wakeAll();
       res.json({ ok: true });
     } catch (e) {
       sendError(
         res,
-        /UNIQUE constraint/.test(errMessage(e))
-          ? httpError(409, 'public key already registered to another node')
-          : e,
+        isUniqueViolation(e) ? httpError(409, 'public key already registered to another node') : e,
       );
     }
   });
@@ -1521,7 +1507,7 @@ export async function createApp(
     const password = req.body.password;
     const node =
       username && password
-        ? await db.get(
+        ? db.get(
             'SELECT id,name FROM nodes WHERE (name=? OR id=?) AND registry_token_hash IS NOT NULL AND registry_token_hash=?',
             username,
             username,
@@ -1534,8 +1520,8 @@ export async function createApp(
 
   api('post', '/api/v1/tokens', null, async (req, res) => {
     const request = parseTokenRequest(req.body);
-    const created = await createToken(db, request, req.actor!.name);
-    await audit(req.actor!, {
+    const created = createToken(db, request, req.actor!.name);
+    audit(req.actor!, {
       type: 'token.create',
       message: `token ${created.name} (${created.role}${created.projects ? `, projects: ${created.projects.join(', ')}` : ''}) created by ${req.actor!.name}`,
       metadata: {
@@ -1547,13 +1533,11 @@ export async function createApp(
     });
     res.json(created);
   });
-  api('get', '/api/v1/tokens', null, async (_req, res) =>
-    res.json({ tokens: await listTokens(db) }),
-  );
+  api('get', '/api/v1/tokens', null, async (_req, res) => res.json({ tokens: listTokens(db) }));
   api('delete', '/api/v1/tokens/:name', null, async (req, res) => {
-    if (!(await revokeToken(db, req.params.name)))
+    if (!revokeToken(db, req.params.name))
       return res.status(404).json({ error: 'token not found' });
-    await audit(req.actor!, {
+    audit(req.actor!, {
       type: 'token.revoke',
       message: `token ${req.params.name} revoked by ${req.actor!.name}`,
       metadata: { name: req.params.name },
@@ -1566,14 +1550,14 @@ export async function createApp(
     if (!name || value == null) return res.status(400).json({ error: 'name and value required' });
     let lock;
     try {
-      lock = await acquireProjectLock(project, 'secret.set');
-      const old = await db.get<Pick<SecretRow, 'version'>>(
+      lock = acquireProjectLock(project, 'secret.set');
+      const old = db.get<Pick<SecretRow, 'version'>>(
         'SELECT version FROM secrets WHERE project_id=? AND name=?',
         project,
         name,
       );
       const ts = now();
-      await db.run(
+      db.run(
         `INSERT INTO secrets(id,project_id,name,encrypted_value,version,created_at,updated_at) VALUES(?,?,?,?,?,?,?)
         ON CONFLICT(project_id,name) DO UPDATE SET encrypted_value=excluded.encrypted_value,version=excluded.version,updated_at=excluded.updated_at`,
         id('sec'),
@@ -1584,8 +1568,8 @@ export async function createApp(
         ts,
         ts,
       );
-      await wakeAll(project);
-      await audit(req.actor!, {
+      wakeAll(project);
+      audit(req.actor!, {
         type: 'secret.set',
         project,
         message: `secret ${name} set to version ${(old?.version || 0) + 1} by ${req.actor!.name}`,
@@ -1595,27 +1579,27 @@ export async function createApp(
     } catch (e) {
       sendError(res, e);
     } finally {
-      await releaseLock(lock);
+      releaseLock(lock);
     }
   });
   api('get', '/api/v1/secrets', queryProject, async (req, res) =>
     res.json({
-      secrets: await db.all(
+      secrets: db.all(
         'SELECT project_id,name,version,updated_at FROM secrets WHERE project_id=? ORDER BY name',
-        req.query.project || 'site',
+        String(req.query.project || 'site'),
       ),
     }),
   );
   api('delete', '/api/v1/secrets/:name', queryProject, async (req, res) => {
     const project = String(req.query.project || 'site');
-    const removed = await db.run(
+    const removed = db.run(
       'DELETE FROM secrets WHERE project_id=? AND name=?',
       project,
       req.params.name,
     );
     if (removed.changes) {
-      await wakeAll(project);
-      await audit(req.actor!, {
+      wakeAll(project);
+      audit(req.actor!, {
         type: 'secret.delete',
         project,
         message: `secret ${req.params.name} deleted by ${req.actor!.name}`,
@@ -1640,14 +1624,14 @@ export async function createApp(
   }
   const artifactDir = path.join(DATA_DIR, 'images');
   await ensureDir(artifactDir);
-  async function retainedStates(): Promise<DesiredState[]> {
+  function retainedStates(): DesiredState[] {
     // All published history is retained. This conservative superset protects failed/lagging versions too.
-    return (await db.all<DesiredStateRow[]>('SELECT * FROM desired_states')).map((row) =>
-      JSON.parse(row.state_json),
-    );
+    return db
+      .all<DesiredStateRow>('SELECT * FROM desired_states')
+      .map((row) => JSON.parse(row.state_json));
   }
   async function collectArtifacts(): Promise<void> {
-    const states = await retainedStates();
+    const states = retainedStates();
     const refs = new Set(
       states.flatMap((state) =>
         Object.values(state.services).flatMap((service) =>
@@ -1658,10 +1642,10 @@ export async function createApp(
     const imageRefs = new Set(
       states.flatMap((state) => Object.values(state.services).map((service) => service.image)),
     );
-    const rows = await db.all<BuildRow[]>('SELECT * FROM builds');
+    const rows = db.all<BuildRow>('SELECT * FROM builds');
     for (const row of rows) {
       if (refs.has(row.id) || imageRefs.has(row.image_ref)) continue;
-      const active = await db.get(
+      const active = db.get(
         "SELECT 1 FROM deployments WHERE id=? AND state IN ('uploading','building')",
         row.deployment_id,
       );
@@ -1671,15 +1655,15 @@ export async function createApp(
         { force: true },
       );
       await images.run('docker', ['image', 'rm', row.image_ref]).catch(() => {});
-      await db.run('DELETE FROM builds WHERE id=?', row.id);
+      db.run('DELETE FROM builds WHERE id=?', row.id);
     }
-    const remaining = await db.all<{ id: string }[]>('SELECT id FROM builds');
+    const remaining = db.all<{ id: string }>('SELECT id FROM builds');
     const owned = new Set(remaining.flatMap((row) => [`${row.id}.tar.gz`, `${row.id}.tar.gz.tmp`]));
     for (const name of await fs.readdir(artifactDir))
       if (!owned.has(name)) await fs.rm(path.join(artifactDir, name), { force: true });
   }
   // Previous-process builds cannot finish after a restart; clear their unpublished files.
-  await db.run(
+  db.run(
     "UPDATE deployments SET state='build_failed',error_message='control restarted during build' WHERE state IN ('uploading','building')",
   );
   await collectArtifacts();
@@ -1724,7 +1708,7 @@ export async function createApp(
           400,
           `version cannot start with "${ROLLBACK_VERSION_PREFIX}" (reserved for rollback deployments)`,
         );
-      const nodeRows = await db.all<NodeRow[]>(
+      const nodeRows = db.all<NodeRow>(
         'SELECT name,labels_json,last_seen_at,created_at FROM nodes ORDER BY created_at,name',
       );
       // Stale nodes (agent not seen recently) are not scheduled onto, so a dead host cannot hold a rollout open.
@@ -1771,7 +1755,7 @@ export async function createApp(
           !xe.placement?.nodes?.[0]
         )
           continue;
-        const exporter = await db.get<{ address: string | null; overlay_ip: string | null }>(
+        const exporter = db.get<{ address: string | null; overlay_ip: string | null }>(
           'SELECT address,overlay_ip FROM nodes WHERE name=?',
           xe.placement.nodes[0],
         );
@@ -1790,9 +1774,9 @@ export async function createApp(
       const referenced = sentinelNames(compose);
       if (referenced.length) {
         const known = new Set(
-          (
-            await db.all<{ name: string }[]>('SELECT name FROM secrets WHERE project_id=?', project)
-          ).map((row) => row.name),
+          db
+            .all<{ name: string }>('SELECT name FROM secrets WHERE project_id=?', project)
+            .map((row) => row.name),
         );
         const missing = referenced.filter((name) => !known.has(name));
         if (missing.length)
@@ -1846,29 +1830,29 @@ export async function createApp(
         if (ing?.tls !== 'custom') continue;
         for (const secret of [ing.cert, ing.key])
           if (
-            !(await db.get('SELECT 1 FROM secrets WHERE project_id=? AND name=?', project, secret))
+            !db.get('SELECT 1 FROM secrets WHERE project_id=? AND name=?', project, secret ?? null)
           )
             throw httpError(
               400,
               `${svcName}: custom TLS secret ${secret} not found in project ${project}; set it with secret-set first`,
             );
       }
-      lock = await acquireProjectLock(project, 'deploy');
-      const active = await db.get<DeploymentRow>(
+      lock = acquireProjectLock(project, 'deploy');
+      const active = db.get<DeploymentRow>(
         `SELECT * FROM deployments WHERE project_id=? AND state IN (${ACTIVE_STATES_SQL}) LIMIT 1`,
         project,
       );
       if (active) throw httpError(409, `deployment ${active.id} is already ${active.state}`);
       depId = id('dep');
       const ts = now();
-      await db.run(
+      db.run(
         'INSERT OR IGNORE INTO projects(id,name,created_at,updated_at) VALUES(?,?,?,?)',
         project,
         project,
         ts,
         ts,
       );
-      await db.run(
+      db.run(
         'INSERT INTO deployments(id,project_id,version,state,created_at,updated_at,actor) VALUES(?,?,?,?,?,?,?)',
         depId,
         project,
@@ -1898,7 +1882,7 @@ export async function createApp(
         const spec = desired.services[service];
         const buildId = id('build');
         const imageRef = spec.image!;
-        await db.run(
+        db.run(
           'INSERT INTO builds(id,project_id,deployment_id,service,image_ref,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)',
           buildId,
           project,
@@ -1947,7 +1931,7 @@ export async function createApp(
           if (REGISTRY) {
             if (process.env.TUG_PUSH !== 'false') await images.run('docker', ['push', imageRef]);
             const inspected = await images.inspect(imageRef);
-            await db.run(
+            db.run(
               'UPDATE builds SET state=?,image_id=?,platform=?,updated_at=? WHERE id=?',
               'complete',
               inspected.imageId,
@@ -1960,7 +1944,7 @@ export async function createApp(
             await fs.rename(temporary, final);
             const artifact: ImageArtifact = { buildId, imageRef, ...info };
             spec.artifact = artifact;
-            await db.run(
+            db.run(
               'UPDATE builds SET state=?,image_id=?,platform=?,sha256=?,size_bytes=?,artifact_path=?,updated_at=? WHERE id=?',
               'complete',
               info.imageId,
@@ -1979,42 +1963,43 @@ export async function createApp(
         }
       }
       const buildLock = lock;
-      await withPublication(async () => {
-        const owned = await db.get(
+      const publishingId = depId;
+      await withPublication(() => {
+        const owned = db.get(
           'SELECT 1 FROM locks WHERE name=? AND owner=? AND expires_at>?',
           buildLock.name,
           buildLock.owner,
           now(),
         );
-        const pending = await db.get(
+        const pending = db.get(
           'SELECT 1 FROM deployments WHERE id=? AND state=?',
-          depId,
+          publishingId,
           'building',
         );
         if (!owned || !pending)
           throw httpError(409, 'deployment was cancelled or its build lease was lost');
-        await db.exec('BEGIN IMMEDIATE');
+        db.exec('BEGIN IMMEDIATE');
         try {
-          const published = await db.run(
+          const published = db.run(
             "UPDATE deployments SET state='rolling_out',updated_at=? WHERE id=? AND state='building'",
             now(),
-            depId,
+            publishingId,
           );
           if (
             published.changes !== 1 ||
-            !(await db.get(
+            !db.get(
               'SELECT 1 FROM locks WHERE name=? AND owner=? AND expires_at>?',
               buildLock.name,
               buildLock.owner,
               now(),
-            ))
+            )
           )
             throw httpError(409, 'deployment was cancelled or its build lease was lost');
-          await db.run(
+          db.run(
             'INSERT INTO desired_states(id,project_id,deployment_id,version,state_json,created_at) VALUES(?,?,?,?,?,?)',
             id('ds'),
             project,
-            depId,
+            publishingId,
             version,
             JSON.stringify(desired),
             ts,
@@ -2023,9 +2008,13 @@ export async function createApp(
             const lp = volumeSpec?.['x-tug'] || {};
             const nodeName = lp.placement?.nodes?.[0] || null;
             const node = nodeName
-              ? await db.get('SELECT id FROM nodes WHERE name=? OR id=?', nodeName, nodeName)
+              ? db.get<Pick<NodeRow, 'id'>>(
+                  'SELECT id FROM nodes WHERE name=? OR id=?',
+                  nodeName,
+                  nodeName,
+                )
               : null;
-            await db.run(
+            db.run(
               `INSERT INTO volumes(id,project_id,name,type,driver,node_id,config_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(project_id,name) DO UPDATE SET type=excluded.type,driver=excluded.driver,node_id=excluded.node_id,config_json=excluded.config_json,updated_at=excluded.updated_at`,
               id('vol'),
               project,
@@ -2038,43 +2027,49 @@ export async function createApp(
               ts,
             );
           }
-          await db.run(
+          db.run(
             'UPDATE projects SET current_deployment_id=?,updated_at=? WHERE id=?',
-            depId,
+            publishingId,
             now(),
             project,
           );
-          await db.exec('COMMIT');
+          db.exec('COMMIT');
         } catch (e) {
-          await db.exec('ROLLBACK');
+          try {
+            db.exec('ROLLBACK');
+          } catch {
+            /* Preserve the publication error. */
+          }
           throw e;
         }
       });
-      await audit(req.actor!, {
+      audit(req.actor!, {
         type: 'deploy',
         project,
         deploymentId: depId,
         message: `deployment ${depId} (${version}) started by ${req.actor!.name}`,
         metadata: { version },
       });
-      await wakeAll(project);
+      wakeAll(project);
       responseBody = {
         deployment: { id: depId, project, version, state: 'rolling_out', actor: req.actor!.name },
         desiredState: desired,
       };
     } catch (e) {
       if (depId)
-        await db
-          .run(
+        try {
+          db.run(
             "UPDATE deployments SET state='build_failed',error_message=?,updated_at=? WHERE id=? AND state='building'",
             errMessage(e),
             now(),
             depId,
-          )
-          .catch(() => {});
+          );
+        } catch {
+          /* Best-effort bookkeeping. */
+        }
       responseError = e;
     } finally {
-      await releaseLock(lock);
+      releaseLock(lock);
       await Promise.all(files.map((file) => fs.rm(file.path, { force: true }).catch(() => {})));
       if (contextDir) await fs.rm(contextDir, { recursive: true, force: true });
       await collectArtifacts().catch((e) => console.error('image cleanup failed:', errMessage(e)));
@@ -2083,7 +2078,7 @@ export async function createApp(
     else res.json(responseBody);
   }
   get('/agent/v1/images/:buildId', authAgent, async (req, res) => {
-    const states = await retainedStates();
+    const states = retainedStates();
     const allowed = states.some((state) =>
       Object.values(state.services).some(
         (service) =>
@@ -2092,7 +2087,7 @@ export async function createApp(
       ),
     );
     if (!allowed) return res.status(404).json({ error: 'image not found' });
-    const row = await db.get<BuildRow>(
+    const row = db.get<BuildRow>(
       'SELECT * FROM builds WHERE id=? AND state=?',
       req.params.buildId,
       'complete',
@@ -2113,18 +2108,15 @@ export async function createApp(
   });
 
   api('get', '/api/v1/deployments/:id', deploymentProject, async (req, res) =>
-    res.json(await db.get('SELECT * FROM deployments WHERE id=?', req.params.id)),
+    res.json(db.get('SELECT * FROM deployments WHERE id=?', req.params.id)),
   );
   api('post', '/api/v1/deployments/:id/cancel', deploymentProject, async (req, res) =>
-    withPublication(async () => {
-      const row = await db.get<DeploymentRow>(
-        'SELECT * FROM deployments WHERE id=?',
-        req.params.id,
-      );
+    withPublication(() => {
+      const row = db.get<DeploymentRow>('SELECT * FROM deployments WHERE id=?', req.params.id);
       if (!row) return res.status(404).json({ error: 'deployment not found' });
       if (!(ACTIVE_DEPLOYMENT_STATES as readonly string[]).includes(row.state))
         return res.status(409).json({ error: `deployment is ${row.state}` });
-      const result = await db.run(
+      const result = db.run(
         `UPDATE deployments SET state=?,updated_at=? WHERE id=? AND state IN (${ACTIVE_STATES_SQL})`,
         'cancelled',
         now(),
@@ -2132,7 +2124,7 @@ export async function createApp(
       );
       if (result.changes !== 1)
         return res.status(409).json({ error: 'deployment is no longer active' });
-      await audit(req.actor!, {
+      audit(req.actor!, {
         type: 'cancel',
         project: row.project_id,
         deploymentId: row.id,
@@ -2145,11 +2137,11 @@ export async function createApp(
     withWriter(async () => {
       const project = req.body.project || 'site';
       try {
-        const out = await createRollback(project, {
+        const out = createRollback(project, {
           actor: req.actor!.name,
           force: Boolean(req.body.force),
         });
-        await audit(req.actor!, {
+        audit(req.actor!, {
           type: 'rollback',
           project,
           deploymentId: out.deployment!.id,
@@ -2164,9 +2156,9 @@ export async function createApp(
   );
   api('get', '/api/v1/volumes', queryProject, async (req, res) =>
     res.json({
-      volumes: await db.all(
+      volumes: db.all(
         'SELECT * FROM volumes WHERE project_id=? ORDER BY name',
-        req.query.project || 'site',
+        String(req.query.project || 'site'),
       ),
     }),
   );
@@ -2175,8 +2167,8 @@ export async function createApp(
     const deleteData = String(req.query.deleteData || 'false') === 'true';
     let lock;
     try {
-      lock = deleteData ? await acquireProjectLock(project, 'volume.delete') : null;
-      const volume = await db.get(
+      lock = deleteData ? acquireProjectLock(project, 'volume.delete') : null;
+      const volume = db.get<VolumeRow>(
         'SELECT * FROM volumes WHERE project_id=? AND name=?',
         project,
         req.params.name,
@@ -2187,7 +2179,7 @@ export async function createApp(
         return res
           .status(409)
           .json({ error: 'refusing to delete persistent volume without deleteData=true' });
-      const ds = await currentDesired(project);
+      const ds = currentDesired(project);
       if (ds) {
         const state: DesiredState = JSON.parse(ds.state_json);
         const inUse = Object.entries(state.compose?.services || {})
@@ -2204,17 +2196,17 @@ export async function createApp(
       }
       let commandId = null;
       if (deleteData && volume.node_id) {
-        commandId = await queueCommand(volume.node_id, project, 'volume.delete', {
+        commandId = queueCommand(volume.node_id, project, 'volume.delete', {
           project,
           volume: req.params.name,
         });
       }
-      await db.run('DELETE FROM volumes WHERE project_id=? AND name=?', project, req.params.name);
+      db.run('DELETE FROM volumes WHERE project_id=? AND name=?', project, req.params.name);
       res.json({ ok: true, commandId, deletedMetadata: true, deleteData });
     } catch (e) {
       sendError(res, e);
     } finally {
-      await releaseLock(lock);
+      releaseLock(lock);
     }
   });
   api('post', '/api/v1/control/backups/run', null, async (req, res) =>
@@ -2227,8 +2219,8 @@ export async function createApp(
       const staging = path.join(backupDir, `${backupId}-staging`);
       await fs.rm(staging, { recursive: true, force: true });
       await ensureDir(staging);
-      const snapshotPath = path.join(staging, 'tug.db').replaceAll("'", "''");
-      await db.exec(`VACUUM INTO '${snapshotPath}'`);
+      const snapshotPath = path.join(staging, 'tug.db');
+      db.run('VACUUM INTO ?', snapshotPath);
       await fs.copyFile(masterKeyFile, path.join(staging, 'master.key'));
       await fs.cp(artifactDir, path.join(staging, 'images'), { recursive: true });
       await fs.writeFile(
@@ -2243,7 +2235,7 @@ export async function createApp(
         'images',
       ]);
       await fs.rm(staging, { recursive: true, force: true });
-      await db.run(
+      db.run(
         'INSERT INTO backups(id,project_id,target,node_id,state,artifact_ref,metadata_json,created_at,completed_at) VALUES(?,?,?,?,?,?,?,?,?)',
         backupId,
         '_control',
@@ -2284,24 +2276,20 @@ export async function createApp(
         await tar.x({ file: artifactRef, cwd: restoreDir, strict: true });
         const key = (await fs.readFile(path.join(restoreDir, 'master.key'), 'utf8')).trim();
         if (!/^[A-Za-z0-9+/]{43}=$/.test(key)) throw new Error('invalid backup master key');
-        snapshot = await open({
-          filename: path.join(restoreDir, 'tug.db'),
-          driver: sqlite3.Database,
-          mode: sqlite3.OPEN_READONLY,
-        });
-        const integrity = await snapshot.get('PRAGMA integrity_check');
+        snapshot = openSnapshotDb(path.join(restoreDir, 'tug.db'));
+        const integrity = snapshot.get('PRAGMA integrity_check');
         if (integrity?.integrity_check !== 'ok')
           throw new Error('backup database failed integrity check');
-        if (!(await snapshot.get("SELECT 1 FROM meta WHERE key='operator_token_hash'")))
+        if (!snapshot.get("SELECT 1 FROM meta WHERE key='operator_token_hash'"))
           throw new Error('backup database has no operator identity');
-        for (const secret of await snapshot.all<SecretRow[]>('SELECT * FROM secrets'))
+        for (const secret of snapshot.all<SecretRow>('SELECT * FROM secrets'))
           decrypt(secret.encrypted_value, key);
-        const states = await snapshot.all<DesiredStateRow[]>('SELECT * FROM desired_states');
+        const states = snapshot.all<DesiredStateRow>('SELECT * FROM desired_states');
         for (const stateRow of states) {
           const state: DesiredState = JSON.parse(stateRow.state_json);
           for (const service of Object.values(state.services)) {
             if (!service.artifact) continue;
-            const build = await snapshot.get<BuildRow>(
+            const build = snapshot.get<BuildRow>(
               'SELECT * FROM builds WHERE id=? AND state=?',
               service.artifact.buildId,
               'complete',
@@ -2321,12 +2309,12 @@ export async function createApp(
               throw new Error('backup image archive checksum mismatch');
           }
         }
-        await snapshot.close();
+        snapshot.close();
         snapshot = undefined;
         await ensureDir(path.join(restoreDir, 'images'));
         // Validation completes before changing any live file. Stop DB-dependent work until restart.
         restartRequired = true;
-        await db.close();
+        db.close();
         await fs.rm(`${dbFile}-wal`, { force: true });
         await fs.rm(`${dbFile}-shm`, { force: true });
         await fs.cp(path.join(restoreDir, 'images'), artifactDir, { recursive: true });
@@ -2334,12 +2322,16 @@ export async function createApp(
         await fs.copyFile(path.join(restoreDir, 'master.key'), masterKeyFile);
         res.json({ ok: true, restored: true, restartRequired: true });
       } catch (e) {
-        if (snapshot) await snapshot.close().catch(() => {});
+        try {
+          snapshot?.close();
+        } catch {
+          /* Preserve the restore error. */
+        }
         res.status(restartRequired ? 500 : 400).json({ error: errMessage(e), restartRequired });
       }
     }),
   );
-  async function commandForService({
+  function commandForService({
     project,
     service,
     type,
@@ -2351,28 +2343,32 @@ export async function createApp(
     payload: Record<string, unknown>;
   }) {
     if (!service) throw httpError(400, 'service required');
-    const ds = await currentDesired(project);
+    const ds = currentDesired(project);
     if (!ds) throw httpError(404, missingProject(project));
     const state = JSON.parse(ds.state_json);
     const svc = state.services?.[service];
     if (!svc) throw httpError(404, missingService(project, service));
     const nodeName = svc.placement?.nodes?.[0];
     if (!nodeName) throw httpError(400, 'service has no explicit node placement');
-    const node = await db.get('SELECT id FROM nodes WHERE name=? OR id=?', nodeName, nodeName);
+    const node = db.get<Pick<NodeRow, 'id'>>(
+      'SELECT id FROM nodes WHERE name=? OR id=?',
+      nodeName,
+      nodeName,
+    );
     if (!node) throw httpError(404, 'node not found');
-    const cmdId = await queueCommand(node.id, project, type, { project, service, ...payload });
+    const cmdId = queueCommand(node.id, project, type, { project, service, ...payload });
     return { commandId: cmdId, nodeId: node.id };
   }
   api('post', '/api/v1/restart', bodyProject, async (req, res) => {
     try {
       const project = req.body.project || 'site';
-      const queued = await commandForService({
+      const queued = commandForService({
         project,
         service: req.body.service,
         type: 'service.restart',
         payload: {},
       });
-      await audit(req.actor!, {
+      audit(req.actor!, {
         type: 'restart',
         project,
         message: `service ${req.body.service} restart requested by ${req.actor!.name}`,
@@ -2388,25 +2384,29 @@ export async function createApp(
     const service = req.body.service;
     const tail = Number(req.body.tail || 200);
     if (!service) return res.status(400).json({ error: 'service required' });
-    const ds = await currentDesired(project);
+    const ds = currentDesired(project);
     if (!ds) return res.status(404).json({ error: missingProject(project) });
     const state = JSON.parse(ds.state_json);
     const svc = state.services?.[service];
     if (!svc) return res.status(404).json({ error: missingService(project, service) });
     const nodeName = svc.placement?.nodes?.[0];
     if (!nodeName) return res.status(400).json({ error: 'service has no explicit node placement' });
-    const node = await db.get('SELECT id FROM nodes WHERE name=? OR id=?', nodeName, nodeName);
+    const node = db.get<Pick<NodeRow, 'id'>>(
+      'SELECT id FROM nodes WHERE name=? OR id=?',
+      nodeName,
+      nodeName,
+    );
     if (!node) return res.status(404).json({ error: 'node not found' });
-    const cmdId = await queueCommand(node.id, project, 'logs.fetch', { project, service, tail });
+    const cmdId = queueCommand(node.id, project, 'logs.fetch', { project, service, tail });
     res.json({ commandId: cmdId, nodeId: node.id });
   });
   api('get', '/api/v1/commands/:id', commandProject, async (req, res) =>
-    res.json(await db.get('SELECT * FROM commands WHERE id=?', req.params.id)),
+    res.json(db.get('SELECT * FROM commands WHERE id=?', req.params.id)),
   );
   api('get', '/api/v1/status', null, async (req, res) => {
     const staleSeconds = Number(process.env.TUG_STALE_SECONDS || 60);
     const cutoff = new Date(Date.now() - staleSeconds * 1000).toISOString();
-    await db.run(
+    db.run(
       "UPDATE nodes SET status='stale',updated_at=? WHERE last_seen_at IS NOT NULL AND last_seen_at < ?",
       now(),
       cutoff,
@@ -2415,16 +2415,13 @@ export async function createApp(
     const deployments = projectScope(req.actor!, 'project_id');
     const statuses = projectScope(req.actor!, 'project_id');
     res.json({
-      projects: await db.all(`SELECT * FROM projects WHERE ${projects.where}`, ...projects.args),
-      deployments: await db.all(
+      projects: db.all(`SELECT * FROM projects WHERE ${projects.where}`, ...projects.args),
+      deployments: db.all(
         `SELECT * FROM deployments WHERE ${deployments.where} ORDER BY created_at DESC LIMIT 20`,
         ...deployments.args,
       ),
-      nodes: await db.all('SELECT id,name,status,last_seen_at FROM nodes'),
-      statuses: await db.all(
-        `SELECT * FROM node_statuses WHERE ${statuses.where}`,
-        ...statuses.args,
-      ),
+      nodes: db.all('SELECT id,name,status,last_seen_at FROM nodes'),
+      statuses: db.all(`SELECT * FROM node_statuses WHERE ${statuses.where}`, ...statuses.args),
     });
   });
   api('get', '/api/v1/events', null, async (req, res) => {
@@ -2433,12 +2430,12 @@ export async function createApp(
     const limit = Math.min(Number(req.query.limit || 100), 500);
     const scope = projectScope(req.actor!, 'project_id'); // scoped tokens never see node-level or other projects' events
     const events = project
-      ? await db.all(
+      ? db.all(
           'SELECT * FROM events WHERE project_id=? ORDER BY created_at DESC LIMIT ?',
           project,
           limit,
         )
-      : await db.all(
+      : db.all(
           `SELECT * FROM events WHERE ${scope.where} ORDER BY created_at DESC LIMIT ?`,
           ...scope.args,
           limit,
@@ -2455,12 +2452,10 @@ export async function createApp(
       }
     }
     await check('sqlite', async () => ({
-      value: (await db.get('SELECT COUNT(*) AS count FROM projects')).count,
+      value: db.get<{ count: number }>('SELECT COUNT(*) AS count FROM projects')!.count,
     }));
     await check('operator_token', async () => ({
-      configured: Boolean(
-        await db.get('SELECT value FROM meta WHERE key=?', 'operator_token_hash'),
-      ),
+      configured: Boolean(db.get('SELECT value FROM meta WHERE key=?', 'operator_token_hash')),
     }));
     await check('master_key', async () => ({ configured: Boolean(masterKey) }));
     await check('docker', async () => ({
@@ -2473,7 +2468,7 @@ export async function createApp(
     }));
     if (MESH) {
       await check('mesh', async () => {
-        const nodes = await db.all<{ name: string; overlay_ip: string | null; has_key: number }[]>(
+        const nodes = db.all<{ name: string; overlay_ip: string | null; has_key: number }>(
           'SELECT n.name, n.overlay_ip, EXISTS(SELECT 1 FROM wg_peers w WHERE w.node_id=n.id) AS has_key FROM nodes n',
         );
         const missing = nodes.filter((n) => !n.has_key).map((n) => n.name);
@@ -2484,7 +2479,7 @@ export async function createApp(
         return { cidr: MESH_CIDR, port: WG_PORT, nodes: nodes.length };
       });
     }
-    const ingressNodes = await db.all<Pick<NodeRow, 'name' | 'ingress_status_json'>[]>(
+    const ingressNodes = db.all<Pick<NodeRow, 'name' | 'ingress_status_json'>>(
       'SELECT name,ingress_status_json FROM nodes WHERE ingress=1',
     );
     if (ingressNodes.length) {
@@ -2504,29 +2499,33 @@ export async function createApp(
   });
   api('post', '/api/v1/diagnostics/nodes', null, async (req, res) => {
     const nodes = req.body.node
-      ? await db.all('SELECT id FROM nodes WHERE id=? OR name=?', req.body.node, req.body.node)
-      : await db.all('SELECT id FROM nodes');
+      ? db.all<Pick<NodeRow, 'id'>>(
+          'SELECT id FROM nodes WHERE id=? OR name=?',
+          req.body.node,
+          req.body.node,
+        )
+      : db.all<Pick<NodeRow, 'id'>>('SELECT id FROM nodes');
     if (req.body.node && !nodes.length)
       return res.status(404).json({ error: `node ${req.body.node} not found` });
     const commands = [];
     for (const node of nodes) {
-      const cmdId = await queueCommand(node.id, null, 'diagnostics.run');
+      const cmdId = queueCommand(node.id, null, 'diagnostics.run');
       commands.push({ commandId: cmdId, nodeId: node.id });
     }
     res.json({ commands });
   });
 
-  async function currentDesiredStates(): Promise<DesiredState[]> {
-    const rows = await db.all<DesiredStateRow[]>(
+  function currentDesiredStates(): DesiredState[] {
+    const rows = db.all<DesiredStateRow>(
       `SELECT ds.* FROM desired_states ds JOIN projects p ON p.current_deployment_id=ds.deployment_id ORDER BY ds.created_at DESC`,
     );
     return rows.map((s): DesiredState => JSON.parse(s.state_json));
   }
-  async function endpointsFor(states: DesiredState[]): Promise<ServiceEndpoints> {
+  function endpointsFor(states: DesiredState[]): ServiceEndpoints {
     const staleBefore = new Date(
       Date.now() - Number(process.env.TUG_STALE_SECONDS || 60) * 1000,
     ).toISOString();
-    const nodes = await db.all<(NodeRow & { has_key: number })[]>(
+    const nodes = db.all<NodeRow & { has_key: number }>(
       'SELECT n.*, EXISTS(SELECT 1 FROM wg_peers w WHERE w.node_id=n.id) AS has_key FROM nodes n',
     );
     const views: NodeView[] = nodes.map((n) => ({
@@ -2535,20 +2534,20 @@ export async function createApp(
       address: n.address,
       lastSeenAt: n.last_seen_at,
     }));
-    const statuses = (
-      await db.all<{ node_id: string; project_id: string; status_json: string }[]>(
+    const statuses = db
+      .all<{ node_id: string; project_id: string; status_json: string }>(
         'SELECT node_id,project_id,status_json FROM node_statuses',
       )
-    ).map((r) => ({
-      node: nodes.find((n) => n.id === r.node_id)?.name ?? r.node_id,
-      project: r.project_id,
-      status: JSON.parse(r.status_json),
-    }));
+      .map((r) => ({
+        node: nodes.find((n) => n.id === r.node_id)?.name ?? r.node_id,
+        project: r.project_id,
+        status: JSON.parse(r.status_json),
+      }));
     return resolveServiceEndpoints(states, views, statuses, staleBefore);
   }
-  async function networkFor(node: NodeRow): Promise<NetworkConfig | undefined> {
+  function networkFor(node: NodeRow): NetworkConfig | undefined {
     if (!MESH || !node.overlay_ip) return undefined;
-    const peers = await db.all<(WgPeerRow & { name: string })[]>(
+    const peers = db.all<WgPeerRow & { name: string }>(
       'SELECT w.*, n.name FROM wg_peers w JOIN nodes n ON n.id=w.node_id WHERE w.node_id != ? ORDER BY n.name',
       node.id,
     );
@@ -2567,8 +2566,8 @@ export async function createApp(
     };
   }
   /** Names of all nodes and of the ingress nodes, for port binding and upstream decisions. */
-  async function nodeTopology(): Promise<{ nodes: string[]; ingressNodes: string[] }> {
-    const rows = await db.all<Pick<NodeRow, 'name' | 'ingress'>[]>(
+  function nodeTopology(): { nodes: string[]; ingressNodes: string[] } {
+    const rows = db.all<Pick<NodeRow, 'name' | 'ingress'>>(
       'SELECT name,ingress FROM nodes ORDER BY name',
     );
     return {
@@ -2577,10 +2576,10 @@ export async function createApp(
     };
   }
   /** Where this node's published ports listen: the address other nodes and the ingress reach it on, or loopback. */
-  async function portBindingFor(node: NodeRow, states: DesiredState[]): Promise<PortBinding> {
+  function portBindingFor(node: NodeRow, states: DesiredState[]): PortBinding {
     const hasKey =
-      MESH && node.overlay_ip && (await db.get('SELECT 1 FROM wg_peers WHERE node_id=?', node.id));
-    const { nodes, ingressNodes } = await nodeTopology();
+      MESH && node.overlay_ip && db.get('SELECT 1 FROM wg_peers WHERE node_id=?', node.id);
+    const { nodes, ingressNodes } = nodeTopology();
     const loopback: Record<string, string[]> = {};
     for (const state of states) {
       const services = loopbackIngressServices(state, node.name, ingressNodes, nodes);
@@ -2588,17 +2587,17 @@ export async function createApp(
     }
     return { address: (hasKey ? node.overlay_ip : node.address) || null, loopback };
   }
-  async function ingressFor(node: NodeRow, states: DesiredState[]) {
+  function ingressFor(node: NodeRow, states: DesiredState[]) {
     const secrets = new Map<string, string>();
     for (const state of states) {
       for (const svc of Object.values(state.compose.services || {})) {
         const ing = svc['x-tug']?.ingress;
         if (ing?.tls !== 'custom') continue;
         for (const name of [ing.cert, ing.key]) {
-          const row = await db.get<Pick<SecretRow, 'encrypted_value'>>(
+          const row = db.get<Pick<SecretRow, 'encrypted_value'>>(
             'SELECT encrypted_value FROM secrets WHERE project_id=? AND name=?',
             state.project,
-            name,
+            name ?? null,
           );
           if (row) secrets.set(`${state.project}/${name}`, decrypt(row.encrypted_value, masterKey));
         }
@@ -2606,9 +2605,9 @@ export async function createApp(
     }
     return buildIngressWork({
       states,
-      endpoints: await endpointsFor(states),
+      endpoints: endpointsFor(states),
       node: node.name,
-      ...(await nodeTopology()),
+      ...nodeTopology(),
       secrets,
       acmeEmail: ACME_EMAIL,
     });
@@ -2620,42 +2619,32 @@ export async function createApp(
       30_000,
       Math.max(0, Number.parseInt(String(req.query.timeout ?? '25000'), 10) || 0),
     );
-    await db.run(
-      'UPDATE nodes SET last_seen_at=?,status=? WHERE id=?',
-      now(),
-      'online',
-      req.node!.id,
-    );
+    db.run('UPDATE nodes SET last_seen_at=?,status=? WHERE id=?', now(), 'online', req.node!.id);
     res.json(await wakeHub.wait(req.node!.id, after, timeoutMs));
   });
   get('/agent/v1/work', authAgent, async (req, res) => {
-    await db.run(
-      'UPDATE nodes SET last_seen_at=?,status=? WHERE id=?',
-      now(),
-      'online',
-      req.node!.id,
-    );
-    const node = (await db.get<NodeRow>('SELECT * FROM nodes WHERE id=?', req.node!.id))!;
-    const allStates = await currentDesiredStates();
+    db.run('UPDATE nodes SET last_seen_at=?,status=? WHERE id=?', now(), 'online', req.node!.id);
+    const node = db.get<NodeRow>('SELECT * FROM nodes WHERE id=?', req.node!.id)!;
+    const allStates = currentDesiredStates();
     const desiredStates = allStates.filter((st) =>
       Object.values(st.services).some(
         (svc) => (svc.placement?.nodes || []).includes(node.name) || !svc.placement?.nodes?.length,
       ),
     );
-    const commands = await db.all<CommandRow[]>(
+    const commands = db.all<CommandRow>(
       'SELECT * FROM commands WHERE node_id=? AND state=?',
       node.id,
       'pending',
     );
     if (commands.length)
-      await db.run(
+      db.run(
         `UPDATE commands SET state='running',attempts=attempts+1,updated_at=? WHERE node_id=? AND state='pending'`,
         now(),
         node.id,
       );
     const retainedImages = [
       ...new Set(
-        (await retainedStates()).flatMap((state) =>
+        retainedStates().flatMap((state) =>
           Object.values(state.services)
             .filter(
               (service) =>
@@ -2673,23 +2662,23 @@ export async function createApp(
       commands,
       retainedImages,
     };
-    const network = await networkFor(node);
+    const network = networkFor(node);
     if (network) work.network = network;
-    work.ports = await portBindingFor(node, desiredStates);
+    work.ports = portBindingFor(node, desiredStates);
     if (SERVICE_DNS) {
-      const all = await endpointsFor(allStates);
+      const all = endpointsFor(allStates);
       work.serviceEndpoints = Object.fromEntries(
         desiredStates.map((st) => [st.project, all[st.project] || {}]),
       );
     }
-    if (node.ingress) work.ingress = await ingressFor(node, allStates);
+    if (node.ingress) work.ingress = ingressFor(node, allStates);
     res.json(work);
   });
   post('/agent/v1/status', authAgent, async (req, res) => {
     const ts = now();
     const report: Partial<StatusReport> = req.body;
     for (const st of report.projects || []) {
-      await db.run(
+      db.run(
         `INSERT INTO node_statuses(id,node_id,project_id,observed_version,status_json,health,updated_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(node_id,project_id) DO UPDATE SET observed_version=excluded.observed_version,status_json=excluded.status_json,health=excluded.health,updated_at=excluded.updated_at`,
         id('ns'),
         req.node!.id,
@@ -2699,37 +2688,37 @@ export async function createApp(
         st.health || 'unknown',
         ts,
       );
-      await updateDeploymentConvergence(st.project);
+      updateDeploymentConvergence(st.project);
     }
     for (const cr of (report.commandResults || []) as Partial<CommandResult>[]) {
       const result = cr.result || {};
-      await db.run(
+      db.run(
         'UPDATE commands SET state=?,result_json=?,updated_at=? WHERE id=? AND node_id=?',
         cr.state || 'succeeded',
         JSON.stringify(result),
         ts,
-        cr.commandId,
+        cr.commandId ?? null,
         req.node!.id,
       );
     }
     if (report.ingress)
-      await db.run(
+      db.run(
         'UPDATE nodes SET ingress_status_json=? WHERE id=?',
         JSON.stringify({ ...report.ingress, reportedAt: ts }),
         req.node!.id,
       );
-    await db.run('UPDATE nodes SET last_seen_at=?,status=? WHERE id=?', ts, 'online', req.node!.id);
-    const nextEndpointSnapshot = JSON.stringify(await endpointsFor(await currentDesiredStates()));
+    db.run('UPDATE nodes SET last_seen_at=?,status=? WHERE id=?', ts, 'online', req.node!.id);
+    const nextEndpointSnapshot = JSON.stringify(endpointsFor(currentDesiredStates()));
     if (nextEndpointSnapshot !== endpointSnapshot) {
       endpointSnapshot = nextEndpointSnapshot;
-      await wakeAll();
+      wakeAll();
     }
     res.json({ ok: true });
   });
   post('/agent/v1/events', authAgent, async (req, res) => {
     const evs: AgentEvent[] = req.body.events || [req.body];
     for (const ev of evs)
-      await db.run(
+      db.run(
         'INSERT INTO events(id,project_id,deployment_id,node_id,level,type,message,metadata_json,created_at) VALUES(?,?,?,?,?,?,?,?,?)',
         id('evt'),
         ev.projectId || null,
@@ -2742,17 +2731,21 @@ export async function createApp(
         now(),
       );
     if (Date.now() - lastEventPrune >= eventPruneIntervalMs)
-      await pruneEvents().catch((e) => console.error(`event pruning failed: ${errMessage(e)}`));
+      try {
+        pruneEvents();
+      } catch (e) {
+        console.error(`event pruning failed: ${errMessage(e)}`);
+      }
     res.json({ ok: true });
   });
   get('/agent/v1/secrets', authAgent, async (req, res) => {
     const project = String(req.query.project || 'site');
-    let rows = await db.all<Pick<SecretRow, 'name' | 'encrypted_value' | 'version'>[]>(
+    let rows = db.all<Pick<SecretRow, 'name' | 'encrypted_value' | 'version'>>(
       'SELECT name,encrypted_value,version FROM secrets WHERE project_id=?',
       project,
     );
     if (req.query.services) {
-      const ds = await currentDesired(project);
+      const ds = currentDesired(project);
       const names = String(req.query.services)
         .split(',')
         .map((s) => s.trim())
@@ -2793,7 +2786,7 @@ function attachAgentStream(app: express.Express, server: http.Server | https.Ser
     const raw = String(request.headers.authorization || '').replace(/^Bearer /, '');
     void (async () => {
       if (pathname === '/api/v1/live') {
-        const actor = await runtime.authenticateOperator(raw);
+        const actor = runtime.authenticateOperator(raw);
         if (!actor) {
           reject(401, 'Unauthorized');
           return;
@@ -2804,7 +2797,7 @@ function attachAgentStream(app: express.Express, server: http.Server | https.Ser
         }
         wss.handleUpgrade(request, socket, head, (ws) => runtime.live.operator(actor, ws));
       } else {
-        const node = await runtime.authenticate(raw);
+        const node = runtime.authenticate(raw);
         if (!node) {
           reject(401, 'Unauthorized');
           return;

@@ -34,6 +34,14 @@ Commands to run each suite are in [Development](development.md). Entries marked 
 - **Image archives** are built in the test, so malformed and hostile layouts can be checked without Docker (`src/artifacts.test.ts`).
 - **The CLI** is run against a stub `ssh` that records its arguments (`src/cli.templates.test.ts`).
 
+### SQLite contract and blocking measurements
+
+`src/db.test.ts` runs the reusable factory-driven suite in `tests/db-contract.ts` against the Node adapter. It checks bindings and injection resistance, NULL and missing rows, ordinary object results, numeric change counts, integer boundaries, classified errors, transactions, busy waits, read-only/no-create behavior and connection cleanup. Shared-policy tests cover schemas, persisted agent state, foreign keys, WAL and the 1,000 ms timeout. A future Bun adapter must pass the same suite before it can replace the Node adapter.
+
+Control tests cover duplicate locks/tokens, failed publication rollback, backup validation and restart-required responses. Restore race tests pause actual filesystem I/O; synchronous SQL has no suspension point inside a transaction. The runtime image smoke test executes compiled database code inside the production image and checks that neither SQLite npm addon is present. CI exercises the exact Node 22.18.0 minimum alongside current Node 22 and 24 releases.
+
+Run `node tools/scripts/benchmark-database.js` for a synthetic reference workload of 100,000 events and 1,000 metadata reads. It reports operation duration, timer delay, snapshot size and maximum event-loop delay. On a local Node 24.21.0 run, the reads took 9 ms, the 75 MiB snapshot 218 ms and read-only integrity checking 123 ms; the maximum observed event-loop delay was 219 ms. These are reference measurements, not portable performance guarantees or CI thresholds. Recheck representative production data before relying on backup latency or lease timing.
+
 ### Measuring with mocks (proposed)
 
 Today the fakes record commands and return canned output. Extend the fake Docker runner to keep a model of what is running (containers, their Compose project and service, published host ports) and a log of every call. A test can then compute numbers from the log and assert on them, for example:

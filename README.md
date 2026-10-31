@@ -6,7 +6,7 @@ Deploy Docker Compose projects to one or more ordinary Linux VPSes through a sma
 
 ## Features
 
-- Control API with bearer-token auth, scoped `read`/`deploy`/`admin` API tokens for CI and teammates, an audit trail naming who acted, and SQLite metadata.
+- Control API with bearer-token auth, scoped `read`/`deploy`/`admin` API tokens for CI and teammates, an audit trail naming who acted, and SQLite metadata through Node's built-in driver.
 - Nodes join over SSH (`node-install`) or enroll themselves with a single `docker run` (`node-enroll`), with per-node agent and registry tokens. Agents only dial out, so nodes behind NAT work.
 - Agents pull desired state from control, apply a generated per-node Compose file, run TCP/HTTP/Docker health checks and report status. An outbound WebSocket wakes them as soon as control queues work and carries live `exec`, followed logs, `ps` and `inspect` sessions, with long-poll and periodic-poll fallbacks for ordinary work.
 - `x-tug` placement of services and volumes on nodes, with immutable desired-state records per deployment.
