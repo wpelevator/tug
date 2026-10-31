@@ -10,13 +10,13 @@ The operator this is for runs one to a few dozen sites on two to ten VPSes, depl
 
 ## Principles
 
-1. **Compose stays the app format.** `docker compose up` works locally; `x-tug` adds deployment metadata, and Compose features that cannot work across nodes are rejected rather than half-supported ([Compose extensions](compose.md#not-supported)).
-2. **Production runs immutable images.** Application code, including WordPress core, themes and plugins, ships inside an image built on control or on the operator's machine. Nothing is built or synced into a running node during reconciliation, so rollback is switching image references.
+1. **Compose stays the app format.** `docker compose up` works locally; `x-tug` adds deployment metadata, and Compose features that cannot work across nodes are rejected rather than half-supported ([Compose extensions](compose.md#not-supported)). Compose is the input, not the node runtime: nodes need only the Docker Engine ([M14](#m14--engine-api-agent)).
+2. **Production runs immutable images.** Application code, including WordPress core, themes and plugins, ships inside an image built on control or on the operator's machine. Every image a deployment uses is pinned to a digest when the deployment is created ([M13](#m13--pinned-images-and-one-delivery-path)). Nothing is built or synced into a running node during reconciliation, so rollback is switching image references and always restores exactly what ran.
 3. **Agents reconcile desired state and only dial out.** Normal deploys need no SSH and no inbound port on nodes, so nodes behind NAT or a deny-all firewall work. Running containers keep serving while control is down.
 4. **One writer.** Desired state, locks, secrets and history live in one control plane. This keeps ordering, rollback and audit simple; availability comes from control backups and, if needed later, a warm standby.
 5. **Stateful things are pinned and backed up.** Databases and data volumes stay on their placement node unless the operator moves them, are never deleted by a deploy, and every first-class stateful service has a backup and restore path.
 6. **Private by default.** Nothing Tug deploys should become reachable from the internet unless it is routed through the ingress or the operator asked for it.
-7. **Start simple.** No distributed storage, no autoscaling, no bin-packing scheduler, no database failover. Single points of failure are allowed when they are documented.
+7. **Start simple.** No distributed storage, no autoscaling, no bin-packing scheduler, no database failover. Single points of failure are allowed when they are documented. A single node needs nothing beyond Docker, the agent and control: the mesh, the ingress and any other subsystem stay optional layers on top of that core.
 
 Non-goals: Kubernetes compatibility, provisioning VPSes through provider APIs, autoscaling, distributed block or file storage, database HA, a multi-tenant hosted control plane.
 
@@ -52,7 +52,7 @@ Keep the single-writer control plane rather than decentralizing it like uncloud.
 
 Alternatives considered:
 
-- **uncloud** (decentralized, WireGuard mesh, container-routable networking, unregistry image push). Closest in spirit. Tug differs by having one control plane and agents that only dial out; it should match uncloud's networking model ([M12](#m12--container-networking-over-the-mesh)) rather than keep its own node-address scheme.
+- **uncloud** (decentralized, WireGuard mesh, container-routable networking, unregistry image push). Closest in spirit. Tug differs by having one control plane and agents that only dial out; it should match uncloud's networking model ([M12](#m12--container-networking-over-the-mesh)) when multi-node users need it.
 - **Docker Swarm** gives an overlay network, service VIPs, rolling updates, secrets, labels and global mode out of the box, which overlaps M2, M3 and M6. It needs inbound manager and overlay ports on every node (no NAT), three managers for HA, has MTU and overlay reliability issues on VPS providers, and offers no builds, audit trail or scoped API. Not adopted; it remains the yardstick for how much Tug should build itself.
 - **Kamal** pushes over SSH with no control plane. Simpler, but no reconciliation, no central audit or scoped CI tokens, and no state for scheduled jobs such as backups.
 
@@ -68,19 +68,19 @@ Typed `src/protocol.ts` control↔agent contract and injectable agent runners. S
 
 ### M2 — Cross-node networking, DNS, ingress/TLS (done)
 
-WireGuard mesh with control as the IP allocator and peer registry, health-aware service names through `extra_hosts`, and a managed Caddy ingress with `x-tug.ingress` routes and automatic TLS, each opt-in. See [Networking](networking.md). Service names resolve to node addresses and need published host ports; [M12](#m12--container-networking-over-the-mesh) replaces that.
+WireGuard mesh with control as the IP allocator and peer registry, health-aware service names through `extra_hosts`, and a managed Caddy ingress with `x-tug.ingress` routes and automatic TLS, each opt-in. See [Networking](networking.md). Service names resolve to node addresses and need published host ports; [M12](#m12--container-networking-over-the-mesh) can replace that.
 
 ### M3 — Zero-downtime rolling deploys + automatic rollback (done)
 
-Rolling rollouts for ingress-fronted services (start the new revision on its own host port, health-check it, switch the Caddy upstream, drain the old one), `x-tug.rollout` options and opt-in `x-tug.rollback: auto`. See [Architecture](architecture.md#rolling-rollouts-and-automatic-rollback) and [Compose extensions](compose.md#rolling-rollouts). The numbers it is held to are in [Testing](testing.md#metrics). Rolling services have no stable cross-node name and port; M12 fixes that.
+Rolling rollouts for ingress-fronted services (start the new revision on its own host port, health-check it, switch the Caddy upstream, drain the old one), `x-tug.rollout` options and opt-in `x-tug.rollback: auto`. See [Architecture](architecture.md#rolling-rollouts-and-automatic-rollback) and [Compose extensions](compose.md#rolling-rollouts). The numbers it is held to are in [Testing](testing.md#metrics). Rolling services have no stable cross-node name and port; M12 can fix that.
 
 ### M4 — Images without a registry, bare-host install (done)
 
-Control stores built images as saved image files and agents download them with their own token, so no registry or daemon change is needed; bring-your-own registry stays supported. `deploy --build-local` uploads an image built on the operator's machine. `--install-docker` bootstraps Docker on apt and dnf hosts and in `node-enroll` cloud-init. See [Architecture](architecture.md#image-artifacts). Each deploy transfers the whole image; [M13](#m13--image-layer-reuse) adds layer reuse.
+Control stores built images as saved image files and agents download them with their own token, so no registry or daemon change is needed. A bring-your-own registry is still supported today; M13 removes it. `deploy --build-local` uploads an image built on the operator's machine. `--install-docker` bootstraps Docker on apt and dnf hosts and in `node-enroll` cloud-init. See [Architecture](architecture.md#image-artifacts). Each deploy transfers the whole image; layer reuse is in [Later](#later--only-if-needed).
 
 ### M5 — Streaming channel between agent and control (mostly done)
 
-Agent-initiated WebSocket with long-poll fallback that wakes agents when work is queued and carries live sessions: non-TTY `tug exec` with stdin, `logs -f`, `ps` and `inspect` ([Architecture](architecture.md#agent-wake-channel), [Observability](observability.md#live-commands)). Remaining, at low priority: PTY allocation and resize for `exec -t`, agent and daemon log streams, and terminating the remote process when an exec session is cancelled.
+Agent-initiated WebSocket with long-poll fallback that wakes agents when work is queued and carries live sessions: non-TTY `tug exec` with stdin, `logs -f`, `ps` and `inspect` ([Architecture](architecture.md#agent-wake-channel), [Observability](observability.md#live-commands)). Remaining, at low priority: dropping the long-poll fallback (the WebSocket plus the periodic poll cover a lost socket), agent and daemon log streams, and terminating the remote process when an exec session is cancelled. PTY allocation and resize for `exec -t` move to [M14](#m14--engine-api-agent), where the Engine API provides them.
 
 ### M6 — Placement and scheduling (done)
 
@@ -114,23 +114,45 @@ The stateful half of principle 5, and something a central control plane does bet
 
 ### M12 — Container networking over the mesh
 
-Replace node-address service names with container addressing, which removes the need to publish ports for internal traffic and gives rolling services a stable name and port.
+Optional, and not on the critical path. The reference topology already works with M10's mesh-bound published ports; this milestone removes two real annoyances: rolling services have no stable cross-node name and port, and an endpoint change recreates client containers through `extra_hosts`. Start it when a multi-node user hits them.
 
+- The mesh stays opt-in, and a single node is never affected. Without the mesh, today's node-address names and port binding stay as they are. Two nodes behind NAT cannot reach each other over WireGuard, so making the mesh mandatory would break principle 3 for multi-node setups.
 - Each node gets a fixed container subnet from control (for example a `/24` out of a mesh-wide `/16`); the agent creates the project networks inside it and adds the other nodes' subnets to their WireGuard `AllowedIPs`, with the forwarding rules this needs.
-- A small DNS resolver per node, fed by control's endpoint list, answers `service` and `service.project.tug` with the IPs of healthy containers and forwards everything else; containers use it instead of `extra_hosts`, so endpoint changes no longer recreate client containers.
-- Rolling revisions become reachable by container IP on the declared port, so per-revision host ports (`TUG_ROLLOUT_PORTS`) and the "M3 later" stable-name gap go away, and the ingress dials containers directly.
-- Published ports remain only for traffic that genuinely comes from outside the mesh.
+- A small DNS resolver per node, fed by control's endpoint list, answers `service` and `service.project.tug` with the IPs of healthy containers and forwards everything else; containers use it instead of `extra_hosts`.
+- Rolling revisions become reachable by container IP on the declared port, so per-revision host ports (`TUG_ROLLOUT_PORTS`) go away for meshed projects and the ingress dials containers directly.
+- A node option may carry WireGuard over an existing private network by using the node's private `address` as its peer endpoint; traffic stays encrypted.
 
-Without the mesh, today's node-address names stay as the fallback. This is the largest remaining design change; it gets its own spec before implementation, including MTU, IPv6 and how an existing project's networks are recreated.
+Prerequisites: [M14](#m14--engine-api-agent), and a decision on the agent's form. Running WireGuard, forwarding rules, a resolver and a host-bound endpoint from a container needs host networking and broad capabilities, which is the host-level helper in [Later](#later--only-if-needed). It gets its own spec before implementation: MTU, IPv6, forwarding rules, resolver placement, how an existing project's networks are recreated, and how rollouts stay zero-downtime.
 
-### M13 — Image layer reuse
+### M13 — Pinned images and one delivery path
 
-Agents download whole saved images on every deploy, which is costly for large images on several nodes. Docker treats registries on `127.0.0.0/8` as insecure-allowed by default, so the agent can serve a registry endpoint on localhost that forwards to control with the agent's existing token, and control serves the read-only registry API (manifests and blobs) from its image store. Nodes then pull only missing layers with no daemon configuration, certificates or inbound ports, and agents still only dial out. The saved-image download stays as the fallback, and bring-your-own registries are unchanged.
+Make rollback restore exactly what ran, and leave one way for images to reach a node.
+
+- **Digest pinning.** When a deployment is created, control resolves every `image:` tag to its digest and records `image@sha256:…` in the desired state. Control resolves it, not the first agent, so a tag that moves mid-rollout cannot split the nodes. Rollback restores exactly what ran, and nodes added later run the same image. Nodes still pull by digest from the upstream registry. Private registries use credentials stored as a project secret. (Stopgap in place: agents pull published images only when a deployment revision is new to the node, not on every poll, so a moved tag is not deployed without a deploy.)
+- **No bring-your-own registry for built images.** The current option only enforces per-node pull tokens when control writes the registry's htpasswd file and restarts its container, so hosted registries (GHCR, Docker Hub, ECR) cannot use them; it costs a second node credential, a second image delivery path and four install flags. Remove `TUG_REGISTRY`, `TUG_PUSH`, `TUG_REGISTRY_AUTH_PATH`, `TUG_REGISTRY_CONTAINER`, `--no-build-upload`, registry pull tokens and their rotate and revoke commands, and the agent's `docker login`, so a node has one credential. Tug-built images keep travelling as saved image files from control. Teams that build in CI push to their own registry and deploy through `image:`.
+
+Each deploy still transfers whole Tug-built images; a control-hosted image store, mirroring of published images and layer reuse are in [Later](#later--only-if-needed) until image size hurts.
+
+### M14 — Engine API agent
+
+The agent stops running the `docker compose` CLI and reconciles containers through the Docker Engine API. The agent already works around Compose: rolling revisions are separate Compose projects with hand-made networks and volumes carrying copied Compose labels, `depends_on` is stripped across them, and secret changes need forced recreates.
+
+- The CLI normalizes the Compose file with `docker compose config` (Compose does interpolation, `extends`, profiles and `env_file`; secret variables are left as sentinels for the agent to substitute) and sends JSON; control validates an explicit allowlist of supported keys, including resource limits; agents never parse Compose YAML. Nodes need only the Docker Engine, not the Compose plugin. The control host keeps using Compose for its own install unless that moves to `docker run`.
+- One reconciler for every service: containers carry `tug.*` labels with a hash of their resolved configuration, including the image reference and the versions of the secrets they use, and are recreated when it changes. `recreate` and `rolling` become two strategies of the same loop. Tug names its own networks, volumes and containers; service names are network aliases.
+- Secrets are substituted into the container environment by the agent; no `.env` file on disk. Health checks stay agent-run, because images often lack the tools a Docker `HEALTHCHECK` would need.
+- `exec -t` with a real PTY and resize, and `logs`, `ps` and `inspect` from the API instead of CLI output.
+
+### M15 — Flexible node roles
+
+- **Control on a runtime node.** Installing control and a node on the same host is supported, so a small setup needs no dedicated control VPS. Control's API is then served through the node's managed Caddy, since both need ports 80 and 443. Keep a direct control port bound to loopback or the mesh as break-glass access, so a broken ingress or agent never locks out the fix path.
+- **Builder nodes.** Builds run on a node labelled `builder`: control queues a build command, the agent downloads the source context from control, builds it and uploads the saved image to control the way `deploy --build-local` does. Without a builder node, control builds, as today. This keeps untrusted Dockerfile builds and their CPU and memory use off the host that holds the secrets database.
 
 ## Later / only if needed
 
 - Warm-standby control plane (WAL shipping or periodic backup plus promote), see [Positioning](#positioning).
-- A host-level agent helper or standalone agent binary, for work a container should not do: installing the NFS server (M7), host mounts and WireGuard outside Docker. Shares the build with the standalone CLI binary ([Standalone binary](standalone-binary.md)).
+- A host-level agent helper or standalone agent binary, for work a container should not do: installing the NFS server (M7), host mounts and WireGuard outside Docker. Shares the build with the standalone CLI binary ([Standalone binary](standalone-binary.md)). Decide this before M12.
+- A control-hosted OCI image store, mirroring of published images and an agent-local registry endpoint for layer reuse, once whole-image transfers or upstream rate limits hurt. Mirroring is opt-in; it makes control a bandwidth and disk bottleneck and a dependency for every pull.
+- A mandatory mesh with no non-mesh fallback, if the maintenance cost of two networking paths outweighs losing NAT-friendly multi-node setups.
 - Standalone Bun-compiled `tug` binaries and a Homebrew tap, so operators need no Node.js.
 - A minimal read-only web dashboard over `/api/v1/status` and `/api/v1/events`.
 - Load-balanced service names and multiple routes per service, wildcard certificates.
@@ -140,15 +162,17 @@ Agents download whole saved images on every deploy, which is costly for large im
 
 Current priority order:
 
-1. M11 backups and run-once jobs: the main gap for the target operator.
-2. M12 container networking: removes the node-address and per-revision-port workarounds and is a prerequisite for comfortable multi-node apps.
-3. M13 image layer reuse.
-4. M9 metrics and M8/M9 webhooks.
-5. Remaining M5 items (PTY, process termination).
+1. M13 digest pinning and removal of the bring-your-own registry: small, independent, and closes the gap where rollback and new nodes can run a different image than the deployment did.
+2. M14 Engine API agent: removes the Compose workarounds, and makes M11's `tug run` a one-off container create.
+3. M11 backups and run-once jobs: the main gap for the target operator.
+4. M15 flexible node roles.
+5. M9 metrics and M8/M9 webhooks.
+6. Remaining M5 items (long-poll removal, agent and daemon log streams, process termination).
+7. M12 container networking, when multi-node users need stable names for rolling services.
 
 M10 (private-by-default ports) is done.
 
-Dependencies: M10 builds on M2. M11 uses the M5 command channel for job output and M8 webhooks for alerts but needs neither to start. M12 depends on M2 and changes M3's rollout mechanics, so its spec must keep rollouts zero-downtime. M13 is independent.
+Dependencies: M10 builds on M2. M11 uses the M5 command channel for job output and M8 webhooks for alerts but needs neither to start. M13 is independent of M14, and M14's config hash uses the pinned image references. M12 depends on M2 and M14, needs the agent-form decision, and changes M3's rollout mechanics, so its spec must keep rollouts zero-downtime. M15's control-on-a-node needs the managed Caddy from M2.
 
 The reference topology also needs a validated example: a scaled WordPress project with code in the image and uploads on S3-compatible storage or an NFS uploads volume, deployed on real hosts once M11 lands (M10 is done).
 
@@ -165,7 +189,8 @@ The test layers, the metrics milestones are held to and the backlog of mocked te
 - [x] M4 opt-in Docker install for `node-install`/`control-install` (verified on Ubuntu 24.04) and `node-enroll --install-docker` cloud-init (verified on a cloud-init host)
 - [ ] M4 dnf bootstrap verified on real Fedora and Rocky/AlmaLinux hosts
 - [x] M5 wake channel, faster convergence, non-TTY `exec` with stdin, `logs -f`, `ps`, `inspect`
-- [ ] M5 PTY allocation and resize for `exec -t`, agent/daemon log streams
+- [ ] M5 agent/daemon log streams
+- [ ] M5 long-poll wake fallback removed; WebSocket plus periodic poll
 - [ ] M5 remote process termination when an exec session is cancelled or disconnected
 - [x] M6 node labels, label placement, replicas spread, `global` mode, `scale` command, verified on real hosts
 - [x] M7 `nfs` volume type over the mesh (exporter must already run an NFS server), verified on real hosts
@@ -182,9 +207,18 @@ The test layers, the metrics milestones are held to and the backlog of mocked te
 - [ ] M11 `tug run` and `x-tug.release` run-once jobs
 - [ ] M11 `tug move` for stateful services
 - [ ] M12 spec written (subnets, resolver, rollout changes, MTU, IPv6, network recreation)
-- [ ] M12 per-node container subnets over WireGuard and per-node service DNS
-- [ ] M12 rolling services reachable by stable name and port; per-revision host ports removed
-- [ ] M13 localhost registry endpoint on agents with layer reuse from control's image store
+- [ ] M12 per-node container subnets over WireGuard and per-node service DNS, mesh stays opt-in
+- [ ] M12 rolling services reachable by stable name and port on meshed projects; per-revision host ports removed there
+- [ ] M12 WireGuard over an existing private network as a node option
+- [x] M13 stopgap: published images pulled only when a deployment revision is new to the node
+- [ ] M13 digest pinning for every `image:` at deploy time, used by rollback
+- [ ] M13 bring-your-own registry, registry pull tokens and `docker login` removed; one node credential
+- [ ] M14 Compose normalized on the operator machine; allowlist validation on control
+- [ ] M14 Engine API reconciler with config-hash recreation, `recreate` and `rolling` strategies, no `.env` on disk
+- [ ] M14 `exec -t` with PTY and resize; `logs`, `ps`, `inspect` and ingress on the Engine API
+- [ ] M14 Compose plugin no longer required on nodes
+- [ ] M15 control on a runtime node behind the managed Caddy, with a break-glass control port
+- [ ] M15 builds on `builder`-labelled nodes, uploaded to control as saved images
 - [ ] Scaled WordPress reference example (code in image, shared uploads) validated on real hosts
 - [ ] Mocked tests from the [Testing](testing.md#backlog-of-mocked-tests-proposed) backlog: revisions started per deployment, WireGuard key re-report, old-schema database, preflight remedies
 - [ ] Re-check uncloud releases at the start of each milestone and update the baseline in [Positioning](#positioning)
