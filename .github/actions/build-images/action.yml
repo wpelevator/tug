@@ -18,9 +18,9 @@ inputs:
 runs:
   using: composite
   steps:
-    - uses: docker/setup-buildx-action@v3
+    - uses: docker/setup-buildx-action@v4
     - if: inputs.runtime == 'true'
-      uses: docker/build-push-action@v6
+      uses: docker/build-push-action@v7
       with:
         context: .
         load: true
@@ -28,7 +28,7 @@ runs:
         cache-from: type=gha,scope=runtime
         cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,scope=runtime,mode=max' || '' }}
     - if: inputs.fake-vps == 'true'
-      uses: docker/build-push-action@v6
+      uses: docker/build-push-action@v7
       with:
         context: .
         file: tools/docker/fake-vps/Dockerfile
@@ -37,7 +37,7 @@ runs:
         cache-from: type=gha,scope=fake-vps
         cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,scope=fake-vps,mode=max' || '' }}
     - if: inputs.registry == 'true'
-      uses: docker/build-push-action@v6
+      uses: docker/build-push-action@v7
       with:
         context: tools/docker/registry
         load: true

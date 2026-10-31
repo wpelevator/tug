@@ -23,7 +23,7 @@ jobs:
         # engines.node is the oldest version; .nvmrc is the one used for development and the other jobs.
         node: [22, 24]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup
         with:
           node-version: ${{ matrix.node }}
@@ -42,7 +42,7 @@ jobs:
       TUG_COMPOSE_BUILD: ''
       TUG_RUNTIME_IMAGE: tug-runtime:integration
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup
       - uses: ./.github/actions/build-images
         with:
@@ -59,7 +59,7 @@ jobs:
     env:
       TUG_COMPOSE_BUILD: ''
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup
       - uses: ./.github/actions/build-images
         with:
@@ -75,7 +75,7 @@ jobs:
     env:
       TUG_COMPOSE_BUILD: ''
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup
       - uses: ./.github/actions/build-images
         with:
