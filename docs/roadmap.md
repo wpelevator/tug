@@ -59,10 +59,10 @@ The primary use case in `plan.md` needs an NFS-backed WordPress docroot on a sto
 
 What a single control plane makes easy:
 
-- scoped API tokens (deploy-only, read-only, per-project) for CI, replacing the single operator token
-- `tug deploy` from CI with a documented GitHub Actions example
+- scoped API tokens (deploy-only, read-only, per-project) for CI, alongside the operator token: shipped, see [Access control](access-control.md)
+- `tug deploy` from CI with a documented GitHub Actions example: shipped, in [Access control](access-control.md)
 - outbound webhooks for deployment state changes and failed health checks
-- multiple operators with named tokens, recorded in the events audit trail
+- multiple operators with named tokens, recorded in the events audit trail: shipped, in [Access control](access-control.md)
 - a minimal read-only web dashboard over the existing `/api/v1/status` and `/api/v1/events`
 
 ### Later / only if needed
@@ -101,9 +101,9 @@ Rough parity with uncloud after M2 + M3 + M4 + M5. M3's automatic rollback and M
 - [ ] M5 `exec` (incl. TTY), `logs -f`, `ps`, `inspect`
 - [ ] M6 node labels, label placement, replicas spread, `global` mode, `scale` command
 - [ ] M7 `nfs` volume type for shared docroot over the mesh
-- [ ] M8 scoped API tokens and CI deploy example
+- [x] M8 scoped API tokens and CI deploy example ([Access control](access-control.md))
 - [ ] M8 outbound webhooks
-- [ ] M8 named multi-operator tokens in the audit trail
+- [x] M8 named multi-operator tokens in the audit trail
 - [ ] M8 read-only web dashboard
 - [ ] Re-check uncloud releases at the start of each milestone and update the baseline above
 - [ ] Each milestone: tests added, README.md and docs updated, its own plan file folded into docs and deleted when done

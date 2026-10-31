@@ -9,7 +9,7 @@ CLI options override environment variables, which override the selected config f
 | `TUG_CONFIG` | Path to the CLI config file (default `./.tug.json`). |
 | `TUG_CONTROL_URL` | Control API URL; overrides the config file. |
 | `TUG_PROJECT` | Default project; overrides the config file. |
-| `TUG_TOKEN` | Operator token; overrides the config file. |
+| `TUG_TOKEN` | Operator token or a scoped API token from `tug token-create`; overrides the config file. |
 
 ## Control plane
 

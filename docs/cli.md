@@ -54,13 +54,23 @@ These operations use the resolved project.
 
 - `tug deploy [-f, --file <file>] [--version <version>] [--build-local | --no-build-upload] [--no-wait] [--timeout <seconds>]` deploys Compose from `docker-compose.yml` by default. Services with `build:` upload the current directory for remote builds, or build on the operator's Docker daemon with `--build-local` and upload saved images without source. Published-image-only applications need no context upload. `--no-build-upload` skips source upload; it cannot be combined with `--build-local`. Control rejects a built service with no available build input. The display version defaults to `git-<Compose hash>`; deployment image identities are immutable even when that display version is reused. Local builds are single-platform and must match the target node architecture. Deployment waits for convergence by default, with a `300` second timeout; `--no-wait` returns once desired state is created.
 - `tug status` shows all projects, recent deployments, nodes and per-node status.
-- `tug events [--limit <n>]` lists events in the resolved project; the limit defaults to `100`, with a maximum of `500`.
+- `tug events [--limit <n>] [--all]` lists events in the resolved project, or in every project with `--all` (including control events that belong to no project, such as token changes); the limit defaults to `100`, with a maximum of `500`. Control actions show the `actor` token that caused them.
 - `tug rollback [--force] [--no-wait] [--timeout <seconds>]` rolls the resolved project back; `--force` permits rollback while a deployment is active. Waiting defaults to `300` seconds.
 - `tug deploy-cancel <deployment-id>` cancels an active deployment.
 
 To build on a laptop and deploy without a registry: `tug deploy --build-local -f docker-compose.yml`. To use an existing registry, configure it on control with `control-install --registry <host>`; local builds are uploaded to control and pushed through that registry too.
 
 Local builds use generated temporary image tags and remove those tags after saving each archive, including cleanup attempts after build/save failure. They do not remove your published image tags or the Tug runtime image. A refused cleanup produces a warning without hiding the original build error.
+
+## API tokens
+
+Scoped credentials for CI and teammates; see [Access control](access-control.md) for roles, scoping and a GitHub Actions example. All three commands need an admin token (or the operator token).
+
+- `tug token-create <name> --role read|deploy|admin [--project <name> ...] [--expires-in-days <n>]` creates a token and prints it once on stdout. Repeat `--project` to allow several projects; without it the token covers all projects (admin tokens cannot be limited). Here `--project` selects the token's scope rather than the connection project. Names are 1 to 64 letters, numbers, dots, underscores or hyphens, and cannot be reused after revocation. Expiry is at most `3650` days and defaults to never.
+- `tug token-list` lists tokens with role, projects, creator, last use, expiry and revocation, never secrets.
+- `tug token-revoke <name>` revokes a token immediately.
+
+Use a created token anywhere `TUG_TOKEN` works, for example `TUG_TOKEN=tug_tok_... tug deploy`.
 
 ## Services and volumes
 

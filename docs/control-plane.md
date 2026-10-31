@@ -39,9 +39,13 @@ Every node gets a registry pull token at registration or enrollment. When `TUG_R
 
 ## Backup and restore
 
-`tug control-backup` takes a consistent SQLite snapshot and writes a `.tar.gz` with `tug.db`, `master.key`, retained `images/` archives and metadata to `TUG_CONTROL_BACKUP_DIR` (default `<data dir>/control-backups`). `tug control-restore <artifactRef> --confirm` overwrites the database, master key and image store from such an archive; restart control afterwards. This covers disaster recovery of the control host only; back up project data (volumes, databases) with your own tooling.
+`tug control-backup` takes a consistent SQLite snapshot (including API tokens) and writes a `.tar.gz` with `tug.db`, `master.key`, retained `images/` archives and metadata to `TUG_CONTROL_BACKUP_DIR` (default `<data dir>/control-backups`). `tug control-restore <artifactRef> --confirm` overwrites the database, master key and image store from such an archive; restart control afterwards. This covers disaster recovery of the control host only; back up project data (volumes, databases) with your own tooling.
 
 Running containers keep serving while control is down; agents just cannot pick up new desired state until it is back.
+
+## Access control
+
+Besides the root operator token, control accepts named API tokens with `read`, `deploy` or `admin` roles, optionally limited to projects, for CI and teammates. Every deployment and control event records the acting token. See [Access control](access-control.md) for the endpoint table, the audit trail and a GitHub Actions deploy example. Tokens are stored hashed in the control database and travel with control backups.
 
 ## Configuration
 
