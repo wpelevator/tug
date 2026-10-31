@@ -81,7 +81,7 @@ Add `--mesh` to `node-install` or `node-enroll` (and set `TUG_MESH=true` on cont
 
 ## Status and diagnostics
 
-Nodes are `online` while they poll and become `stale` after `TUG_STALE_SECONDS` (default `60`) without a poll. `tug status` lists nodes, deployments and per-node project status; `tug doctor --nodes` (or `--node <name>`) queues Docker and Compose checks on agents.
+Nodes are `online` while they poll and become `stale` after `TUG_STALE_SECONDS` (default `60`) without a poll. `tug status` lists nodes, deployments and per-node project status; `tug doctor --nodes` (or `--node <name>`) runs Docker and Compose checks on agents and waits for the result. The wait defaults to 60 seconds.
 
 ## Configuration
 

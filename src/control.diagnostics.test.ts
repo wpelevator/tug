@@ -35,5 +35,8 @@ test('control diagnostics and node diagnostics command queue', async () => {
     assert.match(queued.commands[0].commandId, /^cmd_/);
     res = await fetch(`${s.base}/agent/v1/work`, { headers: { Authorization: `Bearer ${node.agentToken}` } });
     assert.equal((await json(res)).commands[0].type, 'diagnostics.run');
+    res = await fetch(`${s.base}/api/v1/diagnostics/nodes`, { method: 'POST', headers: op, body: JSON.stringify({ node: 'missing' }) });
+    assert.equal(res.status, 404, 'an unknown node is not an empty diagnostic run');
+    assert.equal((await json(res)).error, 'node missing not found', 'the error names the node that was requested');
   } finally { await s.close(); }
 });

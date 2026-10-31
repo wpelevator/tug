@@ -2,7 +2,7 @@
 
 The name: tugboats pull ships into place, like the pull-based agents here; `tug` is the CLI.
 
-Deploy Docker Compose projects to one or more ordinary Linux VPSes through a small self-hosted control plane and a pull-based agent on each node, without Kubernetes or a hosted PaaS. The original specification is in [plan.md](plan.md).
+Deploy Docker Compose projects to one or more ordinary Linux VPSes through a small self-hosted control plane and a pull-based agent on each node, without Kubernetes or a hosted PaaS. The original specification is in [plan.md](plan.md). Its multi-node WordPress layout (a shared NFS docroot, a FastCGI front, and replicas spread across nodes) is not deployable yet; that needs the unfinished placement and shared-volume milestones. What works today is an app and its database on the same node. See [Compose extensions](docs/compose.md#a-database-on-the-same-node).
 
 ## Features
 

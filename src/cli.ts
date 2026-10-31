@@ -286,7 +286,7 @@ program.command('events').description('list recent events with the token that ca
   const query = `limit=${encodeURIComponent(o.limit)}${project ? `&project=${encodeURIComponent(project)}` : ''}`;
   console.log(JSON.stringify(await request('GET', `/api/v1/events?${query}`), null, 2));
 });
-program.command('doctor').description('run local and control-plane diagnostics').option('--nodes', 'also queue diagnostics on registered agents').option('--node <name>', 'specific node for agent diagnostics').action(async (o: { nodes?: boolean; node?: string }) => {
+program.command('doctor').description('run local and control-plane diagnostics').option('--nodes', 'also run diagnostics on every registered agent and wait').option('--node <name>', 'run diagnostics on one agent and wait').option('--timeout <seconds>', 'wait timeout for node diagnostics', '60').action(async (o: { nodes?: boolean; node?: string; timeout: string }) => {
   const local: { name: string; ok: boolean; output?: string; error?: string }[] = [];
   for (const [name, cmd, args] of [['node', 'node', ['--version']], ['docker', 'docker', ['version', '--format', '{{.Server.Version}}']], ['docker_compose', 'docker', ['compose', 'version']]] as [string, string, string[]][]) {
     try { local.push({ name, ok: true, output: runCapture(cmd, args).trim() }); }
@@ -294,7 +294,16 @@ program.command('doctor').description('run local and control-plane diagnostics')
   }
   const controlDiagnostics = await request('GET', '/api/v1/diagnostics');
   const output: { ok: boolean; local: typeof local; control: unknown; nodeDiagnostics?: unknown } = { ok: local.every(c => c.ok) && controlDiagnostics.ok, local, control: controlDiagnostics };
-  if (o.nodes || o.node) output.nodeDiagnostics = await request('POST', '/api/v1/diagnostics/nodes', { node: o.node || null });
+  if (o.nodes || o.node) {
+    const queued = await request<{ commands: { commandId: string; nodeId: string }[] }>('POST', '/api/v1/diagnostics/nodes', { node: o.node || null });
+    const commands = [];
+    for (const command of queued.commands) {
+      const finished = await waitForCommand(command.commandId, Number(o.timeout));
+      commands.push({ nodeId: command.nodeId, state: finished.state, result: JSON.parse(finished.result_json || '{}') });
+    }
+    output.nodeDiagnostics = { commands };
+    if (commands.some(command => command.state !== 'succeeded')) output.ok = false;
+  }
   console.log(JSON.stringify(output, null, 2));
 });
 program.command('rollback').option('--force').option('--no-wait', 'return immediately after activating rollback').option('--timeout <seconds>', 'wait timeout', '300').action(async (o: CommonOpts & WaitOpts & { force?: boolean }) => {

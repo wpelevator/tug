@@ -69,6 +69,8 @@ services:
 
 `tug node-ingress edge1` marks a node as an ingress node (`--disable` removes the role). `port` may be the container port or the published host port; control resolves it to the published host port, and `validateCompose` rejects an ingress port that is not published, because the edge reaches services on `<node address>:<published port>`.
 
+Caddy dials `127.0.0.1` for a service on the ingress node and the node's overlay address (or `address`, without the mesh) for every other node. A port published as `8080:80` listens on every interface, so the app is also on the public IP, next to Caddy and without TLS. Bind `127.0.0.1:8080:80` for a service on the ingress node, and `<overlay ip>:8080:80` for a service on another node, when that exposure is not what you want. The overlay address is the node's `overlay_ip`; it is not filled in for you, and a re-registered node can get a different one.
+
 Control aggregates the `ingress` blocks of every project's current deployment, and for each ingress node renders:
 
 - one site block per host with `reverse_proxy` to every serving endpoint, using `127.0.0.1` for services on the ingress node itself and the overlay (or plain node) address for the rest;
@@ -77,7 +79,7 @@ Control aggregates the `ingress` blocks of every project's current deployment, a
 
 TLS modes:
 
-- `auto` (default): Caddy obtains and renews certificates with ACME. Ports 80 and 443 must be reachable from the internet and the host's DNS record must point at the ingress node.
+- `auto` (default): Caddy obtains and renews certificates with ACME. Ports 80 and 443 must be reachable from the internet and the host's DNS record must point at the ingress node. A name such as `app.<ingress-ip>.sslip.io` resolves to that address without a domain you own. Let's Encrypt limits certificates per registered domain, and `sslip.io` is shared, so a burst of new hostnames can be refused.
 - `custom`: `cert` and `key` name two project secrets holding the PEM certificate chain and private key (`tug secret-set WEB_CERT --project blog --value "$(cat fullchain.pem)"`). Deploy fails if either secret is missing. Control decrypts them only for the ingress node, which receives them as files in the work response; they never reach the nodes running the service, and they never appear in the Caddyfile.
 - `off`: plain HTTP on port 80, for development.
 
