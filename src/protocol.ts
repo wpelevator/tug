@@ -4,7 +4,7 @@
 
 // ---- Compose input (what the operator deploys) -------------------------------------------------
 
-export interface Placement { nodes?: string[] }
+export interface Placement { nodes?: string[]; labels?: string[]; global?: boolean }
 
 export interface HealthCheck {
   type: 'docker' | 'tcp' | 'http';
@@ -40,7 +40,7 @@ export interface RolloutSpec {
 }
 
 /** The `x-tug` extension on a Compose service. */
-export interface ServiceExtension { placement?: Placement; replicas?: number; health?: HealthCheck; ingress?: IngressSpec; rollout?: RolloutSpec }
+export interface ServiceExtension { placement?: Placement; replicas?: number; global?: boolean; health?: HealthCheck; ingress?: IngressSpec; rollout?: RolloutSpec }
 
 /** The top-level `x-tug` extension of a Compose file. */
 export interface ProjectExtension {
@@ -54,6 +54,8 @@ export interface VolumeExtension {
   driver?: string;
   persistent?: boolean;
   placement?: Placement;
+  /** NFS exporter address override (defaults to the placement node name). */
+  address?: string;
 }
 
 export type BuildConfig = string | { context?: string; dockerfile?: string; [key: string]: unknown };
@@ -331,6 +333,7 @@ export interface NodeInfo {
   address: string | null;
   public_address: string | null;
   overlay_ip?: string | null;
+  labels?: string[];
   status: string;
   created_at: string;
   updated_at: string;
@@ -347,6 +350,8 @@ export interface EnrollRequest {
   publicAddress?: string;
   /** Base64 WireGuard public key; the private key never leaves the node. */
   wgPublicKey?: string;
+  /** Node labels (tags) used for label-based placement. */
+  labels?: string[];
 }
 
 /** Response of `POST /agent/v1/enroll`. */
@@ -368,4 +373,6 @@ export interface JoinKey {
   enrollToken: string;
   /** PEM CA certificate to trust for a private/self-signed control plane. */
   ca?: string;
+  /** Node labels to register at enrollment. */
+  labels?: string[];
 }

@@ -114,8 +114,8 @@ The test layers, the metrics milestones are held to and the backlog of mocked te
 - [x] M5 non-TTY `exec` with stdin forwarding, service `logs -f`, `ps`, and `inspect`
 - [ ] M5 true PTY allocation and resize for `exec -t`, plus agent/daemon log streams
 - [ ] M5 remote process termination when an exec session is cancelled or disconnected
-- [ ] M6 node labels, label placement, replicas spread, `global` mode, `scale` command
-- [ ] M7 `nfs` volume type for shared docroot over the mesh
+- [x] M6 node labels, label placement, replicas spread, `global` mode, `scale` command
+- [x] M7 `nfs` volume type for shared docroot over the mesh
 - [x] M8 scoped API tokens and CI deploy example ([Access control](access-control.md))
 - [ ] M8 outbound webhooks
 - [x] M8 named multi-operator tokens in the audit trail

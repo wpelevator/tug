@@ -104,6 +104,7 @@ const SAMPLES: Record<string, { path: string; body?: unknown }> = {
   'POST /api/v1/deployments': { path: '/api/v1/deployments', body: { project: 'site', compose: { services: {} } } },
   'POST /api/v1/deployments/:id/cancel': { path: '/api/v1/deployments/dep_x/cancel', body: {} },
   'POST /api/v1/rollback': { path: '/api/v1/rollback', body: { project: 'site' } },
+  'POST /api/v1/scale': { path: '/api/v1/scale', body: { project: 'site', service: 'web', replicas: 1 } },
   'POST /api/v1/restart': { path: '/api/v1/restart', body: { project: 'site' } },
   'POST /api/v1/logs': { path: '/api/v1/logs', body: { project: 'site' } },
   'GET /api/v1/commands/:id': { path: '/api/v1/commands/cmd_x' },

@@ -677,7 +677,7 @@ async function enroll(joinKey: string): Promise<Creds> {
   const wgPublicKey = MESH ? (await ensureWgKeys(STATE_DIR)).publicKey : undefined;
   const res = await fetch(`${controlUrl}/agent/v1/enroll`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ enrollToken: decoded.enrollToken, name: NODE_NAME, address: process.env.TUG_NODE_ADDRESS, publicAddress: process.env.TUG_NODE_PUBLIC_ADDRESS, wgPublicKey })
+    body: JSON.stringify({ enrollToken: decoded.enrollToken, name: NODE_NAME, address: process.env.TUG_NODE_ADDRESS, publicAddress: process.env.TUG_NODE_PUBLIC_ADDRESS, wgPublicKey, labels: decoded.labels || (process.env.TUG_LABELS ? process.env.TUG_LABELS.split(',').map(s => s.trim()).filter(Boolean) : undefined) })
   });
   if (!res.ok) throw new Error(`enroll failed: ${res.status} ${await res.text()}`);
   const out = await res.json() as EnrollResponse;

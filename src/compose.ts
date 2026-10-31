@@ -85,9 +85,12 @@ export function validateCompose(compose: ComposeFile | undefined, nodes: string[
     if (svc.container_name) errors.push(`${name}: container_name is not supported`);
     if (svc.deploy) errors.push(`${name}: swarm deploy semantics are not supported`);
     const lp = svc['x-tug'] || {};
-    const selected = lp.placement?.nodes || [];
-    if (nodes.length > 1 && selected.length === 0) errors.push(`${name}: multi-node deployments require x-tug.placement.nodes`);
-    if (lp.replicas && selected.length && lp.replicas !== selected.length) errors.push(`${name}: replicas must match placement node count in v1`);
+    const placement = lp.placement || {};
+    const selected = placement.nodes || [];
+    const hasLabels = Array.isArray(placement.labels) && placement.labels.length > 0;
+    const isGlobal = lp.global === true || placement.global === true;
+    if (nodes.length > 1 && selected.length === 0 && !hasLabels && !isGlobal) errors.push(`${name}: multi-node deployments require x-tug.placement.nodes or placement.labels`);
+    if (lp.replicas && selected.length && !hasLabels && !isGlobal && lp.replicas !== selected.length) errors.push(`${name}: replicas must match placement node count in v1`);
     validateIngress(name, svc, ingressHosts, errors);
     validateRollout(name, svc, errors);
   }
@@ -95,13 +98,24 @@ export function validateCompose(compose: ComposeFile | undefined, nodes: string[
   if (errors.length) throw new Error(errors.join('; '));
 }
 
-export interface BuildDesiredStateOptions { project: string; version: string; compose: ComposeFile; registry: string; revision?: string; defaultNode?: string | null }
+export interface BuildDesiredStateOptions { project: string; version: string; compose: ComposeFile; registry: string; revision?: string; defaultNode?: string | null; nodes?: Array<{ name: string; labels?: string[] }> }
 
-export function buildDesiredState({ project, version, compose, registry, revision, defaultNode = null }: BuildDesiredStateOptions): DesiredState {
+export function buildDesiredState({ project, version, compose, registry, revision, defaultNode = null, nodes }: BuildDesiredStateOptions): DesiredState {
   const services: Record<string, ServiceSpec> = {};
   for (const [name, src] of Object.entries(compose.services || {})) {
     const lp = src['x-tug'] || {};
-    const placement = lp.placement || (defaultNode ? { nodes: [defaultNode] } : {});
+    let placement = lp.placement || (defaultNode ? { nodes: [defaultNode] } : {});
+    const global = lp.global === true || placement.global === true;
+    const labels = placement.labels || [];
+    if (nodes && (!placement.nodes || !placement.nodes.length) && (labels.length || global)) {
+      const matched = nodes.filter(node => labels.every(label => (node.labels || []).includes(label))).sort((a, b) => a.name.localeCompare(b.name));
+      let selected = matched;
+      if (!global) {
+        const replicas = lp.replicas || matched.length;
+        selected = matched.slice(0, Math.min(replicas, matched.length));
+      }
+      placement = { ...placement, nodes: selected.map(node => node.name) };
+    }
     const image = src.build ? `${registry ? `${registry}/` : "tug-build/"}${project}/${name}:${revision || version}` : src.image;
     services[name] = { image, build: src.build || null, placement, replicas: lp.replicas || placement.nodes?.length || 1, health: lp.health || null };
   }
@@ -138,7 +152,7 @@ function extraHostsList(value: ComposeService['extra_hosts']): string[] {
  * node's main project (rolling services run in their own revision projects); they still count as
  * local, so they get no cross-node `extra_hosts` entry, and `depends_on` references to them are dropped.
  */
-export function composeForNode(desiredState: DesiredState, nodeName: string, secrets: Record<string, string> = {}, endpoints: Record<string, ServiceEndpoint[]> = {}, exclude: ReadonlySet<string> = new Set()): ComposeFile {
+export function composeForNode(desiredState: DesiredState, nodeName: string, secrets: Record<string, string> = {}, endpoints: Record<string, ServiceEndpoint[]> = {}, exclude: ReadonlySet<string> = new Set(), nodeAddresses: Record<string, string> = {}): ComposeFile {
   const out: ComposeFile & { volumes?: Record<string, ComposeVolume> } = { services: {}, volumes: {} };
   const outVolumes = out.volumes!;
   const usedVolumes = new Set<string>();
@@ -169,7 +183,24 @@ export function composeForNode(desiredState: DesiredState, nodeName: string, sec
   }
   for (const name of usedVolumes) {
     const vol = desiredState.compose.volumes?.[name] || {};
-    const nodes = vol['x-tug']?.placement?.nodes || [];
+    const xe = vol['x-tug'] || {};
+    const nodes = xe.placement?.nodes || [];
+    const isNfs = xe.type === 'nfs' || xe.driver === 'nfs' || (xe.type === 'shared' && xe.driver === 'nfs');
+    if (isNfs) {
+      const exporter = nodes[0];
+      if (!exporter || exporter === nodeName || nodes.includes(nodeName)) {
+        // Exporter node (or unplaced volume): keep the volume definition as-is.
+        const cleaned = { ...vol }; delete cleaned['x-tug'];
+        outVolumes[name] = Object.keys(cleaned).length ? cleaned : vol;
+      } else {
+        const addr = nodeAddresses[exporter] || xe.address || exporter;
+        outVolumes[name] = {
+          driver: 'nfs',
+          driver_opts: { type: 'nfs', o: `addr=${addr},rw,nolock,soft`, device: `:/${name}` }
+        };
+      }
+      continue;
+    }
     if (!nodes.length || nodes.includes(nodeName)) outVolumes[name] = vol;
   }
   if (!Object.keys(outVolumes).length) delete out.volumes;

@@ -37,6 +37,7 @@ The project column says how a scoped token's allowed projects are checked: the p
 | `POST /api/v1/deployments` | `deploy` | Body or upload payload `project` |
 | `POST /api/v1/deployments/:id/cancel` | `deploy` | Deployment's project |
 | `POST /api/v1/rollback` | `deploy` | Body |
+| `POST /api/v1/scale` | `deploy` | Body |
 | `POST /api/v1/restart` | `deploy` | Body |
 | `POST /api/v1/logs` | `deploy` | Body |
 | `GET /api/v1/live` | `deploy` | First WebSocket frame |
