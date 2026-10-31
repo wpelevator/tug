@@ -13,15 +13,12 @@ import { createApp } from './control.ts';
 import { openDb } from './db.ts';
 import { json } from '../tests/helpers.ts';
 
-async function server(registry = '', openDatabase?: typeof openDb) {
+async function server(openDatabase?: typeof openDb) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-images-'));
   Object.assign(process.env, {
     TUG_DATA_DIR: dir,
     TUG_OPERATOR_TOKEN: 'images-op',
-    TUG_REGISTRY: registry,
   });
-  delete process.env.TUG_REGISTRY_AUTH_PATH;
-  delete process.env.TUG_REGISTRY_CONTAINER;
   const bytes = Buffer.from('saved image gzip');
   const calls: string[] = [];
   const imageInfo = { imageId: `sha256:${'a'.repeat(64)}`, platform: 'linux/amd64' };
@@ -355,35 +352,31 @@ test('restore rejects missing archives before changing live data and requires re
   }
 });
 
-test('configured registry still accepts local builds and pushes them without storing an image archive', async () => {
-  const s = await server('registry.test');
+test('legacy registry environment cannot redirect local builds away from archives', async () => {
+  const s = await server();
   try {
     await s.node('n1');
+    process.env.TUG_REGISTRY = 'ignored.example';
     const response = await s.deploy('local-registry', true);
-    assert.equal(
-      response.status,
-      200,
-      'local image uploads must remain available with a bring-your-own registry',
-    );
+    assert.equal(response.status, 200, 'local uploads must always use archive delivery');
     const deployed = await json(response);
     assert.match(
       deployed.desiredState.services.app.image,
-      /^registry\.test\//,
-      'registry mode must publish registry-qualified immutable references',
-    );
-    assert.equal(
-      deployed.desiredState.services.app.artifact,
-      undefined,
-      'registry-backed desired state must use pulls instead of artifact downloads',
+      /^tug-build\//,
+      'builds must publish Tug-owned immutable references',
     );
     assert.ok(
-      s.calls.some((call) => call.startsWith('push registry.test/')),
-      'control must push verified local images to the configured registry',
+      deployed.desiredState.services.app.artifact,
+      'built images must always use retained archives',
     );
-    assert.deepEqual(
-      await fs.readdir(path.join(s.dir, 'images')),
-      [],
-      'registry builds must not leave compressed delivery archives',
+    assert.ok(
+      !s.calls.some((call) => call.startsWith('push ')),
+      'control must never push built images to a registry',
+    );
+    assert.equal(
+      (await fs.readdir(path.join(s.dir, 'images'))).length,
+      1,
+      'each build must retain its compressed delivery archive',
     );
   } finally {
     await s.close();
@@ -602,7 +595,7 @@ test('configured upload limits reject oversized archives and remove partial file
 test('publication failure rolls back desired state and keeps the previous deployment current', async () => {
   let failPublication = false;
   let database: Awaited<ReturnType<typeof openDb>>;
-  const s = await server('', async (filename) => {
+  const s = await server(async (filename) => {
     const db = await openDb(filename);
     database = db;
     const run = db.run.bind(db);
@@ -653,7 +646,7 @@ test('publication failure rolls back desired state and keeps the previous deploy
 
 test('a build that loses its lease cannot publish or delete the replacement lease', async () => {
   let database: Awaited<ReturnType<typeof openDb>>;
-  const s = await server('', async (filename) => {
+  const s = await server(async (filename) => {
     database = await openDb(filename);
     return database;
   });

@@ -36,14 +36,13 @@ test('builds per-node desired compose preserving service names', () => {
     project: 'site',
     version: 'git-abc',
     compose: normalized(compose),
-    registry: 'reg:5000',
   });
-  assert.equal(ds.services.web.image, 'reg:5000/site/web:git-abc');
+  assert.equal(ds.services.web.image, 'tug-build/site/web:git-abc');
   const plan = containerSpecs(ds, 'n1');
   assert.deepEqual(Object.keys(plan.specs), ['web']);
   assert.equal(
     plan.specs.web.body.Image,
-    'reg:5000/site/web:git-abc',
+    'tug-build/site/web:git-abc',
     'a built service runs the image reference control assigned',
   );
   assert.deepEqual(
@@ -170,7 +169,7 @@ test('containerSpecs injects cross-node names as extra hosts without touching lo
       db: { image: 'd', 'x-tug': { placement: { nodes: ['n2', 'n3'] } } },
     },
   };
-  const ds = buildDesiredState({ project: 'blog', version: 'v1', compose, registry: 'reg' });
+  const ds = buildDesiredState({ project: 'blog', version: 'v1', compose });
   const endpoints = {
     db: [
       { node: 'n2', address: '10.210.0.2' },
@@ -240,7 +239,7 @@ test('buildDesiredState resolves label placement when nodes are provided', () =>
     project: 'site',
     version: 'v1',
     compose,
-    registry: 'reg',
+
     nodes: [
       { name: 'n1', labels: ['app'] },
       { name: 'n2', labels: ['db'] },
@@ -263,7 +262,7 @@ test('buildDesiredState global mode selects every matching node', () => {
     project: 'site',
     version: 'v1',
     compose,
-    registry: 'reg',
+
     nodes: [
       { name: 'n1', labels: ['app'] },
       { name: 'n2', labels: ['app'] },
@@ -287,7 +286,7 @@ test('containerSpecs generates an NFS volume on consuming nodes', () => {
     },
     volumes: { shared: { 'x-tug': { type: 'nfs', placement: { nodes: ['n1'] } } } },
   });
-  const ds = buildDesiredState({ project: 'site', version: 'v1', compose, registry: 'reg' });
+  const ds = buildDesiredState({ project: 'site', version: 'v1', compose });
   const consumer = containerSpecs(ds, 'n2', { nodeAddresses: { n1: '10.0.0.1' } });
   const opts = consumer.volumes[0].opts;
   assert.equal(consumer.volumes[0].name, 'tug_site_shared', 'volumes carry the Tug name');

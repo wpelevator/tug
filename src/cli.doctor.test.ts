@@ -8,6 +8,7 @@ import { promisify } from 'node:util';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from './control.ts';
+import { testImageResolver } from '../tests/helpers.ts';
 
 const exec = promisify(execFile);
 const entry = path.resolve('src/cli.ts');
@@ -16,7 +17,7 @@ test('doctor waits for the node diagnostic instead of returning the queued comma
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-doctor-'));
   process.env.TUG_DATA_DIR = dir;
   process.env.TUG_OPERATOR_TOKEN = 'op-doctor-wait';
-  const app = await createApp();
+  const app = await createApp({ images: { resolve: testImageResolver } });
   const srv = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));
   });

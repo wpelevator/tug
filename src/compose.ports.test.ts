@@ -123,7 +123,6 @@ const project = (services: ComposeFile['services']) =>
     project: 'blog',
     version: 'v1',
     compose: normalized({ services }),
-    registry: '',
   });
 const web = (nodes: string[], extra: Record<string, unknown> = {}) => ({
   image: 'nginx',

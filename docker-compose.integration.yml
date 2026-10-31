@@ -1,14 +1,4 @@
 services:
-  registry:
-    image: tug-registry:integration
-    build: ./tools/docker/registry
-    container_name: tug-registry-it
-    ports:
-      - "15000:5000"
-    volumes:
-      - registry-data:/var/lib/registry
-      - registry-auth:/auth
-
   control:
     image: tug-runtime:integration
     build: .
@@ -17,18 +7,11 @@ services:
       PORT: 8080
       TUG_DATA_DIR: /data
       TUG_OPERATOR_TOKEN: integration-token
-      TUG_REGISTRY: registry:5000
-      TUG_PUSH: "false"
-      TUG_REGISTRY_AUTH_PATH: /registry-auth/htpasswd
-      TUG_REGISTRY_CONTAINER: tug-registry-it
     ports:
-      - "18080:8080"
+      - "127.0.0.1:${TUG_TEST_PORT:-18080}:8080"
     volumes:
       - tug-data:/data
-      - registry-auth:/registry-auth
       - /var/run/docker.sock:/var/run/docker.sock
-    depends_on:
-      - registry
 
   provisioner:
     image: tug-runtime:integration
@@ -55,7 +38,6 @@ services:
     environment:
       TUG_NODE_NAME: vps-a
       TUG_CONTROL_URL: http://control:8080
-      TUG_REGISTRY: registry:5000
       TUG_APPLY: "true"
       TUG_POLL_INTERVAL_MS: 2000
     volumes:
@@ -74,7 +56,6 @@ services:
     environment:
       TUG_NODE_NAME: vps-b
       TUG_CONTROL_URL: http://control:8080
-      TUG_REGISTRY: registry:5000
       TUG_APPLY: "true"
       TUG_POLL_INTERVAL_MS: 2000
     volumes:
@@ -93,7 +74,6 @@ services:
     environment:
       TUG_NODE_NAME: vps-c
       TUG_CONTROL_URL: http://control:8080
-      TUG_REGISTRY: registry:5000
       TUG_APPLY: "true"
       TUG_POLL_INTERVAL_MS: 2000
     volumes:
@@ -107,12 +87,10 @@ networks:
   default:
     ipam:
       config:
-        - subnet: 10.89.240.0/24
+        - subnet: ${TUG_TEST_SUBNET:-10.89.240.0/24}
 
 volumes:
   tug-data:
-  registry-data:
-  registry-auth:
   node-tokens:
   vps-a-docker:
   vps-a-state:

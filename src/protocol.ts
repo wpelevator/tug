@@ -406,6 +406,7 @@ export interface StatusReport {
 // ---- GET /agent/v1/secrets ---------------------------------------------------------------------
 
 export interface SecretsResponse {
+  registryAuth?: Record<string, { username: string; password: string }>;
   secrets: Record<string, string>;
   versions: Record<string, number>;
 }
@@ -439,7 +440,6 @@ export interface NodeInfo {
 export interface RegisterResponse {
   node: NodeInfo;
   agentToken: string;
-  registryToken: string;
 }
 
 /** Body of `POST /agent/v1/enroll`. */
@@ -455,9 +455,7 @@ export interface EnrollRequest {
 }
 
 /** Response of `POST /agent/v1/enroll`. */
-export interface EnrollResponse extends RegisterResponse {
-  registry: string;
-}
+export type EnrollResponse = RegisterResponse;
 
 /** Response of `POST /api/v1/nodes/enroll-token`. */
 export interface EnrollTokenResponse {
@@ -465,7 +463,6 @@ export interface EnrollTokenResponse {
   name: string | null;
   usesRemaining: number;
   expiresAt: string;
-  registry: string;
 }
 
 /** The base64url-encoded JSON payload of TUG_JOIN_KEY. */

@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import * as tar from 'tar';
-import { buildAndPush, run, unpackContext } from './build.ts';
+import { buildImage, run, unpackContext } from './build.ts';
 
 test('source extraction accepts regular files and rejects symlinks before extraction', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-source-'));
@@ -41,23 +41,21 @@ test('build paths and Dockerfiles cannot escape the uploaded build root', async 
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-build-root-'));
   try {
     await assert.rejects(
-      buildAndPush({
+      buildImage({
         contextDir: dir,
         service: 'app',
         buildSpec: '../outside',
         imageRef: 'unused',
-        push: false,
       }),
       /context escapes/,
       'build context traversal must fail before invoking Docker',
     );
     await assert.rejects(
-      buildAndPush({
+      buildImage({
         contextDir: dir,
         service: 'app',
         buildSpec: { context: '.', dockerfile: '../Dockerfile' },
         imageRef: 'unused',
-        push: false,
       }),
       /Dockerfile escapes/,
       'Dockerfile traversal must fail before invoking Docker',

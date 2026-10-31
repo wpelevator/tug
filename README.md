@@ -7,14 +7,14 @@ Deploy Docker Compose projects to one or more ordinary Linux VPSes through a sma
 ## Features
 
 - Control API with bearer-token auth, scoped `read`/`deploy`/`admin` API tokens for CI and teammates, an audit trail naming who acted, and SQLite metadata through Node's built-in driver.
-- Nodes join over SSH (`node-install`) or enroll themselves with a single `docker run` (`node-enroll`), with per-node agent and registry tokens. Agents only dial out, so nodes behind NAT work.
-- Agents pull desired state from control, apply a generated per-node Compose file, run TCP/HTTP/Docker health checks and report status. An outbound WebSocket wakes them as soon as control queues work and carries live `exec`, followed logs, `ps` and `inspect` sessions, with long-poll and periodic-poll fallbacks for ordinary work.
+- Nodes join over SSH (`node-install`) or enroll themselves with a single `docker run` (`node-enroll`), with one agent token per node. Agents only dial out, so nodes behind NAT work.
+- Agents pull desired state from control, reconcile containers through the Docker Engine API, run TCP/HTTP/Docker health checks and report status. An outbound WebSocket wakes them as soon as control queues work and carries live `exec`, followed logs, `ps` and `inspect` sessions, with long-poll and periodic-poll fallbacks for ordinary work.
 - `x-tug` placement of services and volumes on nodes, with immutable desired-state records per deployment.
-- Build application images on control from uploaded source, or locally with `deploy --build-local`. Agents download saved images directly from control by default; a bring-your-own registry is optional.
+- Build application images on control from uploaded source, or locally with `deploy --build-local`. Agents download saved images directly from control. Published images are pinned to registry digests at deployment creation.
 - Secrets encrypted at rest, released only to the nodes whose services reference them, with targeted service recreation when only a secret changes.
 - Deployment convergence, per-project operation locks, cancellation, rollback, per-service rollout events and log fetching through the agents.
 - Opt-in zero-downtime rolling rollouts for ingress-fronted services (`x-tug.rollout`) and automatic rollback of failed deployments (`x-tug.rollback: auto`). See [Compose extensions](docs/compose.md#rolling-rollouts).
-- Per-node registry pull tokens enforced by an htpasswd-backed registry you provide, with rotation and revocation.
+- Private published images use encrypted project credentials for digest resolution and Engine API pulls.
 - Optional WireGuard mesh between nodes, health-aware cross-node service names and a managed Caddy ingress with automatic HTTPS, each opt-in. See [Networking](docs/networking.md).
 - Private-by-default published ports: generated Compose binds them to the overlay IP, loopback or the node address, never every interface unless you write `0.0.0.0`. See [Networking](docs/networking.md#published-ports-private-by-default).
 - Control-plane backup and restore, and `tug doctor` diagnostics.
@@ -31,7 +31,6 @@ Deploy Docker Compose projects to one or more ordinary Linux VPSes through a sma
 |   Control API (role-checked)        |
 |   SQLite: desired states, secrets   |
 |   image builds, saved images        |
-|   registry (optional)               |
 +-------------------------------------+
        ^                       ^
        |  agents dial out: work, status,
@@ -72,7 +71,7 @@ The CLI installs the matching `ghcr.io/wpelevator/tug:<version>` image on your h
 
 - [Architecture](docs/architecture.md): components, reconciliation, workflow diagrams, secrets and runtime paths.
 - [Compose extensions](docs/compose.md): `x-tug` placement, health checks, volumes and limitations.
-- [Control plane](docs/control-plane.md): install, TLS, registry credentials, backup and restore.
+- [Control plane](docs/control-plane.md): install, TLS, image delivery, backup and restore.
 - [Backups](docs/backups.md): interim WordPress backup sidecar with restic, per-node and NFS variants, and a restore drill until `x-tug.backup` (M11).
 - [Access control](docs/access-control.md): scoped API tokens, roles, audit trail and a GitHub Actions deploy example.
 - [Networking](docs/networking.md): WireGuard mesh, service DNS, ingress and TLS, firewall notes.

@@ -1,6 +1,6 @@
 name: Build integration images
 description: >-
-  Build the images the integration tests run (runtime, fake VPS, registry) into the local Docker daemon with a shared GitHub
+  Build the images the integration tests run (runtime, fake VPS) into the local Docker daemon with a shared GitHub
   Actions layer cache. Only pushes to main write the cache; pull requests read it, because a pull request cannot read another
   pull request's cache. The scopes match the ones in release.yml so releases reuse the same layers.
 
@@ -10,9 +10,6 @@ inputs:
     default: 'false'
   fake-vps:
     description: Build the fake VPS image (tug-fake-vps:integration).
-    default: 'false'
-  registry:
-    description: Build the local registry image (tug-registry:integration).
     default: 'false'
 
 runs:
@@ -36,11 +33,3 @@ runs:
         tags: tug-fake-vps:integration
         cache-from: type=gha,scope=fake-vps
         cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,scope=fake-vps,mode=max' || '' }}
-    - if: inputs.registry == 'true'
-      uses: docker/build-push-action@v7
-      with:
-        context: tools/docker/registry
-        load: true
-        tags: tug-registry:integration
-        cache-from: type=gha,scope=registry
-        cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,scope=registry,mode=max' || '' }}

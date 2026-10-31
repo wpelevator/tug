@@ -66,7 +66,6 @@ const desired = buildDesiredState({
   project: 'blog',
   version: 'v1',
   compose: normalized(compose),
-  registry: 'reg.test',
 });
 const peer = generateWgKeyPair().publicKey;
 const network = {

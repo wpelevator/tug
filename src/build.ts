@@ -54,21 +54,19 @@ export async function unpackContext(tarball: string, dest: string): Promise<void
   await tar.x({ file: tarball, cwd: dest, strict: true });
 }
 
-export interface BuildAndPushOptions {
+export interface BuildImageOptions {
   contextDir: string;
   service: string;
   buildSpec: string | BuildSpec;
   imageRef: string;
-  push?: boolean;
 }
 
-export async function buildAndPush({
+export async function buildImage({
   contextDir,
   service,
   buildSpec,
   imageRef,
-  push = true,
-}: BuildAndPushOptions): Promise<void> {
+}: BuildImageOptions): Promise<void> {
   const buildPath = typeof buildSpec === 'string' ? buildSpec : buildSpec?.context || '.';
   const dockerfilePath =
     typeof buildSpec === 'object' && buildSpec.dockerfile
@@ -86,5 +84,4 @@ export async function buildAndPush({
   if (!(await exists(fullContext)))
     throw new Error(`build context not found for ${service}: ${buildPath}`);
   await run('docker', ['build', ...dockerfile, '-t', imageRef, fullContext]);
-  if (push) await run('docker', ['push', imageRef]);
 }

@@ -11,7 +11,7 @@ import type { AgentContext } from './agent.ts';
 import { createApp, listen } from './control.ts';
 import { LIVE_MAX_SESSIONS } from './protocol.ts';
 import type { StreamMessage, WakeResponse } from './protocol.ts';
-import { json } from '../tests/helpers.ts';
+import { testImageResolver, json } from '../tests/helpers.ts';
 
 const OPERATOR = 'op-stream-test';
 
@@ -19,10 +19,9 @@ async function server(liveStartTimeoutMs?: number) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-stream-'));
   process.env.TUG_DATA_DIR = dir;
   process.env.TUG_OPERATOR_TOKEN = OPERATOR;
-  process.env.TUG_REGISTRY = 'registry.test';
   delete process.env.TUG_TLS_CERT_FILE;
   delete process.env.TUG_TLS_KEY_FILE;
-  const app = await createApp({ liveStartTimeoutMs });
+  const app = await createApp({ liveStartTimeoutMs, images: { resolve: testImageResolver } });
   const httpServer = await listen(app, 0);
   const base = `http://127.0.0.1:${(httpServer.address() as AddressInfo).port}`;
   const call = (method: string, route: string, body?: unknown) =>

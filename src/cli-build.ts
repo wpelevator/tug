@@ -2,12 +2,12 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import * as tar from 'tar';
-import { buildAndPush, run } from './build.ts';
+import { buildImage, run } from './build.ts';
 import { saveImageArchive } from './artifacts.ts';
 import type { ComposeFile, LocalImageUpload } from './protocol.ts';
 
 export interface LocalBuildDependencies {
-  build: typeof buildAndPush;
+  build: typeof buildImage;
   save: typeof saveImageArchive;
   nonce: () => string;
   remove: (imageRef: string) => Promise<void>;
@@ -38,7 +38,7 @@ export async function createSourceArchive(
   const configPaths = configFiles
     .map((file) => path.relative(contextDir, file).split(path.sep).join('/'))
     .filter((file) => file !== '..' && !file.startsWith('../') && !path.isAbsolute(file));
-  const ignores = ['node_modules', 'data', 'registry-data'];
+  const ignores = ['node_modules', 'data'];
   try {
     ignores.push(
       ...(await fs.readFile(path.join(contextDir, '.dockerignore'), 'utf8'))
@@ -66,7 +66,7 @@ export async function prepareLocalImages(
   contextDir: string,
   directory: string,
   dependencies: LocalBuildDependencies = {
-    build: buildAndPush,
+    build: buildImage,
     save: saveImageArchive,
     nonce: randomUUID,
     remove: async (imageRef) => {
@@ -86,7 +86,6 @@ export async function prepareLocalImages(
         service,
         buildSpec: spec.build,
         imageRef,
-        push: false,
       });
       const archive = await dependencies.save(imageRef, path.join(directory, `${field}.tar.gz`));
       images.push({ service, imageRef, ...archive, field });

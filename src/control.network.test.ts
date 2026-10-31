@@ -6,6 +6,7 @@ import path from 'node:path';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from './control.ts';
+import { testImageResolver } from '../tests/helpers.ts';
 import { generateWgKeyPair } from './mesh.ts';
 import { json } from '../tests/helpers.ts';
 
@@ -25,12 +26,10 @@ async function server(env: Record<string, string> = {}) {
     {
       TUG_DATA_DIR: dir,
       TUG_OPERATOR_TOKEN: 'op-net-token',
-      TUG_REGISTRY: 'registry.test',
-      TUG_PUSH: 'false',
     },
     env,
   );
-  const app = await createApp();
+  const app = await createApp({ images: { resolve: testImageResolver } });
   const srv = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));
   });

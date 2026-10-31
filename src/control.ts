@@ -1,5 +1,11 @@
 #!/usr/bin/env node
 import express from 'express';
+import {
+  resolveImage,
+  parseRegistryCredentials,
+  imageLocation,
+  REGISTRY_AUTH_SECRET,
+} from './registry.ts';
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
 import multer from 'multer';
 import fs from 'node:fs/promises';
@@ -34,7 +40,7 @@ import {
   serviceSecretNames,
   validateCompose,
 } from './compose.ts';
-import { buildAndPush, unpackContext, run as runCommand } from './build.ts';
+import { buildImage, unpackContext, run as runCommand } from './build.ts';
 import { sentinelNames } from './normalize.ts';
 import { ensureDir, errMessage, hashToken, id, now, token } from './util.ts';
 import {
@@ -516,7 +522,8 @@ const ACTIVE_STATES_SQL = ACTIVE_DEPLOYMENT_STATES.map((s) => `'${s}'`).join(','
 const PORT = Number(process.env.PORT || 8080);
 
 export interface ControlImageOperations {
-  build: typeof buildAndPush;
+  resolve: typeof resolveImage;
+  build: typeof buildImage;
   save: typeof saveImageArchive;
   inspect: typeof inspectImage;
   validate: typeof validateImageArchive;
@@ -531,7 +538,8 @@ export async function createApp(
   } = {},
 ) {
   const images: ControlImageOperations = {
-    build: buildAndPush,
+    resolve: resolveImage,
+    build: buildImage,
     save: saveImageArchive,
     inspect: inspectImage,
     validate: validateImageArchive,
@@ -548,9 +556,6 @@ export async function createApp(
   });
   const dbFile = path.join(DATA_DIR, 'tug.db');
   const masterKeyFile = path.join(DATA_DIR, 'master.key');
-  const REGISTRY = process.env.TUG_REGISTRY?.trim() || '';
-  const REGISTRY_AUTH_PATH = process.env.TUG_REGISTRY_AUTH_PATH || null;
-  const REGISTRY_CONTAINER = process.env.TUG_REGISTRY_CONTAINER || null;
   // Networking layers are opt-in; with all of them off the work response is unchanged.
   const MESH = process.env.TUG_MESH === 'true';
   const MESH_CIDR = process.env.TUG_MESH_CIDR || DEFAULT_MESH_CIDR;
@@ -558,57 +563,6 @@ export async function createApp(
   const SERVICE_DNS = (process.env.TUG_SERVICE_DNS ?? String(MESH)) === 'true';
   const ACME_EMAIL = process.env.TUG_ACME_EMAIL || undefined;
   if (MESH) parseCidr(MESH_CIDR);
-
-  let htpasswdQueue = Promise.resolve();
-  function withHtpasswdLock<T>(fn: () => Promise<T>): Promise<T> {
-    const next = htpasswdQueue.catch(() => {}).then(fn);
-    htpasswdQueue = next.then(
-      () => {},
-      () => {},
-    );
-    return next;
-  }
-  async function reloadRegistry() {
-    if (!REGISTRY_CONTAINER) return;
-    await runCommand('docker', ['restart', REGISTRY_CONTAINER]).catch((e) =>
-      console.error(`registry reload failed: ${e.message}`),
-    );
-  }
-  async function upsertRegistryCredential(name: string, password: string): Promise<void> {
-    if (!REGISTRY || !REGISTRY_AUTH_PATH) return;
-    await withHtpasswdLock(async () => {
-      const { out } = await runCommand('htpasswd', ['-nbB', name, password]);
-      const line = out.trim();
-      let existing = '';
-      try {
-        existing = await fs.readFile(REGISTRY_AUTH_PATH, 'utf8');
-      } catch {}
-      const lines = existing
-        .split('\n')
-        .filter(Boolean)
-        .filter((l) => !l.startsWith(`${name}:`));
-      lines.push(line);
-      await ensureDir(path.dirname(REGISTRY_AUTH_PATH));
-      await fs.writeFile(REGISTRY_AUTH_PATH, `${lines.join('\n')}\n`);
-    });
-    await reloadRegistry();
-  }
-  async function removeRegistryCredential(name: string): Promise<void> {
-    if (!REGISTRY_AUTH_PATH) return;
-    await withHtpasswdLock(async () => {
-      let existing = '';
-      try {
-        existing = await fs.readFile(REGISTRY_AUTH_PATH, 'utf8');
-      } catch {}
-      const lines = existing
-        .split('\n')
-        .filter(Boolean)
-        .filter((l) => !l.startsWith(`${name}:`));
-      await ensureDir(path.dirname(REGISTRY_AUTH_PATH));
-      await fs.writeFile(REGISTRY_AUTH_PATH, lines.length ? `${lines.join('\n')}\n` : '');
-    });
-    await reloadRegistry();
-  }
 
   const db = await (options.openDatabase || openDb)(dbFile);
   const wakeHub = new WakeHub();
@@ -1248,11 +1202,10 @@ export async function createApp(
     if (wgPublicKey !== undefined && !isWgKey(wgPublicKey))
       throw httpError(400, 'wgPublicKey must be a base64 WireGuard public key');
     const agentToken = token('tug_agent');
-    const registryToken = token('tug_reg');
     const ts = now();
     db.run(
-      `INSERT INTO nodes(id,name,address,public_address,status,labels_json,agent_token_hash,registry_token_hash,created_at,updated_at)
-      VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,address=excluded.address,public_address=excluded.public_address,labels_json=excluded.labels_json,agent_token_hash=excluded.agent_token_hash,registry_token_hash=excluded.registry_token_hash,updated_at=excluded.updated_at`,
+      `INSERT INTO nodes(id,name,address,public_address,status,labels_json,agent_token_hash,created_at,updated_at)
+      VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,address=excluded.address,public_address=excluded.public_address,labels_json=excluded.labels_json,agent_token_hash=excluded.agent_token_hash,updated_at=excluded.updated_at`,
       name,
       name,
       address || null,
@@ -1260,13 +1213,11 @@ export async function createApp(
       'registered',
       JSON.stringify(Array.isArray(labels) ? labels : []),
       hashToken(agentToken),
-      hashToken(registryToken),
       ts,
       ts,
     );
     ensureOverlayIp(name);
     syncWgPeer(name, wgPublicKey);
-    await upsertRegistryCredential(name, registryToken);
     wakeAll();
     const row = db.get<NodeRow>(NODE_INFO_SQL, name);
     if (!row) throw httpError(500, 'node not found after registration');
@@ -1281,7 +1232,7 @@ export async function createApp(
       created_at: row.created_at,
       updated_at: row.updated_at,
     };
-    return { node, agentToken, registryToken };
+    return { node, agentToken };
   }
   api('post', '/api/v1/nodes/register', null, async (req, res) => {
     const name = req.body.name;
@@ -1317,7 +1268,7 @@ export async function createApp(
       expiresAt,
       now(),
     );
-    res.json({ enrollToken, name, usesRemaining: uses, expiresAt, registry: REGISTRY });
+    res.json({ enrollToken, name, usesRemaining: uses, expiresAt });
   });
   post('/agent/v1/enroll', async (req, res) => {
     const body: EnrollRequest = req.body;
@@ -1358,7 +1309,7 @@ export async function createApp(
         remaining,
         hashToken(raw),
       );
-    const enrolled: EnrollResponse = { ...result, registry: REGISTRY };
+    const enrolled: EnrollResponse = { ...result };
     res.json(enrolled);
   });
   api('get', '/api/v1/nodes', null, async (req, res) => {
@@ -1371,34 +1322,6 @@ export async function createApp(
         return { ...rest, labels: labels_json ? (JSON.parse(labels_json) as string[]) : [] };
       }),
     });
-  });
-  api('post', '/api/v1/nodes/:name/rotate-registry-token', null, async (req, res) => {
-    const node = db.get<Pick<NodeRow, 'id' | 'name'>>(
-      'SELECT id,name FROM nodes WHERE name=? OR id=?',
-      req.params.name,
-      req.params.name,
-    );
-    if (!node) return res.status(404).json({ error: 'node not found' });
-    const registryToken = token('tug_reg');
-    db.run(
-      'UPDATE nodes SET registry_token_hash=?,updated_at=? WHERE id=?',
-      hashToken(registryToken),
-      now(),
-      node.id,
-    );
-    await upsertRegistryCredential(node.name, registryToken);
-    res.json({ ok: true, node: node.name, registryToken });
-  });
-  api('post', '/api/v1/nodes/:name/revoke-registry-token', null, async (req, res) => {
-    const node = db.get<Pick<NodeRow, 'id' | 'name'>>(
-      'SELECT id,name FROM nodes WHERE name=? OR id=?',
-      req.params.name,
-      req.params.name,
-    );
-    if (!node) return res.status(404).json({ error: 'node not found' });
-    db.run('UPDATE nodes SET registry_token_hash=NULL,updated_at=? WHERE id=?', now(), node.id);
-    await removeRegistryCredential(node.name);
-    res.json({ ok: true, node: node.name, revoked: true });
   });
   function findNode(nameOrId: string) {
     return db.get<Pick<NodeRow, 'id' | 'name'>>(
@@ -1502,22 +1425,6 @@ export async function createApp(
       );
     }
   });
-  post('/api/v1/registry/auth', async (req, res) => {
-    const username = req.body.username;
-    const password = req.body.password;
-    const node =
-      username && password
-        ? db.get(
-            'SELECT id,name FROM nodes WHERE (name=? OR id=?) AND registry_token_hash IS NOT NULL AND registry_token_hash=?',
-            username,
-            username,
-            hashToken(password),
-          )
-        : null;
-    if (!node) return res.status(401).json({ ok: false, error: 'invalid registry credentials' });
-    res.json({ ok: true, node: node.name });
-  });
-
   api('post', '/api/v1/tokens', null, async (req, res) => {
     const request = parseTokenRequest(req.body);
     const created = createToken(db, request, req.actor!.name);
@@ -1772,6 +1679,12 @@ export async function createApp(
       }
       // The CLI interpolates control secrets as sentinels; a reference to a secret that is gone would deploy an empty value.
       const referenced = sentinelNames(compose);
+      if (referenced.includes(REGISTRY_AUTH_SECRET))
+        throw httpError(
+          400,
+          REGISTRY_AUTH_SECRET +
+            ' is reserved for registry authentication and cannot be used in service definitions',
+        );
       if (referenced.length) {
         const known = new Set(
           db
@@ -1820,11 +1733,8 @@ export async function createApp(
       }
       if (files.length !== (local ? local.length : context ? 1 : 0))
         throw httpError(400, 'unexpected deployment upload');
-      if (!REGISTRY && builtServices.length && !context && !local)
-        throw httpError(
-          400,
-          'build services require a source context or localImages upload without a registry',
-        );
+      if (builtServices.length && !context && !local)
+        throw httpError(400, 'build services require a source context or localImages upload');
       for (const [svcName, svc] of Object.entries(compose.services)) {
         const ing = svc['x-tug']?.ingress;
         if (ing?.tls !== 'custom') continue;
@@ -1867,7 +1777,6 @@ export async function createApp(
         version,
         revision: depId,
         compose,
-        registry: REGISTRY,
         defaultNode: nodes[0]?.name || null,
       });
       if (context) {
@@ -1875,10 +1784,6 @@ export async function createApp(
         await unpackContext(context.path, contextDir);
       }
       for (const service of builtServices) {
-        if (!contextDir && !local) {
-          desired.services[service].image = `${REGISTRY}/${project}/${service}:${version}`;
-          continue;
-        } // Explicit registry/no-build-upload means an existing pushed image.
         const spec = desired.services[service];
         const buildId = id('build');
         const imageRef = spec.image!;
@@ -1926,41 +1831,43 @@ export async function createApp(
               service,
               buildSpec: compose.services[service].build!,
               imageRef,
-              push: false,
             });
-          if (REGISTRY) {
-            if (process.env.TUG_PUSH !== 'false') await images.run('docker', ['push', imageRef]);
-            const inspected = await images.inspect(imageRef);
-            db.run(
-              'UPDATE builds SET state=?,image_id=?,platform=?,updated_at=? WHERE id=?',
-              'complete',
-              inspected.imageId,
-              inspected.platform,
-              now(),
-              buildId,
-            );
-          } else {
-            info = await images.save(imageRef, temporary);
-            await fs.rename(temporary, final);
-            const artifact: ImageArtifact = { buildId, imageRef, ...info };
-            spec.artifact = artifact;
-            db.run(
-              'UPDATE builds SET state=?,image_id=?,platform=?,sha256=?,size_bytes=?,artifact_path=?,updated_at=? WHERE id=?',
-              'complete',
-              info.imageId,
-              info.platform,
-              info.sha256,
-              info.sizeBytes,
-              relative,
-              now(),
-              buildId,
-            );
-          }
+          info = await images.save(imageRef, temporary);
+          await fs.rename(temporary, final);
+          const artifact: ImageArtifact = { buildId, imageRef, ...info };
+          spec.artifact = artifact;
+          db.run(
+            'UPDATE builds SET state=?,image_id=?,platform=?,sha256=?,size_bytes=?,artifact_path=?,updated_at=? WHERE id=?',
+            'complete',
+            info.imageId,
+            info.platform,
+            info.sha256,
+            info.sizeBytes,
+            relative,
+            now(),
+            buildId,
+          );
         } finally {
           if (importedClientRef)
             await images.run('docker', ['image', 'rm', importedClientRef]).catch(() => {});
           await fs.rm(temporary, { force: true });
         }
+      }
+      const registrySecret = db.get<SecretRow>(
+        'SELECT * FROM secrets WHERE project_id=? AND name=?',
+        project,
+        REGISTRY_AUTH_SECRET,
+      );
+      const credentials = parseRegistryCredentials(
+        registrySecret ? decrypt(registrySecret.encrypted_value, masterKey) : undefined,
+      );
+      const resolved = new Map<string, string>();
+      for (const [name, spec] of Object.entries(desired.services)) {
+        if (spec.artifact) continue;
+        const image = spec.image!;
+        if (!resolved.has(image)) resolved.set(image, await images.resolve(image, credentials));
+        spec.image = resolved.get(image)!;
+        desired.compose.services[name].image = spec.image;
       }
       const buildLock = lock;
       const publishingId = depId;
@@ -2495,7 +2402,7 @@ export async function createApp(
         return { nodes: ingressNodes.map((n) => n.name) };
       });
     }
-    res.json({ ok: checks.every((c) => c.ok), registry: REGISTRY, checks });
+    res.json({ ok: checks.every((c) => c.ok), checks });
   });
   api('post', '/api/v1/diagnostics/nodes', null, async (req, res) => {
     const nodes = req.body.node
@@ -2744,20 +2651,35 @@ export async function createApp(
       'SELECT name,encrypted_value,version FROM secrets WHERE project_id=?',
       project,
     );
-    if (req.query.services) {
-      const ds = currentDesired(project);
-      const names = String(req.query.services)
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean);
-      const allowed = ds
-        ? serviceSecretNames(JSON.parse(ds.state_json).compose, names)
-        : new Set<string>();
-      rows = rows.filter((r) => allowed.has(r.name));
+    const ds = currentDesired(project);
+    const desired: DesiredState | undefined = ds ? JSON.parse(ds.state_json) : undefined;
+    const requested = req.query.services
+      ? String(req.query.services)
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean)
+      : Object.keys(desired?.services || {});
+    const names = requested.filter((name) =>
+      desired?.services[name]?.placement.nodes?.includes(req.node!.name),
+    );
+    const allowed = serviceSecretNames(desired?.compose, names);
+    const registrySecret = rows.find((row) => row.name === REGISTRY_AUTH_SECRET);
+    const registryAuth: NonNullable<SecretsResponse['registryAuth']> = {};
+    const credentials = parseRegistryCredentials(
+      registrySecret ? decrypt(registrySecret.encrypted_value, masterKey) : undefined,
+    );
+    for (const name of names) {
+      const spec = desired!.services[name];
+      if (!spec.artifact && spec.image) {
+        const host = imageLocation(spec.image).host;
+        if (credentials[host]) registryAuth[host] = credentials[host];
+      }
     }
+    rows = rows.filter((row) => allowed.has(row.name) && row.name !== REGISTRY_AUTH_SECRET);
     const secrets: SecretsResponse = {
       secrets: Object.fromEntries(rows.map((r) => [r.name, decrypt(r.encrypted_value, masterKey)])),
       versions: Object.fromEntries(rows.map((r) => [r.name, r.version])),
+      ...(Object.keys(registryAuth).length ? { registryAuth } : {}),
     };
     res.json(secrets);
   });

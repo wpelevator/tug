@@ -161,7 +161,13 @@ test('CLI exposes flat commands and rejects malformed invocations before side ef
       ['status', 'typo'],
       ['node', 'install'],
       ['secret:set', 'KEY'],
-      ['deploy', '--build-local', '--no-build-upload'],
+      ['deploy', '--no-build-upload'],
+      ['control-install', 'root@host', '--registry', 'registry.example'],
+      ['control-install', 'root@host', '--registry-auth-path', '/auth'],
+      ['control-install', 'root@host', '--registry-container', 'registry'],
+      ['node-install', 'root@host', '--name', 'n1', '--registry', 'registry.example'],
+      ['node-rotate-registry-token', 'n1'],
+      ['node-revoke-registry-token', 'n1'],
       ['deploy', '--timeout', '0'],
       ['control-install', 'root@host', '--port', '65536'],
       ['node-enroll', '--uses', 'NaN'],
@@ -274,7 +280,7 @@ test('local application builds skip published images and produce unique file-bac
     'local builds should process only services declaring build',
   );
   assert.ok(
-    builds.every((build) => build.push === false && build.contextDir === '/source'),
+    builds.every((build) => !('push' in build) && build.contextDir === '/source'),
     'local builds should use explicit source context and never push directly',
   );
   assert.equal(

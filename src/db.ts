@@ -42,7 +42,6 @@ export interface NodeRow {
   status: string;
   labels_json: string | null;
   agent_token_hash: string | null;
-  registry_token_hash: string | null;
   last_seen_at: string | null;
   created_at: string;
   updated_at: string;
@@ -183,7 +182,7 @@ function initializeControl(db: Db): void {
   db.exec(`
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, name TEXT UNIQUE NOT NULL, current_deployment_id TEXT, created_at TEXT, updated_at TEXT);
-CREATE TABLE IF NOT EXISTS nodes(id TEXT PRIMARY KEY, name TEXT UNIQUE NOT NULL, address TEXT, public_address TEXT, overlay_ip TEXT UNIQUE, ingress INTEGER NOT NULL DEFAULT 0, ingress_status_json TEXT, status TEXT, labels_json TEXT, agent_token_hash TEXT, registry_token_hash TEXT, last_seen_at TEXT, created_at TEXT, updated_at TEXT);
+CREATE TABLE IF NOT EXISTS nodes(id TEXT PRIMARY KEY, name TEXT UNIQUE NOT NULL, address TEXT, public_address TEXT, overlay_ip TEXT UNIQUE, ingress INTEGER NOT NULL DEFAULT 0, ingress_status_json TEXT, status TEXT, labels_json TEXT, agent_token_hash TEXT, last_seen_at TEXT, created_at TEXT, updated_at TEXT);
 CREATE TABLE IF NOT EXISTS wg_peers(node_id TEXT PRIMARY KEY, public_key TEXT NOT NULL UNIQUE, overlay_ip TEXT NOT NULL, endpoint TEXT, allowed_ips TEXT NOT NULL, updated_at TEXT);
 CREATE TABLE IF NOT EXISTS enroll_tokens(token_hash TEXT PRIMARY KEY, name TEXT, uses_remaining INTEGER, expires_at TEXT, created_at TEXT);
 CREATE TABLE IF NOT EXISTS deployments(id TEXT PRIMARY KEY, project_id TEXT, version TEXT, state TEXT, created_at TEXT, updated_at TEXT, error_message TEXT, actor TEXT);

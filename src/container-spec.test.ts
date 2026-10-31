@@ -8,7 +8,7 @@ import type { ComposeFile } from './protocol.ts';
 const place = { 'x-tug': { placement: { nodes: ['n1'] } } };
 const plan = (compose: ComposeFile, opts = {}, version = 'v1') =>
   containerSpecs(
-    buildDesiredState({ project: 'p', version, compose: normalized(compose), registry: '' }),
+    buildDesiredState({ project: 'p', version, compose: normalized(compose) }),
     'n1',
     opts,
   );

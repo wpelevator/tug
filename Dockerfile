@@ -13,7 +13,7 @@ WORKDIR /app
 # Keep Compose compatible with the Docker 20.x daemons used by the isolated-node tests.
 ARG DOCKER_COMPOSE_VERSION=2.32.4
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends docker.io ca-certificates curl apache2-utils wireguard-tools iproute2 \
+  && apt-get install -y --no-install-recommends docker.io ca-certificates curl wireguard-tools iproute2 \
   && arch="$(dpkg --print-architecture)" \
   && case "$arch" in amd64) compose_arch=x86_64 ;; arm64) compose_arch=aarch64 ;; *) echo "unsupported arch $arch" >&2; exit 1 ;; esac \
   && mkdir -p /usr/local/lib/docker/cli-plugins \

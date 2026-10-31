@@ -6,6 +6,7 @@ import path from 'node:path';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from './control.ts';
+import { testImageResolver } from '../tests/helpers.ts';
 import { openDb } from './db.ts';
 import { json } from '../tests/helpers.ts';
 
@@ -43,7 +44,7 @@ async function makeServer(
         if (value === undefined) delete process.env[key];
         else process.env[key] = value;
       }
-      const app = await createApp(options);
+      const app = await createApp({ ...options, images: { resolve: testImageResolver } });
       for (const [key, value] of Object.entries(restore)) {
         if (value === undefined) delete process.env[key];
         else process.env[key] = value;

@@ -55,7 +55,6 @@ function desired(compose: ComposeFile, version = 'v1', project = 'proj') {
     project,
     version,
     compose: normalized(compose),
-    registry: 'reg.test',
     defaultNode: 'n1',
   });
 }
@@ -763,5 +762,41 @@ test('pollOnce reconciles desired states, runs commands and posts one status rep
   assert.deepEqual(
     report.commandResults.map((r) => [r.commandId, r.state]),
     [['c1', 'succeeded']],
+  );
+});
+
+test('published-image pulls use project registry auth only in the Engine request', async () => {
+  const credential = { username: 'ci', password: 'private-password' };
+  const control = fakeControl(() => ({
+    secrets: {},
+    versions: {},
+    registryAuth: { 'private.example': credential },
+  }));
+  const ctx = await makeCtx({ http: control.http });
+  const pulls: { image: string; auth?: Record<string, string> }[] = [];
+  const original = ctx.docker.pullImage.bind(ctx.docker);
+  ctx.docker.pullImage = async (image, auth) => {
+    pulls.push({ image, auth });
+    await original(image, auth);
+  };
+  const image = `private.example/team/app@sha256:${'a'.repeat(64)}`;
+  const state = desired({ services: { web: { image, ...place } } });
+  await reconcile(state, ctx);
+  assert.deepEqual(
+    pulls,
+    [{ image, auth: credential }],
+    'the agent must pull the control-pinned digest using its released project credential',
+  );
+  assert.ok(
+    !JSON.stringify(fake(ctx).service('proj', 'web')[0].body).includes('private-password'),
+    'registry credentials must never enter the container definition',
+  );
+  assert.ok(
+    !(
+      await fs
+        .readFile(path.join(ctx.stateDir, 'projects', 'proj', 'compose.yml'), 'utf8')
+        .catch(() => '')
+    ).includes('private-password'),
+    'registry credentials must never be written to generated project files',
   );
 });

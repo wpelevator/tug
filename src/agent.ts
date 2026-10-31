@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 import fs from 'node:fs/promises';
+import { imageLocation } from './registry.ts';
 import { createReadStream, createWriteStream } from 'node:fs';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { validateImageArchive, verifyDownload } from './artifacts.ts';
 import path from 'node:path';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import net from 'node:net';
 import dns from 'node:dns/promises';
 import { WebSocket } from 'ws';
@@ -1076,7 +1077,11 @@ export async function reconcile(
       const artifact = desiredState.services[service].artifact;
       if (artifact) await ensureArtifact(ctx, artifact);
     },
-    pullImage: (service: string) => ctx.docker.pullImage(plan.specs[service].body.Image),
+    pullImage: (service: string) =>
+      ctx.docker.pullImage(
+        plan.specs[service].body.Image,
+        sec.registryAuth?.[imageLocation(plan.specs[service].body.Image).host],
+      ),
     emit,
   };
   let failing: string | undefined;
@@ -1290,8 +1295,6 @@ interface Creds {
   agentToken: string;
   nodeName?: string;
   controlUrl?: string;
-  registry?: string | null;
-  registryToken?: string | null;
 }
 
 const CREDS_FILE = () => path.join(STATE_DIR, 'agent.json');
@@ -1317,21 +1320,6 @@ async function readJoinKey(): Promise<string | null> {
     }
   }
   return null;
-}
-function dockerLogin(registry: string, user: string, password: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const p = spawn('docker', ['login', registry, '-u', user, '--password-stdin'], {
-      stdio: ['pipe', 'ignore', 'pipe'],
-    });
-    let err = '';
-    p.stderr.on('data', (d) => (err += d));
-    p.on('error', reject);
-    p.on('close', (code) =>
-      code === 0 ? resolve() : reject(new Error(err.trim() || `exit ${code}`)),
-    );
-    p.stdin!.write(password);
-    p.stdin!.end();
-  });
 }
 async function enroll(joinKey: string): Promise<Creds> {
   let decoded: JoinKey;
@@ -1380,8 +1368,6 @@ async function enroll(joinKey: string): Promise<Creds> {
     agentToken: out.agentToken,
     nodeName: out.node?.name || NODE_NAME,
     controlUrl,
-    registry: out.registry || null,
-    registryToken: out.registryToken || null,
   };
   await saveCreds(creds);
   if (wgPublicKey) await writeReportedKey(STATE_DIR, wgPublicKey);
@@ -1405,15 +1391,6 @@ export async function loadOrEnroll(): Promise<Creds> {
   TOKEN = creds.agentToken;
   NODE_NAME = creds.nodeName || NODE_NAME;
   if (!CONTROL_URL_FROM_ENV && creds.controlUrl) CONTROL_URL = creds.controlUrl;
-  if (APPLY && creds.registry && creds.registryToken) {
-    try {
-      await dockerLogin(creds.registry, NODE_NAME, creds.registryToken);
-    } catch (e) {
-      console.error(
-        `registry login failed (pulls from ${creds.registry} may fail): ${errMessage(e)}`,
-      );
-    }
-  }
   return creds;
 }
 
