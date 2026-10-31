@@ -8,7 +8,11 @@ export const IMAGE_REPOSITORY = 'ghcr.io/wpelevator/tug';
 export const LOCAL_IMAGE = 'tug:local';
 
 // package.json sits one level above this file in src/ (dev), dist/ (build) and the installed package.
-const packageJsonPath = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'package.json');
+const packageJsonPath = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '..',
+  'package.json',
+);
 
 export function packageVersion(): string {
   return (JSON.parse(fs.readFileSync(packageJsonPath, 'utf8')) as { version: string }).version;
@@ -20,6 +24,10 @@ export function defaultImage(version = packageVersion()): string {
 }
 
 /** An explicit `--image` always wins; otherwise a locally built image is `tug:local` and anything else is the published image. */
-export function resolveImage(image: string | undefined, buildLocalImage = false, version = packageVersion()): string {
+export function resolveImage(
+  image: string | undefined,
+  buildLocalImage = false,
+  version = packageVersion(),
+): string {
   return image || (buildLocalImage ? LOCAL_IMAGE : defaultImage(version));
 }

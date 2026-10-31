@@ -15,20 +15,35 @@ async function makeServer() {
   process.env.TUG_CONTROL_RESTORE_DIR = path.join(dir, 'control-restore');
   process.env.TUG_OPERATOR_TOKEN = 'op-control-backup-token';
   const app = await createApp();
-  const srv = await new Promise<Server>(resolve => { const s = app.listen(0, () => resolve(s)); });
-  return { base: `http://127.0.0.1:${(srv.address() as AddressInfo).port}`, close: () => new Promise(resolve => srv.close(resolve)) };
+  const srv = await new Promise<Server>((resolve) => {
+    const s = app.listen(0, () => resolve(s));
+  });
+  return {
+    base: `http://127.0.0.1:${(srv.address() as AddressInfo).port}`,
+    close: () => new Promise((resolve) => srv.close(resolve)),
+  };
 }
 const op = { Authorization: 'Bearer op-control-backup-token', 'content-type': 'application/json' };
 
 test('creates control-plane backup and requires confirmation for restore', async () => {
   const s = await makeServer();
   try {
-    let res = await fetch(`${s.base}/api/v1/control/backups/run`, { method: 'POST', headers: op, body: '{}' });
+    let res = await fetch(`${s.base}/api/v1/control/backups/run`, {
+      method: 'POST',
+      headers: op,
+      body: '{}',
+    });
     assert.equal(res.status, 200);
     const backup = await json(res);
     assert.match(backup.backupId, /^cbak_/);
     assert.ok((await fs.stat(backup.artifactRef)).size > 0);
-    res = await fetch(`${s.base}/api/v1/control/restore`, { method: 'POST', headers: op, body: JSON.stringify({ artifactRef: backup.artifactRef }) });
+    res = await fetch(`${s.base}/api/v1/control/restore`, {
+      method: 'POST',
+      headers: op,
+      body: JSON.stringify({ artifactRef: backup.artifactRef }),
+    });
     assert.equal(res.status, 400);
-  } finally { await s.close(); }
+  } finally {
+    await s.close();
+  }
 });

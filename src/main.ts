@@ -15,7 +15,9 @@ switch (role) {
     break;
   }
   default: {
-    const self = process.argv[1] ? `node ${process.argv[1].split('/').slice(-2).join('/')}` : 'main';
+    const self = process.argv[1]
+      ? `node ${process.argv[1].split('/').slice(-2).join('/')}`
+      : 'main';
     console.error(`Usage: TUG_ROLE=control|agent ${self}, or ${self} <control|agent>`);
     process.exit(1);
   }

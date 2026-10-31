@@ -14,22 +14,37 @@ async function server() {
   process.env.TUG_OPERATOR_TOKEN = 'op-test-token';
   process.env.TUG_REGISTRY = 'registry.test';
   const app = await createApp();
-  const srv = await new Promise<Server>(resolve => { const s = app.listen(0, () => resolve(s)); });
-  return { base: `http://127.0.0.1:${(srv.address() as AddressInfo).port}`, close: () => new Promise(resolve => srv.close(resolve)) };
+  const srv = await new Promise<Server>((resolve) => {
+    const s = app.listen(0, () => resolve(s));
+  });
+  return {
+    base: `http://127.0.0.1:${(srv.address() as AddressInfo).port}`,
+    close: () => new Promise((resolve) => srv.close(resolve)),
+  };
 }
-function op() { return { Authorization: 'Bearer op-test-token', 'content-type': 'application/json' }; }
+function op() {
+  return { Authorization: 'Bearer op-test-token', 'content-type': 'application/json' };
+}
 const json = { 'content-type': 'application/json' };
 
 test('enroll token exchanges for durable agent credentials and is single-use', async () => {
   const s = await server();
   try {
-    let res = await fetch(`${s.base}/api/v1/nodes/enroll-token`, { method: 'POST', headers: op(), body: JSON.stringify({ name: 'app1' }) });
+    let res = await fetch(`${s.base}/api/v1/nodes/enroll-token`, {
+      method: 'POST',
+      headers: op(),
+      body: JSON.stringify({ name: 'app1' }),
+    });
     assert.equal(res.status, 200);
     const minted = await jsonBody(res);
     assert.match(minted.enrollToken, /^tug_enroll_/);
     assert.equal(minted.registry, 'registry.test');
 
-    res = await fetch(`${s.base}/agent/v1/enroll`, { method: 'POST', headers: json, body: JSON.stringify({ enrollToken: minted.enrollToken }) });
+    res = await fetch(`${s.base}/agent/v1/enroll`, {
+      method: 'POST',
+      headers: json,
+      body: JSON.stringify({ enrollToken: minted.enrollToken }),
+    });
     assert.equal(res.status, 200);
     const enrolled = await jsonBody(res);
     assert.equal(enrolled.node.name, 'app1');
@@ -38,42 +53,82 @@ test('enroll token exchanges for durable agent credentials and is single-use', a
     assert.equal(enrolled.registry, 'registry.test');
 
     // durable token authenticates against agent work
-    res = await fetch(`${s.base}/agent/v1/work`, { headers: { Authorization: `Bearer ${enrolled.agentToken}` } });
+    res = await fetch(`${s.base}/agent/v1/work`, {
+      headers: { Authorization: `Bearer ${enrolled.agentToken}` },
+    });
     assert.equal(res.status, 200);
 
     // single-use: a second enroll with the same token is rejected
-    res = await fetch(`${s.base}/agent/v1/enroll`, { method: 'POST', headers: json, body: JSON.stringify({ enrollToken: minted.enrollToken }) });
+    res = await fetch(`${s.base}/agent/v1/enroll`, {
+      method: 'POST',
+      headers: json,
+      body: JSON.stringify({ enrollToken: minted.enrollToken }),
+    });
     assert.equal(res.status, 401);
-  } finally { await s.close(); }
+  } finally {
+    await s.close();
+  }
 });
 
 test('unbound enroll token takes name from agent and honors uses count', async () => {
   const s = await server();
   try {
-    let res = await fetch(`${s.base}/api/v1/nodes/enroll-token`, { method: 'POST', headers: op(), body: JSON.stringify({ uses: 2 }) });
+    let res = await fetch(`${s.base}/api/v1/nodes/enroll-token`, {
+      method: 'POST',
+      headers: op(),
+      body: JSON.stringify({ uses: 2 }),
+    });
     const minted = await jsonBody(res);
 
     // missing name on an unbound token is a 400
-    res = await fetch(`${s.base}/agent/v1/enroll`, { method: 'POST', headers: json, body: JSON.stringify({ enrollToken: minted.enrollToken }) });
+    res = await fetch(`${s.base}/agent/v1/enroll`, {
+      method: 'POST',
+      headers: json,
+      body: JSON.stringify({ enrollToken: minted.enrollToken }),
+    });
     assert.equal(res.status, 400);
 
-    res = await fetch(`${s.base}/agent/v1/enroll`, { method: 'POST', headers: json, body: JSON.stringify({ enrollToken: minted.enrollToken, name: 'web-a' }) });
+    res = await fetch(`${s.base}/agent/v1/enroll`, {
+      method: 'POST',
+      headers: json,
+      body: JSON.stringify({ enrollToken: minted.enrollToken, name: 'web-a' }),
+    });
     assert.equal((await jsonBody(res)).node.name, 'web-a');
-    res = await fetch(`${s.base}/agent/v1/enroll`, { method: 'POST', headers: json, body: JSON.stringify({ enrollToken: minted.enrollToken, name: 'web-b' }) });
+    res = await fetch(`${s.base}/agent/v1/enroll`, {
+      method: 'POST',
+      headers: json,
+      body: JSON.stringify({ enrollToken: minted.enrollToken, name: 'web-b' }),
+    });
     assert.equal((await jsonBody(res)).node.name, 'web-b');
     // third use exhausts the token
-    res = await fetch(`${s.base}/agent/v1/enroll`, { method: 'POST', headers: json, body: JSON.stringify({ enrollToken: minted.enrollToken, name: 'web-c' }) });
+    res = await fetch(`${s.base}/agent/v1/enroll`, {
+      method: 'POST',
+      headers: json,
+      body: JSON.stringify({ enrollToken: minted.enrollToken, name: 'web-c' }),
+    });
     assert.equal(res.status, 401);
-  } finally { await s.close(); }
+  } finally {
+    await s.close();
+  }
 });
 
 test('expired enroll token is rejected', async () => {
   const s = await server();
   try {
-    let res = await fetch(`${s.base}/api/v1/nodes/enroll-token`, { method: 'POST', headers: op(), body: JSON.stringify({ name: 'app1', ttlSeconds: 1 }) });
+    let res = await fetch(`${s.base}/api/v1/nodes/enroll-token`, {
+      method: 'POST',
+      headers: op(),
+      body: JSON.stringify({ name: 'app1', ttlSeconds: 1 }),
+    });
     const minted = await jsonBody(res);
-    await new Promise(r => setTimeout(r, 1100));
-    res = await fetch(`${s.base}/agent/v1/enroll`, { method: 'POST', headers: json, body: JSON.stringify({ enrollToken: minted.enrollToken }) });
+    await new Promise((r) => setTimeout(r, 1100));
+    res = await fetch(`${s.base}/agent/v1/enroll`, {
+      method: 'POST',
+      headers: json,
+      body: JSON.stringify({ enrollToken: minted.enrollToken }),
+    });
     assert.equal(res.status, 401);
-  } finally { await s.close(); }
+  } finally {
+    await s.close();
+  }
 });

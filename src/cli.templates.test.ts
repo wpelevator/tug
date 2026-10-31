@@ -21,7 +21,11 @@ async function stubSsh(dir: string) {
   const bin = path.join(dir, 'bin');
   const log = path.join(dir, 'ssh.log');
   await fs.mkdir(bin, { recursive: true });
-  await fs.writeFile(path.join(bin, 'ssh'), `#!/bin/sh\nfor a in "$@"; do printf '%s\\n' "$a"; done >> "${log}"\nprintf '\\n--END--\\n' >> "${log}"\n`, { mode: 0o755 });
+  await fs.writeFile(
+    path.join(bin, 'ssh'),
+    `#!/bin/sh\nfor a in "$@"; do printf '%s\\n' "$a"; done >> "${log}"\nprintf '\\n--END--\\n' >> "${log}"\n`,
+    { mode: 0o755 },
+  );
   return { bin, log };
 }
 
@@ -30,79 +34,254 @@ test('install commands render the shipped templates (src in dev, dist in the ima
   process.env.TUG_DATA_DIR = path.join(dir, 'data');
   process.env.TUG_OPERATOR_TOKEN = 'op-cli-template-token';
   const app = await createApp();
-  const server = await new Promise<import('node:http').Server>(resolve => { const s = app.listen(0, () => resolve(s)); });
+  const server = await new Promise<import('node:http').Server>((resolve) => {
+    const s = app.listen(0, () => resolve(s));
+  });
   const controlUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   const ssh = await stubSsh(dir);
-  const env = { ...process.env, PATH: `${ssh.bin}${path.delimiter}${process.env.PATH}`, TUG_CONFIG: path.join(dir, 'cfg.json'), TUG_TOKEN: 'op-cli-template-token', TUG_CONTROL_URL: controlUrl };
+  const env = {
+    ...process.env,
+    PATH: `${ssh.bin}${path.delimiter}${process.env.PATH}`,
+    TUG_CONFIG: path.join(dir, 'cfg.json'),
+    TUG_TOKEN: 'op-cli-template-token',
+    TUG_CONTROL_URL: controlUrl,
+  };
   await fs.writeFile(env.TUG_CONFIG, '{}');
-  const cli = (...args: string[]) => execFileAsync(process.execPath, [cliEntry, ...args], { env, cwd: dir });
+  const cli = (...args: string[]) =>
+    execFileAsync(process.execPath, [cliEntry, ...args], { env, cwd: dir });
   try {
-    await cli('control-install', 'root@control.test', '--registry', 'registry.test', '--port', '9099');
+    await cli(
+      'control-install',
+      'root@control.test',
+      '--registry',
+      'registry.test',
+      '--port',
+      '9099',
+    );
     let script = await fs.readFile(ssh.log, 'utf8');
-    assert.ok(script.includes('registry.test'), 'control-compose.yml rendered with the registry host');
+    assert.ok(
+      script.includes('registry.test'),
+      'control-compose.yml rendered with the registry host',
+    );
     assert.ok(script.includes('9099'), 'control-compose.yml rendered with the port');
     assert.match(script, /TUG_MESH: "false"/, 'control-install leaves the mesh off by default');
-    assert.ok(script.includes(`image: ${JSON.stringify(defaultImage())}`), 'control-install defaults to the published image for the CLI version');
-    assert.ok(!script.includes('docker build'), 'control-install does not build an image unless --build-local-image is set');
+    assert.ok(
+      script.includes(`image: ${JSON.stringify(defaultImage())}`),
+      'control-install defaults to the published image for the CLI version',
+    );
+    assert.ok(
+      !script.includes('docker build'),
+      'control-install does not build an image unless --build-local-image is set',
+    );
     assert.doesNotMatch(script, unrenderedVariable, 'no unrendered template variables');
 
     await fs.rm(ssh.log);
     await cli('control-install', 'root@bare.test', '--install-docker');
     script = await fs.readFile(ssh.log, 'utf8');
-    assert.match(script, /TUG_REGISTRY: ""/, 'registry-free control install should render an explicitly empty registry');
-    assert.ok(script.indexOf('download.docker.com') < script.indexOf('preflight: docker.version'), 'opt-in Docker bootstrap should run before preflight');
-    assert.match(script, /docker-compose-plugin/, 'bare-host bootstrap should install the Docker Compose plugin');
+    assert.match(
+      script,
+      /TUG_REGISTRY: ""/,
+      'registry-free control install should render an explicitly empty registry',
+    );
+    assert.ok(
+      script.indexOf('download.docker.com') < script.indexOf('preflight: docker.version'),
+      'opt-in Docker bootstrap should run before preflight',
+    );
+    assert.match(
+      script,
+      /docker-compose-plugin/,
+      'bare-host bootstrap should install the Docker Compose plugin',
+    );
 
     await fs.rm(ssh.log);
     await cli('control-install', 'root@mesh.test', '--mesh');
-    assert.match(await fs.readFile(ssh.log, 'utf8'), /TUG_MESH: "true"/, 'control-install --mesh should enable the mesh on control');
+    assert.match(
+      await fs.readFile(ssh.log, 'utf8'),
+      /TUG_MESH: "true"/,
+      'control-install --mesh should enable the mesh on control',
+    );
 
     await fs.rm(ssh.log);
-    await cli('node-install', 'root@node.test', '--name', 'n-tpl', '--control-url', controlUrl, '--http-only-dev');
+    await cli(
+      'node-install',
+      'root@node.test',
+      '--name',
+      'n-tpl',
+      '--control-url',
+      controlUrl,
+      '--http-only-dev',
+    );
     script = await fs.readFile(ssh.log, 'utf8');
     assert.ok(script.includes('TUG_NODE_NAME=n-tpl'), 'agent.env rendered');
     assert.ok(script.includes(controlUrl), 'agent.env carries the control URL');
-    assert.ok(script.includes(defaultImage()), 'node-install defaults to the published image for the CLI version');
+    assert.ok(
+      script.includes(defaultImage()),
+      'node-install defaults to the published image for the CLI version',
+    );
     assert.doesNotMatch(script, unrenderedVariable, 'no unrendered template variables');
     assert.doesNotMatch(script, /NET_ADMIN|TUG_MESH/, 'agents join no mesh unless asked');
 
     await fs.rm(ssh.log);
     const agentControlUrl = 'https://agent-control.test';
-    await cli('node-install', 'root@private.test', '--name', 'n-private', '--agent-control-url', agentControlUrl);
+    await cli(
+      'node-install',
+      'root@private.test',
+      '--name',
+      'n-private',
+      '--agent-control-url',
+      agentControlUrl,
+    );
     script = await fs.readFile(ssh.log, 'utf8');
-    assert.ok(script.includes(`TUG_CONTROL_URL=${agentControlUrl}`), 'agent installation should write the separately advertised URL while registration reaches the operator API');
-    assert.ok(script.includes(`'${agentControlUrl}'/healthz`), 'node preflight should test control reachability using the agent URL');
-    const privateEnroll = JSON.parse((await cli('node-enroll', '--name', 'n-private-enroll', '--agent-control-url', agentControlUrl, '--json')).stdout);
-    assert.equal(privateEnroll.controlUrl, agentControlUrl, 'enrollment output should advertise the agent URL');
-    assert.equal(JSON.parse(Buffer.from(privateEnroll.joinKey, 'base64url').toString()).controlUrl, agentControlUrl, 'join key should use the agent URL without changing the operator API request destination');
+    assert.ok(
+      script.includes(`TUG_CONTROL_URL=${agentControlUrl}`),
+      'agent installation should write the separately advertised URL while registration reaches the operator API',
+    );
+    assert.ok(
+      script.includes(`'${agentControlUrl}'/healthz`),
+      'node preflight should test control reachability using the agent URL',
+    );
+    const privateEnroll = JSON.parse(
+      (
+        await cli(
+          'node-enroll',
+          '--name',
+          'n-private-enroll',
+          '--agent-control-url',
+          agentControlUrl,
+          '--json',
+        )
+      ).stdout,
+    );
+    assert.equal(
+      privateEnroll.controlUrl,
+      agentControlUrl,
+      'enrollment output should advertise the agent URL',
+    );
+    assert.equal(
+      JSON.parse(Buffer.from(privateEnroll.joinKey, 'base64url').toString()).controlUrl,
+      agentControlUrl,
+      'join key should use the agent URL without changing the operator API request destination',
+    );
 
     await fs.rm(ssh.log);
-    await cli('node-install', 'root@node2.test', '--name', 'n-mesh', '--control-url', controlUrl, '--http-only-dev', '--mesh');
+    await cli(
+      'node-install',
+      'root@node2.test',
+      '--name',
+      'n-mesh',
+      '--control-url',
+      controlUrl,
+      '--http-only-dev',
+      '--mesh',
+    );
     script = await fs.readFile(ssh.log, 'utf8');
     assert.ok(script.includes('TUG_MESH=true'), '--mesh sets TUG_MESH in agent.env');
-    assert.match(script, /--network host --cap-add NET_ADMIN/, '--mesh runs the agent with host networking and NET_ADMIN');
-    assert.ok(script.includes('tugwgtest type wireguard') && script.includes('udp.51820.free'), '--mesh adds WireGuard kernel and UDP port preflight checks');
-    assert.ok(script.includes('docker inspect --format') && script.includes('tug-agent'), "the UDP check must let this node's own running Tug agent keep its WireGuard port, so an install can be repeated");
+    assert.match(
+      script,
+      /--network host --cap-add NET_ADMIN/,
+      '--mesh runs the agent with host networking and NET_ADMIN',
+    );
+    assert.ok(
+      script.includes('tugwgtest type wireguard') && script.includes('udp.51820.free'),
+      '--mesh adds WireGuard kernel and UDP port preflight checks',
+    );
+    assert.ok(
+      script.includes('docker inspect --format') && script.includes('tug-agent'),
+      "the UDP check must let this node's own running Tug agent keep its WireGuard port, so an install can be repeated",
+    );
     assert.doesNotMatch(script, unrenderedVariable, 'no unrendered template variables');
 
-    const enroll = await cli('node-enroll', '--name', 'n-enr', '--mesh', '--control-url', controlUrl, '--http-only-dev');
-    assert.ok(enroll.stdout.includes(`'${defaultImage()}' agent`), 'node-enroll prints a docker run with the published image for the CLI version');
-    assert.match(enroll.stdout, /--network host --cap-add NET_ADMIN -e TUG_MESH=true/, 'node-enroll --mesh prints a mesh-capable docker run');
+    const enroll = await cli(
+      'node-enroll',
+      '--name',
+      'n-enr',
+      '--mesh',
+      '--control-url',
+      controlUrl,
+      '--http-only-dev',
+    );
+    assert.ok(
+      enroll.stdout.includes(`'${defaultImage()}' agent`),
+      'node-enroll prints a docker run with the published image for the CLI version',
+    );
+    assert.match(
+      enroll.stdout,
+      /--network host --cap-add NET_ADMIN -e TUG_MESH=true/,
+      'node-enroll --mesh prints a mesh-capable docker run',
+    );
 
-    const cloud = await cli('node-enroll', '--name', 'n-cloud', '--install-docker', '--mesh', '--json', '--http-only-dev');
+    const cloud = await cli(
+      'node-enroll',
+      '--name',
+      'n-cloud',
+      '--install-docker',
+      '--mesh',
+      '--json',
+      '--http-only-dev',
+    );
     const payload = JSON.parse(cloud.stdout);
-    assert.match(payload.command, /--network host --cap-add NET_ADMIN/, 'JSON enrollment should contain the directly usable agent command');
-    assert.match(payload.cloudInit, /^#cloud-config\n/, 'JSON bare-host enrollment should contain a complete cloud-init document');
+    assert.match(
+      payload.command,
+      /--network host --cap-add NET_ADMIN/,
+      'JSON enrollment should contain the directly usable agent command',
+    );
+    assert.match(
+      payload.cloudInit,
+      /^#cloud-config\n/,
+      'JSON bare-host enrollment should contain a complete cloud-init document',
+    );
     const cloudDocument = yaml.load(payload.cloudInit) as { runcmd: string[][] };
-    assert.ok(cloudDocument.runcmd[0][3].includes('&& docker run'), 'cloud-init must start the agent only if Docker installation succeeds');
+    assert.ok(
+      cloudDocument.runcmd[0][3].includes('&& docker run'),
+      'cloud-init must start the agent only if Docker installation succeeds',
+    );
 
     const composeFile = path.join(dir, 'app.yml');
-    await fs.writeFile(composeFile, yaml.dump({ services: { web: { image: 'busybox:latest', 'x-tug': { placement: { nodes: ['n-tpl'] } } } } }));
-    const deployment = await cli('deploy', '--version', 'display-version', '--project', 'after-command', '--file', composeFile, '--no-wait');
-    assert.equal(JSON.parse(deployment.stdout).deployment.version, 'display-version', 'deploy --version must reach the API as the display version rather than exit through the global package version option');
-    const before = await cli('--project', 'before-command', 'deploy', '--version', 'second-display', '--file', composeFile, '--no-wait');
-    assert.equal(JSON.parse(before.stdout).deployment.project, 'before-command', 'shared options before the command must use the same project resolution as shared options after it');
+    await fs.writeFile(
+      composeFile,
+      yaml.dump({
+        services: {
+          web: { image: 'busybox:latest', 'x-tug': { placement: { nodes: ['n-tpl'] } } },
+        },
+      }),
+    );
+    const deployment = await cli(
+      'deploy',
+      '--version',
+      'display-version',
+      '--project',
+      'after-command',
+      '--file',
+      composeFile,
+      '--no-wait',
+    );
+    assert.equal(
+      JSON.parse(deployment.stdout).deployment.version,
+      'display-version',
+      'deploy --version must reach the API as the display version rather than exit through the global package version option',
+    );
+    const before = await cli(
+      '--project',
+      'before-command',
+      'deploy',
+      '--version',
+      'second-display',
+      '--file',
+      composeFile,
+      '--no-wait',
+    );
+    assert.equal(
+      JSON.parse(before.stdout).deployment.project,
+      'before-command',
+      'shared options before the command must use the same project resolution as shared options after it',
+    );
     const packageVersion = await cli('--version');
-    assert.match(packageVersion.stdout, /^\d+\.\d+\.\d+/m, 'global --version must still print the CLI package version');
-  } finally { await new Promise(resolve => server.close(resolve)); }
+    assert.match(
+      packageVersion.stdout,
+      /^\d+\.\d+\.\d+/m,
+      'global --version must still print the CLI package version',
+    );
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
 });
