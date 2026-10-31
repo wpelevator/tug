@@ -7,8 +7,9 @@ import { validateImageArchive, verifyDownload } from './artifacts.ts';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import net from 'node:net';
-import { composeForNode, dumpYaml, serviceSecretVersions } from './compose.ts';
-import { ensureDir, errMessage, now } from './util.ts';
+import { composeForNode, dumpYaml, isRolling, serviceSecretVersions } from './compose.ts';
+import { activeRollingStates, composeBase, hasLegacyContainers, reconcileRolling, retireAll } from './rollout.ts';
+import { ensureDir, errMessage, now, parseDuration } from './util.ts';
 import { openAgentDb } from './db.ts';
 import type { AppliedStateRow, Db } from './db.ts';
 import { createDockerRunner, createHostRunner } from './runners.ts';
@@ -45,10 +46,12 @@ export interface AgentContext {
   /** Manage the WireGuard mesh (generate a key, report it, reconcile `wg0`). */
   mesh?: boolean;
   caddyImage?: string;
+  /** Host port range (`LOW-HIGH`) for rolling-rollout revisions; default 20000-20999. */
+  rolloutPorts?: string;
 }
 
 export function defaultContext(): AgentContext {
-  return { docker: createDockerRunner(), http: fetch, nodeName: NODE_NAME, stateDir: STATE_DIR, apply: APPLY, controlUrl: CONTROL_URL, token: TOKEN, host: createHostRunner(), mesh: MESH, caddyImage: process.env.TUG_CADDY_IMAGE };
+  return { docker: createDockerRunner(), http: fetch, nodeName: NODE_NAME, stateDir: STATE_DIR, apply: APPLY, controlUrl: CONTROL_URL, token: TOKEN, host: createHostRunner(), mesh: MESH, caddyImage: process.env.TUG_CADDY_IMAGE, rolloutPorts: process.env.TUG_ROLLOUT_PORTS };
 }
 
 const dbsByStateDir = new Map<string, Db>();
@@ -73,8 +76,11 @@ async function writeEnv(file: string, secrets: Record<string, string>): Promise<
   await fs.writeFile(file, body, { mode: 0o600 });
 }
 
-export async function containerIp(ctx: AgentContext, project: string, service: string, cwd: string): Promise<string> {
-  const ids = (await ctx.docker(['compose', '-p', project, 'ps', '-q', service], { cwd })).out.trim().split(/\s+/).filter(Boolean);
+/** `docker compose` prefix for a project; rolling revision projects pass their own Compose file. */
+const composeCmd = (project: string, cwd: string, composeFile?: string): string[] => composeFile ? composeBase(project, cwd, composeFile) : ['compose', '-p', project];
+
+export async function containerIp(ctx: AgentContext, project: string, service: string, cwd: string, composeFile?: string): Promise<string> {
+  const ids = (await ctx.docker([...composeCmd(project, cwd, composeFile), 'ps', '-q', service], { cwd })).out.trim().split(/\s+/).filter(Boolean);
   if (!ids.length) throw new Error(`${service}: no container found`);
   const inspected = JSON.parse((await ctx.docker(['inspect', ids[0]], { cwd })).out)[0];
   const networks: Record<string, { IPAddress?: string }> = inspected?.NetworkSettings?.Networks || {};
@@ -89,7 +95,7 @@ function tcpCheck(host: string, port: number | string, timeoutMs = 2000): Promis
   });
 }
 
-export async function waitForHealth(ctx: AgentContext, project: string, service: string, health: HealthCheck | null | undefined, cwd: string): Promise<void> {
+export async function waitForHealth(ctx: AgentContext, project: string, service: string, health: HealthCheck | null | undefined, cwd: string, composeFile?: string): Promise<void> {
   if (!ctx.apply || !health) return;
   const retries = Number(health.retries || 10);
   const intervalMs = parseDuration(health.interval || '2s');
@@ -97,30 +103,36 @@ export async function waitForHealth(ctx: AgentContext, project: string, service:
   for (let i = 0; i < retries; i++) {
     try {
       if (health.type === 'docker') {
-        const id = (await ctx.docker(['compose', '-p', project, 'ps', '-q', service], { cwd })).out.trim().split(/\s+/)[0];
+        const id = (await ctx.docker([...composeCmd(project, cwd, composeFile), 'ps', '-q', service], { cwd })).out.trim().split(/\s+/)[0];
         const state = JSON.parse((await ctx.docker(['inspect', id], { cwd })).out)[0]?.State;
         if (!state?.Running) throw new Error(`${service}: not running`);
         if (state.Health && state.Health.Status !== 'healthy') throw new Error(`${service}: docker health ${state.Health.Status}`);
       } else if (health.type === 'tcp') {
-        await tcpCheck(await containerIp(ctx, project, service, cwd), health.port as number | string, parseDuration(health.timeout || '2s'));
+        await tcpCheck(await containerIp(ctx, project, service, cwd, composeFile), health.port as number | string, parseDuration(health.timeout || '2s'));
       } else if (health.type === 'http') {
-        const ip = await containerIp(ctx, project, service, cwd);
+        const ip = await containerIp(ctx, project, service, cwd, composeFile);
         const res = await ctx.http(`http://${ip}:${health.port || 80}${health.path || '/'}`, { signal: AbortSignal.timeout(parseDuration(health.timeout || '2s')) });
         if (!res.ok) throw new Error(`${service}: http ${res.status}`);
       }
       return;
     } catch (e) { last = e; await new Promise(r => setTimeout(r, intervalMs)); }
   }
-  throw last || new Error(`${service}: health check failed`);
+  throw new Error(`${service}: ${describeHealthCheck(health)} failed after ${retries} attempt${retries === 1 ? '' : 's'}: ${describeError(last)}`);
 }
 
-export function parseDuration(value: string | number): number {
-  if (typeof value === 'number') return value;
-  const m = String(value).match(/^(\d+)(ms|s|m)?$/);
-  if (!m) return 2000;
-  const n = Number(m[1]);
-  return m[2] === 'm' ? n * 60000 : m[2] === 'ms' ? n : n * 1000;
+/** Node's fetch reports every network failure as "fetch failed"; the system error that explains it is on `cause`. */
+function describeError(error: unknown): string {
+  const e = error as { message?: string; cause?: { code?: string; message?: string } } | undefined;
+  const cause = e?.cause?.code || e?.cause?.message;
+  return cause ? `${e?.message ?? 'error'} (${cause})` : (e?.message ?? 'no response');
 }
+function describeHealthCheck(health: HealthCheck): string {
+  if (health.type === 'http') return `http health check on port ${health.port || 80}${health.path || '/'}`;
+  if (health.type === 'tcp') return `tcp health check on port ${health.port}`;
+  return 'docker health check';
+}
+
+export { parseDuration };
 
 export async function executeCommand(command: Command, ctx: AgentContext = defaultContext()): Promise<CommandResult> {
   const payload: { project: string; service: string; tail?: number | string; volume: string } =
@@ -239,7 +251,10 @@ export async function reconcile(desiredState: DesiredState, ctx: AgentContext = 
   await ensureDir(dir);
   const plannedCompose = composeForNode(desiredState, ctx.nodeName, {});
   const serviceNames = Object.keys(plannedCompose.services || {});
-  if (!serviceNames.length) return { project: desiredState.project, observedVersion: desiredState.version, ...(desiredState.revision ? { observedRevision: desiredState.revision } : {}), health: 'skipped', services: [], serviceStates: {} };
+  if (!serviceNames.length) {
+    if (ctx.apply) await retireAll(ctx, dir, desiredState).catch(() => {});
+    return { project: desiredState.project, observedVersion: desiredState.version, ...(desiredState.revision ? { observedRevision: desiredState.revision } : {}), health: 'skipped', services: [], serviceStates: {} };
+  }
   const serviceStates: Record<string, ServiceState> = Object.fromEntries(serviceNames.map(service => [service, { rolloutState: 'pending', image: desiredState.services[service]?.image }]));
   const emit = (service: string, rolloutState: string, message = rolloutState) => api(ctx, '/agent/v1/events', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ projectId: desiredState.project, level: 'info', type: `service.${rolloutState}`, message, metadata: { service, version: desiredState.version, node: ctx.nodeName } }) }).catch(() => {});
   const sec = await api<SecretsResponse>(ctx, `/agent/v1/secrets?project=${encodeURIComponent(desiredState.project)}&services=${encodeURIComponent(serviceNames.join(','))}`);
@@ -247,27 +262,57 @@ export async function reconcile(desiredState: DesiredState, ctx: AgentContext = 
   const db = await agentDb(ctx.stateDir);
   const previousRow = await db.get<AppliedStateRow>('SELECT version, revision, secret_versions_json FROM applied_state WHERE project = ?', desiredState.project);
   const previous: { version?: string; revision?: string | null; secretVersions?: Record<string, Record<string, number>> } = previousRow ? { version: previousRow.version, revision: previousRow.revision, secretVersions: JSON.parse(previousRow.secret_versions_json) } : {};
-  const secretChangedServices = serviceNames.filter(service => JSON.stringify(previous.secretVersions?.[service] || {}) !== JSON.stringify(currentSecretVersions[service] || {}));
+  const rolling = serviceNames.filter(service => isRolling(desiredState.compose.services[service]));
+  const rollingSet = new Set(rolling);
+  const mainServices = serviceNames.filter(service => !rollingSet.has(service));
+  const secretChangedServices = mainServices.filter(service => JSON.stringify(previous.secretVersions?.[service] || {}) !== JSON.stringify(currentSecretVersions[service] || {}));
   const sameDesiredVersion = desiredState.revision ? previous.revision === desiredState.revision : previous.version === desiredState.version;
-  const nodeCompose = composeForNode(desiredState, ctx.nodeName, sec.secrets || {}, endpoints);
+  // Rolling services run in their own revision projects; the main project holds only the recreated ones.
+  const nodeCompose = composeForNode(desiredState, ctx.nodeName, sec.secrets || {}, endpoints, rollingSet);
   await fs.writeFile(path.join(dir, 'docker-compose.yml'), dumpYaml(nodeCompose));
   await writeEnv(path.join(dir, '.env'), sec.secrets || {});
+  const failedStatus = (error: string): ProjectStatus => ({ project: desiredState.project, observedVersion: desiredState.version, ...(desiredState.revision ? { observedRevision: desiredState.revision } : {}), health: 'failed', services: serviceNames, serviceStates, error });
   if (ctx.apply) {
-    for (const service of serviceNames) { serviceStates[service].rolloutState = 'pulling'; await emit(service, 'pulling'); }
-    for (const service of serviceNames) { const artifact = desiredState.services[service].artifact; if (artifact) await ensureArtifact(ctx, artifact); }
-    const pullServices = serviceNames.filter(service => !desiredState.services[service].artifact);
-    if (pullServices.length) await ctx.docker(['compose', '-p', desiredState.project, 'pull', ...(pullServices.length === serviceNames.length ? [] : pullServices)], { cwd: dir });
-    for (const service of serviceNames) { serviceStates[service].rolloutState = 'starting'; await emit(service, 'starting'); }
-    await ctx.docker(['compose', '-p', desiredState.project, 'up', '-d', '--remove-orphans'], { cwd: dir });
-    if (sameDesiredVersion && secretChangedServices.length) {
-      for (const service of secretChangedServices) await emit(service, 'secret_recreate', 'secret version changed; recreating service');
-      await ctx.docker(['compose', '-p', desiredState.project, 'up', '-d', '--no-deps', '--force-recreate', ...secretChangedServices], { cwd: dir });
+    try {
+      for (const service of mainServices) { serviceStates[service].rolloutState = 'pulling'; await emit(service, 'pulling'); }
+      for (const service of mainServices) { const artifact = desiredState.services[service].artifact; if (artifact) await ensureArtifact(ctx, artifact); }
+      const pullServices = mainServices.filter(service => !desiredState.services[service].artifact);
+      if (pullServices.length) await ctx.docker(['compose', '-p', desiredState.project, 'pull', ...(pullServices.length === mainServices.length ? [] : pullServices)], { cwd: dir });
+      for (const service of mainServices) { serviceStates[service].rolloutState = 'starting'; await emit(service, 'starting'); }
+      if (mainServices.length) {
+        // Services that just became rolling still run here until their replacement takes over; keep them.
+        const keepLegacy = rolling.length > 0 && await hasLegacyContainers(ctx, desiredState.project, rolling);
+        await ctx.docker(['compose', '-p', desiredState.project, 'up', '-d', ...(keepLegacy ? [] : ['--remove-orphans'])], { cwd: dir });
+      }
+      if (sameDesiredVersion && secretChangedServices.length) {
+        for (const service of secretChangedServices) await emit(service, 'secret_recreate', 'secret version changed; recreating service');
+        await ctx.docker(['compose', '-p', desiredState.project, 'up', '-d', '--no-deps', '--force-recreate', ...secretChangedServices], { cwd: dir });
+      }
+      for (const service of mainServices) {
+        serviceStates[service].rolloutState = 'health_checking'; await emit(service, 'health_checking');
+        await waitForHealth(ctx, desiredState.project, service, desiredState.services[service]?.health, dir);
+        serviceStates[service].rolloutState = 'serving'; serviceStates[service].healthyAt = now(); await emit(service, 'serving');
+      }
+    } catch (e) {
+      // Rolling services are untouched by a failure here, so keep reporting their current revision as serving.
+      if (!rolling.length) throw e;
+      Object.assign(serviceStates, await activeRollingStates(dir, rolling));
+      return failedStatus(errMessage(e));
     }
-    for (const service of serviceNames) {
-      serviceStates[service].rolloutState = 'health_checking'; await emit(service, 'health_checking');
-      await waitForHealth(ctx, desiredState.project, service, desiredState.services[service]?.health, dir);
-      serviceStates[service].rolloutState = 'serving'; serviceStates[service].healthyAt = now(); await emit(service, 'serving');
-    }
+    if (rolling.length) {
+      const rolled = await reconcileRolling(ctx, {
+        desired: desiredState, dir, services: rolling, secretVersions: currentSecretVersions,
+        full: composeForNode(desiredState, ctx.nodeName, sec.secrets || {}, endpoints),
+        deps: {
+          waitForHealth: (project, service, composeFile) => waitForHealth(ctx, project, service, desiredState.services[service]?.health, dir, composeFile),
+          ensureArtifact: async service => { const artifact = desiredState.services[service].artifact; if (artifact) await ensureArtifact(ctx, artifact); },
+          emit
+        }
+      });
+      Object.assign(serviceStates, rolled.serviceStates);
+      const errors = Object.entries(rolled.errors);
+      if (errors.length) return failedStatus(errors.map(([service, error]) => `${service}: ${error}`).join('; '));
+    } else await retireAll(ctx, dir, desiredState);
   } else {
     for (const service of serviceNames) serviceStates[service].rolloutState = 'serving';
   }

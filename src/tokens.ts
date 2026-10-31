@@ -10,6 +10,8 @@ const RANK: Record<Role, number> = { read: 1, deploy: 2, admin: 3 };
 
 /** Name recorded in the audit trail for the root operator token. */
 export const OPERATOR_ACTOR = 'operator';
+/** Reserved actor for rollbacks control starts on its own. Token names cannot contain a colon, so no token can use it. */
+export const AUTO_ROLLBACK_ACTOR = 'system:auto-rollback';
 export const TOKEN_PREFIX = 'tug_tok';
 export const TOKEN_NAME_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$/;
 export const PROJECT_NAME_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/;

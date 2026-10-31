@@ -13,6 +13,7 @@ Deploy Docker Compose projects to one or more ordinary Linux VPSes through a sma
 - Build application images on control from uploaded source, or locally with `deploy --build-local`. Agents download saved images directly from control by default; a bring-your-own registry is optional.
 - Secrets encrypted at rest, released only to the nodes whose services reference them, with targeted service recreation when only a secret changes.
 - Deployment convergence, per-project operation locks, cancellation, rollback, per-service rollout events and log fetching through the agents.
+- Opt-in zero-downtime rolling rollouts for ingress-fronted services (`x-tug.rollout`) and automatic rollback of failed deployments (`x-tug.rollback: auto`). See [Compose extensions](docs/compose.md#rolling-rollouts).
 - Per-node registry pull tokens enforced by an htpasswd-backed registry you provide, with rotation and revocation.
 - Optional WireGuard mesh between nodes, health-aware cross-node service names and a managed Caddy ingress with automatic HTTPS, each opt-in. See [Networking](docs/networking.md).
 - Control-plane backup and restore, and `tug doctor` diagnostics.

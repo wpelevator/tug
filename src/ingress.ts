@@ -42,8 +42,10 @@ export function resolveServiceEndpoints(states: DesiredState[], nodes: NodeView[
         const node = byName.get(nodeName);
         const address = node && (node.overlayIp || node.address);
         if (!node || !address || !node.lastSeenAt || node.lastSeenAt < staleBefore) continue;
-        if (reported.get(`${nodeName}\0${state.project}`)?.serviceStates?.[service]?.rolloutState !== 'serving') continue;
-        endpoints.push({ node: nodeName, address });
+        const serviceState = reported.get(`${nodeName}\0${state.project}`)?.serviceStates?.[service];
+        if (serviceState?.rolloutState !== 'serving') continue;
+        // Rolling services publish each revision on its own host port; the report names the serving one.
+        endpoints.push({ node: nodeName, address, ...(serviceState.port ? { port: serviceState.port } : {}) });
       }
       if (endpoints.length) (out[state.project] ||= {})[service] = endpoints.sort((a, b) => a.node.localeCompare(b.node));
     }
@@ -82,7 +84,7 @@ export function buildIngressWork({ states, endpoints, node, secrets, acmeEmail }
     const tls: IngressTls = ingress.tls || 'auto';
     if (seenHosts.has(host)) { warnings.push(`${label}: host ${host} is already routed by ${seenHosts.get(host)}; skipped`); continue; }
     if (port == null) { warnings.push(`${label}: ingress.port ${ingress.port} is not published; skipped`); continue; }
-    const upstreams = (endpoints[project]?.[service] || []).map(e => `${e.node === node ? '127.0.0.1' : e.address}:${port}`);
+    const upstreams = (endpoints[project]?.[service] || []).map(e => `${e.node === node ? '127.0.0.1' : e.address}:${e.port ?? port}`);
     if (!upstreams.length) { warnings.push(`${label}: no serving upstream for ${host}; route withheld`); continue; }
     if (tls === 'custom') {
       const cert = secrets.get(`${project}/${ingress.cert}`); const key = secrets.get(`${project}/${ingress.key}`);

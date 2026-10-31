@@ -7,6 +7,7 @@ Tug deploys Docker Compose projects to one or more Docker hosts through a small 
 - **Control plane** (`src/control.ts`): an Express API backed by SQLite (`tug.db`) and an install-time master key (`master.key`) in `TUG_DATA_DIR`. It stores nodes, projects, deployments, desired states, encrypted secrets, volumes, queued commands, events, hashed API tokens and locks, and builds images from uploaded source tarballs or imports operator-built archives. With no registry configured it stores and serves compressed image artifacts; a configured registry remains supported.
 - **Access control** (`src/tokens.ts`): every operator route is declared once in a role table (`read`, `deploy`, `admin`) and passes through one guard that authenticates the bearer (the root operator token or a named API token, both by hash lookup), checks the role and the token's allowed projects, and attaches the acting token name that deployments and audit events record. Agents authenticate separately with per-node tokens. See [Access control](access-control.md).
 - **Agent** (`src/agent.ts`): runs on every node, polls `GET /agent/v1/work`, renders a per-node Compose file and `.env`, verifies/downloads/loads artifact-backed images, selectively pulls registry images and runs `docker compose up -d`, executes health checks, runs queued commands and reports back with `POST /agent/v1/status`. Agents only dial out to control, so nodes behind NAT or firewalls work.
+- **Rolling rollouts** (`src/rollout.ts`): the agent-side logic for services with `x-tug.rollout.strategy: rolling`: revision hashing, per-revision Compose projects, host port allocation, health-gated takeover, drain and crash recovery. `agent.ts` calls it from `reconcile`.
 - **CLI** (`src/cli.ts`): the `tug` command for operators. It talks to the control API and uses SSH only for `control-install` and `node-install`. See [CLI reference](cli.md).
 - **Networking** (`src/mesh.ts`, `src/ingress.ts`): optional WireGuard mesh, health-aware service endpoints and the managed Caddy edge. `mesh.ts` has overlay IP allocation, key handling, `wg` config rendering, peer diffing and the idempotent `wg0` reconcile; `ingress.ts` resolves service endpoints and ingress routes, renders the Caddyfile (control) and reconciles the Caddy container (agent). See [Networking](networking.md).
 - **Registry**: optional; bring your own to use registry pushes instead of saved-image delivery. Tug can manage per-node pull credentials for a registry that uses an htpasswd file. See [Control plane](control-plane.md#registry).
@@ -18,7 +19,7 @@ Tug deploys Docker Compose projects to one or more Docker hosts through a small 
 
 `tug deploy` sends the Compose file to control, which validates `x-tug` placement (see [Compose extensions](compose.md)), optionally builds images for services with `build:`, and stores an immutable desired-state record for the deployment. Each agent receives the desired states that place services on its node, applies them, and reports the observed display version, immutable desired-state revision and health per project. When every node assigned to the current deployment reports that revision as `serving` (or `skipped`), the deployment becomes `succeeded`; if one reports `failed`, the deployment becomes `failed`.
 
-Deploys, rollbacks, secret changes and data-deleting volume removals take a per-project operation lock, so concurrent operations on one project are rejected with `409`. Long builds renew the project lease and check ownership/cancellation before publication. Deploy publication, rollback and artifact backup/restore share an operation-lifetime writer queue. Rollback creates a new deployment and revision whose desired state copies the most recent earlier `succeeded` or `rolling_out` one.
+Deploys, rollbacks, secret changes and data-deleting volume removals take a per-project operation lock, so concurrent operations on one project are rejected with `409`. Long builds renew the project lease and check ownership/cancellation before publication. Deploy publication, rollback and artifact backup/restore share an operation-lifetime writer queue. Rollback creates a new deployment and revision whose desired state copies the most recent earlier `succeeded` or `rolling_out` one. With `x-tug.rollback: auto` control creates that rollback itself when a deployment turns `failed`; see [Rolling rollouts and automatic rollback](#rolling-rollouts-and-automatic-rollback).
 
 Restarts, log fetches, diagnostics and volume deletions are queued as commands for the node that runs the service; the agent picks them up on its next poll and posts results back.
 
@@ -144,6 +145,53 @@ sequenceDiagram
     CLI-->>Op: rollback deployment result
 ```
 
+## Rolling rollouts and automatic rollback
+
+Services are `recreate` by default: the agent renders the node Compose file and runs `docker compose up -d`, which replaces changed containers in place. A service with `x-tug.rollout.strategy: rolling` is taken out of the node's main project and rolled instead, one changed service at a time:
+
+```mermaid
+sequenceDiagram
+    participant Op as Operator / CI
+    participant Ctrl as Control plane
+    participant A as Agent (app node)
+    participant E as Agent (ingress node) + Caddy
+
+    Op->>Ctrl: POST /api/v1/deployments (web v2, rolling, rollback: auto)
+    Ctrl->>Ctrl: validate, store desired state, deployment rolling_out
+    A->>Ctrl: GET /agent/v1/work (desired state v2)
+    A->>A: hash the rendered service + its secret versions (new revision?)
+    A->>A: allocate a free host port, persist candidate in rollout.json
+    A->>A: docker compose -p proj-web-HASH up -d (old revision untouched)
+    A->>A: health check the new container
+    alt healthy
+        A->>A: active = new, old revision scheduled to drain
+        A->>Ctrl: POST /agent/v1/status (web serving, port 20001)
+        Ctrl->>Ctrl: endpoint port 20001, re-render Caddyfile, deployment succeeded
+        E->>Ctrl: GET /agent/v1/work (new Caddyfile)
+        E->>E: caddy reload (graceful, no dropped connections)
+        A->>A: a later poll, after the drain: remove the old revision
+    else health check fails or no free port
+        A->>A: remove the new revision, remember the failure for this desired revision
+        A->>Ctrl: POST /agent/v1/status (health failed, web still serving, old port)
+        Ctrl->>Ctrl: deployment failed, ingress keeps the old port
+        opt x-tug.rollback is auto and a previous succeeded deployment exists
+            Ctrl->>Ctrl: createRollback(), the same code as POST /api/v1/rollback, event deployment.auto_rollback
+            A->>A: desired state equals the revision still running, nothing restarts
+            A->>Ctrl: POST /agent/v1/status (rollback revision serving)
+            Ctrl->>Ctrl: rollback deployment succeeded
+        end
+    end
+```
+
+Rules the agent follows (`src/rollout.ts`):
+
+- A revision is identified by a hash of the rendered service (image id for built images, environment, `extra_hosts`, ports shape, volumes) and the versions of the secrets it references. The same hash means the revision is already running and nothing is restarted; a secret change rolls the service instead of force-recreating it.
+- Each revision is Compose project `<project>-<service>-<hash8>` with `--project-directory` set to the main project directory, attached to the main project's `default` network and named volumes as external resources (created if missing), with the single published port remapped to a free port from `TUG_ROLLOUT_PORTS`. The main project keeps only recreated services, so `--remove-orphans` on it never touches a revision.
+- State lives in `<state dir>/projects/<project>/rollout.json`: the active revision, a candidate (written before `up`, so a restarted agent resumes the same project and port instead of starting a second one), revisions waiting to drain with their deadline, and the last rejected revision per service so it is not retried on every poll. Drain deadlines are checked on every poll, so a drain never blocks the poll loop.
+- A failed health check, an exhausted port range or a failed start removes the candidate and leaves the active revision untouched. The node reports `health: failed` and the rejection reason, while the service state stays `serving` with the old port so control keeps routing to it. If a recreated service of the same project fails, rolling services keep being reported serving the same way.
+- Control resolves each endpoint's `port` from the service state, so the ingress follows takeovers without any ingress-specific agent protocol. Convergence is unchanged: `failed` still comes from a node reporting failed health for the current revision.
+- Automatic rollback runs on control right after the status update that moved a deployment from `rolling_out` to `failed`. `scheduleAutoRollback` works in the background so a busy writer queue never blocks status reports, skips rollback deployments (their versions start with the reserved `rollback-`), requires the failed deployment to still be current, and takes the writer queue and project lock like a manual rollback. On a rolling node the previous revision is still running, so applying the rollback restarts nothing; other nodes recreate as usual.
+
 ## Networking
 
 With `TUG_MESH=true`, `GET /agent/v1/work` also returns a `network` block (this node's overlay IP and every other node's WireGuard peer), `serviceEndpoints` (serving endpoints per service for injecting `extra_hosts`) and, for nodes marked as ingress nodes, an `ingress` block with the rendered Caddyfile. Agents report their public key with `POST /agent/v1/wireguard/key` (or `wgPublicKey` at enrollment) and ingress state in the status report. Control stores overlay IPs in `nodes.overlay_ip` and keys in `wg_peers`. See [Networking](networking.md) for the model and the mesh/ingress sequence diagram.
@@ -166,6 +214,8 @@ Agents write generated state under `TUG_STATE_DIR` (default `/var/lib/tug`):
 /var/lib/tug/ingress/                                  # ingress nodes only: applied Caddy config and its hash
 /var/lib/tug/projects/<project>/docker-compose.yml
 /var/lib/tug/projects/<project>/.env
+/var/lib/tug/projects/<project>/rollout.json               # rolling services: active/candidate/draining revisions and the last rejected one
+/var/lib/tug/projects/<project>/rollout/<revision>.yml     # rolling services: Compose file of each running revision
 ```
 
 When agents enroll via `node-enroll`, mount the state directory as a named volume (`-v tug-agent:/var/lib/tug`) so `agent.json` survives container recreation and the agent does not re-enroll after an image update or reboot.

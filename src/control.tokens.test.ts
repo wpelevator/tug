@@ -52,6 +52,7 @@ test('named tokens are created once, listed without secrets, unique, validated a
     assert.equal(duplicate.status, 409, 'token names must be unique');
     for (const [body, pattern] of [
       [{ name: 'bad name', role: 'read' }, /token name/], [{ name: '', role: 'read' }, /token name/], [{ name: 'operator', role: 'read' }, /reserved/],
+      [{ name: 'system:auto-rollback', role: 'read' }, /token name/],
       [{ name: 'x', role: 'root' }, /role must be/], [{ name: 'x', role: 'admin', projects: ['a'] }, /cannot be limited/],
       [{ name: 'x', role: 'read', projects: [] }, /projects must be/], [{ name: 'x', role: 'read', projects: ['../etc'] }, /projects must be/],
       [{ name: 'x', role: 'read', expiresInSeconds: 0 }, /expiresInSeconds/]

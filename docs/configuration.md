@@ -48,6 +48,7 @@ CLI options override environment variables, which override the selected config f
 | `TUG_POLL_INTERVAL_MS` | `5000` | Poll interval. |
 | `TUG_APPLY` | `true` | Set `false` to render files and report without touching Docker. |
 | `TUG_MESH` | `false` | Set `true` to generate a WireGuard key, report it and reconcile `wg0`. Needs `wg`, `ip`, host networking and `NET_ADMIN`. |
+| `TUG_ROLLOUT_PORTS` | `20000-20999` | Host port range (`LOW-HIGH`) for revisions of rolling services; each running or draining revision uses one port. |
 | `TUG_CADDY_IMAGE` | `caddy:2-alpine` | Image for the managed Caddy container on ingress nodes. |
 | `NODE_EXTRA_CA_CERTS` | unset | Extra CA for a control plane with a private certificate. |
 

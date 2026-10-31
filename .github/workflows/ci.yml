@@ -82,3 +82,19 @@ jobs:
           runtime: true
           fake-vps: true
       - run: npm run test:integration:no-registry
+
+  integration-rollout:
+    name: Integration (rolling rollouts)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TUG_COMPOSE_BUILD: ''
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+      - uses: ./.github/actions/build-images
+        with:
+          runtime: true
+          fake-vps: true
+          registry: true
+      - run: npm run test:integration:rollout

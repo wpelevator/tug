@@ -70,7 +70,7 @@ A `read` or `deploy` token created with `--project` may only act on those projec
 
 ## Audit trail
 
-Every deployment and every control event records the acting token name, `operator` for the root token. `tug events` and `GET /api/v1/events` return it as `actor`, and deployment records (`GET /api/v1/deployments/:id`, `tug status`) carry it as `actor`. Control actions write events of these types: `deploy`, `rollback`, `cancel`, `restart`, `secret.set`, `secret.delete`, `token.create` and `token.revoke`. Events never contain secret values or token secrets. Events written by agents have no `actor`. Control events that belong to no project (token changes) show up in `tug events --all`.
+Every deployment and every control event records the acting token name, `operator` for the root token. `tug events` and `GET /api/v1/events` return it as `actor`, and deployment records (`GET /api/v1/deployments/:id`, `tug status`) carry it as `actor`. Control actions write events of these types: `deploy`, `rollback`, `cancel`, `restart`, `secret.set`, `secret.delete`, `token.create` and `token.revoke`. Events never contain secret values or token secrets. Rollbacks that control starts by itself (`x-tug: { rollback: auto }`, see [Compose extensions](compose.md#automatic-rollback)) and their `deployment.auto_rollback` events are attributed to the reserved actor `system:auto-rollback`; token names cannot contain a colon, so no token can use it. Events written by agents have no `actor`. Control events that belong to no project (token changes) show up in `tug events --all`.
 
 ## Managing tokens
 

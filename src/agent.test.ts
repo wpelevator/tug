@@ -187,6 +187,17 @@ test('http health: follows the container IP and honours the status code', async 
   assert.equal(urls[0], 'http://10.1.2.3:80/', 'defaults to port 80 and path /');
 });
 
+test('a failed http health check names the check, the attempts and the network error behind "fetch failed"', async () => {
+  const d = fakeDocker(args => args[0] === 'inspect' ? inspectJson({ Running: true }, '10.1.2.3') : 'cid1\n');
+  const refused = (async () => { throw Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error('connect ECONNREFUSED 10.1.2.3:8081'), { code: 'ECONNREFUSED' }) }); }) as HttpClient;
+  const ctx = await makeCtx({ docker: d.docker, http: refused });
+  await assert.rejects(
+    waitForHealth(ctx, 'proj', 'web', { type: 'http', port: 8081, path: '/', ...fastRetry }, '/tmp'),
+    /web: http health check on port 8081\/ failed after 3 attempts: fetch failed \(ECONNREFUSED\)/,
+    'an operator reading a rejected rollout must see which check failed and why, not just "fetch failed"'
+  );
+});
+
 test('tcp health: connects to the container IP and port', async () => {
   const server = net.createServer(s => s.end());
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
