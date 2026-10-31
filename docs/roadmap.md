@@ -28,9 +28,13 @@ Automatic rollback: convergence in `control.ts` already detects a node reporting
 
 ### M4 — Setup friction: images without a registry, bare-host install
 
-Registry: `--registry` is mandatory today. Make it optional by having `control install` run an internal registry by default (control already runs Docker and manages htpasswd per-node tokens), keeping bring-your-own as an option. Later, consider agent-to-agent image streaming over the mesh, matching uncloud's unregistry.
+Registry: a registry is only needed for services with `build:` (published images are pulled from their own source), but `control install` requires `--registry` today. Make it optional: when no registry is configured, control keeps each built image as a compressed `docker save` file recorded in the `builds` table, and agents download it from a new agent endpoint (for example `GET /agent/v1/images/:buildId`, served only to nodes that run the service) and `docker load` it when it is missing locally, with `pull_policy: never` on those services in the generated Compose file. Bring-your-own registry stays supported for teams that already run one.
 
-Local builds: allow `tug deploy --build-local` to build on the operator's machine and push to the control registry, alongside the existing remote build on control.
+Why not an internal registry container: Docker only pulls from HTTPS registries unless every node's daemon lists the registry as insecure, and control installs over plain HTTP by default, so a Tug-run registry would need certificates or per-node daemon changes. Downloading from control reuses the agent's existing token and TLS trust, needs nothing new on the nodes, and keeps agents dial-out only, so nodes behind NAT still work.
+
+Image files on control are kept for every version that rollback can still reach and deleted after that; agents prune old images the same way. The trade-off is that each deploy transfers the whole image with no layer reuse. If that becomes costly, a later step is for control to serve the read-only registry API from its own image store (as uncloud's unregistry does), so agents pull only missing layers.
+
+Local builds: allow `tug deploy --build-local` to build on the operator's machine and upload the saved image to control, which stores and serves it the same way, alongside the existing remote build on control.
 
 Bare hosts: add an opt-in Docker Engine + Compose install step to `node install` and `control install`, and an `--install-docker` flag on `node enroll` that prints a cloud-init/user-data snippet, so a bare VPS becomes a working node in one step.
 
@@ -81,8 +85,11 @@ Rough parity with uncloud after M2 + M3 + M4 + M5. M3's automatic rollback and M
 - [ ] M3 rolling deploys with ingress upstream switching
 - [ ] M3 `x-tug.rollout` options, `recreate` default for stateful services
 - [ ] M3 opt-in automatic rollback on failed health
-- [ ] M4 internal registry by default in `control install`, bring-your-own still supported
-- [ ] M4 `deploy --build-local` push to control registry
+- [ ] M4 spec written (`plan-no-registry.md`)
+- [ ] M4 `--registry` optional; built images stored on control and downloaded by agents, bring-your-own registry still supported
+- [ ] M4 image file retention tied to rollback history, and image pruning on agents
+- [ ] M4 `deploy --build-local` uploads the saved image to control
+- [ ] M4 later, if transfer size matters: control serves the read-only registry API for layer reuse
 - [ ] M4 opt-in Docker install for `node install`/`control install` and `node enroll --install-docker` cloud-init
 - [ ] M5 spec written (`plan-agent-stream.md`)
 - [ ] M5 agent-initiated persistent channel (WebSocket, long-poll fallback), dial-out only
