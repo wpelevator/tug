@@ -46,12 +46,23 @@ test('endpoints fall back to the node address without a mesh and skip unreachabl
   assert.deepEqual(eps.blog.web, [{ node: 'app1', address: '192.168.1.5' }], 'node with no overlay or address cannot be an endpoint');
 });
 
-test('ingress routes use loopback for the local node and overlay addresses for remote ones', () => {
+test('ingress dials a local service on its bound address when other nodes also reach it, and remote ones on their overlay address', () => {
   const eps = { blog: { web: [{ node: 'app1', address: '10.210.0.4' }, { node: 'app22', address: '10.210.0.5' }] } };
-  const work = buildIngressWork({ states: [state()], endpoints: eps, node: 'app1', secrets: new Map() });
-  assert.deepEqual(work.routes, [{ project: 'blog', service: 'web', host: 'app.example.com', tls: 'auto', upstreams: ['127.0.0.1:8080', '10.210.0.5:8080'] }], 'container port 80 resolves to published 8080');
-  assert.equal(work.caddyfile, `app.example.com {\n\treverse_proxy 127.0.0.1:8080 10.210.0.5:8080 {\n\t\tlb_policy round_robin\n\t}\n}\n`);
+  const work = buildIngressWork({ states: [state()], endpoints: eps, node: 'app1', nodes: ['app1', 'app22', 'dbnode'], ingressNodes: ['app1'], secrets: new Map() });
+  assert.deepEqual(work.routes, [{ project: 'blog', service: 'web', host: 'app.example.com', tls: 'auto', upstreams: ['10.210.0.4:8080', '10.210.0.5:8080'] }], 'web runs on two nodes, so its port is bound to the overlay address and the local upstream uses it too; container port 80 resolves to published 8080');
+  assert.equal(work.caddyfile, `app.example.com {\n\treverse_proxy 10.210.0.4:8080 10.210.0.5:8080 {\n\t\tlb_policy round_robin\n\t}\n}\n`, 'the Caddyfile lists the same upstreams');
   assert.deepEqual(work.warnings, []);
+});
+
+test('ingress dials 127.0.0.1 for a service whose ingress port listens on loopback on the ingress node', () => {
+  const local: ComposeFile = { services: { web: { image: 'nginx', ports: ['8080:80'], 'x-tug': { placement: { nodes: ['edge'] }, ingress: { host: 'app.example.com', port: 80 } } } } };
+  const eps = { blog: { web: [{ node: 'edge', address: '10.210.0.4' }] } };
+  const work = buildIngressWork({ states: [state(local)], endpoints: eps, node: 'edge', nodes: ['edge', 'app'], ingressNodes: ['edge'], secrets: new Map() });
+  assert.deepEqual(work.routes[0].upstreams, ['127.0.0.1:8080'], 'a project wholly on the only ingress node is reached on loopback, where its port is bound');
+  const twoEdges = buildIngressWork({ states: [state(local)], endpoints: eps, node: 'edge', nodes: ['edge', 'edge2'], ingressNodes: ['edge', 'edge2'], secrets: new Map() });
+  assert.deepEqual(twoEdges.routes[0].upstreams, ['10.210.0.4:8080'], 'with a second ingress node the port is bound to the overlay address, so the local Caddy dials that too');
+  const v6 = buildIngressWork({ states: [state()], endpoints: { blog: { web: [{ node: 'app22', address: 'fd00::5' }] } }, node: 'edge', nodes: ['edge', 'app1', 'app22', 'dbnode'], ingressNodes: ['edge'], secrets: new Map() });
+  assert.deepEqual(v6.routes[0].upstreams, ['[fd00::5]:8080'], 'an IPv6 node address is bracketed in the upstream');
 });
 
 test('routes without serving upstreams are withheld with a warning', () => {

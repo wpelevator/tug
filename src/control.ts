@@ -18,7 +18,7 @@ import * as tar from 'tar';
 import { openDb } from './db.ts';
 import type { CommandRow, DeploymentRow, DesiredStateRow, EnrollTokenRow, LockRow, NodeRow, ProjectRow, SecretRow, WgPeerRow } from './db.ts';
 import { encrypt, decrypt, loadOrCreateMasterKey } from './secrets.ts';
-import { buildDesiredState, serviceSecretNames, validateCompose } from './compose.ts';
+import { buildDesiredState, loopbackIngressServices, serviceSecretNames, validateCompose } from './compose.ts';
 import { buildAndPush, unpackContext, run as runCommand } from './build.ts';
 import { ensureDir, errMessage, hashToken, id, now, token } from './util.ts';
 import { DEFAULT_MESH_CIDR, DEFAULT_WG_PORT, WG_INTERFACE, WG_KEEPALIVE, allocateOverlayIp, isWgKey, parseCidr, wgEndpoint } from './mesh.ts';
@@ -28,7 +28,7 @@ import { ACTIVE_DEPLOYMENT_STATES, LIVE_MAX_FRAME_BYTES, LIVE_MAX_BUFFERED_BYTES
 import { AUTO_ROLLBACK_ACTOR, ROUTE_ROLES, PROJECT_NAME_PATTERN, authenticate, hasRole, assertProject, bodyProject, createGuard, createToken, listTokens, parseTokenRequest, queryProject, recordEvent, revokeToken } from './tokens.ts';
 import type { Actor, ProjectResolver, RouteRole } from './tokens.ts';
 import type {
-  LiveRequest, LiveInput, OperatorLiveMessage, ImageArtifact, LocalImageUpload, AgentEvent, CommandResult, CommandType, ComposeFile, DesiredState, EnrollRequest, EnrollResponse, NetworkConfig, NodeInfo,
+  LiveRequest, LiveInput, OperatorLiveMessage, ImageArtifact, LocalImageUpload, AgentEvent, CommandResult, CommandType, ComposeFile, DesiredState, EnrollRequest, EnrollResponse, NetworkConfig, NodeInfo, PortBinding,
   RegisterResponse, SecretsResponse, ServiceEndpoints, StatusReport, StreamMessage, WakeResponse, WgKeyRequest, WorkResponse
 } from './protocol.ts';
 
@@ -1144,6 +1144,22 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
       peers: peers.map(p => ({ node: p.name, publicKey: p.public_key, endpoint: p.endpoint ?? undefined, allowedIps: p.allowed_ips.split(','), persistentKeepalive: WG_KEEPALIVE }))
     };
   }
+  /** Names of all nodes and of the ingress nodes, for port binding and upstream decisions. */
+  async function nodeTopology(): Promise<{ nodes: string[]; ingressNodes: string[] }> {
+    const rows = await db.all<Pick<NodeRow, 'name' | 'ingress'>[]>('SELECT name,ingress FROM nodes ORDER BY name');
+    return { nodes: rows.map(r => r.name), ingressNodes: rows.filter(r => r.ingress).map(r => r.name) };
+  }
+  /** Where this node's published ports listen: the address other nodes and the ingress reach it on, or loopback. */
+  async function portBindingFor(node: NodeRow, states: DesiredState[]): Promise<PortBinding> {
+    const hasKey = MESH && node.overlay_ip && await db.get('SELECT 1 FROM wg_peers WHERE node_id=?', node.id);
+    const { nodes, ingressNodes } = await nodeTopology();
+    const loopback: Record<string, string[]> = {};
+    for (const state of states) {
+      const services = loopbackIngressServices(state, node.name, ingressNodes, nodes);
+      if (services.length) loopback[state.project] = services;
+    }
+    return { address: (hasKey ? node.overlay_ip : node.address) || null, loopback };
+  }
   async function ingressFor(node: NodeRow, states: DesiredState[]) {
     const secrets = new Map<string, string>();
     for (const state of states) {
@@ -1156,7 +1172,7 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
         }
       }
     }
-    return buildIngressWork({ states, endpoints: await endpointsFor(states), node: node.name, secrets, acmeEmail: ACME_EMAIL });
+    return buildIngressWork({ states, endpoints: await endpointsFor(states), node: node.name, ...(await nodeTopology()), secrets, acmeEmail: ACME_EMAIL });
   }
 
   get('/agent/v1/wake', authAgent, async (req, res) => {
@@ -1176,6 +1192,7 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
     const work: WorkResponse = { serverTime: now(), nodeId: node.id, desiredStates, commands, retainedImages };
     const network = await networkFor(node);
     if (network) work.network = network;
+    work.ports = await portBindingFor(node, desiredStates);
     if (SERVICE_DNS) {
       const all = await endpointsFor(allStates);
       work.serviceEndpoints = Object.fromEntries(desiredStates.map(st => [st.project, all[st.project] || {}]));

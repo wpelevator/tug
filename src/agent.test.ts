@@ -322,7 +322,8 @@ test('executeCommand drives docker for restart, logs, volume delete and diagnost
   const diag = await executeCommand({ id: 'c4', type: 'diagnostics.run', payload_json: '{}' }, ctx);
   assert.equal(diag.state, 'succeeded');
   assert.deepEqual((diag.result as { node: string }).node, 'n1');
-  assert.deepEqual(d.commands().slice(-3), ['info', 'version', 'compose version']);
+  assert.deepEqual(d.commands().slice(-4, -1), ['info', 'version', 'compose version'], 'diagnostics query docker, its version and compose');
+  assert.match(d.commands().at(-1) || '', /^ps --filter label=com.docker.compose.project/, 'diagnostics finish by listing Compose containers for the public-port check');
 });
 
 test('executeCommand tolerates a missing volume, reports failing diagnostics, rejects unknown types', async () => {

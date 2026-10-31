@@ -36,7 +36,8 @@ test('with every networking layer off, the work response and node info are uncha
     const reg = await s.register('n1', { wgPublicKey: undefined });
     assert.equal(reg.node.overlay_ip, null, 'no overlay address is allocated');
     const w = await s.work(reg.agentToken);
-    assert.deepEqual(Object.keys(w).sort(), ['commands', 'desiredStates', 'nodeId', 'retainedImages', 'serverTime'], 'no network, serviceEndpoints or ingress keys');
+    assert.deepEqual(Object.keys(w).sort(), ['commands', 'desiredStates', 'nodeId', 'ports', 'retainedImages', 'serverTime'], 'no network, serviceEndpoints or ingress keys');
+    assert.deepEqual(w.ports, { address: null, loopback: {} }, 'a node without an address or mesh key binds published ports to loopback');
     assert.equal((await s.post('/agent/v1/wireguard/key', { publicKey: generateWgKeyPair().publicKey }, s.agent(reg.agentToken))).status, 409, 'key endpoint refuses when the mesh is off');
     assert.equal((await s.post('/api/v1/nodes/n1/rotate-wg-key', {})).status, 409, 'rotation refuses when the mesh is off');
   } finally { await s.close(); }
@@ -173,6 +174,27 @@ test('ingress works without the mesh using node addresses, and ingress status is
     await s.post('/agent/v1/status', { node: 'edge', projects: [], commandResults: [], ingress: { state: 'serving', configHash: 'h', routes: 1 } }, s.agent(edge.agentToken));
     assert.equal((await diag()).ok, true, 'doctor passes once the edge reports serving');
   } finally { await s.close(); }
+});
+
+test('the work response tells each node where to bind published ports', async () => {
+  const s = await server({ TUG_MESH: 'true' });
+  try {
+    const edge = await s.register('edge', { address: '203.0.113.9', wgPublicKey: generateWgKeyPair().publicKey });
+    const app = await s.register('app', { address: '203.0.113.10', wgPublicKey: generateWgKeyPair().publicKey });
+    const keyless = await s.register('keyless', { address: '192.168.1.7' });
+    await s.post('/api/v1/nodes/edge/ingress', { enabled: true });
+    const site = { services: { web: { ...stack.services.web, 'x-tug': { ...stack.services.web['x-tug'], placement: { nodes: ['edge'] } } } } };
+    await s.post('/api/v1/deployments', { project: 'site', version: 'v1', compose: site });
+    await s.post('/api/v1/deployments', { project: 'blog', version: 'v1', compose: stack });
+    assert.deepEqual((await s.work(edge.agentToken)).ports, { address: edge.node.overlay_ip, loopback: { site: ['web'] } }, 'with the mesh the edge binds to its overlay IP, and a project wholly on the only ingress node puts its ingress port on loopback');
+    assert.deepEqual((await s.work(app.agentToken)).ports, { address: app.node.overlay_ip, loopback: {} }, 'a non-ingress node binds to its overlay IP, not its public address');
+    assert.deepEqual((await s.work(keyless.agentToken)).ports, { address: '192.168.1.7', loopback: {} }, 'a node that has not reported a WireGuard key binds to its address, matching its service endpoint');
+  } finally { await s.close(); }
+  const plain = await server();
+  try {
+    const n = await plain.register('n1', { address: '203.0.113.20' });
+    assert.deepEqual((await plain.work(n.agentToken)).ports, { address: '203.0.113.20', loopback: {} }, 'without the mesh a node binds to its address (the agent warns when it is public)');
+  } finally { await plain.close(); }
 });
 
 test('deploy rejects invalid ingress annotations and custom TLS without its secrets', async () => {

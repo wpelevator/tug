@@ -8,6 +8,8 @@ Three independent, opt-in layers let services on different hosts find each other
 | B. Service DNS | Services on other nodes resolve by name to their node's overlay IP, only while healthy | on by default with the mesh; `TUG_SERVICE_DNS` on control overrides |
 | C. Ingress and TLS | A managed Caddy on an ingress node routes hostnames to services anywhere, with automatic HTTPS | `tug node-ingress <node>` plus `x-tug.ingress` on a service |
 
+Independently of the layers, [published ports are private by default](#published-ports-private-by-default): Tug binds them to the address other nodes and the ingress use, never to every interface unless you wrote that.
+
 ## Layer A: WireGuard mesh
 
 Control owns addressing. When `TUG_MESH=true`, registering or enrolling a node allocates a stable `nodes.overlay_ip` from `TUG_MESH_CIDR` (default `10.210.0.0/16`, first free host address; re-registering keeps it). The default does not overlap the integration subnet `10.89.240.0/24`, Docker's default `172.16.0.0/12` pools or the usual home and VPN ranges; pick another CIDR if it collides with a network you route to. The mesh needs at least a `/29`.
@@ -46,7 +48,7 @@ When service DNS is on (default with the mesh; force with `TUG_SERVICE_DNS=true|
 
 Consequences:
 
-- The name resolves to the node's address, not the container. The target service must publish its port (`ports: ["3306:3306"]`) and clients connect to the published host port. Rolling services are the exception, see [Rolling services and service names](#rolling-services-and-service-names).
+- The name resolves to the node's address, not the container. The target service must publish its port (`ports: ["3306:3306"]`) and clients connect to the published host port. Tug binds that port to the same address the name resolves to ([Published ports](#published-ports-private-by-default)), so it is not on the internet. Rolling services are the exception, see [Rolling services and service names](#rolling-services-and-service-names).
 - `/etc/hosts` has no load balancing: most resolvers use the first entry, so multi-node services give failover on node loss rather than round robin. Real load balancing is a non-goal.
 - Records appear after the target reports `serving` and the client's node re-renders its Compose file on its next poll, which recreates the client container if its `extra_hosts` changed. Order dependent services with health checks and expect one extra recreate on first deploy.
 
@@ -71,11 +73,11 @@ services:
 
 `tug node-ingress edge1` marks a node as an ingress node (`--disable` removes the role). `port` may be the container port or the published host port; control resolves it to the published host port, and `validateCompose` rejects an ingress port that is not published, because the edge reaches services on `<node address>:<published port>`.
 
-Caddy dials `127.0.0.1` for a service on the ingress node and the node's overlay address (or `address`, without the mesh) for every other node. A port published as `8080:80` listens on every interface, so the app is also on the public IP, next to Caddy and without TLS. Bind `127.0.0.1:8080:80` for a service on the ingress node, and `<overlay ip>:8080:80` for a service on another node, when that exposure is not what you want. The overlay address is the node's `overlay_ip`; it is not filled in for you, and a re-registered node can get a different one.
+Caddy dials each upstream where its port is bound ([Published ports](#published-ports-private-by-default)): `127.0.0.1` for a service whose ingress port listens on loopback on the ingress node, otherwise the node's overlay address (or `address`, without the mesh), including for services on the ingress node itself.
 
 Control aggregates the `ingress` blocks of every project's current deployment, and for each ingress node renders:
 
-- one site block per host with `reverse_proxy` to every serving endpoint, using `127.0.0.1` for services on the ingress node itself and the overlay (or plain node) address for the rest;
+- one site block per host with `reverse_proxy` to every serving endpoint, using `127.0.0.1` for loopback-bound services on the ingress node and the overlay (or plain node) address for the rest;
 - no route at all for a host without a serving upstream (reported in `ingress.warnings` rather than serving errors), and only the first project for a host claimed twice;
 - with `TUG_ACME_EMAIL`, a global `email` for ACME registration.
 
@@ -90,6 +92,33 @@ The agent on an ingress node creates the `tug-caddy` container with host network
 For services with `x-tug.rollout.strategy: rolling`, the upstream port is the one the serving revision reports instead of the declared published port (see below).
 
 Ingress works without the mesh: upstreams then use each node's `address`, which must be reachable from the ingress node.
+
+## Published ports: private by default
+
+A `ports` entry such as `"3306:3306"` would listen on every interface of the node, and Docker's iptables rules bypass host firewalls such as ufw, so the port would be on the internet unless a provider firewall blocks it. Tug therefore rewrites every `ports` entry that names no host IP in the per-node Compose file:
+
+| Situation | Bound to |
+|---|---|
+| Mesh on and the node has reported its WireGuard key | the node's overlay IP |
+| The service's ingress port, when only the managed Caddy on this node dials it | `127.0.0.1` |
+| Otherwise | the node's `address` (a warning event when it is public) |
+| The node has no `address` and no mesh key | `127.0.0.1` |
+
+The address is always the one other nodes resolve the service to and the ingress dials, so cross-node service names and upstreams keep working.
+
+"Only the managed Caddy on this node" means: this node is the only ingress node, the service runs on it, and every service of the project runs only on nodes where this service also runs, so no other node reaches it through a service name. That is the [small reference topology](roadmap.md#reference-topology) (app, database and Caddy on one node). Only the entry that publishes `x-tug.ingress.port` moves to loopback; other ports of the service follow the rest of the table.
+
+Details:
+
+- Short syntax gets the address prefixed (`10.210.0.2:3306:3306`, `10.210.0.2:5353:53/udp`, `10.210.0.2:8000-8010:8000-8010`); a container-only entry such as `"80"` becomes `10.210.0.2::80`, and an IPv6 address is bracketed. Long syntax gets `host_ip`.
+- An entry that already names a host IP is left exactly as written, including `0.0.0.0` and `[::]`. That is how you publish something on purpose: `"0.0.0.0:2222:22"`.
+- Control sends the binding in the work response (`ports`, `PortBinding` in `src/protocol.ts`): the address and, per project, the loopback services. A hostname `address` is resolved on the node, only when some port of the project binds to it; if it does not resolve the project fails to apply rather than falling back to every interface. The address must belong to one of the node's interfaces, otherwise Docker cannot bind it (`cannot assign requested address`). On a cloud VM whose public IP is 1:1 NAT (not on an interface), register the private address, or use the mesh.
+- Without the mesh and with a public `address`, ports are bound to that public address and the agent sends one `ports.public` warning event naming the services (again whenever the set changes). Turn on the mesh, register a private `address`, or write the host IP in `ports` to make the exposure explicit.
+- Rolling revisions keep the host IP when their host port is remapped, so revision ports (`TUG_ROLLOUT_PORTS`) are bound the same way.
+- With the mesh, ports bind to the address on `wg0`. After a host reboot Docker may try to start containers before the agent has brought `wg0` up; those fail to bind and the agent's next `docker compose up -d` starts them.
+- `tug doctor --nodes` runs a `ports.public` check on every agent: it lists containers of Tug projects (and their rolling revisions) listening on `0.0.0.0`, `::` or a public IP. It is a warning, not a failure, because an explicit `0.0.0.0` may be intended.
+
+M12 (container networking over the mesh) will remove most published ports for internal traffic.
 
 ## Rolling services and service names
 

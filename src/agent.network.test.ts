@@ -120,6 +120,6 @@ test('wg.rotate-key generates a new keypair, reports the public key and succeeds
 test('diagnostics include WireGuard checks only when the mesh is enabled', async () => {
   const h = harness(() => ({}));
   const names = async (ctx: AgentContext) => ((await executeCommand({ id: 'd', type: 'diagnostics.run' }, ctx)).result as { checks: { name: string }[] }).checks.map(c => c.name);
-  assert.deepEqual(await names(await makeCtx(h)), ['docker.info', 'docker.version', 'docker.compose.version', 'wireguard.version', 'wireguard.interface']);
-  assert.deepEqual(await names(await makeCtx(h, { mesh: false })), ['docker.info', 'docker.version', 'docker.compose.version']);
+  assert.deepEqual(await names(await makeCtx(h)), ['docker.info', 'docker.version', 'docker.compose.version', 'wireguard.version', 'wireguard.interface', 'ports.public'], 'mesh agents add the WireGuard checks before the public-port check');
+  assert.deepEqual(await names(await makeCtx(h, { mesh: false })), ['docker.info', 'docker.version', 'docker.compose.version', 'ports.public'], 'without the mesh there are no WireGuard checks');
 });

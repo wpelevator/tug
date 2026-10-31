@@ -139,7 +139,8 @@ export interface Command {
   updated_at?: string;
 }
 
-export interface DiagnosticCheck { name: string; ok: boolean; stdout?: string; stderr?: string; error?: string }
+/** One diagnostic result; `warning` flags something to look at that does not fail the check. */
+export interface DiagnosticCheck { name: string; ok: boolean; stdout?: string; stderr?: string; error?: string; warning?: string }
 
 export type CommandResultPayload =
   | { checks: DiagnosticCheck[]; node: string }
@@ -212,6 +213,19 @@ export interface WorkResponse {
   serviceEndpoints?: ServiceEndpoints;
   /** Edge proxy config; present only for nodes marked as ingress nodes. */
   ingress?: IngressWork;
+  /** Host addresses for published ports that name no host IP. */
+  ports?: PortBinding;
+}
+
+/**
+ * Where a node's published ports listen when a `ports` entry names no host IP. Entries with an
+ * explicit host IP (including `0.0.0.0`) are never changed.
+ */
+export interface PortBinding {
+  /** The node's overlay IP with the mesh, otherwise its `address` (an IP or a hostname the agent resolves); null binds to `127.0.0.1`. */
+  address: string | null;
+  /** Per project, services whose ingress port only the managed Caddy on this node dials; that port binds to `127.0.0.1`. */
+  loopback: Record<string, string[]>;
 }
 
 // ---- Networking: WireGuard mesh, service DNS, ingress ------------------------------------------

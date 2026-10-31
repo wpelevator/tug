@@ -7,15 +7,17 @@ import { validateImageArchive, verifyDownload } from './artifacts.ts';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import net from 'node:net';
+import dns from 'node:dns/promises';
 import { WebSocket } from 'ws';
 import { createHash } from 'node:crypto';
-import { composeForNode, dumpYaml, isRolling, serviceSecretVersions } from './compose.ts';
+import { addressBoundServices, composeForNode, dumpYaml, isRolling, serviceSecretVersions } from './compose.ts';
+import type { PortBind } from './compose.ts';
 import { LIVE_MAX_FRAME_BYTES, LIVE_START_TIMEOUT_MS } from './protocol.ts';
 import type { AgentLiveCommand, AgentLiveFrame, LiveRequest as ProtocolLiveRequest } from './protocol.ts';
 import { LiveOperationEngine } from './live.ts';
 import type { LiveEngineOptions } from './live.ts';
 import { loadRolloutState, activeRollingStates, composeBase, hasLegacyContainers, reconcileRolling, retireAll } from './rollout.ts';
-import { ensureDir, errMessage, now, parseDuration } from './util.ts';
+import { ensureDir, errMessage, isPublicAddress, now, parseDuration } from './util.ts';
 import { openAgentDb } from './db.ts';
 import type { AppliedStateRow, Db, EventStateRow } from './db.ts';
 import { createDockerRunner, createHostRunner } from './runners.ts';
@@ -24,7 +26,7 @@ import { CADDY_CONTAINER, reconcileIngress, removeIngress } from './ingress.ts';
 import { WG_INTERFACE, ensureWgKeys, readReportedKey, reconcileMesh, rotateWgKeys, writeReportedKey } from './mesh.ts';
 import type {
   Command, CommandResult, DesiredState, DiagnosticCheck, EnrollResponse, HealthCheck, IngressStatus, JoinKey, ProjectStatus,
-  ImageArtifact, SecretsResponse, ServiceEndpoint, ServiceState, StatusReport, WakeResponse, WorkResponse
+  ImageArtifact, PortBinding, SecretsResponse, ServiceEndpoint, ServiceState, StatusReport, WakeResponse, WorkResponse
 } from './protocol.ts';
 
 const CONTROL_URL_FROM_ENV = Boolean(process.env.TUG_CONTROL_URL);
@@ -372,6 +374,37 @@ function describeHealthCheck(health: HealthCheck): string {
 
 export { parseDuration };
 
+export interface PublicListener { project: string; container: string; listen: string }
+
+/**
+ * Containers of Tug projects (`projects`, plus their rolling revision projects `<project>-…`) that
+ * listen on all interfaces or on a public IP, from `docker ps --format '{{.Label "com.docker.compose.project"}}\t{{.Names}}\t{{.Ports}}'`.
+ */
+export function publicListeners(psOutput: string, projects: readonly string[]): PublicListener[] {
+  const out: PublicListener[] = [];
+  for (const line of psOutput.split('\n')) {
+    const [project, container, ports = ''] = line.split('\t');
+    if (!project || !projects.some(p => project === p || project.startsWith(`${p}-`))) continue;
+    for (const m of ports.matchAll(/(\[[0-9a-fA-F:.]+\]|[0-9a-fA-F:.]+):(\d+(?:-\d+)?)->(\S+?)(?:,|$)/g)) {
+      if (isPublicAddress(m[1])) out.push({ project, container, listen: `${m[1]}:${m[2]}->${m[3]}` });
+    }
+  }
+  return out;
+}
+
+/** `ports.public` diagnostic: a warning, not a failure, since an operator may publish on purpose with an explicit host IP. */
+async function publicPortsCheck(ctx: AgentContext): Promise<DiagnosticCheck> {
+  try {
+    const projects = await fs.readdir(path.join(ctx.stateDir, 'projects')).catch(() => [] as string[]);
+    const ps = await ctx.docker(['ps', '--filter', 'label=com.docker.compose.project', '--format', '{{.Label "com.docker.compose.project"}}\t{{.Names}}\t{{.Ports}}']);
+    const listeners = publicListeners(ps.out, projects);
+    const stdout = listeners.map(l => `${l.project}\t${l.container}\t${l.listen}`).join('\n');
+    return listeners.length
+      ? { name: 'ports.public', ok: true, stdout: stdout.slice(-4000), warning: `${listeners.length} published port${listeners.length === 1 ? ' of Tug projects listens' : 's of Tug projects listen'} on a public address; bind them to 127.0.0.1, the overlay IP or a private address unless that is intended` }
+      : { name: 'ports.public', ok: true, stdout: 'no Tug project container listens on a public address' };
+  } catch (e) { return { name: 'ports.public', ok: false, error: errMessage(e).slice(-4000) }; }
+}
+
 export async function executeCommand(command: Command, ctx: AgentContext = defaultContext()): Promise<CommandResult> {
   const payload: { project: string; service: string; tail?: number | string; volume: string } =
     typeof command.payload_json === 'string' ? JSON.parse(command.payload_json || '{}') : command.payload || {};
@@ -401,6 +434,7 @@ export async function executeCommand(command: Command, ctx: AgentContext = defau
       try { const result = await fn(); checks.push({ name, ok: true, stdout: result.out.slice(-4000), stderr: result.err.slice(-4000) }); }
       catch (e) { checks.push({ name, ok: false, error: errMessage(e).slice(-4000) }); }
     }
+    checks.push(await publicPortsCheck(ctx));
     return { commandId: command.id, state: checks.every(c => c.ok) ? 'succeeded' : 'failed', result: { checks, node: ctx.nodeName } };
   }
   if (command.type === 'service.restart') {
@@ -484,7 +518,22 @@ export async function pruneManagedImages(ctx: AgentContext, retained: string[]):
   await fs.writeFile(await managedImageFile(ctx), JSON.stringify(remaining), { mode: 0o600 });
 }
 
-export async function reconcile(desiredState: DesiredState, ctx: AgentContext = defaultContext(), endpoints: Record<string, ServiceEndpoint[]> = {}): Promise<ProjectStatus> {
+/**
+ * The IP that published ports without a host IP listen on: `127.0.0.1` when the node has no
+ * address, the address itself when it is an IP, otherwise what it resolves to on this node.
+ */
+export async function resolveBindAddress(address: string | null, lookup: (host: string) => Promise<{ address: string }> = host => dns.lookup(host)): Promise<string> {
+  if (!address) return '127.0.0.1';
+  const bare = address.replace(/^\[|\]$/g, '');
+  if (net.isIP(bare)) return bare;
+  try { return (await lookup(bare)).address; }
+  catch (e) { throw new Error(`cannot resolve node address ${address} to bind published ports: ${errMessage(e)}`, { cause: e }); }
+}
+
+// Last public-port warning per project, so the event is sent when it changes rather than on every poll.
+const publicPortWarnings = new Map<string, string>();
+
+export async function reconcile(desiredState: DesiredState, ctx: AgentContext = defaultContext(), endpoints: Record<string, ServiceEndpoint[]> = {}, ports: PortBinding = { address: null, loopback: {} }): Promise<ProjectStatus> {
   const dir = path.join(ctx.stateDir, 'projects', desiredState.project);
   await ensureDir(dir);
   const plannedCompose = composeForNode(desiredState, ctx.nodeName, {});
@@ -506,7 +555,12 @@ export async function reconcile(desiredState: DesiredState, ctx: AgentContext = 
   const secretChangedServices = mainServices.filter(service => JSON.stringify(previous.secretVersions?.[service] || {}) !== JSON.stringify(currentSecretVersions[service] || {}));
   const sameDesiredVersion = desiredState.revision ? previous.revision === desiredState.revision : previous.version === desiredState.version;
   // Rolling services run in their own revision projects; the main project holds only the recreated ones.
-  const nodeCompose = composeForNode(desiredState, ctx.nodeName, sec.secrets || {}, endpoints, rollingSet);
+  const loopback = new Set(ports.loopback[desiredState.project] || []);
+  // Resolve only when some port actually binds to the node address; a hostname nobody needs must not fail the apply.
+  const needsAddress = addressBoundServices(desiredState.compose, serviceNames, loopback).length > 0;
+  const bind: PortBind = { address: needsAddress ? await resolveBindAddress(ports.address) : '127.0.0.1', loopback };
+  const nodeCompose = composeForNode(desiredState, ctx.nodeName, { secrets: sec.secrets || {}, endpoints, exclude: rollingSet, bind });
+  await warnPublicPorts(ctx, desiredState, serviceNames, bind);
   await fs.writeFile(path.join(dir, 'docker-compose.yml'), dumpYaml(nodeCompose));
   await writeEnv(path.join(dir, '.env'), sec.secrets || {});
   const failedStatus = (error: string): ProjectStatus => ({ project: desiredState.project, observedVersion: desiredState.version, ...(desiredState.revision ? { observedRevision: desiredState.revision } : {}), health: 'failed', services: serviceNames, serviceStates, error });
@@ -557,7 +611,7 @@ export async function reconcile(desiredState: DesiredState, ctx: AgentContext = 
     if (rolling.length) {
       const rolled = await reconcileRolling(ctx, {
         desired: desiredState, dir, services: rolling, secretVersions: currentSecretVersions,
-        full: composeForNode(desiredState, ctx.nodeName, sec.secrets || {}, endpoints),
+        full: composeForNode(desiredState, ctx.nodeName, { secrets: sec.secrets || {}, endpoints, bind }),
         deps: {
           waitForHealth: (project, service, composeFile) => waitForHealth(ctx, project, service, desiredState.services[service]?.health, dir, composeFile),
           ensureArtifact: async service => { const artifact = desiredState.services[service].artifact; if (artifact) await ensureArtifact(ctx, artifact); },
@@ -579,6 +633,17 @@ export async function reconcile(desiredState: DesiredState, ctx: AgentContext = 
     desiredState.project, desiredState.version, desiredState.revision || null, now(), JSON.stringify(serviceStates), JSON.stringify(currentSecretVersions)
   );
   return { project: desiredState.project, observedVersion: desiredState.version, ...(desiredState.revision ? { observedRevision: desiredState.revision } : {}), health: 'serving', services: serviceNames, serviceStates };
+}
+
+/** Emits a `ports.public` warning when published ports of this project are bound to a public node address. */
+async function warnPublicPorts(ctx: AgentContext, desiredState: DesiredState, serviceNames: string[], bind: PortBind): Promise<void> {
+  const key = `${ctx.stateDir}\0${desiredState.project}`;
+  const exposed = isPublicAddress(bind.address) ? addressBoundServices(desiredState.compose, serviceNames, bind.loopback) : [];
+  const message = exposed.length ? `published ports of ${exposed.join(', ')} listen on public address ${bind.address}; enable the mesh, give the node a private address, or write the host IP in ports to make the exposure explicit` : '';
+  if ((publicPortWarnings.get(key) ?? '') === message) return;
+  publicPortWarnings.set(key, message);
+  if (!message) return;
+  await api(ctx, '/agent/v1/events', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ projectId: desiredState.project, level: 'warn', type: 'ports.public', message, metadata: { services: exposed, address: bind.address, node: ctx.nodeName } }) }).catch(() => {});
 }
 
 /** Reports this node's WireGuard public key when control has not seen the current one yet. */
@@ -609,7 +674,7 @@ export async function pollOnce(ctx: AgentContext = defaultContext()): Promise<Pr
   }
   const projects: ProjectStatus[] = [];
   for (const desired of work.desiredStates || (work.desiredState ? [work.desiredState] : [])) {
-    try { projects.push(await reconcile(desired, ctx, work.serviceEndpoints?.[desired.project])); }
+    try { projects.push(await reconcile(desired, ctx, work.serviceEndpoints?.[desired.project], work.ports)); }
     catch (e) { projects.push({ project: desired.project, observedVersion: desired.version, ...(desired.revision ? { observedRevision: desired.revision } : {}), health: 'failed', error: errMessage(e) }); }
   }
   let ingress: IngressStatus | undefined;

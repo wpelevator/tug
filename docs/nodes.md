@@ -11,6 +11,8 @@ tug node-install root@app1.example.com --name app1 --address 10.0.0.11 \
 
 This registers the node with control (issuing an agent token and a registry pull token), runs SSH preflight checks, pulls the Tug image on the host (by default `ghcr.io/wpelevator/tug:<CLI version>`; see [Image](#image)), writes `/etc/tug/agent.env`, runs `docker login` against `--registry` if given, and starts the agent container.
 
+`--address` is where other nodes and the ingress reach this node's services without the mesh, and the address its published ports bind to ([Published ports](networking.md#published-ports-private-by-default)); give an IP on one of the host's interfaces, preferably a private one. `--public-address` is only the WireGuard endpoint.
+
 A registry is optional: built application images are downloaded directly from control when it has no registry configured. Published images still come from their original registries. Pass `--registry <host>` only when the host needs Tug's per-node registry login.
 
 Preflight checks fail early, with a fix hint, unless the host has Docker Engine accessible to the SSH user, Docker Compose v2, writable `/opt`, `/var/lib` and `/etc/tug` paths, at least 1024 MB free under `/var/lib`, and can reach `<control-url>/healthz`. The control URL must be `https://` unless you pass `--http-only-dev` for local or private development.

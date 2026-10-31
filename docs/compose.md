@@ -1,6 +1,6 @@
 # Compose extensions
 
-Tug deploys standard Docker Compose files with an `x-tug` extension on services and volumes for placement and health checks. Control generates a per-node Compose file containing only the services and volumes placed on that node, with `x-tug`, `build`, `deploy` and `container_name` removed (and `extra_hosts` added for services on other nodes) and `image` set to the built or declared image.
+Tug deploys standard Docker Compose files with an `x-tug` extension on services and volumes for placement and health checks. Control generates a per-node Compose file containing only the services and volumes placed on that node, with `x-tug`, `build`, `deploy` and `container_name` removed (and `extra_hosts` added for services on other nodes) and `image` set to the built or declared image. Published `ports` without a host IP are bound to the node's overlay IP, `127.0.0.1` or the node's `address` instead of every interface; write the host IP (for example `"0.0.0.0:80:80"`) to publish on purpose. See [Published ports](networking.md#published-ports-private-by-default).
 
 ## Services
 
@@ -45,7 +45,7 @@ services:
         tls: auto            # auto | custom | off
 ```
 
-Services that run on a different node than a given service are reachable from it by name (`db` or `db.<project>.tug`) when the mesh and service DNS are on, as long as the target publishes its port. Control injects these names into the per-node Compose file as `extra_hosts`; see [Networking](networking.md#layer-b-service-dns).
+Services that run on a different node than a given service are reachable from it by name (`db` or `db.<project>.tug`) when the mesh and service DNS are on, as long as the target publishes its port (Tug binds it to the overlay address, not the internet). Control injects these names into the per-node Compose file as `extra_hosts`; see [Networking](networking.md#layer-b-service-dns).
 
 Services with `build:` are built by control from the uploaded source tarball, or on the operator machine with `deploy --build-local`. Each build receives an immutable tag distinct from the display version, so reusing a version label does not replace rollback images. Without `TUG_REGISTRY`, agents download saved images from control and generated Compose forces `pull_policy: never` for those services, overriding a source pull policy. With a registry configured, agents pull the pushed images. Published `image:` services retain their normal registry source. `--no-build-upload` with `build:` requires an explicitly configured registry and an existing image at `<registry>/<project>/<service>:<version>`; without a registry, send a source context or use local builds. Uploaded source contexts must contain regular files/directories within the build root; symlinks and escaping build paths are rejected.
 
