@@ -516,6 +516,32 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
   }
   function sendError(res: Response, e: unknown): void { const err = e as HttpError; res.status(restartRequired ? 503 : err.status || 500).json({ error: err.message, lock: err.lock || undefined }); }
 
+  api('post', '/api/v1/scale', null, async (req, res) => {
+    const project = req.body?.project; const service = req.body?.service; const replicas = Number(req.body?.replicas);
+    if (!project || !service || !Number.isInteger(replicas) || replicas < 1) throw httpError(400, 'project, service and a positive integer replicas are required');
+    assertProject(req.actor!, project);
+    const dsRow = await currentDesired(project);
+    if (!dsRow) throw httpError(404, `project ${project} has no desired state`);
+    const state: DesiredState = JSON.parse(dsRow.state_json);
+    if (!state.services?.[service]) throw httpError(404, `service ${service} not found in project ${project}`);
+    const nodeRows = await db.all<NodeRow[]>("SELECT name,labels_json,last_seen_at FROM nodes ORDER BY created_at,name");
+    const nodeInfos = nodeRows.filter(row => !isStale(row)).map(row => ({ name: row.name, labels: row.labels_json ? JSON.parse(row.labels_json) as string[] : [] }));
+    const composeSvc = state.compose?.services?.[service] || {};
+    const ext = composeSvc['x-tug'] || {};
+    const placement = ext.placement || {};
+    const global = ext.global === true || placement.global === true;
+    const labels = Array.isArray(placement.labels) ? placement.labels : [];
+    const matched = nodeInfos.filter(node => labels.every(label => node.labels.includes(label)));
+    const pool = labels.length ? matched : nodeInfos;
+    if (!pool.length) throw httpError(400, labels.length ? 'no healthy nodes match the service placement labels' : 'no nodes available for scaling');
+    const selected = global ? pool : pool.slice(0, Math.min(replicas, pool.length));
+    state.services[service].placement = { ...(state.services[service].placement || {}), nodes: selected.map(node => node.name) };
+    state.services[service].replicas = selected.length;
+    state.revision = id('rev');
+    await db.run('UPDATE desired_states SET state_json=? WHERE id=?', JSON.stringify(state), dsRow.id);
+    await wakeAll(project);
+    res.json({ ok: true, project, service, replicas: selected.length, nodes: selected.map(node => node.name) });
+  });
   get('/healthz', (req, res) => res.json({ ok: true }));
 
   api('post', '/api/v1/projects', req => String(req.body?.name || 'site'), async (req, res) => {
@@ -525,7 +551,9 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
   });
   api('get', '/api/v1/projects/:project', req => req.params.project, async (req, res) => res.json(await db.get('SELECT * FROM projects WHERE id=?', req.params.project)));
 
-  const NODE_INFO_SQL = 'SELECT id,name,address,public_address,overlay_ip,status,created_at,updated_at FROM nodes WHERE id=?';
+  /** A node whose agent has been seen before but not within TUG_STALE_SECONDS; never-seen (just registered) nodes stay schedulable. */
+  const isStale = (row: { last_seen_at: string | null }) => !!row.last_seen_at && Date.parse(row.last_seen_at) < Date.now() - Number(process.env.TUG_STALE_SECONDS || 60) * 1000;
+  const NODE_INFO_SQL = 'SELECT id,name,address,public_address,overlay_ip,labels_json,status,created_at,updated_at FROM nodes WHERE id=?';
 
   /** Allocates the node's stable overlay IP on first registration (retrying if a concurrent register took it). */
   async function ensureOverlayIp(nodeId: string): Promise<void> {
@@ -551,22 +579,24 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
       nodeId, key, node.overlay_ip, wgEndpoint(node.public_address, WG_PORT) ?? null, `${node.overlay_ip}/32`, now());
   }
 
-  async function registerNode({ name, address, publicAddress, wgPublicKey }: { name: string; address?: string; publicAddress?: string; wgPublicKey?: string }): Promise<RegisterResponse> {
+  async function registerNode({ name, address, publicAddress, wgPublicKey, labels }: { name: string; address?: string; publicAddress?: string; wgPublicKey?: string; labels?: string[] }): Promise<RegisterResponse> {
     if (wgPublicKey !== undefined && !isWgKey(wgPublicKey)) throw httpError(400, 'wgPublicKey must be a base64 WireGuard public key');
     const agentToken = token('tug_agent'); const registryToken = token('tug_reg'); const ts = now();
-    await db.run(`INSERT INTO nodes(id,name,address,public_address,status,agent_token_hash,registry_token_hash,created_at,updated_at)
-      VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,address=excluded.address,public_address=excluded.public_address,agent_token_hash=excluded.agent_token_hash,registry_token_hash=excluded.registry_token_hash,updated_at=excluded.updated_at`,
-      name, name, address || null, publicAddress || null, 'registered', hashToken(agentToken), hashToken(registryToken), ts, ts);
+    await db.run(`INSERT INTO nodes(id,name,address,public_address,status,labels_json,agent_token_hash,registry_token_hash,created_at,updated_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,address=excluded.address,public_address=excluded.public_address,labels_json=excluded.labels_json,agent_token_hash=excluded.agent_token_hash,registry_token_hash=excluded.registry_token_hash,updated_at=excluded.updated_at`,
+      name, name, address || null, publicAddress || null, 'registered', JSON.stringify(Array.isArray(labels) ? labels : []), hashToken(agentToken), hashToken(registryToken), ts, ts);
     await ensureOverlayIp(name);
     await syncWgPeer(name, wgPublicKey);
     await upsertRegistryCredential(name, registryToken);
     await wakeAll();
-    const node = (await db.get<NodeInfo>(NODE_INFO_SQL, name))!;
+    const row = await db.get<NodeRow>(NODE_INFO_SQL, name);
+    if (!row) throw httpError(500, 'node not found after registration');
+    const node: NodeInfo = { id: row.id, name: row.name, address: row.address, public_address: row.public_address, overlay_ip: row.overlay_ip, labels: row.labels_json ? JSON.parse(row.labels_json) as string[] : [], status: row.status, created_at: row.created_at, updated_at: row.updated_at };
     return { node, agentToken, registryToken };
   }
   api('post', '/api/v1/nodes/register', null, async (req, res) => {
     const name = req.body.name; if (!name) return res.status(400).json({ error: 'name required' });
-    try { res.json(await registerNode({ name, address: req.body.address, publicAddress: req.body.publicAddress, wgPublicKey: req.body.wgPublicKey })); }
+    try { res.json(await registerNode({ name, address: req.body.address, publicAddress: req.body.publicAddress, wgPublicKey: req.body.wgPublicKey, labels: req.body.labels })); }
     catch (e) { sendError(res, e); }
   });
 
@@ -594,7 +624,7 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
     const name = row.name || body.name;
     if (!name) return res.status(400).json({ error: 'node name required (bind one to the enroll token or send name)' });
     let result: RegisterResponse;
-    try { result = await registerNode({ name, address: body.address, publicAddress: body.publicAddress, wgPublicKey: body.wgPublicKey }); }
+    try { result = await registerNode({ name, address: body.address, publicAddress: body.publicAddress, wgPublicKey: body.wgPublicKey, labels: body.labels }); }
     catch (e) { return sendError(res, e); }
     const remaining = row.uses_remaining - 1;
     if (remaining < 1) await db.run('DELETE FROM enroll_tokens WHERE token_hash=?', hashToken(raw));
@@ -602,7 +632,10 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
     const enrolled: EnrollResponse = { ...result, registry: REGISTRY };
     res.json(enrolled);
   });
-  api('get', '/api/v1/nodes', null, async (req, res) => res.json({ nodes: await db.all('SELECT id,name,address,public_address,overlay_ip,ingress,ingress_status_json,status,last_seen_at,created_at,updated_at FROM nodes ORDER BY name') }));
+  api('get', '/api/v1/nodes', null, async (req, res) => {
+    const rows = await db.all<NodeRow[]>('SELECT id,name,address,public_address,overlay_ip,ingress,ingress_status_json,status,labels_json,last_seen_at,created_at,updated_at FROM nodes ORDER BY name');
+    res.json({ nodes: rows.map(row => { const { labels_json, ...rest } = row; return { ...rest, labels: labels_json ? JSON.parse(labels_json) as string[] : [] }; }) });
+  });
   api('post', '/api/v1/nodes/:name/rotate-registry-token', null, async (req, res) => {
     const node = await db.get('SELECT id,name FROM nodes WHERE name=? OR id=?', req.params.name, req.params.name);
     if (!node) return res.status(404).json({ error: 'node not found' });
@@ -632,6 +665,26 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
     const node = await findNode(req.params.name);
     if (!node) return res.status(404).json({ error: 'node not found' });
     res.json({ commandId: await queueCommand(node.id, null, 'wg.rotate-key'), nodeId: node.id });
+  });
+  // Removes a retired node: its token, WireGuard peer, statuses and queued commands. Refused while a current deployment still places
+  // something on it (redeploy without it first) or while its agent is still reporting, unless force=true.
+  api('delete', '/api/v1/nodes/:name', null, async (req, res) => {
+    const node = await db.get<Pick<NodeRow, 'id' | 'name' | 'last_seen_at'>>('SELECT id,name,last_seen_at FROM nodes WHERE name=? OR id=?', req.params.name, req.params.name);
+    if (!node) return res.status(404).json({ error: 'node not found' });
+    const referenced: string[] = [];
+    for (const state of await currentDesiredStates()) {
+      for (const [name, svc] of Object.entries(state.services || {})) if (svc.placement?.nodes?.includes(node.name)) referenced.push(`${state.project}/${name}`);
+      for (const [name, vol] of Object.entries(state.compose?.volumes || {})) if (vol?.['x-tug']?.placement?.nodes?.includes(node.name)) referenced.push(`${state.project}/volume ${name}`);
+    }
+    if (referenced.length) return res.status(409).json({ error: `node ${node.name} is still placed in current deployments: ${referenced.join(', ')}; deploy without it first` });
+    if (node.last_seen_at && !isStale(node) && String(req.query.force) !== 'true') return res.status(409).json({ error: `node ${node.name} is still reporting; stop its agent first or pass force=true` });
+    await db.run('DELETE FROM commands WHERE node_id=?', node.id);
+    await db.run('DELETE FROM node_statuses WHERE node_id=?', node.id);
+    await db.run('DELETE FROM wg_peers WHERE node_id=?', node.id);
+    await db.run('DELETE FROM nodes WHERE id=?', node.id);
+    await audit(req.actor!, { type: 'node.removed', message: `node ${node.name} removed`, metadata: { node: node.name } });
+    await wakeAll();
+    res.json({ ok: true, node: node.name });
   });
   api('post', '/api/v1/nodes/:name/ingress', null, async (req, res) => {
     const node = await findNode(req.params.name);
@@ -746,7 +799,36 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
       assertProject(req.actor!, project);
       if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(project) || typeof version !== 'string' || !version.length) throw httpError(400, 'invalid project or version');
       if (version.startsWith(ROLLBACK_VERSION_PREFIX)) throw httpError(400, `version cannot start with "${ROLLBACK_VERSION_PREFIX}" (reserved for rollback deployments)`);
-      const nodes = await db.all<{ name: string }[]>('SELECT name FROM nodes ORDER BY created_at,name');
+      const nodeRows = await db.all<NodeRow[]>('SELECT name,labels_json,last_seen_at,created_at FROM nodes ORDER BY created_at,name');
+      // Stale nodes (agent not seen recently) are not scheduled onto, so a dead host cannot hold a rollout open.
+      const nodeInfos = nodeRows.filter(row => !isStale(row)).map(row => ({ name: row.name, labels: row.labels_json ? JSON.parse(row.labels_json) as string[] : [], created_at: row.created_at }));
+      // Resolve label-based and global placement into concrete node lists before validation.
+      for (const svc of Object.values(compose.services || {})) {
+        const ext = (svc['x-tug'] ||= {}) as { placement?: { nodes?: string[]; labels?: string[]; global?: boolean }; replicas?: number; global?: boolean };
+        const placement = ext.placement || {};
+        const global = ext.global === true || placement.global === true;
+        const labels = Array.isArray(placement.labels) ? placement.labels : [];
+        if (!placement.nodes?.length && (labels.length || global)) {
+          const matched = nodeInfos.filter(node => labels.every(label => node.labels.includes(label))).sort((a, b) => a.name.localeCompare(b.name));
+          if (!matched.length) throw httpError(400, 'no nodes match placement labels');
+          let selected = matched;
+          if (!global) {
+            const replicas = ext.replicas || matched.length;
+            if (!Number.isInteger(replicas) || replicas < 1) throw httpError(400, 'replicas must be a positive integer');
+            selected = matched.slice(0, Math.min(replicas, matched.length));
+          }
+          ext.placement = { ...placement, nodes: selected.map(node => node.name) };
+          ext.replicas = selected.length;
+        }
+      }
+      const nodes = nodeRows.map(row => ({ name: row.name }));
+      for (const vol of Object.values(compose.volumes || {})) {
+        const xe = vol?.['x-tug'];
+        if (!xe || (xe.type !== 'nfs' && xe.driver !== 'nfs') || xe.address || !xe.placement?.nodes?.[0]) continue;
+        const exporter = await db.get<{ address: string | null; overlay_ip: string | null }>('SELECT address,overlay_ip FROM nodes WHERE name=?', xe.placement.nodes[0]);
+        const addr = (MESH && exporter?.overlay_ip) || exporter?.address;
+        if (addr) xe.address = addr;
+      }
       try { validateCompose(compose, nodes.map(n => n.name)); } catch (e) { throw httpError(400, errMessage(e)); }
       const builtServices = Object.entries(compose.services).filter(([, service]) => service.build).map(([name]) => name);
       const local: LocalImageUpload[] | undefined = body.localImages;

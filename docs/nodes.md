@@ -71,6 +71,10 @@ It adds Docker's official apt or dnf repository, installs Engine, Buildx and the
 
 `node-install --build-local-image` is for development: it builds the image from the current checkout, copies it to the host with `docker save` / `scp` / `docker load` and runs it, tagging it `tug:local` unless `--image` is also given. It needs a Tug checkout (the Dockerfile) in the working directory. See [Releases](releases.md) for how images are published.
 
+## Node labels
+
+`node-install`, `node-enroll` and `node-register` accept a repeatable `--label <label>`. Labels are plain tags stored on the node and listed by the node list API; services select nodes with `x-tug.placement.labels` (see [Compose extensions](compose.md#services)). Re-registering a node replaces its labels.
+
 ## Joining the WireGuard mesh
 
 Add `--mesh` to `node-install` or `node-enroll` (and set `TUG_MESH=true` on control) to run the agent with host networking and `NET_ADMIN`, so it can create `wg0` and join the overlay. Give nodes that other nodes must dial a `--public-address`; nodes behind NAT can omit it. See [Networking](networking.md).

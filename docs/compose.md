@@ -22,6 +22,8 @@ services:
 ```
 
 - `placement.nodes`: node names that run the service. Required on every service when more than one node is registered. With a single node, services without placement go to that node.
+- `placement.labels`: node labels (tags) that select the nodes running the service. Nodes must carry all listed labels. Combined with `replicas: N`, the control plane spreads the service across N matching nodes; `global: true` runs one replica on every matching node. Nodes whose agent has not been seen within `TUG_STALE_SECONDS` are skipped when labels or `global` are resolved (at deploy and on `tug scale`), so a dead host cannot hold a rollout open. Explicit `placement.nodes` still pins a service to named nodes.
+- `global`: run one replica on every node matching `placement.labels` (or every node when no labels are given).
 - `replicas`: optional; in this version it must equal the number of placement nodes (one container per node).
 - `ingress`: publishes the service on a hostname through the managed Caddy edge (see [Networking](networking.md#layer-c-ingress-and-tls)). `host` is a fully qualified hostname, unique across the file; `port` is the service's container port or published host port and must appear in `ports`; `tls` is `auto` (default, ACME), `custom` or `off`. `tls: custom` also needs `cert` and `key`, the names of project secrets holding the PEM certificate chain and private key, which must exist before you deploy.
 - `rollout`: `strategy: recreate` (default) or `rolling`, plus `drain`; see [Rolling rollouts](#rolling-rollouts). The top-level `x-tug: { rollback: auto }` is described under [Automatic rollback](#automatic-rollback).
@@ -110,6 +112,7 @@ volumes:
 ```
 
 Control records volumes per project. A volume is included in a node's Compose file only when a service on that node uses it and, if the volume has `placement.nodes`, the node is listed. `tug volume-remove` refuses to remove a persistent volume without `--delete-data`, and refuses any volume still referenced by a service in the current deployment. `--delete-data` queues a `docker volume rm` on the volume's placement node.
+Volumes with `x-tug.type: nfs` share a directory exported by their placement node. Tug does not install or start an NFS server, and consuming nodes need the NFS client (`nfs-common` on Debian and Ubuntu): the exporter node must already export `x-tug.export` (default `/srv/tug/<volume>`) to the other nodes, ideally restricted to the mesh. On the exporter, services bind-mount that directory; on every other node using the volume, Tug generates a Compose volume that mounts `<exporter>:<export>` over NFS. Control stamps the exporter's overlay IP (with the mesh) or node address into `x-tug.address` at deploy time unless you set it. The exporter is a single point of failure.
 
 ## Secrets in services
 

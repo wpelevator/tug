@@ -119,8 +119,9 @@ program.command('init').option('--token <token>', 'operator token (prefer TUG_TO
   console.log(`wrote ${cfgPath()}`);
 });
 
-program.command('node-register <name>').description('register a node with the control plane').option('--address <addr>').option('--public-address <addr>').action(async (name: string, o: { address?: string; publicAddress?: string }) => {
-  const r = await request('POST', '/api/v1/nodes/register', { name, address: o.address, publicAddress: o.publicAddress });
+program.command('node-register <name>').description('register a node with the control plane').option('--address <addr>').option('--public-address <addr>')// eslint-disable-next-line @typescript-eslint/no-explicit-any
+.option('--label <label>', 'node label (repeatable)', ((v: string, a: string[] = []) => [...a, v]) as any, []).action(async (name: string, o: { address?: string; publicAddress?: string; label: string[] }) => {
+  const r = await request('POST', '/api/v1/nodes/register', { name, address: o.address, publicAddress: o.publicAddress, labels: o.label });
   console.log(JSON.stringify(r, null, 2));
 });
 program.command('node-rotate-registry-token <name>').description('issue a new registry pull token for a node, invalidating the old one').action(async (name: string) => {
@@ -132,6 +133,9 @@ program.command('node-rotate-wg-key <name>').description('generate a new WireGua
   if (cmd.state === 'failed') throw new Error(JSON.parse(cmd.result_json || '{}').error || 'key rotation failed');
   console.log(JSON.stringify({ ok: true, node: name, ...JSON.parse(cmd.result_json || '{}') }, null, 2));
 });
+program.command('node-remove <name>').description('remove a retired node from control (its agent token, WireGuard peer and queued commands)').option('--force', 'remove even if the agent is still reporting').action(async (name: string, o: { force?: boolean }) => {
+  console.log(JSON.stringify(await request('DELETE', `/api/v1/nodes/${encodeURIComponent(name)}${o.force ? '?force=true' : ''}`), null, 2));
+});
 program.command('node-ingress <name>').description('mark a node as an ingress node (managed Caddy on ports 80/443), or remove the role with --disable').option('--disable', 'stop acting as an ingress node').action(async (name: string, o: { disable?: boolean }) => {
   console.log(JSON.stringify(await request('POST', `/api/v1/nodes/${encodeURIComponent(name)}/ingress`, { enabled: !o.disable }), null, 2));
 });
@@ -139,6 +143,11 @@ program.command('node-revoke-registry-token <name>').description('revoke a node\
   console.log(JSON.stringify(await request('POST', `/api/v1/nodes/${encodeURIComponent(name)}/revoke-registry-token`, {}), null, 2));
 });
 
+program.command('scale <service> <replicas>').description('scale a service to N replicas across matching nodes').action(async (service: string, replicas: string, o: CommonOpts) => {
+  const cfg = await loadCfg(); const project = o.project || cfg.project || 'site';
+  if (!/^[1-9]\d*$/.test(replicas)) throw new Error('replicas must be a positive integer');
+  console.log(JSON.stringify(await request('POST', '/api/v1/scale', { project, service, replicas: Number(replicas) }), null, 2));
+});
 program.command('control-token').description('print local dev operator token if available').action(async()=> console.log((await fs.readFile('./data/operator.token','utf8')).trim()));
 
 program.command('control-install <sshTarget>')
@@ -148,10 +157,11 @@ program.command('control-install <sshTarget>')
   .option('--build-local-image', 'build the image from the current checkout and copy it to the host over SSH (tags it tug:local unless --image is set); for development')
   .option('--token <token>', 'operator token')
   .option('--port <port>', 'published API port', '8080')
+  .option('--mesh', 'enable the WireGuard mesh on control (TUG_MESH=true); install nodes with --mesh too')
   .option('--registry <host>', 'registry host used in desired images; bring your own registry, Tug does not provision one')
   .option('--registry-auth-path <path>', 'container path to an htpasswd file tug-control should manage credentials in, if your registry uses one')
   .option('--registry-container <name>', 'docker container name to restart when a node\'s registry credentials change, if your registry uses an htpasswd file')
-  .action(async (sshTarget: string, o: InstallOpts & { token?: string; port: string; registry?: string; registryAuthPath?: string; registryContainer?: string }) => {
+  .action(async (sshTarget: string, o: InstallOpts & { token?: string; port: string; mesh?: boolean; registry?: string; registryAuthPath?: string; registryContainer?: string }) => {
     const operatorToken = o.token || process.env.TUG_TOKEN || token('tug_op');
     if (o.installDocker) await bootstrapDocker(sshTarget);
     preflightRemote(sshTarget, { ports: [Number(o.port)], minDiskMb: 2048 });
@@ -160,7 +170,7 @@ program.command('control-install <sshTarget>')
     const registryHost = o.registry || '';
     const yamlValue = (value: string) => JSON.stringify(value);
     const compose = await loadTemplate(templatesDir, 'control-compose.yml', {
-      IMAGE: yamlValue(image), OPERATOR_TOKEN: yamlValue(operatorToken), REGISTRY_HOST: yamlValue(registryHost), PORT: o.port,
+      IMAGE: yamlValue(image), OPERATOR_TOKEN: yamlValue(operatorToken), REGISTRY_HOST: yamlValue(registryHost), PORT: o.port, MESH: yamlValue(o.mesh ? 'true' : 'false'),
       REGISTRY_AUTH_PATH: yamlValue(o.registryAuthPath || ''),
       REGISTRY_CONTAINER: yamlValue(o.registryContainer || '')
     });
@@ -176,6 +186,8 @@ program.command('node-install <sshTarget>')
   .requiredOption('--name <name>')
   .option('--address <addr>')
   .option('--public-address <addr>')
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+.option('--label <label>', 'node label (repeatable)', ((v: string, a: string[] = []) => [...a, v]) as any, [])
   .option('--agent-control-url <url>', 'control URL reachable by the agent (default: resolved operator control URL)')
   .option('--registry <host>', 'registry host for docker login')
   .option('--http-only-dev', 'allow plaintext HTTP control URL for local/private development')
@@ -184,13 +196,13 @@ program.command('node-install <sshTarget>')
   .option('--image <tag>', 'Tug image to run (default: ghcr.io/wpelevator/tug:<this CLI\'s version>)')
   .option('--install-docker', 'install missing Docker Engine and Compose on supported Debian, Ubuntu, Fedora and RHEL-compatible hosts (root required)')
   .option('--build-local-image', 'build the image from the current checkout and copy it to the host over SSH (tags it tug:local unless --image is set); for development')
-  .action(async (sshTarget: string, o: InstallOpts & { name: string; address?: string; publicAddress?: string; agentControlUrl?: string; registry?: string; httpOnlyDev?: boolean; mesh?: boolean; wgPort: string }) => {
+  .action(async (sshTarget: string, o: InstallOpts & { name: string; address?: string; publicAddress?: string; label: string[]; agentControlUrl?: string; registry?: string; httpOnlyDev?: boolean; mesh?: boolean; wgPort: string }) => {
     const cfg = await loadCfg();
     const controlUrl = normalizeControlUrl(o.agentControlUrl ?? cfg.controlUrl!);
     assertHttps(controlUrl, o.httpOnlyDev);
     if (o.installDocker) await bootstrapDocker(sshTarget);
     preflightRemote(sshTarget, { controlUrl, mesh: o.mesh, udpPorts: o.mesh ? [Number(o.wgPort)] : [] });
-    const registered = await request<RegisterResponse>('POST', '/api/v1/nodes/register', { name: o.name, address: o.address, publicAddress: o.publicAddress });
+    const registered = await request<RegisterResponse>('POST', '/api/v1/nodes/register', { name: o.name, address: o.address, publicAddress: o.publicAddress, labels: o.label });
     const image = resolveImage(o.image, o.buildLocalImage);
     if (o.buildLocalImage) await transferTugImage(sshTarget, image);
     const env = await loadTemplate(templatesDir, 'agent.env', {
@@ -214,15 +226,17 @@ program.command('node-enroll')
   .option('--http-only-dev', 'allow a plaintext HTTP control URL for local/private development')
   .option('--image <tag>', 'agent image used in the printed docker run (default: ghcr.io/wpelevator/tug:<this CLI\'s version>)')
   .option('--mesh', 'print a docker run that joins the WireGuard mesh (host networking, NET_ADMIN)')
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+.option('--label <label>', 'node label (repeatable)', ((v: string, a: string[] = []) => [...a, v]) as any, [])
   .option('--install-docker', 'print cloud-init that installs Docker and starts the agent')
   .option('--json', 'print JSON including the command or cloud-init payload')
-  .action(async (o: { name?: string; agentControlUrl?: string; ttl: string; uses: string; ca?: string; httpOnlyDev?: boolean; image?: string; mesh?: boolean; json?: boolean; installDocker?: boolean }) => {
+  .action(async (o: { name?: string; agentControlUrl?: string; ttl: string; uses: string; ca?: string; httpOnlyDev?: boolean; image?: string; mesh?: boolean; label: string[]; json?: boolean; installDocker?: boolean }) => {
     const cfg = await loadCfg();
     const controlUrl = normalizeControlUrl(o.agentControlUrl ?? cfg.controlUrl!);
     assertHttps(controlUrl, o.httpOnlyDev);
     const ca = o.ca ? await fs.readFile(o.ca, 'utf8') : undefined;
     const minted = await request<EnrollTokenResponse>('POST', '/api/v1/nodes/enroll-token', { name: o.name || null, ttlSeconds: Number(o.ttl), uses: Number(o.uses) });
-    const keyPayload: JoinKey = { v: 1, controlUrl, enrollToken: minted.enrollToken };
+    const keyPayload: JoinKey = { v: 1, controlUrl, enrollToken: minted.enrollToken, ...(o.label.length ? { labels: o.label } : {}) };
     if (ca) keyPayload.ca = ca;
     const joinKey = Buffer.from(JSON.stringify(keyPayload)).toString('base64url');
     const command = dockerRunSnippet(resolveImage(o.image), joinKey, o.mesh);

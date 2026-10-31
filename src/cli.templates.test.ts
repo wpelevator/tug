@@ -41,6 +41,7 @@ test('install commands render the shipped templates (src in dev, dist in the ima
     let script = await fs.readFile(ssh.log, 'utf8');
     assert.ok(script.includes('registry.test'), 'control-compose.yml rendered with the registry host');
     assert.ok(script.includes('9099'), 'control-compose.yml rendered with the port');
+    assert.match(script, /TUG_MESH: "false"/, 'control-install leaves the mesh off by default');
     assert.ok(script.includes(`image: ${JSON.stringify(defaultImage())}`), 'control-install defaults to the published image for the CLI version');
     assert.ok(!script.includes('docker build'), 'control-install does not build an image unless --build-local-image is set');
     assert.doesNotMatch(script, unrenderedVariable, 'no unrendered template variables');
@@ -51,6 +52,10 @@ test('install commands render the shipped templates (src in dev, dist in the ima
     assert.match(script, /TUG_REGISTRY: ""/, 'registry-free control install should render an explicitly empty registry');
     assert.ok(script.indexOf('download.docker.com') < script.indexOf('preflight: docker.version'), 'opt-in Docker bootstrap should run before preflight');
     assert.match(script, /docker-compose-plugin/, 'bare-host bootstrap should install the Docker Compose plugin');
+
+    await fs.rm(ssh.log);
+    await cli('control-install', 'root@mesh.test', '--mesh');
+    assert.match(await fs.readFile(ssh.log, 'utf8'), /TUG_MESH: "true"/, 'control-install --mesh should enable the mesh on control');
 
     await fs.rm(ssh.log);
     await cli('node-install', 'root@node.test', '--name', 'n-tpl', '--control-url', controlUrl, '--http-only-dev');
