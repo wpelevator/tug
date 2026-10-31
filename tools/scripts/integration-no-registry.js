@@ -211,7 +211,7 @@ try {
   const backup = await request('/api/v1/control/backups/run', {});
   await run('docker', ['kill', '--signal', 'STOP', nodeContainer]);
   paused = true;
-  await appCompose('down');
+  await onNode('sh', '-c', 'docker rm -f $(docker ps -aq --filter label=tug.project=imagedemo)');
   await onNode('docker', 'image', 'rm', local.desiredState.services.web.image);
   await request('/api/v1/control/restore', { artifactRef: backup.artifactRef, confirm: true });
   await compose('restart', 'control');
