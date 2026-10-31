@@ -23,7 +23,7 @@ function fakeDocker(handler: (args: string[]) => string | void = () => '') {
   return { docker, calls, commands: () => calls.map(c => c.args.join(' ')) };
 }
 
-interface FakeControl { http: HttpClient; events: { type: string; metadata: { service: string } }[]; requests: string[] }
+interface FakeControl { http: HttpClient; events: { type: string; level?: string; message?: string; metadata: { service: string } }[]; requests: string[] }
 function fakeControl(secrets: () => SecretsResponse): FakeControl {
   const events: FakeControl['events'] = [];
   const requests: string[] = [];
@@ -196,6 +196,67 @@ test('a failed http health check names the check, the attempts and the network e
     /web: http health check on port 8081\/ failed after 3 attempts: fetch failed \(ECONNREFUSED\)/,
     'an operator reading a rejected rollout must see which check failed and why, not just "fetch failed"'
   );
+});
+
+const oneService: ComposeFile = { services: { web: { image: 'nginx', 'x-tug': { placement: { nodes: ['n1'] }, health: { type: 'docker', interval: '1ms', retries: 2 } } } } };
+
+test('polling an unchanged project adds no lifecycle events, but still applies and checks it', async () => {
+  const d = fakeDocker();
+  const control = fakeControl(() => ({ secrets: {}, versions: {} }));
+  const ctx = await makeCtx({ docker: d.docker, http: control.http });
+  await reconcile(desired(twoServices), ctx);
+  const first = control.events.length;
+  assert.equal(first, 8, 'the first apply announces every step for both services');
+  for (let i = 0; i < 3; i++) await reconcile(desired(twoServices), { ...ctx });
+  assert.equal(control.events.length, first, 'three more polls of the same revision, including after an agent restart, must not add events');
+  assert.equal(d.commands().filter(c => c.includes(' up -d')).length, 4, 'every poll still applies the project, so drift is still repaired');
+});
+
+test('a new revision or changed secrets announce themselves again, and the same inputs are quiet afterwards', async () => {
+  let versions: Record<string, number> = { API_KEY: 1 };
+  const control = fakeControl(() => ({ secrets: { API_KEY: 'k' }, versions }));
+  const ctx = await makeCtx({ docker: fakeDocker().docker, http: control.http });
+  await reconcile(desired(twoServices, 'v1'), ctx);
+  let seen = control.events.length;
+  await reconcile(desired(twoServices, 'v2'), ctx);
+  assert.equal(control.events.slice(seen).filter(e => e.type === 'service.serving').length, 2, 'a new version announces serving for both services');
+  seen = control.events.length;
+  versions = { API_KEY: 2 };
+  await reconcile(desired(twoServices, 'v2'), ctx);
+  assert.ok(control.events.slice(seen).some(e => e.type === 'service.secret_recreate' && e.metadata.service === 'web'), 'a changed secret is announced for the service that uses it');
+  seen = control.events.length;
+  await reconcile(desired(twoServices, 'v2'), ctx);
+  assert.equal(control.events.length, seen, 'the same inputs again are quiet');
+});
+
+test('a failing apply is announced once, retries stay quiet, and recovery is announced once', async () => {
+  let running = false;
+  const d = fakeDocker(args => args[0] === 'inspect' ? inspectJson({ Running: running }) : 'cid1\n');
+  const control = fakeControl(() => ({ secrets: {}, versions: {} }));
+  const ctx = await makeCtx({ docker: d.docker, http: control.http });
+  const project = desired(oneService);
+
+  await assert.rejects(reconcile(project, ctx), /not running/);
+  const failed = control.events.filter(e => e.type === 'service.failed');
+  assert.equal(failed.length, 1, 'the first failure is announced');
+  assert.equal(failed[0].level, 'error', 'a failure is an error-level event');
+  assert.match(String(failed[0].message), /web: docker health check failed after 2 attempts: web: not running/, 'the event says what failed and why');
+  assert.equal(failed[0].metadata.service, 'web', 'it names the service whose check failed');
+
+  const seen = control.events.length;
+  await assert.rejects(reconcile(project, ctx), /not running/);
+  await assert.rejects(reconcile(project, ctx), /not running/);
+  assert.equal(control.events.length, seen, 'retrying the same failure adds no events');
+
+  running = true;
+  await reconcile(project, ctx);
+  assert.deepEqual(control.events.slice(seen).map(e => `${e.type}:${e.message}`), ['service.serving:serving again after a failure'], 'recovery is announced exactly once');
+  await reconcile(project, ctx);
+  assert.equal(control.events.length, seen + 1, 'once recovered, polling is quiet again');
+
+  running = false;
+  await assert.rejects(reconcile(project, ctx), /not running/);
+  assert.equal(control.events.filter(e => e.type === 'service.failed').length, 2, 'a later failure of an already serving project is announced once more');
 });
 
 test('tcp health: connects to the container IP and port', async () => {

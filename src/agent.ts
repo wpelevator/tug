@@ -7,11 +7,12 @@ import { validateImageArchive, verifyDownload } from './artifacts.ts';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import net from 'node:net';
+import { createHash } from 'node:crypto';
 import { composeForNode, dumpYaml, isRolling, serviceSecretVersions } from './compose.ts';
 import { activeRollingStates, composeBase, hasLegacyContainers, reconcileRolling, retireAll } from './rollout.ts';
 import { ensureDir, errMessage, now, parseDuration } from './util.ts';
 import { openAgentDb } from './db.ts';
-import type { AppliedStateRow, Db } from './db.ts';
+import type { AppliedStateRow, Db, EventStateRow } from './db.ts';
 import { createDockerRunner, createHostRunner } from './runners.ts';
 import type { DockerRunner, HostRunner, HttpClient } from './runners.ts';
 import { CADDY_CONTAINER, reconcileIngress, removeIngress } from './ingress.ts';
@@ -256,7 +257,7 @@ export async function reconcile(desiredState: DesiredState, ctx: AgentContext = 
     return { project: desiredState.project, observedVersion: desiredState.version, ...(desiredState.revision ? { observedRevision: desiredState.revision } : {}), health: 'skipped', services: [], serviceStates: {} };
   }
   const serviceStates: Record<string, ServiceState> = Object.fromEntries(serviceNames.map(service => [service, { rolloutState: 'pending', image: desiredState.services[service]?.image }]));
-  const emit = (service: string, rolloutState: string, message = rolloutState) => api(ctx, '/agent/v1/events', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ projectId: desiredState.project, level: 'info', type: `service.${rolloutState}`, message, metadata: { service, version: desiredState.version, node: ctx.nodeName } }) }).catch(() => {});
+  const emit = (service: string, rolloutState: string, message = rolloutState, level = 'info') => api(ctx, '/agent/v1/events', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ projectId: desiredState.project, level, type: `service.${rolloutState}`, message, metadata: { service, version: desiredState.version, node: ctx.nodeName } }) }).catch(() => {});
   const sec = await api<SecretsResponse>(ctx, `/agent/v1/secrets?project=${encodeURIComponent(desiredState.project)}&services=${encodeURIComponent(serviceNames.join(','))}`);
   const currentSecretVersions = serviceSecretVersions(desiredState.compose, serviceNames, sec.versions || {});
   const db = await agentDb(ctx.stateDir);
@@ -272,13 +273,21 @@ export async function reconcile(desiredState: DesiredState, ctx: AgentContext = 
   await fs.writeFile(path.join(dir, 'docker-compose.yml'), dumpYaml(nodeCompose));
   await writeEnv(path.join(dir, '.env'), sec.secrets || {});
   const failedStatus = (error: string): ProjectStatus => ({ project: desiredState.project, observedVersion: desiredState.version, ...(desiredState.revision ? { observedRevision: desiredState.revision } : {}), health: 'failed', services: serviceNames, serviceStates, error });
+  // Lifecycle events say what changed, not that the agent is still polling. They are sent when the desired revision,
+  // this node's rendered configuration or the secrets change, when an apply fails (once) and when it recovers (once).
+  const eventFingerprint = createHash('sha256').update(JSON.stringify([desiredState.revision || desiredState.version, dumpYaml(nodeCompose), mainServices.map(service => currentSecretVersions[service] || {})])).digest('hex').slice(0, 16);
+  const knownEvents = mainServices.length ? await db.get<EventStateRow>('SELECT fingerprint, phase FROM event_state WHERE project = ?', desiredState.project) : undefined;
+  const announce = knownEvents?.fingerprint !== eventFingerprint;
+  const wasFailed = !announce && knownEvents?.phase === 'failed';
+  const markEvents = (phase: 'serving' | 'failed') => db.run('INSERT INTO event_state(project, fingerprint, phase) VALUES(?,?,?) ON CONFLICT(project) DO UPDATE SET fingerprint=excluded.fingerprint, phase=excluded.phase', desiredState.project, eventFingerprint, phase);
+  let failing: string | undefined;
   if (ctx.apply) {
     try {
-      for (const service of mainServices) { serviceStates[service].rolloutState = 'pulling'; await emit(service, 'pulling'); }
+      for (const service of mainServices) { serviceStates[service].rolloutState = 'pulling'; if (announce) await emit(service, 'pulling'); }
       for (const service of mainServices) { const artifact = desiredState.services[service].artifact; if (artifact) await ensureArtifact(ctx, artifact); }
       const pullServices = mainServices.filter(service => !desiredState.services[service].artifact);
       if (pullServices.length) await ctx.docker(['compose', '-p', desiredState.project, 'pull', ...(pullServices.length === mainServices.length ? [] : pullServices)], { cwd: dir });
-      for (const service of mainServices) { serviceStates[service].rolloutState = 'starting'; await emit(service, 'starting'); }
+      for (const service of mainServices) { serviceStates[service].rolloutState = 'starting'; if (announce) await emit(service, 'starting'); }
       if (mainServices.length) {
         // Services that just became rolling still run here until their replacement takes over; keep them.
         const keepLegacy = rolling.length > 0 && await hasLegacyContainers(ctx, desiredState.project, rolling);
@@ -289,11 +298,20 @@ export async function reconcile(desiredState: DesiredState, ctx: AgentContext = 
         await ctx.docker(['compose', '-p', desiredState.project, 'up', '-d', '--no-deps', '--force-recreate', ...secretChangedServices], { cwd: dir });
       }
       for (const service of mainServices) {
-        serviceStates[service].rolloutState = 'health_checking'; await emit(service, 'health_checking');
+        serviceStates[service].rolloutState = 'health_checking'; if (announce) await emit(service, 'health_checking');
+        failing = service;
         await waitForHealth(ctx, desiredState.project, service, desiredState.services[service]?.health, dir);
-        serviceStates[service].rolloutState = 'serving'; serviceStates[service].healthyAt = now(); await emit(service, 'serving');
+        failing = undefined;
+        serviceStates[service].rolloutState = 'serving'; serviceStates[service].healthyAt = now();
+        if (announce || wasFailed) await emit(service, 'serving', wasFailed ? 'serving again after a failure' : 'serving');
       }
+      if (mainServices.length && (announce || wasFailed)) await markEvents('serving');
     } catch (e) {
+      if (mainServices.length && !wasFailed) {
+        // Announce a failure once; retries of the same failure stay quiet until it recovers or the inputs change.
+        await emit(failing ?? mainServices.join(', '), 'failed', errMessage(e), 'error');
+        await markEvents('failed');
+      }
       // Rolling services are untouched by a failure here, so keep reporting their current revision as serving.
       if (!rolling.length) throw e;
       Object.assign(serviceStates, await activeRollingStates(dir, rolling));

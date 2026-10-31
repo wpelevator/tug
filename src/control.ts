@@ -50,7 +50,7 @@ export interface ControlImageOperations {
   validate: typeof validateImageArchive;
   run: typeof runCommand;
 }
-export async function createApp(options: { images?: Partial<ControlImageOperations>; openDatabase?: typeof openDb } = {}) {
+export async function createApp(options: { images?: Partial<ControlImageOperations>; openDatabase?: typeof openDb; /** Minimum time between event prunes triggered by agent reports; default one hour. */ eventPruneIntervalMs?: number } = {}) {
   const images: ControlImageOperations = { build: buildAndPush, save: saveImageArchive, inspect: inspectImage, validate: validateImageArchive, run: runCommand, ...options.images };
   const DATA_DIR = process.env.TUG_DATA_DIR || './data';
   const MAX_IMAGE_BYTES = Number(process.env.TUG_MAX_IMAGE_BYTES || 5 * 1024 ** 3);
@@ -106,6 +106,30 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
   }
 
   const db = await (options.openDatabase || openDb)(dbFile);
+
+  // Events are an operator-facing log, not a record of truth, so keep them bounded. `0` turns a limit off; anything that is
+  // not a whole number falls back to the default.
+  const envCount = (name: string, fallback: number): number => {
+    const raw = process.env[name];
+    if (raw === undefined || raw === '') return fallback;
+    const value = Number(raw);
+    if (Number.isInteger(value) && value >= 0) return value;
+    console.warn(`${name}=${JSON.stringify(raw)} is not a whole number; using ${fallback}`);
+    return fallback;
+  };
+  const EVENT_RETENTION_DAYS = envCount('TUG_EVENT_RETENTION_DAYS', 30);
+  const EVENT_MAX_ROWS = envCount('TUG_EVENT_MAX_ROWS', 100_000);
+  const eventPruneIntervalMs = options.eventPruneIntervalMs ?? 60 * 60 * 1000;
+  let lastEventPrune = Date.now();
+  async function pruneEvents(): Promise<number> {
+    lastEventPrune = Date.now();
+    let removed = 0;
+    if (EVENT_RETENTION_DAYS > 0) removed += (await db.run('DELETE FROM events WHERE created_at < ?', new Date(Date.now() - EVENT_RETENTION_DAYS * 86_400_000).toISOString())).changes ?? 0;
+    if (EVENT_MAX_ROWS > 0) removed += (await db.run('DELETE FROM events WHERE id IN (SELECT id FROM events ORDER BY created_at DESC, id DESC LIMIT -1 OFFSET ?)', EVENT_MAX_ROWS)).changes ?? 0;
+    if (removed) console.log(`removed ${removed} old events (kept ${EVENT_RETENTION_DAYS || 'any'} days, at most ${EVENT_MAX_ROWS || 'unlimited'} rows)`);
+    return removed;
+  }
+  await pruneEvents().catch(e => console.error(`event pruning failed: ${errMessage(e)}`));
   const masterKey = await loadOrCreateMasterKey(masterKeyFile);
   const operator = await db.get('SELECT value FROM meta WHERE key=?', 'operator_token_hash');
   if (!operator) {
@@ -855,7 +879,10 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
     await db.run('UPDATE nodes SET last_seen_at=?,status=? WHERE id=?', ts, 'online', req.node!.id);
     res.json({ ok: true });
   });
-  post('/agent/v1/events', authAgent, async (req, res) => { const evs: AgentEvent[] = req.body.events || [req.body]; for (const ev of evs) await db.run('INSERT INTO events(id,project_id,deployment_id,node_id,level,type,message,metadata_json,created_at) VALUES(?,?,?,?,?,?,?,?,?)', id('evt'), ev.projectId || null, ev.deploymentId || null, req.node!.id, ev.level || 'info', ev.type || 'event', ev.message || '', JSON.stringify(ev.metadata || {}), now()); res.json({ ok: true }); });
+  post('/agent/v1/events', authAgent, async (req, res) => { const evs: AgentEvent[] = req.body.events || [req.body]; for (const ev of evs) await db.run('INSERT INTO events(id,project_id,deployment_id,node_id,level,type,message,metadata_json,created_at) VALUES(?,?,?,?,?,?,?,?,?)', id('evt'), ev.projectId || null, ev.deploymentId || null, req.node!.id, ev.level || 'info', ev.type || 'event', ev.message || '', JSON.stringify(ev.metadata || {}), now());
+    if (Date.now() - lastEventPrune >= eventPruneIntervalMs) await pruneEvents().catch(e => console.error(`event pruning failed: ${errMessage(e)}`));
+    res.json({ ok: true });
+  });
   get('/agent/v1/secrets', authAgent, async (req, res) => {
     const project = String(req.query.project || 'site');
     let rows = await db.all<Pick<SecretRow, 'name' | 'encrypted_value' | 'version'>[]>('SELECT name,encrypted_value,version FROM secrets WHERE project_id=?', project);
