@@ -8,8 +8,9 @@ The [README](../README.md#how-it-fits-together) has an overview diagram of how t
 
 - **Control plane** (`src/control.ts`): an Express API backed by SQLite (`tug.db`) and an install-time master key (`master.key`) in `TUG_DATA_DIR`. It stores nodes, projects, deployments, desired states, encrypted secrets, volumes, queued commands, events, hashed API tokens and locks, and builds images from uploaded source tarballs or imports operator-built archives. With no registry configured it stores and serves compressed image artifacts; a configured registry remains supported.
 - **Access control** (`src/tokens.ts`): every operator route is declared once in a role table (`read`, `deploy`, `admin`) and passes through one guard that authenticates the bearer (the root operator token or a named API token, both by hash lookup), checks the role and the token's allowed projects, and attaches the acting token name that deployments and audit events record. Agents authenticate separately with per-node tokens. See [Access control](access-control.md).
-- **Agent** (`src/agent.ts`): runs on every node, fetches authoritative work from `GET /agent/v1/work`, renders a per-node Compose file and `.env`, verifies/downloads/loads artifact-backed images, pulls registry images when the desired revision is new to the node (not on every poll, so a tag that moves upstream is not deployed without a deploy) and runs `docker compose up -d`, executes health checks, runs queued commands and reports back with `POST /agent/v1/status`. Between reconciliations it keeps an authenticated outbound WebSocket open for wake notifications, falls back to a cursor-based long poll when WebSockets are unavailable, and still polls periodically for recovery. Agents only dial out to control, so nodes behind NAT or firewalls work.
-- **Rolling rollouts** (`src/rollout.ts`): the agent-side logic for services with `x-tug.rollout.strategy: rolling`: revision hashing, per-revision Compose projects, host port allocation, health-gated takeover, drain and crash recovery. `agent.ts` calls it from `reconcile`.
+- **Agent** (`src/agent.ts`): runs on every node, fetches authoritative work from `GET /agent/v1/work` and reconciles containers through the Docker Engine API (`src/docker-api.ts`) over the local socket. It builds one container definition per placed service (`src/container-spec.ts`), substitutes released secrets into the container environment, verifies/downloads/loads artifact-backed images, pulls registry images when the desired revision is new to the node (not on every poll, so a tag that moves upstream is not deployed without a deploy), executes health checks, and reports status. Nodes need only the Docker Engine, not the Compose plugin.
+- **Reconciler** (`src/reconciler.ts`): one loop for every service. Containers carry `tug.project`, `tug.service`, `tug.revision` and `tug.config-hash` labels; the hash covers the resolved definition, the image identity and the versions of the secrets the service uses, and a container whose hash differs is replaced. `recreate` stops the old container and starts the new one; `rolling` (`x-tug.rollout.strategy: rolling`) starts the new one on a free host port beside the old one, health-checks it, lets the ingress switch and removes the old one after a drain. Tug names its own network `tug_<project>`, volumes `tug_<project>_<volume>` and containers `tug-<project>-<service>-<hash8>`; service names are network aliases. Reconciliation never removes volumes; `volume.delete` is the only way one goes away.
+- **Compose normalization** (`src/normalize.ts`): `tug deploy` runs `docker compose config` on the operator machine, which does interpolation, `extends`, profiles and `env_file`. Control secrets are interpolated as `@@tug:secret:NAME@@` sentinels that the agent replaces with released values. The CLI reads Compose's YAML rendering because its JSON rendering drops service-level `x-tug`. Control validates the result against an allowlist of keys ([Compose](compose.md#supported-keys)); agents never parse Compose YAML.
 - **CLI** (`src/cli.ts`): the `tug` command for operators. It talks to the control API and uses SSH only for `control-install` and `node-install`. See [CLI reference](cli.md).
 - **Networking** (`src/mesh.ts`, `src/ingress.ts`): optional WireGuard mesh, health-aware service endpoints and the managed Caddy edge. `mesh.ts` has overlay IP allocation, key handling, `wg` config rendering, peer diffing and the idempotent `wg0` reconcile; `ingress.ts` resolves service endpoints and ingress routes, renders the Caddyfile (control) and reconciles the Caddy container (agent). See [Networking](networking.md).
 - **Registry**: optional; bring your own to use registry pushes instead of saved-image delivery. Tug can manage per-node pull credentials for a registry that uses an htpasswd file. See [Control plane](control-plane.md#registry).
@@ -161,7 +162,7 @@ sequenceDiagram
 
 ## Rolling rollouts and automatic rollback
 
-Services are `recreate` by default: the agent renders the node Compose file and runs `docker compose up -d`, which replaces changed containers in place. A service with `x-tug.rollout.strategy: rolling` is taken out of the node's main project and rolled instead, one changed service at a time:
+Services are `recreate` by default: a container whose config hash changed is stopped and replaced in place. A service with `x-tug.rollout.strategy: rolling` is rolled instead, one changed service at a time:
 
 ```mermaid
 sequenceDiagram
@@ -197,10 +198,10 @@ sequenceDiagram
     end
 ```
 
-Rules the agent follows (`src/rollout.ts`):
+Rules the agent follows (`src/reconciler.ts`):
 
 - A revision is identified by a hash of the rendered service (image id for built images, environment, `extra_hosts`, ports shape, volumes) and the versions of the secrets it references. The same hash means the revision is already running and nothing is restarted; a secret change rolls the service instead of force-recreating it.
-- Each revision is Compose project `<project>-<service>-<hash8>` with `--project-directory` set to the main project directory, attached to the main project's `default` network and named volumes as external resources (created if missing), with the single published port remapped to a free port from `TUG_ROLLOUT_PORTS`. The main project keeps only recreated services, so `--remove-orphans` on it never touches a revision.
+- Each revision is a container `tug-<project>-<service>-<hash8>` on the project network, with the single published port remapped to a free port from `TUG_ROLLOUT_PORTS` (default 20000-20999) and the bind address kept. A running container that predates the rollout state is adopted as the active revision.
 - State lives in `<state dir>/projects/<project>/rollout.json`: the active revision, a candidate (written before `up`, so a restarted agent resumes the same project and port instead of starting a second one), revisions waiting to drain with their deadline, and the last rejected revision per service so it is not retried on every poll. Drain deadlines are checked on every poll, so a drain never blocks the poll loop.
 - A failed health check, an exhausted port range or a failed start removes the candidate and leaves the active revision untouched. The node reports `health: failed` and the rejection reason, while the service state stays `serving` with the old port so control keeps routing to it. If a recreated service of the same project fails, rolling services keep being reported serving the same way.
 - Control resolves each endpoint's `port` from the service state, so the ingress follows takeovers without any ingress-specific agent protocol. Convergence is unchanged: `failed` still comes from a node reporting failed health for the current revision.
@@ -212,7 +213,7 @@ With `TUG_MESH=true`, `GET /agent/v1/work` also returns a `network` block (this 
 
 ## Secrets
 
-Secrets are encrypted at rest with AES-256-GCM using the control master key, and versioned per project. An agent only receives the secrets referenced by the `environment` of services placed on its node, written to the project's `.env` with mode `0600`. When only a referenced secret's version changes, the agent force-recreates just the affected services.
+Secrets are encrypted at rest with AES-256-GCM using the control master key, and versioned per project. An agent only receives the secrets referenced by the `environment` of services placed on its node, substituted into the container environment by the agent (no file on disk). When only a referenced secret's version changes, the agent force-recreates just the affected services.
 
 ## Runtime paths
 
@@ -226,10 +227,7 @@ Agents write generated state under `TUG_STATE_DIR` (default `/var/lib/tug`):
 /var/lib/tug/wireguard/private.key                     # mesh only: node's WireGuard private key (0600), never sent to control
 /var/lib/tug/wireguard/wg0.conf                        # mesh only: last config passed to `wg syncconf`
 /var/lib/tug/ingress/                                  # ingress nodes only: applied Caddy config and its hash
-/var/lib/tug/projects/<project>/docker-compose.yml
-/var/lib/tug/projects/<project>/.env
 /var/lib/tug/projects/<project>/rollout.json               # rolling services: active/candidate/draining revisions and the last rejected one
-/var/lib/tug/projects/<project>/rollout/<revision>.yml     # rolling services: Compose file of each running revision
 ```
 
 When agents enroll via `node-enroll`, mount the state directory as a named volume (`-v tug-agent:/var/lib/tug`) so `agent.json` survives container recreation and the agent does not re-enroll after an image update or reboot.

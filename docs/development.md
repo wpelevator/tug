@@ -24,7 +24,7 @@ Unit tests sit next to the source files as `src/*.test.ts`. The agent integratio
 
 The Dockerfiles are multi-stage: a build stage runs `npm ci && npm run build`, and the final image ships `dist/` plus production dependencies only, with entrypoint `node dist/main.js`. `tsc` does not copy `src/templates/*`, so `npm run build` copies them next to the emitted `dist/cli.js`; the CLI resolves them relative to the running file, so `node src/cli.ts` and `node dist/cli.js` both work.
 
-The runtime image ships its own Docker client and Compose plugin because mounting the host Docker socket does not make the host's CLI plugins available inside the agent. Runtime and fake-VPS Dockerfiles pin `DOCKER_COMPOSE_VERSION=2.32.4` and support `amd64`/`arm64`; update and verify both pins together. This Compose version retains compatibility with the older nested Docker daemons used in integration tests.
+The runtime image ships its own Docker client and Compose plugin for the control host, which still installs through Compose, because mounting the host Docker socket does not make the host's CLI plugins available inside the agent. Runtime and fake-VPS Dockerfiles pin `DOCKER_COMPOSE_VERSION=2.32.4` and support `amd64`/`arm64`; update and verify both pins together. This Compose version retains compatibility with the older nested Docker daemons used in integration tests.
 
 Run `npm run test:smoke:image` to build the actual shipped runtime image and execute its Docker, Compose and Node binaries without mounting the host socket or CLI plugins. To test an already-built image, set `TUG_RUNTIME_IMAGE=<tag>`. CI runs this packaging smoke before the registry integration test, so the fake-VPS image cannot mask missing runtime tools.
 

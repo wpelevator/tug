@@ -27,13 +27,13 @@ services:
 - `replicas`: optional; in this version it must equal the number of placement nodes (one container per node).
 - `ingress`: publishes the service on a hostname through the managed Caddy edge (see [Networking](networking.md#layer-c-ingress-and-tls)). `host` is a fully qualified hostname, unique across the file; `port` is the service's container port or published host port and must appear in `ports`; `tls` is `auto` (default, ACME), `custom` or `off`. `tls: custom` also needs `cert` and `key`, the names of project secrets holding the PEM certificate chain and private key, which must exist before you deploy.
 - `rollout`: `strategy: recreate` (default) or `rolling`, plus `drain`; see [Rolling rollouts](#rolling-rollouts). The top-level `x-tug: { rollback: auto }` is described under [Automatic rollback](#automatic-rollback).
-- `health`: checked by the agent after `docker compose up -d`; the service is `serving` only once it passes.
+- `health`: checked by the agent after the container starts; the service is `serving` only once it passes.
   - `type: docker` waits for the container to be running and, if it defines a Docker `HEALTHCHECK`, healthy.
   - `type: tcp` connects to `port` on the container IP.
   - `type: http` requests `http://<container-ip>:<port><path>` (defaults `80` and `/`) and expects a 2xx response after following redirects.
   - `interval` (default `2s`), `timeout` (default `2s`) and `retries` (default `10`) accept numbers in milliseconds or `ms`/`s`/`m` suffixes.
 
-`depends_on` is copied into the generated Compose file. `condition: service_healthy` waits on Docker's `HEALTHCHECK`, not on `x-tug.health`. Tug removes `x-tug` before `docker compose up`, so that condition fails the deploy when the image has no `HEALTHCHECK` and the service has no `healthcheck:` block. MariaDB 11.4 is one such image. Use `depends_on: [db]` and `x-tug.health` on each service. A failed apply is included in the deployment error `tug deploy` prints, and recorded once as `service.failed`.
+`depends_on` sets start order on a node. `condition: service_healthy` waits on the dependency's `x-tug.health` when it has one, otherwise on Docker's `HEALTHCHECK`, so it fails the deploy when the image has no `HEALTHCHECK` and the service has no `healthcheck:` block. MariaDB 11.4 is one such image. Use `depends_on: [db]` and `x-tug.health` on each service. A failed apply is included in the deployment error `tug deploy` prints, and recorded once as `service.failed`.
 
 ```yaml
     x-tug:
@@ -51,7 +51,7 @@ Services with `build:` are built by control from the uploaded source tarball, or
 
 ### Rolling rollouts
 
-By default a changed service is recreated in place (`docker compose up -d`), which drops its traffic for a moment. A service behind the managed ingress can instead opt in to a rolling rollout:
+By default a changed service is recreated in place, which drops its traffic for a moment. A service behind the managed ingress can instead opt in to a rolling rollout:
 
 ```yaml
 services:
@@ -116,7 +116,7 @@ Volumes with `x-tug.type: nfs` share a directory exported by their placement nod
 
 ## Secrets in services
 
-Reference secrets through `environment`, either as keys (`DB_PASSWORD:` or `- DB_PASSWORD=...`) or as `${NAME}` / `${NAME:-default}` substitutions. Only referenced secrets are released to a node. Set them with `tug secret-set NAME`. A value that is not exactly a `${NAME}` substitution is a literal, and that key is also treated as a secret name, so a project secret with the same name is released too. The generated `.env` does not quote values; keep `#`, `$`, spaces and newlines out of secret values.
+Reference secrets with `${NAME}` anywhere Compose interpolates, usually `environment`. `tug deploy` sets every project secret as a variable during `docker compose config`, so a secret wins over a local variable of the same name and `environment: [DB_PASSWORD]` passes it through. Only secrets a service references are released to its node, and a changed secret recreates exactly the services that use it. Secrets are substituted into the container environment; keep them out of `command` unless you accept them showing in `docker inspect`. Deploying a Compose file that references a secret the project does not have is rejected.
 
 ## A database on the same node
 
@@ -172,3 +172,7 @@ Set `DB_PASSWORD` and `DB_ROOT_PASSWORD` with `tug secret-set` before deploying.
 
 - `container_name` (Compose project names isolate containers per project).
 - `deploy` (Swarm semantics).
+
+## Supported keys
+
+`tug deploy` normalizes the file with `docker compose config` (Docker Compose v2 must be installed on the operator machine), and control accepts only these service keys: `image`, `build`, `command`, `entrypoint`, `environment`, `ports`, `expose`, `volumes` (named volumes and absolute bind mounts), `tmpfs`, `healthcheck`, `restart`, `labels`, `depends_on` (`service_started`, `service_healthy`), `extra_hosts`, `user`, `working_dir`, `hostname`, `init`, `read_only`, `shm_size`, `mem_limit`, `mem_reservation`, `cpus`, `pids_limit`, `cap_add`, `cap_drop`, `ulimits`, `logging`, `stop_grace_period`, `stop_signal` and `x-tug`. `pull_policy` is ignored because Tug decides when images change. Anything else is rejected with its key named, including `network_mode`, `privileged`, `devices`, `pid`, `ipc`, `container_name`, `env_file` (already merged by Compose), custom networks, and top-level `configs` and `secrets`. Top-level volumes accept `driver`, `driver_opts`, `labels`, `external`, `name` and `x-tug`. Containers use Tug's own network, volume and container names (`tug_<project>`, `tug_<project>_<volume>`), so existing Compose-created volumes are not reused.
