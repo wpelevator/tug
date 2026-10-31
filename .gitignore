@@ -1,6 +1,5 @@
 node_modules/
 data/
-registry-data/
 .tug.json
 *.log
 .DS_Store

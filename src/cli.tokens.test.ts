@@ -8,6 +8,7 @@ import { promisify } from 'node:util';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from './control.ts';
+import { testImageResolver } from '../tests/helpers.ts';
 
 const exec = promisify(execFile);
 const entry = path.resolve('src/cli.ts');
@@ -67,7 +68,7 @@ test('token commands reject malformed invocations before contacting control', as
 test('token-create, token-list and token-revoke work against control and a scoped token works as TUG_TOKEN', async () => {
   const data = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-cli-tokens-'));
   Object.assign(process.env, { TUG_DATA_DIR: data, TUG_OPERATOR_TOKEN: OPERATOR });
-  const app = await createApp();
+  const app = await createApp({ images: { resolve: testImageResolver } });
   const server = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));
   });

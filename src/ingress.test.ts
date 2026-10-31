@@ -53,7 +53,7 @@ const compose: ComposeFile = {
   },
 };
 const state = (c: ComposeFile = compose, project = 'blog'): DesiredState =>
-  buildDesiredState({ project, version: 'v1', compose: c, registry: 'reg' });
+  buildDesiredState({ project, version: 'v1', compose: c });
 
 test('endpoints list only fresh nodes whose copy of the service reports serving', () => {
   const nodes = [node('app1'), node('app22'), node('dbnode')];

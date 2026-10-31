@@ -6,6 +6,7 @@ import path from 'node:path';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from './control.ts';
+import { testImageResolver } from '../tests/helpers.ts';
 import { ROLES, ROUTE_ROLES, hasRole } from './tokens.ts';
 import type { Role } from './tokens.ts';
 
@@ -16,8 +17,7 @@ async function makeServer(dir?: string) {
   process.env.TUG_CONTROL_BACKUP_DIR = path.join(data, 'control-backups');
   process.env.TUG_CONTROL_RESTORE_DIR = path.join(data, 'control-restore');
   process.env.TUG_OPERATOR_TOKEN = OPERATOR;
-  process.env.TUG_REGISTRY = 'registry.test';
-  const app = await createApp();
+  const app = await createApp({ images: { resolve: testImageResolver } });
   const srv = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));
   });
@@ -32,7 +32,14 @@ async function makeServer(dir?: string) {
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     const text = await res.text();
-    return { status: res.status, body: text ? JSON.parse(text) : null, text };
+    return {
+      status: res.status,
+      body:
+        text && res.headers.get('content-type')?.includes('application/json')
+          ? JSON.parse(text)
+          : null,
+      text,
+    };
   };
   /** Creates a token as the operator and returns its secret. */
   const mint = async (name: string, role: Role, projects?: string[]) => {
@@ -214,14 +221,6 @@ const SAMPLES: Record<string, { path: string; body?: unknown }> = {
   'GET /api/v1/nodes': { path: '/api/v1/nodes' },
   'POST /api/v1/nodes/register': { path: '/api/v1/nodes/register', body: {} },
   'POST /api/v1/nodes/enroll-token': { path: '/api/v1/nodes/enroll-token', body: {} },
-  'POST /api/v1/nodes/:name/rotate-registry-token': {
-    path: '/api/v1/nodes/ghost/rotate-registry-token',
-    body: {},
-  },
-  'POST /api/v1/nodes/:name/revoke-registry-token': {
-    path: '/api/v1/nodes/ghost/revoke-registry-token',
-    body: {},
-  },
   'POST /api/v1/nodes/:name/rotate-wg-key': { path: '/api/v1/nodes/ghost/rotate-wg-key', body: {} },
   'POST /api/v1/nodes/:name/ingress': { path: '/api/v1/nodes/ghost/ingress', body: {} },
   'POST /api/v1/control/backups/run': { path: '/api/v1/control/backups/run', body: {} },
@@ -289,7 +288,7 @@ test('every operator route enforces its declared role for read, deploy and admin
   }
 });
 
-test('the registry auth hook and agent endpoints ignore API tokens', async () => {
+test('agent endpoints ignore API tokens and the registry auth hook is removed', async () => {
   const s = await makeServer();
   try {
     const admin = await s.mint('a', 'admin');
@@ -306,8 +305,8 @@ test('the registry auth hook and agent endpoints ignore API tokens', async () =>
     assert.equal(
       (await s.call(null, 'POST', '/api/v1/registry/auth', { username: 'n', password: 'p' }))
         .status,
-      401,
-      'the registry hook still rejects invalid node credentials without bearer auth',
+      404,
+      'the removed registry hook must not accept node or operator credentials',
     );
     assert.equal(
       (await s.call(null, 'GET', '/healthz')).status,

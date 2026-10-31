@@ -87,7 +87,6 @@ const desired = (compose: ComposeFile, version: string) =>
     version,
     revision: `rev-${version}`,
     compose: normalized(compose),
-    registry: '',
     defaultNode: 'n1',
   });
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));

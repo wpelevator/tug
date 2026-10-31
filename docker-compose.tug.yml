@@ -1,26 +1,7 @@
 services:
-  registry:
-    build: ./tools/docker/registry
-    container_name: tug-registry
-    ports:
-      - "5000:5000"
-    volumes:
-      - registry-auth:/auth
-
   control:
     build: .
     ports:
       - "8080:8080"
-    environment:
-      TUG_REGISTRY: localhost:5000
-      TUG_PUSH: "false"
-      TUG_REGISTRY_AUTH_PATH: /registry-auth/htpasswd
-      TUG_REGISTRY_CONTAINER: tug-registry
     volumes:
-      - registry-auth:/registry-auth
       - /var/run/docker.sock:/var/run/docker.sock
-    depends_on:
-      - registry
-
-volumes:
-  registry-auth:

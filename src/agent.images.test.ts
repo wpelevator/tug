@@ -81,7 +81,6 @@ test('artifact-backed services load verified images once, never pull and report 
       project: 'proj',
       version: 'v1',
       revision: 'rev1',
-      registry: '',
       defaultNode: 'n1',
       compose: {
         services: { app: { build: '.', pull_policy: 'always' }, cache: { image: 'redis:7' } },
@@ -144,7 +143,6 @@ test('corrupt downloads fail before load and dry-run mode performs no image I/O'
     const desired = buildDesiredState({
       project: 'proj',
       version: 'v1',
-      registry: '',
       defaultNode: 'n1',
       compose: { services: { app: { build: '.' } } },
     });

@@ -82,7 +82,7 @@ test(
       project: 'lpsecrettest',
       version: 'v1',
       compose: normalized(compose),
-      registry: 'unused',
+
       defaultNode: 'n1',
     });
 

@@ -26,7 +26,7 @@ The Dockerfiles are multi-stage: a build stage runs `npm ci && npm run build`, a
 
 The runtime image ships its own Docker client and Compose plugin for the control host, which still installs through Compose, because mounting the host Docker socket does not make the host's CLI plugins available inside the agent. Runtime and fake-VPS Dockerfiles pin `DOCKER_COMPOSE_VERSION=2.32.4` and support `amd64`/`arm64`; update and verify both pins together. This Compose version retains compatibility with the older nested Docker daemons used in integration tests.
 
-Run `npm run test:smoke:image` to build the actual shipped runtime image and execute its Docker, Compose and Node binaries plus compiled control/agent database initialization, a writable snapshot and read-only validation without mounting the host socket or CLI plugins. To test an already-built image, set `TUG_RUNTIME_IMAGE=<tag>`. CI runs this packaging smoke before the registry integration test, so the fake-VPS image cannot mask missing runtime tools.
+Run `npm run test:smoke:image` to build the actual shipped runtime image and execute its Docker, Compose and Node binaries plus compiled control/agent database initialization, a writable snapshot and read-only validation without mounting the host socket or CLI plugins. To test an already-built image, set `TUG_RUNTIME_IMAGE=<tag>`. CI runs this packaging smoke before the integration test, so the fake-VPS image cannot mask missing runtime tools.
 
 ## Continuous integration and releases
 
@@ -34,7 +34,7 @@ Run `npm run test:smoke:image` to build the actual shipped runtime image and exe
 
 ### CI caching
 
-The `.github/actions/setup` composite action installs Node.js with the npm download cache (keyed on the lockfile) and runs `npm ci`; every job uses it. The integration jobs prebuild their images with `.github/actions/build-images` (Buildx and the GitHub Actions layer cache, scopes `runtime`, `fake-vps` and `registry`) and set `TUG_COMPOSE_BUILD=` so the integration scripts run `compose up` without `--build`; the Compose files tag those images `tug-runtime:integration`, `tug-fake-vps:integration` and `tug-registry:integration`. Locally the variable is unset and the scripts keep passing `--build`. Only pushes to `main` write the cache, because a pull request can read the default branch's cache but not another pull request's. The release workflow's `edge` job exports the `runtime` scope and the versioned `image` job reads it. The Dockerfiles pin the Node.js major (`node:24-*`), so an upstream LTS bump cannot silently invalidate the cache or change the shipped runtime.
+The `.github/actions/setup` composite action installs Node.js with the npm download cache (keyed on the lockfile) and runs `npm ci`; every job uses it. The integration jobs prebuild their images with `.github/actions/build-images` (Buildx and the GitHub Actions layer cache, scopes `runtime` and `fake-vps`) and set `TUG_COMPOSE_BUILD=` so the integration scripts run `compose up` without `--build`; the Compose files tag those images `tug-runtime:integration` and `tug-fake-vps:integration`. Locally the variable is unset and the scripts keep passing `--build`. Only pushes to `main` write the cache, because a pull request can read the default branch's cache but not another pull request's. The release workflow's `edge` job exports the `runtime` scope and the versioned `image` job reads it. The Dockerfiles pin the Node.js major (`node:24-*`), so an upstream LTS bump cannot silently invalidate the cache or change the shipped runtime.
 
 Published images are `ghcr.io/wpelevator/tug`. To test an unreleased CLI against a checkout, use `--build-local-image` on `control-install` and `node-install` (builds `tug:local` from the working directory and copies it over SSH). The dev Compose files (`docker-compose*.yml`) and the integration tests always build the image from the checkout with `build: .` and never pull from GHCR.
 
@@ -42,12 +42,11 @@ Published images are `ghcr.io/wpelevator/tug`. To test an unreleased CLI against
 
 `docker-compose.yml` defines:
 
-- `registry`: a local Docker Registry on port `5000`, built from `tools/docker/registry` with htpasswd auth enabled (`auth.htpasswd` in `tools/docker/registry/config/config.yml`).
-- `control`: the control API on port `8080`, with SQLite and master key data in a named volume. It mounts the `registry-auth` volume (`TUG_REGISTRY_AUTH_PATH`) and the Docker socket, so it can write per-node htpasswd entries and restart the registry container (`TUG_REGISTRY_CONTAINER`) when a node's registry token is issued, rotated or revoked.
+- `control`: the control API on port `8080`, with SQLite, master key and saved image archives in a named volume, plus the Docker socket for builds.
 - `agent`: an optional profile service; run it with `--profile agent` after setting `TUG_AGENT_TOKEN`.
 
 ```bash
-docker compose up --build control registry
+docker compose up --build control
 # after registering a node and obtaining its token:
 TUG_AGENT_TOKEN=... docker compose --profile agent up agent
 ```
@@ -75,11 +74,11 @@ npm run start:agent
 Deploy a Compose project without uploading a build context:
 
 ```bash
-node src/cli.ts deploy -f docker-compose.yml --no-build-upload
+node src/cli.ts deploy -f docker-compose.yml
 node src/cli.ts status
 ```
 
-Omit `--no-build-upload` to upload the current directory and let control run `docker build` for services with `build:`. Without `TUG_REGISTRY`, control stores compressed saved images and agents download/load them directly. `deploy --build-local` instead builds on the operator's Docker daemon and uploads image archives without source; the resulting platform must match target nodes. A configured registry retains build-and-push behavior. Published-image-only applications upload no context. `--no-build-upload` is for applications whose images are already published; it cannot supply missing build input.
+Services with `build:` upload the current directory and control builds and stores compressed saved images for agents. `deploy --build-local` instead builds on the operator daemon and uploads archives; the platform must match target nodes. Published-image-only applications upload no context and control pins their registry digests before publication.
 
 ## Integration test
 
@@ -91,7 +90,7 @@ Omit `--no-build-upload` to upload the current directory and let control run `do
 npm run test:integration
 ```
 
-The test provisions `vps-a`, `vps-b` and `vps-c`, sets a sample secret, deploys `docker-compose.sample.yml`, waits for all three agents to report the desired version, verifies registry pull auth with `tools/scripts/integration-verify-registry-auth.js` (a rotated token authenticates, a wrong password and a revoked token are rejected), and tears the stack down. Set `KEEP_INTEGRATION_STACK=true` to keep containers and volumes for inspection. The integration network uses subnet `10.89.240.0/24`; change it if that overlaps with local Docker or VPN networks.
+The test provisions `vps-a`, `vps-b` and `vps-c`, sets a sample secret, deploys `docker-compose.sample.yml`, waits for all three agents to report the desired version, verifies published images run by the digest pinned on control, and tears the stack down. Set `KEEP_INTEGRATION_STACK=true` to keep containers and volumes for inspection. The integration network defaults to subnet `10.89.240.0/24`; override it with `TUG_TEST_SUBNET` if that overlaps with local Docker or VPN networks. For concurrent runs, set a unique `COMPOSE_PROJECT_NAME`, `TUG_TEST_PORT` and matching `TUG_CONTROL_URL`.
 
 ### Registry-free image integration
 

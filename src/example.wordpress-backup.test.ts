@@ -94,7 +94,7 @@ test('wordpress-backup builds a service from a directory that holds its Dockerfi
   const ctx = compose.services.backup.build as string;
   assert.ok(fs.existsSync(new URL(`${ctx}/Dockerfile`, dir)), 'the build context has a Dockerfile');
   assert.ok(fs.existsSync(new URL(`${ctx}/backup.sh`, dir)), 'the build context has backup.sh');
-  const state = buildDesiredState({ project: 'blog', version: 'v1', compose, registry: '' });
+  const state = buildDesiredState({ project: 'blog', version: 'v1', compose });
   assert.equal(
     state.services.backup.placement?.nodes?.[0],
     'app',

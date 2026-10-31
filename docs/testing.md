@@ -84,7 +84,7 @@ Each tier 2 and tier 3 run should write a JSON report with these keys, keep it a
 
 ## Tier 2: Docker integration
 
-Exists: the fake VPS suite with registry authentication, the registry-free image delivery suite (remote and local builds, rollback, agent restart, backup and restore), the WireGuard mesh suite, and the packaging smoke tests for the built CLI and the runtime image. The rolling-deploy suite added with M3 already sends continuous requests through the ingress during a rollout and fails on any error.
+Exists: the fake VPS suite with pinned published images, the registry-free image delivery suite (remote and local builds, rollback, agent restart, backup and restore), the WireGuard mesh suite, and the packaging smoke tests for the built CLI and the runtime image. The rolling-deploy suite added with M3 already sends continuous requests through the ingress during a rollout and fails on any error.
 
 Proposed:
 

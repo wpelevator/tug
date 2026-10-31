@@ -1,23 +1,10 @@
 services:
-  registry:
-    build: ./tools/docker/registry
-    container_name: tug-registry
-    ports:
-      - "5000:5000"
-    volumes:
-      - registry-data:/var/lib/registry
-      - registry-auth:/auth
-
   control:
     build: .
     command: ["control"]
     environment:
       PORT: 8080
       TUG_DATA_DIR: /data
-      TUG_REGISTRY: localhost:5000
-      TUG_PUSH: "false"
-      TUG_REGISTRY_AUTH_PATH: /registry-auth/htpasswd
-      TUG_REGISTRY_CONTAINER: tug-registry
       # Set both to terminate TLS directly in control.ts instead of relying on Caddy/ACME
       # (e.g. private networks without a public domain). Use a self-signed cert and point
       # agents at it with TUG_CONTROL_URL=https://... plus NODE_EXTRA_CA_CERTS=<ca.pem>.
@@ -27,10 +14,7 @@ services:
       - "8080:8080"
     volumes:
       - tug-data:/data
-      - registry-auth:/registry-auth
       - /var/run/docker.sock:/var/run/docker.sock
-    depends_on:
-      - registry
 
   agent:
     build: .
@@ -51,6 +35,4 @@ services:
 
 volumes:
   tug-data:
-  registry-data:
-  registry-auth:
   agent-state:

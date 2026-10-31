@@ -6,14 +6,13 @@ Tug deploys Docker Compose projects to one or more Docker hosts through a small 
 
 The [README](../README.md#how-it-fits-together) has an overview diagram of how these fit together.
 
-- **Control plane** (`src/control.ts`): an Express API backed by SQLite (`tug.db`) and an install-time master key (`master.key`) in `TUG_DATA_DIR`. It stores nodes, projects, deployments, desired states, encrypted secrets, volumes, queued commands, events, hashed API tokens and locks, and builds images from uploaded source tarballs or imports operator-built archives. With no registry configured it stores and serves compressed image artifacts; a configured registry remains supported.
+- **Control plane** (`src/control.ts`): an Express API backed by SQLite (`tug.db`) and an install-time master key (`master.key`) in `TUG_DATA_DIR`. It stores nodes, projects, deployments, desired states, encrypted secrets, volumes, queued commands, events, hashed API tokens and locks, and builds images from uploaded source tarballs or imports operator-built archives. It always stores and serves built images as compressed artifacts and resolves published image tags to immutable registry digests before publication.
 - **Access control** (`src/tokens.ts`): every operator route is declared once in a role table (`read`, `deploy`, `admin`) and passes through one guard that authenticates the bearer (the root operator token or a named API token, both by hash lookup), checks the role and the token's allowed projects, and attaches the acting token name that deployments and audit events record. Agents authenticate separately with per-node tokens. See [Access control](access-control.md).
-- **Agent** (`src/agent.ts`): runs on every node, fetches authoritative work from `GET /agent/v1/work` and reconciles containers through the Docker Engine API (`src/docker-api.ts`) over the local socket. It builds one container definition per placed service (`src/container-spec.ts`), substitutes released secrets into the container environment, verifies/downloads/loads artifact-backed images, pulls registry images when the desired revision is new to the node (not on every poll, so a tag that moves upstream is not deployed without a deploy), executes health checks, and reports status. Nodes need only the Docker Engine, not the Compose plugin.
+- **Agent** (`src/agent.ts`): runs on every node, fetches authoritative work from `GET /agent/v1/work` and reconciles containers through the Docker Engine API (`src/docker-api.ts`) over the local socket. It builds one container definition per placed service (`src/container-spec.ts`), substitutes released secrets into the container environment, verifies/downloads/loads artifact-backed images, pulls published images by their pinned registry digest when the desired revision is new to the node, executes health checks, and reports status. Nodes need only the Docker Engine, not the Compose plugin.
 - **Reconciler** (`src/reconciler.ts`): one loop for every service. Containers carry `tug.project`, `tug.service`, `tug.revision` and `tug.config-hash` labels; the hash covers the resolved definition, the image identity and the versions of the secrets the service uses, and a container whose hash differs is replaced. `recreate` stops the old container and starts the new one; `rolling` (`x-tug.rollout.strategy: rolling`) starts the new one on a free host port beside the old one, health-checks it, lets the ingress switch and removes the old one after a drain. Tug names its own network `tug_<project>`, volumes `tug_<project>_<volume>` and containers `tug-<project>-<service>-<hash8>`; service names are network aliases. Reconciliation never removes volumes; `volume.delete` is the only way one goes away.
 - **Compose normalization** (`src/normalize.ts`): `tug deploy` runs `docker compose config` on the operator machine, which does interpolation, `extends`, profiles and `env_file`. Control secrets are interpolated as `@@tug:secret:NAME@@` sentinels that the agent replaces with released values. The CLI reads Compose's YAML rendering because its JSON rendering drops service-level `x-tug`. Control validates the result against an allowlist of keys ([Compose](compose.md#supported-keys)); agents never parse Compose YAML.
 - **CLI** (`src/cli.ts`): the `tug` command for operators. It talks to the control API and uses SSH only for `control-install` and `node-install`. See [CLI reference](cli.md).
 - **Networking** (`src/mesh.ts`, `src/ingress.ts`): optional WireGuard mesh, health-aware service endpoints and the managed Caddy edge. `mesh.ts` has overlay IP allocation, key handling, `wg` config rendering, peer diffing and the idempotent `wg0` reconcile; `ingress.ts` resolves service endpoints and ingress routes, renders the Caddyfile (control) and reconciles the Caddy container (agent). See [Networking](networking.md).
-- **Registry**: optional; bring your own to use registry pushes instead of saved-image delivery. Tug can manage per-node pull credentials for a registry that uses an htpasswd file. See [Control plane](control-plane.md#registry).
 - **Entrypoint** (`src/main.ts`, `dist/main.js` in the image): one image serves both roles; `node src/main.ts control|agent` or `TUG_ROLE`.
 - **Protocol** (`src/protocol.ts`): the control↔agent contract. It holds the types, and a few shared constants such as the active and terminal deployment states, for everything crossing the boundary: `DesiredState`, `ServiceSpec` and `HealthCheck`; the `/agent/v1/*` payloads (`WorkResponse` with its optional `network`, `serviceEndpoints` and `ingress` blocks, `Command` / `CommandResult`, `StatusReport` / `ProjectStatus` / `IngressStatus`, `StreamMessage`, `WakeResponse`, `SecretsResponse`, `WgKeyRequest`); and enrollment (`EnrollRequest` / `EnrollResponse`, `RegisterResponse`, `JoinKey`). `control.ts`, `agent.ts`, `compose.ts` and `cli.ts` all import from it, so change the wire format there first.
 - **Injectable agent runners** (`src/runners.ts`): `reconcile`, `executeCommand`, `waitForHealth`, `containerIp` and `pollOnce` take an `AgentContext` (`{ docker, http, nodeName, stateDir, apply, controlUrl, token, host?, mesh?, caddyImage? }`). `docker` is a `DockerRunner` (`createDockerRunner()` wraps `run('docker', …)` from `build.ts`), `host` is a `HostRunner` for `wg` and `ip` (`createHostRunner()`), and `http` is a `fetch`-compatible client. The Caddy reload goes through `docker`. Production code uses `defaultContext()`; `src/agent.test.ts` passes a fake docker runner to unit-test rollout ordering, secret-triggered `--force-recreate` and the docker, tcp and http health-check branches without a Docker daemon. The privileged-Docker integration test remains the end-to-end check.
@@ -56,7 +55,7 @@ Docker image stores can expose either a config digest or an OCI index/manifest d
 
 Archives are validated before Docker can import them. A containerd-backed `docker save` can list BuildKit build attestations of the image next to it, either nested in the image index or as extra top-level entries. These are accepted only when they carry no image name, their in-toto contents match their digests, and their subject is this exact image; any other extra manifest, extra tag, link, absolute or parent-relative path, or oversized entry rejects the archive.
 
-Local builds use a multipart `POST /api/v1/deployments`: `payload` contains the Compose/project/version and `localImages` descriptors; each descriptor names a corresponding `image-N` file. Each archive must contain exactly its declared Tug tag and actual configuration/platform/checksum. Source contexts and local images are mutually exclusive. Control retags imported images under its own deployment identity before publishing or pushing them.
+Local builds use a multipart `POST /api/v1/deployments`: `payload` contains the Compose/project/version and `localImages` descriptors; each descriptor names a corresponding `image-N` file. Each archive must contain exactly its declared Tug tag and actual configuration/platform/checksum. Source contexts and local images are mutually exclusive. Control retags imported images under its own deployment identity before publishing their saved archives.
 
 ## Node bootstrap (`tug node-install`)
 
@@ -72,17 +71,16 @@ sequenceDiagram
     Op->>CLI: node-install root@host --name app1
     CLI->>Host: SSH preflight (docker, compose, paths, disk, control reachable)
     CLI->>Ctrl: POST /api/v1/nodes/register
-    Ctrl->>DB: insert node, generate agentToken + registryToken
-    Ctrl->>Ctrl: write htpasswd entry, restart registry container
-    Ctrl-->>CLI: { node, agentToken, registryToken }
+    Ctrl->>DB: insert node, generate agentToken
+    Ctrl-->>CLI: { node, agentToken }
     CLI->>Host: docker save | scp | docker load (image transfer)
-    CLI->>Host: ssh node-install.sh (writes /etc/tug/agent.env, docker login, docker run agent)
+    CLI->>Host: ssh node-install.sh (writes /etc/tug/agent.env, docker run agent)
     Host->>Agent: start container
     loop every TUG_POLL_INTERVAL_MS
         Agent->>Ctrl: GET /agent/v1/work (Bearer agentToken)
         Ctrl->>DB: update last_seen_at, status=online
     end
-    CLI-->>Op: { ok, node, registryToken }
+    CLI-->>Op: { ok, node }
 ```
 
 ## Self-service enrollment (`tug node-enroll`)
@@ -105,10 +103,9 @@ sequenceDiagram
     Host->>Agent: start container
     Agent->>Agent: no token on volume -> decode join key
     Agent->>Ctrl: POST /agent/v1/enroll (enrollToken + hostname/ip)
-    Ctrl->>DB: validate & consume enroll_token, insert node, mint agentToken + registryToken
-    Ctrl->>Ctrl: write htpasswd entry, restart registry container
-    Ctrl-->>Agent: { node, agentToken, registryToken, registry }
-    Agent->>Agent: persist creds to volume, docker login registry
+    Ctrl->>DB: validate & consume enroll_token, insert node, mint agentToken
+    Ctrl-->>Agent: { node, agentToken }
+    Agent->>Agent: persist agent credentials to volume
     loop every TUG_POLL_INTERVAL_MS
         Agent->>Ctrl: GET /agent/v1/work (Bearer agentToken)
         Ctrl->>DB: update last_seen_at, status=online
@@ -129,7 +126,7 @@ sequenceDiagram
     CLI->>CLI: read & hash compose, tar build context
     CLI->>Ctrl: POST /api/v1/deployments (compose + context)
     Ctrl->>DB: lock project, insert deployment (state=building)
-    Ctrl->>Ctrl: build images; save archives or push to configured registry
+    Ctrl->>Ctrl: build images; save archives; pin published image digests
     Ctrl->>DB: insert desired_state, set current_deployment_id, state=rolling_out
     Ctrl-->>CLI: { deployment, desiredState }
     loop poll interval

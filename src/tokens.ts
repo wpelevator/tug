@@ -22,7 +22,7 @@ const LAST_USED_INTERVAL_MS = 60_000;
 /**
  * The single source of truth for who may call what. Every `/api/v1` route must appear here: createApp refuses to
  * register an unlisted route, and a test compares this table with the live router. `public` routes do their own
- * credential check (the registry hook) and are not behind the token guard. docs/access-control.md mirrors this table.
+ * credential check and are not behind the token guard. docs/access-control.md mirrors this table.
  */
 export const ROUTE_ROLES: Record<string, RouteRole> = {
   'GET /api/v1/live': 'deploy',
@@ -46,8 +46,6 @@ export const ROUTE_ROLES: Record<string, RouteRole> = {
   'GET /api/v1/nodes': 'admin',
   'POST /api/v1/nodes/register': 'admin',
   'POST /api/v1/nodes/enroll-token': 'admin',
-  'POST /api/v1/nodes/:name/rotate-registry-token': 'admin',
-  'POST /api/v1/nodes/:name/revoke-registry-token': 'admin',
   'POST /api/v1/nodes/:name/rotate-wg-key': 'admin',
   'POST /api/v1/nodes/:name/ingress': 'admin',
   'DELETE /api/v1/nodes/:name': 'admin',
@@ -58,7 +56,6 @@ export const ROUTE_ROLES: Record<string, RouteRole> = {
   'POST /api/v1/tokens': 'admin',
   'GET /api/v1/tokens': 'admin',
   'DELETE /api/v1/tokens/:name': 'admin',
-  'POST /api/v1/registry/auth': 'public',
 };
 
 /** The authenticated caller of an API request. `projects` is null when the credential is not project-scoped. */

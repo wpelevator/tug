@@ -5,6 +5,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createApp } from './control.ts';
+import { testImageResolver } from '../tests/helpers.ts';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { json } from '../tests/helpers.ts';
@@ -13,7 +14,7 @@ async function makeServer() {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-vol-'));
   process.env.TUG_DATA_DIR = dir;
   process.env.TUG_OPERATOR_TOKEN = 'op-volume-token';
-  const app = await createApp();
+  const app = await createApp({ images: { resolve: testImageResolver } });
   const srv = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));
   });

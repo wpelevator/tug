@@ -371,7 +371,6 @@ export interface BuildDesiredStateOptions {
   project: string;
   version: string;
   compose: ComposeFile;
-  registry: string;
   revision?: string;
   defaultNode?: string | null;
   nodes?: Array<{ name: string; labels?: string[] }>;
@@ -381,7 +380,6 @@ export function buildDesiredState({
   project,
   version,
   compose,
-  registry,
   revision,
   defaultNode = null,
   nodes,
@@ -403,9 +401,7 @@ export function buildDesiredState({
       }
       placement = { ...placement, nodes: selected.map((node) => node.name) };
     }
-    const image = src.build
-      ? `${registry ? `${registry}/` : 'tug-build/'}${project}/${name}:${revision || version}`
-      : src.image;
+    const image = src.build ? `tug-build/${project}/${name}:${revision || version}` : src.image;
     services[name] = {
       image,
       build: src.build || null,

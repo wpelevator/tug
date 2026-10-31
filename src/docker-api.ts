@@ -168,7 +168,14 @@ export interface DockerApi {
 /** Splits a reference into `fromImage` and `tag` for `POST /images/create`. */
 export function splitImageRef(ref: string): { fromImage: string; tag: string } {
   const digest = ref.indexOf('@');
-  if (digest >= 0) return { fromImage: ref.slice(0, digest), tag: ref.slice(digest + 1) };
+  if (digest >= 0) {
+    const name = ref.slice(0, digest);
+    const colon = name.lastIndexOf(':');
+    return {
+      fromImage: colon > name.lastIndexOf('/') ? name.slice(0, colon) : name,
+      tag: ref.slice(digest + 1),
+    };
+  }
   const colon = ref.lastIndexOf(':');
   if (colon > ref.lastIndexOf('/'))
     return { fromImage: ref.slice(0, colon), tag: ref.slice(colon + 1) };

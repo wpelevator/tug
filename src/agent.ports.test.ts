@@ -58,7 +58,7 @@ const compose: ComposeFile = {
   },
 };
 const desired = (version = 'v1') =>
-  buildDesiredState({ project: 'proj', version, compose: normalized(compose), registry: '' });
+  buildDesiredState({ project: 'proj', version, compose: normalized(compose) });
 /** Published ports of a service as `host:hostPort->port` strings, as created on the fake engine. */
 const published = (ctx: AgentContext, service: string): string[] =>
   (ctx.docker as FakeDocker)
@@ -174,7 +174,6 @@ test('reconcile does not resolve the node address when no port binds to it', asy
     compose: normalized({
       services: { worker: { image: 'busybox', 'x-tug': { placement: { nodes: ['n1'] } } } },
     }),
-    registry: '',
   });
   const status = await reconcile(
     portless,

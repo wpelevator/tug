@@ -11,7 +11,7 @@ The operator this is for runs one to a few dozen sites on two to ten VPSes, depl
 ## Principles
 
 1. **Compose stays the app format.** `docker compose up` works locally; `x-tug` adds deployment metadata, and Compose features that cannot work across nodes are rejected rather than half-supported ([Compose extensions](compose.md#not-supported)). Compose is the input, not the node runtime: nodes need only the Docker Engine ([M14](#m14--engine-api-agent)).
-2. **Production runs immutable images.** Application code, including WordPress core, themes and plugins, ships inside an image built on control or on the operator's machine. Every image a deployment uses is pinned to a digest when the deployment is created ([M13](#m13--pinned-images-and-one-delivery-path)). Nothing is built or synced into a running node during reconciliation, so rollback is switching image references and always restores exactly what ran.
+2. **Production runs immutable images.** Application code, including WordPress core, themes and plugins, ships inside an image built on control or on the operator's machine. Every image a deployment uses is pinned to a digest when the deployment is created ([M13](#m13--pinned-images-and-one-delivery-path-done)). Nothing is built or synced into a running node during reconciliation, so rollback is switching image references and always restores exactly what ran.
 3. **Agents reconcile desired state and only dial out.** Normal deploys need no SSH and no inbound port on nodes, so nodes behind NAT or a deny-all firewall work. Running containers keep serving while control is down.
 4. **One writer.** Desired state, locks, secrets and history live in one control plane. This keeps ordering, rollback and audit simple; availability comes from control backups and, if needed later, a warm standby.
 5. **Stateful things are pinned and backed up.** Databases and data volumes stay on their placement node unless the operator moves them, are never deleted by a deploy, and every first-class stateful service has a backup and restore path.
@@ -56,7 +56,7 @@ Alternatives considered:
 - **Docker Swarm** gives an overlay network, service VIPs, rolling updates, secrets, labels and global mode out of the box, which overlaps M2, M3 and M6. It needs inbound manager and overlay ports on every node (no NAT), three managers for HA, has MTU and overlay reliability issues on VPS providers, and offers no builds, audit trail or scoped API. Not adopted; it remains the yardstick for how much Tug should build itself.
 - **Kamal** pushes over SSH with no control plane. Simpler, but no reconciliation, no central audit or scoped CI tokens, and no state for scheduled jobs such as backups.
 
-Re-check uncloud's releases at the start of each milestone; last baseline: around v0.20 (WireGuard mesh, service DNS, Caddy with automatic HTTPS, rolling deploys, unregistry image push, `uc exec`/`logs`/`ps`, secrets, bare-host install over SSH, no control plane).
+Re-check uncloud's releases at the start of each milestone; baseline rechecked on 2026-10-31: [v0.21.0](https://github.com/psviderski/uncloud/releases/tag/v0.21.0), adding shared Caddy certificate storage, systemd socket activation and runtime templates to the existing mesh, DNS and deployment features.
 
 ## Milestones
 
@@ -76,7 +76,7 @@ Rolling rollouts for ingress-fronted services (start the new revision on its own
 
 ### M4 — Images without a registry, bare-host install (done)
 
-Control stores built images as saved image files and agents download them with their own token, so no registry or daemon change is needed. A bring-your-own registry is still supported today; M13 removes it. `deploy --build-local` uploads an image built on the operator's machine. `--install-docker` bootstraps Docker on apt and dnf hosts and in `node-enroll` cloud-init. See [Architecture](architecture.md#image-artifacts). Each deploy transfers the whole image; layer reuse is in [Later](#later--only-if-needed).
+Control stores built images as saved image files and agents download them with their own token, so no registry or daemon change is needed. `deploy --build-local` uploads an image built on the operator's machine. `--install-docker` bootstraps Docker on apt and dnf hosts and in `node-enroll` cloud-init. See [Architecture](architecture.md#image-artifacts). Each deploy transfers the whole image; layer reuse is in [Later](#later--only-if-needed).
 
 ### M5 — Streaming channel between agent and control (mostly done)
 
@@ -126,12 +126,12 @@ Optional, and not on the critical path. The reference topology already works wit
 
 Prerequisites: [M14](#m14--engine-api-agent), and a decision on the agent's form. Running WireGuard, forwarding rules, a resolver and a host-bound endpoint from a container needs host networking and broad capabilities, which is the host-level helper in [Later](#later--only-if-needed). It gets its own spec before implementation: MTU, IPv6, forwarding rules, resolver placement, how an existing project's networks are recreated, and how rollouts stay zero-downtime.
 
-### M13 — Pinned images and one delivery path
+### M13 — Pinned images and one delivery path (done)
 
 Make rollback restore exactly what ran, and leave one way for images to reach a node.
 
-- **Digest pinning.** When a deployment is created, control resolves every `image:` tag to its digest and records `image@sha256:…` in the desired state. Control resolves it, not the first agent, so a tag that moves mid-rollout cannot split the nodes. Rollback restores exactly what ran, and nodes added later run the same image. Nodes still pull by digest from the upstream registry. Private registries use credentials stored as a project secret. (Stopgap in place: agents pull published images only when a deployment revision is new to the node, not on every poll, so a moved tag is not deployed without a deploy.)
-- **No bring-your-own registry for built images.** The current option only enforces per-node pull tokens when control writes the registry's htpasswd file and restarts its container, so hosted registries (GHCR, Docker Hub, ECR) cannot use them; it costs a second node credential, a second image delivery path and four install flags. Remove `TUG_REGISTRY`, `TUG_PUSH`, `TUG_REGISTRY_AUTH_PATH`, `TUG_REGISTRY_CONTAINER`, `--no-build-upload`, registry pull tokens and their rotate and revoke commands, and the agent's `docker login`, so a node has one credential. Tug-built images keep travelling as saved image files from control. Teams that build in CI push to their own registry and deploy through `image:`.
+- **Digest pinning.** Control resolves each distinct published image tag once per deployment and stores `image@sha256:…` in desired state and canonical Compose before publication. Explicit pins need no lookup. Multi-platform indexes stay intact. Resolution failure leaves current desired state unchanged; rollback and scaling reuse stored pins. Nodes pull by digest from upstream. Private HTTPS registries use the encrypted project secret `TUG_REGISTRY_AUTH` and Engine API authentication, released only to assigned services. See [Control plane](control-plane.md#published-images-and-private-registries).
+- **One built-image delivery path.** Remote and local builds always travel as retained saved archives from control. Built-image registry configuration, `--no-build-upload`, registry pull tokens and their rotate/revoke commands, registry auth hooks and node `docker login` are removed. Each node has one agent credential. CI-built images can be pushed independently and deployed through `image:`.
 
 Each deploy still transfers whole Tug-built images; a control-hosted image store, mirroring of published images and layer reuse are in [Later](#later--only-if-needed) until image size hurts.
 
@@ -164,13 +164,12 @@ The agent stops running the `docker compose` CLI and reconciles containers throu
 
 Current priority order:
 
-1. M13 digest pinning and removal of the bring-your-own registry: small, independent, and closes the gap where rollback and new nodes can run a different image than the deployment did.
-2. M14 Engine API agent: removes the Compose workarounds, and makes M11's `tug run` a one-off container create.
-3. M11 backups and run-once jobs: the main gap for the target operator.
-4. M15 flexible node roles.
-5. M9 metrics and M8/M9 webhooks.
-6. Remaining M5 items (long-poll removal, agent and daemon log streams, process termination).
-7. M12 container networking, when multi-node users need stable names for rolling services.
+1. M14 Engine API agent: removes the Compose workarounds, and makes M11's `tug run` a one-off container create.
+2. M11 backups and run-once jobs: the main gap for the target operator.
+3. M15 flexible node roles.
+4. M9 metrics and M8/M9 webhooks.
+5. Remaining M5 items (long-poll removal, agent and daemon log streams, process termination).
+6. M12 container networking, when multi-node users need stable names for rolling services.
 
 M10 (private-by-default ports) is done.
 
@@ -187,7 +186,7 @@ The test layers, the metrics milestones are held to and the backlog of mocked te
 - [x] M1 TypeScript adoption merged
 - [x] M2 networking, DNS, ingress/TLS: WireGuard mesh, `node-rotate-wg-key`, service DNS, `x-tug.ingress`, managed Caddy with `auto`/`custom`/`off` TLS ([Networking](networking.md))
 - [x] M3 rolling deploys with ingress upstream switching, `x-tug.rollout` (`strategy`, `drain`; `maxSurge` not implemented), opt-in automatic rollback, run on real hosts through the public ingress
-- [x] M4 `--registry` optional with images stored on control, retention tied to rollback history, agent image pruning, `deploy --build-local`
+- [x] M4 images stored on control, retention tied to rollback history, agent image pruning, `deploy --build-local`; M13 makes this the only built-image delivery path
 - [x] M4 opt-in Docker install for `node-install`/`control-install` (verified on Ubuntu 24.04) and `node-enroll --install-docker` cloud-init (verified on a cloud-init host)
 - [ ] M4 dnf bootstrap verified on real Fedora and Rocky/AlmaLinux hosts
 - [x] M5 wake channel, faster convergence, non-TTY `exec` with stdin, `logs -f`, `ps`, `inspect`
@@ -213,8 +212,8 @@ The test layers, the metrics milestones are held to and the backlog of mocked te
 - [ ] M12 rolling services reachable by stable name and port on meshed projects; per-revision host ports removed there
 - [ ] M12 WireGuard over an existing private network as a node option
 - [x] M13 stopgap: published images pulled only when a deployment revision is new to the node
-- [ ] M13 digest pinning for every `image:` at deploy time, used by rollback
-- [ ] M13 bring-your-own registry, registry pull tokens and `docker login` removed; one node credential
+- [x] M13 digest pinning for every `image:` at deploy time, used by rollback
+- [x] M13 bring-your-own registry, registry pull tokens and `docker login` removed; one node credential
 - [x] M14 Compose normalized on the operator machine; allowlist validation on control
 - [x] M14 Engine API reconciler with config-hash recreation, `recreate` and `rolling` strategies, no `.env` on disk
 - [x] M14 `exec -t` with PTY and resize; `logs`, `ps`, `inspect` and ingress on the Engine API
@@ -223,5 +222,5 @@ The test layers, the metrics milestones are held to and the backlog of mocked te
 - [ ] M15 builds on `builder`-labelled nodes, uploaded to control as saved images
 - [ ] Scaled WordPress reference example (code in image, shared uploads) validated on real hosts
 - [ ] Mocked tests from the [Testing](testing.md#backlog-of-mocked-tests-proposed) backlog: revisions started per deployment, WireGuard key re-report, old-schema database, preflight remedies
-- [ ] Re-check uncloud releases at the start of each milestone and update the baseline in [Positioning](#positioning)
+- [x] M13 uncloud release baseline rechecked and updated in [Positioning](#positioning); repeat at the start of each milestone
 - [ ] Each milestone: tests added, README.md and docs updated, its own plan file folded into docs and deleted when done

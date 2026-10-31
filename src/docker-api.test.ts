@@ -77,3 +77,36 @@ test('demux splits the multiplexed stream into stdout and stderr across chunk bo
   await new Promise((r) => setTimeout(r, 10));
   assert.deepEqual([o.join(''), e.join('')], ['hello', 'oops']);
 });
+
+test('digest pulls strip display tags, preserve registry ports and carry credentials in the Engine header', async () => {
+  const credential = { username: 'user', password: 'private-password' };
+  const digest = `sha256:${'a'.repeat(64)}`;
+  const d = await daemon((req, res) => {
+    const url = new URL(req.url!, 'http://docker');
+    assert.equal(
+      url.searchParams.get('fromImage'),
+      'registry.example:5000/team/app',
+      'Engine pull repository must exclude the display tag while preserving the registry port',
+    );
+    assert.equal(
+      url.searchParams.get('tag'),
+      digest,
+      'Engine pulls must address the pinned manifest digest',
+    );
+    assert.deepEqual(
+      JSON.parse(Buffer.from(String(req.headers['x-registry-auth']), 'base64url').toString()),
+      credential,
+      'private pulls must carry credentials in the Engine auth header',
+    );
+    assert.ok(
+      !req.url!.includes('private-password'),
+      'registry credentials must stay out of request URLs',
+    );
+    res.end('{"status":"Downloaded"}\n');
+  });
+  try {
+    await d.engine.pullImage(`registry.example:5000/team/app:latest@${digest}`, credential);
+  } finally {
+    d.close();
+  }
+});

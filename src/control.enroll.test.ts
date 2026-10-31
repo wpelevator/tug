@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createApp } from './control.ts';
+import { testImageResolver } from '../tests/helpers.ts';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { json as jsonBody } from '../tests/helpers.ts';
@@ -12,8 +13,7 @@ async function server() {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-'));
   process.env.TUG_DATA_DIR = dir;
   process.env.TUG_OPERATOR_TOKEN = 'op-test-token';
-  process.env.TUG_REGISTRY = 'registry.test';
-  const app = await createApp();
+  const app = await createApp({ images: { resolve: testImageResolver } });
   const srv = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));
   });
@@ -38,7 +38,11 @@ test('enroll token exchanges for durable agent credentials and is single-use', a
     assert.equal(res.status, 200);
     const minted = await jsonBody(res);
     assert.match(minted.enrollToken, /^tug_enroll_/);
-    assert.equal(minted.registry, 'registry.test');
+    assert.equal(
+      minted.registry,
+      undefined,
+      'enrollment keys must not carry registry configuration',
+    );
 
     res = await fetch(`${s.base}/agent/v1/enroll`, {
       method: 'POST',
@@ -49,8 +53,12 @@ test('enroll token exchanges for durable agent credentials and is single-use', a
     const enrolled = await jsonBody(res);
     assert.equal(enrolled.node.name, 'app1');
     assert.match(enrolled.agentToken, /^tug_agent_/);
-    assert.match(enrolled.registryToken, /^tug_reg_/);
-    assert.equal(enrolled.registry, 'registry.test');
+    assert.equal(
+      enrolled.registryToken,
+      undefined,
+      'enrollment must issue only one node credential',
+    );
+    assert.equal(enrolled.registry, undefined, 'enrollment must not configure a registry login');
 
     // durable token authenticates against agent work
     res = await fetch(`${s.base}/agent/v1/work`, {

@@ -39,13 +39,6 @@ export default [
     },
   },
   {
-    ignores: [
-      'node_modules/**',
-      'dist/**',
-      'data/**',
-      'registry-data/**',
-      'build-contexts/**',
-      '.claude/**',
-    ],
+    ignores: ['node_modules/**', 'dist/**', 'data/**', 'build-contexts/**', '.claude/**'],
   },
 ];

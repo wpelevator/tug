@@ -7,6 +7,7 @@ import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { promisify } from 'node:util';
 import { createApp } from './control.ts';
+import { testImageResolver } from '../tests/helpers.ts';
 import { defaultImage } from './image.ts';
 import yaml from 'js-yaml';
 
@@ -33,7 +34,7 @@ test('install commands render the shipped templates (src in dev, dist in the ima
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-cli-tpl-'));
   process.env.TUG_DATA_DIR = path.join(dir, 'data');
   process.env.TUG_OPERATOR_TOKEN = 'op-cli-template-token';
-  const app = await createApp();
+  const app = await createApp({ images: { resolve: testImageResolver } });
   const server = await new Promise<import('node:http').Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));
   });
@@ -50,18 +51,11 @@ test('install commands render the shipped templates (src in dev, dist in the ima
   const cli = (...args: string[]) =>
     execFileAsync(process.execPath, [cliEntry, ...args], { env, cwd: dir });
   try {
-    await cli(
-      'control-install',
-      'root@control.test',
-      '--registry',
-      'registry.test',
-      '--port',
-      '9099',
-    );
+    await cli('control-install', 'root@control.test', '--port', '9099');
     let script = await fs.readFile(ssh.log, 'utf8');
     assert.ok(
-      script.includes('registry.test'),
-      'control-compose.yml rendered with the registry host',
+      !script.includes('TUG_REGISTRY'),
+      'control installation must not configure a build registry',
     );
     assert.ok(script.includes('9099'), 'control-compose.yml rendered with the port');
     assert.match(script, /TUG_MESH: "false"/, 'control-install leaves the mesh off by default');
@@ -78,10 +72,10 @@ test('install commands render the shipped templates (src in dev, dist in the ima
     await fs.rm(ssh.log);
     await cli('control-install', 'root@bare.test', '--install-docker');
     script = await fs.readFile(ssh.log, 'utf8');
-    assert.match(
+    assert.doesNotMatch(
       script,
-      /TUG_REGISTRY: ""/,
-      'registry-free control install should render an explicitly empty registry',
+      /TUG_REGISTRY|registry-auth/,
+      'control must have no registry credential wiring',
     );
     assert.ok(
       script.indexOf('download.docker.com') < script.indexOf('preflight: docker.version'),

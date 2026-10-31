@@ -120,7 +120,6 @@ docker([
   '-d',
   ...(process.env.TUG_COMPOSE_BUILD ?? '--build').split(' ').filter(Boolean),
   'control',
-  'registry',
   'provisioner',
   'vps-a',
 ]);

@@ -288,22 +288,6 @@ program
     },
   );
 program
-  .command('node-rotate-registry-token <name>')
-  .description('issue a new registry pull token for a node, invalidating the old one')
-  .action(async (name: string) => {
-    console.log(
-      JSON.stringify(
-        await request(
-          'POST',
-          `/api/v1/nodes/${encodeURIComponent(name)}/rotate-registry-token`,
-          {},
-        ),
-        null,
-        2,
-      ),
-    );
-  });
-program
   .command('node-rotate-wg-key <name>')
   .description(
     'generate a new WireGuard keypair on the node; peers pick up the new public key on their next poll',
@@ -358,23 +342,6 @@ program
     );
   });
 program
-  .command('node-revoke-registry-token <name>')
-  .description("revoke a node's registry pull token, blocking future pulls until rotated")
-  .action(async (name: string) => {
-    console.log(
-      JSON.stringify(
-        await request(
-          'POST',
-          `/api/v1/nodes/${encodeURIComponent(name)}/revoke-registry-token`,
-          {},
-        ),
-        null,
-        2,
-      ),
-    );
-  });
-
-program
   .command('scale <service> <replicas>')
   .description('scale a service to N replicas across matching nodes')
   .action(async (service: string, replicas: string, o: CommonOpts) => {
@@ -417,18 +384,6 @@ program
     '--mesh',
     'enable the WireGuard mesh on control (TUG_MESH=true); install nodes with --mesh too',
   )
-  .option(
-    '--registry <host>',
-    'registry host used in desired images; bring your own registry, Tug does not provision one',
-  )
-  .option(
-    '--registry-auth-path <path>',
-    'container path to an htpasswd file tug-control should manage credentials in, if your registry uses one',
-  )
-  .option(
-    '--registry-container <name>',
-    "docker container name to restart when a node's registry credentials change, if your registry uses an htpasswd file",
-  )
   .action(
     async (
       sshTarget: string,
@@ -436,9 +391,6 @@ program
         token?: string;
         port: string;
         mesh?: boolean;
-        registry?: string;
-        registryAuthPath?: string;
-        registryContainer?: string;
       },
     ) => {
       const operatorToken = o.token || process.env.TUG_TOKEN || token('tug_op');
@@ -446,16 +398,12 @@ program
       preflightRemote(sshTarget, { ports: [Number(o.port)], minDiskMb: 2048, compose: true });
       const image = resolveImage(o.image, o.buildLocalImage);
       if (o.buildLocalImage) await transferTugImage(sshTarget, image);
-      const registryHost = o.registry || '';
       const yamlValue = (value: string) => JSON.stringify(value);
       const compose = await loadTemplate(templatesDir, 'control-compose.yml', {
         IMAGE: yamlValue(image),
         OPERATOR_TOKEN: yamlValue(operatorToken),
-        REGISTRY_HOST: yamlValue(registryHost),
         PORT: o.port,
         MESH: yamlValue(o.mesh ? 'true' : 'false'),
-        REGISTRY_AUTH_PATH: yamlValue(o.registryAuthPath || ''),
-        REGISTRY_CONTAINER: yamlValue(o.registryContainer || ''),
       });
       const remote = await loadTemplate(templatesDir, 'control-install.sh', {
         COMPOSE: compose,
@@ -469,7 +417,6 @@ program
             sshTarget,
             operatorToken,
             url: `http://${remoteHost(sshTarget)}:${o.port}`,
-            registry: registryHost,
           },
           null,
           2,
@@ -489,7 +436,6 @@ program
     '--agent-control-url <url>',
     'control URL reachable by the agent (default: resolved operator control URL)',
   )
-  .option('--registry <host>', 'registry host for docker login')
   .option('--http-only-dev', 'allow plaintext HTTP control URL for local/private development')
   .option(
     '--mesh',
@@ -517,7 +463,6 @@ program
         publicAddress?: string;
         label: string[];
         agentControlUrl?: string;
-        registry?: string;
         httpOnlyDev?: boolean;
         mesh?: boolean;
         wgPort: string;
@@ -546,23 +491,13 @@ program
           NODE_NAME: o.name,
           AGENT_TOKEN: registered.agentToken,
         })) + (o.mesh ? 'TUG_MESH=true\n' : '');
-      const dockerLogin = o.registry
-        ? `printf %s ${sh(registered.registryToken)} | docker login ${sh(o.registry)} --username ${sh(o.name)} --password-stdin`
-        : 'true';
       const remote = await loadTemplate(templatesDir, 'node-install.sh', {
         ENV: env,
-        DOCKER_LOGIN: dockerLogin,
         IMAGE_SH: sh(image),
         RUN_FLAGS: `${o.mesh ? MESH_RUN_FLAGS : HOST_NETWORK_FLAG} `,
       });
       runLocal('ssh', ['--', sshTarget, remote]);
-      console.log(
-        JSON.stringify(
-          { ok: true, node: registered.node, registryToken: registered.registryToken },
-          null,
-          2,
-        ),
-      );
+      console.log(JSON.stringify({ ok: true, node: registered.node }, null, 2));
     },
   );
 
@@ -753,17 +688,10 @@ program
   .option('-f, --file <file>', 'compose file', 'docker-compose.yml')
   .option('--version <version>', 'display version (default: git-<Compose hash>)')
   .option('--build-local', 'build application images locally and upload them without source')
-  .option(
-    '--no-build-upload',
-    'deploy published images without uploading source; conflicts with --build-local',
-  )
   .option('--no-wait', 'return after desired state is created')
   .option('--timeout <seconds>', 'wait timeout in seconds', '300')
   .action(
-    async (
-      o: CommonOpts &
-        WaitOpts & { file: string; version?: string; buildUpload: boolean; buildLocal?: boolean },
-    ) => {
+    async (o: CommonOpts & WaitOpts & { file: string; version?: string; buildLocal?: boolean }) => {
       const cfg = await loadCfg();
       const project = o.project || cfg.project || 'site';
       // Control secrets are interpolated as sentinels; the agent substitutes the node's released values.
@@ -794,10 +722,7 @@ program
         } finally {
           await fs.rm(directory, { recursive: true, force: true });
         }
-      } else if (
-        o.buildUpload &&
-        Object.values(compose.services).some((service) => service.build)
-      ) {
+      } else if (Object.values(compose.services).some((service) => service.build)) {
         const tarball = await makeContext();
         try {
           const form = new FormData();
@@ -1071,10 +996,6 @@ program.hook('preAction', async (_root, command) => {
         max,
       );
   }
-  if (options.buildLocal && options.buildUpload === false)
-    throw new Error('--build-local and --no-build-upload cannot be combined');
-  if ((options.registryAuthPath || options.registryContainer) && !options.registry)
-    throw new Error('--registry-auth-path and --registry-container require --registry');
   if (command.name() === 'control-restore' && !options.confirm)
     throw new Error('control-restore requires --confirm');
   const positional = command.name() === 'exec' ? command.args.slice(0, 1) : command.args;

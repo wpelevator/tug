@@ -5,7 +5,7 @@ The control API accepts two kinds of credentials, both sent as `Authorization: B
 - The **operator token** is the root credential created when control first starts (`TUG_OPERATOR_TOKEN`, or generated and written to `<data dir>/operator.token`). It has full access and appears as `operator` in the audit trail. Nothing about existing installs changes.
 - **Named API tokens** are narrower credentials for CI systems, teammates and automation. Each has a unique name, a role and optionally a list of allowed projects. Create them with `tug token-create`, and revoke them with `tug token-revoke`.
 
-Agents (`/agent/v1/*`) and the registry auth hook (`POST /api/v1/registry/auth`) have their own node credentials and are not affected; API tokens, including admin tokens and the operator token, are refused on agent endpoints.
+Agents (`/agent/v1/*`) use their node agent credentials; API tokens, including admin tokens and the operator token, are refused on agent endpoints.
 
 ## Roles
 
@@ -15,7 +15,7 @@ Roles are cumulative.
 | --- | --- |
 | `read` | Status, events, project and deployment records, volume listings and secret names (never values). No mutations. |
 | `deploy` | Everything in `read`, plus create projects, deploy, roll back, cancel deployments, restart services, fetch service logs and read command results, for its allowed projects. |
-| `admin` | Everything the operator token can do: secrets, volumes, nodes, enrollment, registry credentials, backups, restore, diagnostics and token management. Admin tokens cannot be limited to projects. |
+| `admin` | Everything the operator token can do: secrets, volumes, nodes, enrollment, backups, restore, diagnostics and token management. Admin tokens cannot be limited to projects. |
 
 A `deploy` token can never read secret values (no API endpoint returns them to an operator at all), and cannot set or delete secrets, manage nodes, take or restore backups, run diagnostics or manage tokens. Setting and deleting secrets is `admin` only; listing secret names is `read`.
 
@@ -48,8 +48,6 @@ The project column says how a scoped token's allowed projects are checked: the p
 | `GET /api/v1/nodes` | `admin` | Control-wide |
 | `POST /api/v1/nodes/register` | `admin` | Control-wide |
 | `POST /api/v1/nodes/enroll-token` | `admin` | Control-wide |
-| `POST /api/v1/nodes/:name/rotate-registry-token` | `admin` | Control-wide |
-| `POST /api/v1/nodes/:name/revoke-registry-token` | `admin` | Control-wide |
 | `POST /api/v1/nodes/:name/rotate-wg-key` | `admin` | Control-wide |
 | `POST /api/v1/nodes/:name/ingress` | `admin` | Control-wide |
 | `DELETE /api/v1/nodes/:name` | `admin` | Control-wide |
@@ -60,7 +58,6 @@ The project column says how a scoped token's allowed projects are checked: the p
 | `POST /api/v1/tokens` | `admin` | Control-wide |
 | `GET /api/v1/tokens` | `admin` | Control-wide |
 | `DELETE /api/v1/tokens/:name` | `admin` | Control-wide |
-| `POST /api/v1/registry/auth` | `public` | Node registry credentials in the body, not a bearer token |
 
 ## Failures
 
@@ -133,6 +130,6 @@ jobs:
 ## Limits
 
 - A `deploy` token can run any image or Compose configuration on the nodes of its projects, execute commands in those containers, and read their logs and raw Docker inspection data. Treat it as access to those nodes: inspection data can include environment variables, and logs can contain whatever the application prints. Scope tokens to the projects they need and expire short-lived ones.
-- Control-wide state (nodes, registry credentials, backups, diagnostics, tokens, secrets and volume deletion) is admin only. There is no per-project secret management role.
+- Control-wide state (nodes, backups, diagnostics, tokens, secrets and volume deletion) is admin only. There is no per-project secret management role.
 - Roles and project scopes are fixed at creation; to change them, create a new token and revoke the old one.
 - A `deploy` event is written when a deployment is published. A build that fails before publishing appears only in its deployment record (with its `actor`), not as an event.

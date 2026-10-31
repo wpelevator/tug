@@ -45,11 +45,9 @@ for (const name of nodes) {
     address: name,
     publicAddress: publicFromName ? name : undefined,
   });
-  await fs.writeFile(
-    `${tokenDir}/${name}.env`,
-    `export TUG_AGENT_TOKEN=${result.agentToken}\nexport TUG_REGISTRY_TOKEN=${result.registryToken}\n`,
-    { mode: 0o600 },
-  );
+  await fs.writeFile(`${tokenDir}/${name}.env`, `export TUG_AGENT_TOKEN=${result.agentToken}\n`, {
+    mode: 0o600,
+  });
   if (ingressNodes.includes(name))
     await request(`/api/v1/nodes/${name}/ingress`, { enabled: true });
   console.log(`registered ${name}`);

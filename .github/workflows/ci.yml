@@ -48,7 +48,6 @@ jobs:
         with:
           runtime: true
           fake-vps: true
-          registry: true
       - run: npm run test:smoke:image
       - run: npm run test:integration
 
@@ -65,7 +64,6 @@ jobs:
         with:
           runtime: true
           fake-vps: true
-          registry: true
       - run: npm run test:integration:network
 
   integration-no-registry:
@@ -96,5 +94,4 @@ jobs:
         with:
           runtime: true
           fake-vps: true
-          registry: true
       - run: npm run test:integration:rollout
