@@ -1,10 +1,21 @@
 {
-  "name": "tug",
-  "private": true,
+  "name": "@wpelevator/tug",
+  "version": "0.0.0",
+  "description": "Portable VPS deployments with Docker Compose",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wpelevator/tug.git"
+  },
   "type": "module",
   "bin": {
     "tug": "./dist/cli.js",
     "tug-node": "./dist/main.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "start:control": "node src/main.ts control",
@@ -18,7 +29,10 @@
     "test:integration": "bash scripts/integration-test.sh",
     "test:integration:network": "bash scripts/integration-network-test.sh",
     "test:integration:agent": "node --test 'test/integration/**/*.test.ts'",
-    "test:smoke:dist": "npm run build && CLI_ENTRY=dist/cli.js node --test src/cli.templates.test.ts"
+    "test:smoke:dist": "npm run build && CLI_ENTRY=dist/cli.js node --test src/cli.templates.test.ts",
+    "changeset": "changeset",
+    "version-packages": "changeset version && npm install --package-lock-only --ignore-scripts",
+    "release": "changeset publish"
   },
   "dependencies": {
     "commander": "^12.1.0",
@@ -31,6 +45,7 @@
     "tar": "^7.4.3"
   },
   "devDependencies": {
+    "@changesets/cli": "^3.0.3",
     "@eslint/js": "^10.0.1",
     "@types/express": "^4.17.25",
     "@types/js-yaml": "^4.0.9",

@@ -6,7 +6,9 @@
 tug control install root@control.example.com --token "$TUG_TOKEN" --registry registry.example.com
 ```
 
-`control install` runs SSH preflight checks on the host (Docker, Docker Compose, writable Tug paths, at least 2048 MB free under `/var/lib`, the API port free), builds the local Tug image and transfers it with `docker save` / `scp` / `docker load` (skip with `--no-transfer-image`), then starts the `control` container from `src/templates/control-compose.yml`. It prints the operator token and the control URL (`http://<host>:<port>`, port `8080` by default).
+`control install` runs SSH preflight checks on the host (Docker, Docker Compose, writable Tug paths, at least 2048 MB free under `/var/lib`, the API port free), then starts the `control` container from `src/templates/control-compose.yml`. It prints the operator token and the control URL (`http://<host>:<port>`, port `8080` by default).
+
+The control container runs the published image `ghcr.io/wpelevator/tug:<CLI version>` (the installed CLI's own package version, so control and the CLI match). Pass `--image <tag>` to use another tag, or `--build-local-image` to build the image from the current checkout and copy it to the host over SSH with `docker save` / `scp` / `docker load` (tagged `tug:local` unless `--image` is given); the latter is for development and needs the repository's Dockerfile in the working directory. See [Releases](releases.md).
 
 `--registry <host>` is required: Tug does not provision a registry and uses this host in built image references. If the registry uses an htpasswd file and you want Tug to manage per-node credentials, also pass `--registry-auth-path` (the htpasswd path as mounted into the control container) and `--registry-container` (the registry container to restart when credentials change).
 

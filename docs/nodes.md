@@ -9,7 +9,7 @@ tug node install root@app1.example.com --name app1 --address 10.0.0.11 \
   --control-url https://control.example.com --registry registry.example.com
 ```
 
-This registers the node with control (issuing an agent token and a registry pull token), runs SSH preflight checks, transfers the Tug image (skip with `--no-transfer-image`), writes `/etc/tug/agent.env`, runs `docker login` against `--registry` if given, and starts the agent container.
+This registers the node with control (issuing an agent token and a registry pull token), runs SSH preflight checks, pulls the Tug image on the host (by default `ghcr.io/wpelevator/tug:<CLI version>`; see [Image](#image)), writes `/etc/tug/agent.env`, runs `docker login` against `--registry` if given, and starts the agent container.
 
 Preflight checks fail early, with a fix hint, unless the host has Docker Engine accessible to the SSH user, Docker Compose v2, writable `/opt`, `/var/lib` and `/etc/tug` paths, at least 1024 MB free under `/var/lib`, and can reach `<control-url>/healthz`. The control URL must be `https://` unless you pass `--http-only-dev` for local or private development.
 
@@ -24,7 +24,7 @@ tug node enroll --name app1
 #     -v /var/run/docker.sock:/var/run/docker.sock \
 #     -v tug-agent:/var/lib/tug \
 #     -e TUG_JOIN_KEY=<key> \
-#     tug:local agent
+#     ghcr.io/wpelevator/tug:<CLI version> agent
 ```
 
 The enrollment key (`TUG_JOIN_KEY`) is base64url-encoded JSON with the control URL, a short-lived limited-use `enrollToken` and, with `--ca`, the control plane's CA certificate. The durable agent token is minted by control during enrollment and persisted to the agent's state volume (`/var/lib/tug/agent.json`); it never appears on the `docker run` command line or in `docker inspect`. On restart the agent loads the persisted token and skips enrollment; on a fresh volume it enrolls again. A leaked join key is spent after its uses and expires on its own.
@@ -35,11 +35,17 @@ Options:
 - `--uses <n>` lets one key enroll several hosts (default `1`).
 - `--ttl <seconds>` sets the key lifetime (default `3600`).
 - `--ca <ca.pem>` embeds a private or self-signed control CA, so agents trust it without a separate `NODE_EXTRA_CA_CERTS`.
-- `--image <tag>` sets the image in the printed command (default `tug:local`).
+- `--image <tag>` sets the image in the printed command (default `ghcr.io/wpelevator/tug:<CLI version>`).
 - `--json` prints machine-readable output.
 - `--http-only-dev` allows a plaintext HTTP control URL.
 
 To keep the key out of shell history and `docker inspect`, mount it as a file and set `TUG_JOIN_KEY_FILE=/path/to/key` instead of `TUG_JOIN_KEY`.
+
+## Image
+
+`node install` and `node enroll` default `--image` to `ghcr.io/wpelevator/tug:<version>`, where `<version>` is the installed CLI's own package version, so the CLI and the agents it installs stay on the same release. Pass `--image <tag>` to run another image, for example `ghcr.io/wpelevator/tug:edge` for the latest build of `main` or a mirror in your own registry.
+
+`node install --build-local-image` is for development: it builds the image from the current checkout, copies it to the host with `docker save` / `scp` / `docker load` and runs it, tagging it `tug:local` unless `--image` is also given. It needs a Tug checkout (the Dockerfile) in the working directory. See [Releases](releases.md) for how images are published.
 
 ## Joining the WireGuard mesh
 

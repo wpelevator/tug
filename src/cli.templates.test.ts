@@ -7,6 +7,7 @@ import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { promisify } from 'node:util';
 import { createApp } from './control.ts';
+import { defaultImage } from './image.ts';
 
 const execFileAsync = promisify(execFile);
 // `src/cli.ts` in dev; `CLI_ENTRY=dist/cli.js npm run test:smoke:dist` checks the built output.
@@ -32,22 +33,25 @@ test('install commands render the shipped templates (src in dev, dist in the ima
   const env = { ...process.env, PATH: `${ssh.bin}${path.delimiter}${process.env.PATH}`, TUG_CONFIG: path.join(dir, 'cfg.json'), TUG_TOKEN: 'op-cli-template-token', TUG_CONTROL_URL: controlUrl };
   const cli = (...args: string[]) => execFileAsync(process.execPath, [cliEntry, ...args], { env, cwd: dir });
   try {
-    await cli('control', 'install', 'root@control.test', '--registry', 'registry.test', '--no-transfer-image', '--port', '9099');
+    await cli('control', 'install', 'root@control.test', '--registry', 'registry.test', '--port', '9099');
     let script = await fs.readFile(ssh.log, 'utf8');
     assert.ok(script.includes('registry.test'), 'control-compose.yml rendered with the registry host');
     assert.ok(script.includes('9099'), 'control-compose.yml rendered with the port');
+    assert.ok(script.includes(`image: ${defaultImage()}`), 'control install defaults to the published image for the CLI version');
+    assert.ok(!script.includes('docker build'), 'control install does not build an image unless --build-local-image is set');
     assert.doesNotMatch(script, /\{\{\w+\}\}/, 'no unrendered template variables');
 
     await fs.rm(ssh.log);
-    await cli('node', 'install', 'root@node.test', '--name', 'n-tpl', '--control-url', controlUrl, '--http-only-dev', '--no-transfer-image');
+    await cli('node', 'install', 'root@node.test', '--name', 'n-tpl', '--control-url', controlUrl, '--http-only-dev');
     script = await fs.readFile(ssh.log, 'utf8');
     assert.ok(script.includes('TUG_NODE_NAME=n-tpl'), 'agent.env rendered');
     assert.ok(script.includes(controlUrl), 'agent.env carries the control URL');
+    assert.ok(script.includes(defaultImage()), 'node install defaults to the published image for the CLI version');
     assert.doesNotMatch(script, /\{\{\w+\}\}/, 'no unrendered template variables');
     assert.doesNotMatch(script, /NET_ADMIN|TUG_MESH/, 'agents join no mesh unless asked');
 
     await fs.rm(ssh.log);
-    await cli('node', 'install', 'root@node2.test', '--name', 'n-mesh', '--control-url', controlUrl, '--http-only-dev', '--no-transfer-image', '--mesh');
+    await cli('node', 'install', 'root@node2.test', '--name', 'n-mesh', '--control-url', controlUrl, '--http-only-dev', '--mesh');
     script = await fs.readFile(ssh.log, 'utf8');
     assert.ok(script.includes('TUG_MESH=true'), '--mesh sets TUG_MESH in agent.env');
     assert.match(script, /--network host --cap-add NET_ADMIN/, '--mesh runs the agent with host networking and NET_ADMIN');
@@ -55,6 +59,7 @@ test('install commands render the shipped templates (src in dev, dist in the ima
     assert.doesNotMatch(script, /\{\{\w+\}\}/, 'no unrendered template variables');
 
     const enroll = await cli('node', 'enroll', '--name', 'n-enr', '--mesh', '--control-url', controlUrl, '--http-only-dev');
+    assert.ok(enroll.stdout.includes(`${defaultImage()} agent`), 'node enroll prints a docker run with the published image for the CLI version');
     assert.match(enroll.stdout, /--network host --cap-add NET_ADMIN -e TUG_MESH=true/, 'node enroll --mesh prints a mesh-capable docker run');
   } finally { await new Promise(resolve => server.close(resolve)); }
 });

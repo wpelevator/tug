@@ -8,3 +8,4 @@
 - Add tests for all new and updated features, and ensure that existing tests pass. Write assertion messages that state the expected behavior, since they are what a failure shows.
 - Use Node.js for all scripting and tooling needs since that is available on the host machine.
 - Never hard-wrap Markdown. Keep each paragraph, list item and table row on a single line and let the editor soft-wrap it, so editing a sentence doesn't reflow the whole paragraph into an unreadable diff.
+- Every user-facing change needs a changeset (`npm run changeset`); see docs/releases.md.

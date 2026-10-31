@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import * as tar from 'tar';
 import { readCompose, composeHash } from './compose.ts';
 import { errMessage, token, loadTemplate } from './util.ts';
+import { packageVersion, resolveImage } from './image.ts';
 import { TERMINAL_DEPLOYMENT_STATES } from './protocol.ts';
 import type { DeploymentState, EnrollTokenResponse, JoinKey, RegisterResponse } from './protocol.ts';
 
@@ -23,12 +24,12 @@ interface CommandRecord { state: string; result_json?: string | null }
 interface DeployResponse { deployment: DeploymentRecord; desiredState?: unknown }
 interface CommonOpts { project?: string }
 interface WaitOpts { wait: boolean; timeout: string }
-interface InstallOpts { transferImage: boolean; image: string }
+interface InstallOpts { buildLocalImage?: boolean; image?: string }
 /** `docker run` flags a mesh agent needs: host networking so `wg0` lives in the host's network namespace, and NET_ADMIN to manage it. */
 const MESH_RUN_FLAGS = '--network host --cap-add NET_ADMIN';
 
 const program = new Command();
-program.name('tug').description('Portable VPS deployments with Docker Compose').version('0.1.0');
+program.name('tug').description('Portable VPS deployments with Docker Compose').version(packageVersion());
 const cfgPath = () => process.env.TUG_CONFIG || path.join(process.cwd(), '.tug.json');
 async function loadCfg(): Promise<Config> { try { return JSON.parse(await fs.readFile(cfgPath(), 'utf8')); } catch { return {}; } }
 async function saveCfg(c: Config): Promise<void> { await fs.writeFile(cfgPath(), JSON.stringify(c, null, 2)); }
@@ -128,20 +129,21 @@ program.command('control:token').description('print local dev operator token if 
 const control = program.command('control');
 control.command('install <sshTarget>')
   .description('install the control plane on a Docker-capable host over SSH; front it with your own reverse proxy/TLS if exposing it publicly')
-  .option('--image <tag>', 'local/remote image tag', 'tug:local')
+  .option('--image <tag>', 'Tug image to run (default: ghcr.io/wpelevator/tug:<this CLI\'s version>)')
+  .option('--build-local-image', 'build the image from the current checkout and copy it to the host over SSH (tags it tug:local unless --image is set); for development')
   .option('--token <token>', 'operator token')
   .option('--port <port>', 'published API port', '8080')
   .requiredOption('--registry <host>', 'registry host used in desired images; bring your own registry, Tug does not provision one')
   .option('--registry-auth-path <path>', 'container path to an htpasswd file tug-control should manage credentials in, if your registry uses one')
   .option('--registry-container <name>', 'docker container name to restart when a node\'s registry credentials change, if your registry uses an htpasswd file')
-  .option('--no-transfer-image', 'skip docker build/save/scp/load')
   .action(async (sshTarget: string, o: InstallOpts & { token?: string; port: string; registry: string; registryAuthPath?: string; registryContainer?: string }) => {
     const operatorToken = o.token || process.env.TUG_TOKEN || token('tug_op');
     preflightRemote(sshTarget, { ports: [Number(o.port)], minDiskMb: 2048 });
-    if (o.transferImage) await transferTugImage(sshTarget, o.image);
+    const image = resolveImage(o.image, o.buildLocalImage);
+    if (o.buildLocalImage) await transferTugImage(sshTarget, image);
     const registryHost = o.registry;
     const compose = await loadTemplate(templatesDir, 'control-compose.yml', {
-      IMAGE: o.image, OPERATOR_TOKEN: operatorToken, REGISTRY_HOST: registryHost, PORT: o.port,
+      IMAGE: image, OPERATOR_TOKEN: operatorToken, REGISTRY_HOST: registryHost, PORT: o.port,
       REGISTRY_AUTH_PATH: o.registryAuthPath || '',
       REGISTRY_CONTAINER: o.registryContainer || ''
     });
@@ -163,21 +165,22 @@ node.command('install <sshTarget>')
   .option('--http-only-dev', 'allow plaintext HTTP control URL for local/private development')
   .option('--mesh', 'join the WireGuard mesh (agent runs with host networking and NET_ADMIN; control needs TUG_MESH=true)')
   .option('--wg-port <port>', 'WireGuard UDP port checked by preflight', '51820')
-  .option('--image <tag>', 'local/remote image tag', 'tug:local')
-  .option('--no-transfer-image', 'skip docker build/save/scp/load')
+  .option('--image <tag>', 'Tug image to run (default: ghcr.io/wpelevator/tug:<this CLI\'s version>)')
+  .option('--build-local-image', 'build the image from the current checkout and copy it to the host over SSH (tags it tug:local unless --image is set); for development')
   .action(async (sshTarget: string, o: InstallOpts & { name: string; address?: string; publicAddress?: string; controlUrl?: string; registry?: string; httpOnlyDev?: boolean; mesh?: boolean; wgPort: string }) => {
     const cfg = await loadCfg();
     const controlUrl = o.controlUrl || cfg.controlUrl || process.env.TUG_CONTROL_URL || 'http://localhost:8080';
     assertHttps(controlUrl, o.httpOnlyDev);
     preflightRemote(sshTarget, { controlUrl, mesh: o.mesh, udpPorts: o.mesh ? [Number(o.wgPort)] : [] });
     const registered = await request<RegisterResponse>('POST', '/api/v1/nodes/register', { name: o.name, address: o.address, publicAddress: o.publicAddress });
-    if (o.transferImage) await transferTugImage(sshTarget, o.image);
+    const image = resolveImage(o.image, o.buildLocalImage);
+    if (o.buildLocalImage) await transferTugImage(sshTarget, image);
     const env = await loadTemplate(templatesDir, 'agent.env', {
       CONTROL_URL: controlUrl, NODE_NAME: o.name, AGENT_TOKEN: registered.agentToken
     }) + (o.mesh ? 'TUG_MESH=true\n' : '');
     const dockerLogin = o.registry ? `printf %s ${sh(registered.registryToken)} | docker login ${sh(o.registry)} --username ${sh(o.name)} --password-stdin` : 'true';
     const remote = await loadTemplate(templatesDir, 'node-install.sh', {
-      ENV: env, DOCKER_LOGIN: dockerLogin, IMAGE_SH: sh(o.image), RUN_FLAGS: o.mesh ? `${MESH_RUN_FLAGS} ` : ''
+      ENV: env, DOCKER_LOGIN: dockerLogin, IMAGE_SH: sh(image), RUN_FLAGS: o.mesh ? `${MESH_RUN_FLAGS} ` : ''
     });
     runLocal('ssh', [sshTarget, remote]);
     console.log(JSON.stringify({ ok: true, node: registered.node, registryToken: registered.registryToken }, null, 2));
@@ -198,10 +201,10 @@ node.command('enroll')
   .option('--uses <n>', 'how many hosts may enroll with this key', '1')
   .option('--ca <file>', 'PEM CA cert to embed so agents trust a private/self-signed control')
   .option('--http-only-dev', 'allow a plaintext HTTP control URL for local/private development')
-  .option('--image <tag>', 'agent image used in the printed docker run', 'tug:local')
+  .option('--image <tag>', 'agent image used in the printed docker run (default: ghcr.io/wpelevator/tug:<this CLI\'s version>)')
   .option('--mesh', 'print a docker run that joins the WireGuard mesh (host networking, NET_ADMIN)')
   .option('--json', 'print machine-readable JSON instead of the docker run snippet')
-  .action(async (o: { name?: string; controlUrl?: string; ttl: string; uses: string; ca?: string; httpOnlyDev?: boolean; image: string; mesh?: boolean; json?: boolean }) => {
+  .action(async (o: { name?: string; controlUrl?: string; ttl: string; uses: string; ca?: string; httpOnlyDev?: boolean; image?: string; mesh?: boolean; json?: boolean }) => {
     const cfg = await loadCfg();
     const controlUrl = o.controlUrl || cfg.controlUrl || process.env.TUG_CONTROL_URL || 'http://localhost:8080';
     assertHttps(controlUrl, o.httpOnlyDev);
@@ -211,7 +214,7 @@ node.command('enroll')
     const joinKey = Buffer.from(JSON.stringify(keyPayload)).toString('base64url');
     if (o.json) { console.log(JSON.stringify({ ...minted, controlUrl, joinKey }, null, 2)); return; }
     console.log(`# Enrollment key valid until ${minted.expiresAt} (${minted.usesRemaining} use(s)). Run on each fresh host:\n`);
-    console.log(dockerRunSnippet(o.image, joinKey, o.mesh));
+    console.log(dockerRunSnippet(resolveImage(o.image), joinKey, o.mesh));
   });
 
 program.command('secret:set <name>').option('--project <name>').option('--value <value>').action(async (name: string, o: CommonOpts & { value?: string }) => {
