@@ -1,5 +1,24 @@
 # @wpelevator/tug
 
+## 0.3.0
+
+### Minor Changes
+
+- 2e93255: Implement M6 placement and scheduling (node labels, label-based placement, replica spread, global mode, `tug scale`) and M7 NFS shared volumes.
+- 2e93255: Add `tug node-remove` to delete a retired node and `control-install --mesh` to enable the WireGuard mesh on control.
+- 319b45f: Published ports are private by default (M10). Generated Compose binds `ports` entries that name no host IP to the node's overlay IP when the mesh is on, to `127.0.0.1` when only the managed Caddy on the same node dials the service, and otherwise to the node's `address`, with a `ports.public` warning event when that address is public. Entries with an explicit host IP, including `0.0.0.0`, are unchanged, so write `"0.0.0.0:80:80"` to publish something on purpose. `tug doctor --nodes` adds a `ports.public` check listing containers of Tug projects that listen on a public address. A node's `--address` must be an IP on one of its interfaces (or a hostname that resolves to one), because ports bind to it.
+- e14afdd: Wake agents immediately for deployments and queued work through an authenticated outbound WebSocket, with cursor-based long-poll and periodic polling fallbacks.
+- db98497: Add live non-TTY exec, followed service logs, ps, and inspect over the outbound agent stream.
+
+### Patch Changes
+
+- 28c50c2: The agent now always runs with `--network host` (`node-install`, `node-enroll` and its cloud-init). Its TCP and HTTP health checks dial container IPs, which an agent on the default Docker bridge cannot reach on current Docker (29.x), so every first deploy on a fresh node failed health. `--mesh` still adds `NET_ADMIN` and `TUG_MESH`.
+- 72e2b67: `--build-local-image` now builds for the target host's architecture, read with `uname -m` over SSH, instead of the machine running the CLI. Before, installing an amd64 VPS from an arm64 Mac produced an image that failed with `exec format error`.
+- 74e6345: `control-install` can be run again over a running control to upgrade it. Its port preflight no longer fails when the port is held by the existing `tug-control-control-1` container; any other listener still fails it.
+- 446a291: Agents pull published `image:` services only when a deployment revision is new to the node, instead of on every poll. Before, a tag that moved upstream (for example `mariadb:11`) was pulled and the container recreated within seconds without a deploy.
+- 2e93255: Skip stale nodes when resolving label and `global` placement and in `tug scale`, so a dead host cannot hold a rollout open. Fix NFS volumes so consumers mount the exporter's overlay or node address and the exporter bind-mounts the export path.
+- 446a291: Add an interim WordPress backup recipe: an `examples/wordpress-backup` Compose project with a restic backup sidecar (database dump, uploads, retention, health), and `docs/backups.md` with multi-node and NFS variants, a control-plane backup cron and a restore drill, until `x-tug.backup` (M11) exists.
+
 ## 0.2.1
 
 ### Patch Changes
