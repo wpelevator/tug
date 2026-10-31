@@ -9,6 +9,9 @@ export default [
         languageOptions: {
             ecmaVersion: "latest",
             sourceType: "module",
+            parserOptions: {
+                tsconfigRootDir: import.meta.dirname,
+            },
             globals: {
                 ...globals.node,
             },
@@ -34,6 +37,6 @@ export default [
         },
     },
     {
-        ignores: ["node_modules/**", "dist/**", "data/**", "registry-data/**", "build-contexts/**"],
+        ignores: ["node_modules/**", "dist/**", "data/**", "registry-data/**", "build-contexts/**", ".claude/**"],
     },
 ];
