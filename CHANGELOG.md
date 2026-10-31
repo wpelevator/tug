@@ -1,5 +1,19 @@
 # @wpelevator/tug
 
+## 0.5.0
+
+### Minor Changes
+
+- c715f8b: Pin published images to registry digests before deployment so rollback and new nodes reuse the same image. Always deliver Tug-built images as saved archives, remove build-registry configuration and node registry tokens, and support private published images through the encrypted TUG_REGISTRY_AUTH project secret.
+
+### Patch Changes
+
+- 72c112b: Preserve base64url padding in private registry pull credentials so Docker Engine accepts authentication for all username and password lengths.
+  
+  Use a direct PHP health endpoint in the WordPress backup example so installed sites do not depend on their public ingress route to pass local health checks.
+- 6840b72: Add reproducible Docker Compose benchmarks comparing nginx, Caddy proxying to nginx, and direct Caddy for PHP-FPM and static files, including latency, throughput and CPU measurements.
+- 69dcba9: Use Node's built-in SQLite for control and agent state, removing SQLite native-addon installation and its Docker build toolchain. Node >= 22.18 remains supported. Snapshot creation and restore integrity checks run synchronously; large databases can briefly pause control traffic.
+
 ## 0.4.0
 
 ### Minor Changes
