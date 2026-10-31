@@ -22,7 +22,7 @@ What does not exist: a `/metrics` endpoint, CPU, memory, disk or restart data, r
 
 ### Event volume
 
-Agents currently emit four `service.*` events (`pulling`, `starting`, `health_checking`, `serving`) for every non-rolling service on every reconcile, whether or not anything changed. On a real control plane with nothing deploying this was about 71 events a minute, roughly 100,000 a day. Nothing deletes events, so the default `tug events` view (the last 100) covered about a minute and a half and hid real events such as an automatic rollback. Event hygiene, below, addresses this.
+Agents currently emit four `service.*` events (`pulling`, `starting`, `health_checking`, `serving`) for every non-rolling service on every reconcile, whether or not anything changed. On a real control plane with nothing deploying this was about 71 events a minute, roughly 100,000 a day. Nothing deletes events, so the default `tug events` view (the last 100) covered about a minute and a half and hid real events such as an automatic rollback. [PR #13](https://github.com/wpelevator/tug/pull/13) fixes this, see [Event hygiene](#event-hygiene); until it is merged, `main` behaves as described here.
 
 ## Proposed
 
@@ -30,7 +30,7 @@ Everything below is **Proposed** unless a status line says otherwise.
 
 | Piece | Section | Status |
 | --- | --- | --- |
-| Event hygiene | [Event hygiene](#event-hygiene) | In progress, not yet merged |
+| Event hygiene | [Event hygiene](#event-hygiene) | Implemented, in review ([PR #13](https://github.com/wpelevator/tug/pull/13)) |
 | Structured logs | [Structured logs](#structured-logs) | Proposed |
 | Metrics on control | [Metrics on control](#metrics-on-control) | Proposed |
 | Node and service stats from agents | [Node and service stats reported by agents](#node-and-service-stats-reported-by-agents) | Proposed |
@@ -42,7 +42,7 @@ Everything below is **Proposed** unless a status line says otherwise.
 
 ### Event hygiene
 
-Status: in progress, not yet merged. A separate change makes agents emit lifecycle events only when something changes (a new revision, changed secrets or rendered configuration, a failure or a recovery), and makes control delete events older than `TUG_EVENT_RETENTION_DAYS` (default 30) and keep at most `TUG_EVENT_MAX_ROWS` (default 100000). It comes first because every later piece, including webhooks, assumes that an event means something happened.
+Status: implemented in [PR #13](https://github.com/wpelevator/tug/pull/13), in review and not yet merged. Agents emit `service.pulling`, `starting`, `health_checking` and `serving` only when something about the project changes: a new desired revision, a different Compose file rendered for the node, or different secret versions. A failed apply produces one `service.failed` event (level `error`) naming the service whose check failed and why, retries of the same failure add nothing, and recovery produces one `service.serving` event. Agents still apply and health-check the project on every poll, so only the events are quiet. Control deletes events older than `TUG_EVENT_RETENTION_DAYS` (default 30) and keeps at most `TUG_EVENT_MAX_ROWS` (default 100000), at startup and then at most once an hour while agents report; `0` turns a limit off. It comes first because every later piece, including webhooks, assumes that an event means something happened. Known limit: a container that crashes and is restarted by the next poll produces no event unless its health check fails, so crash loops would show up only in the restart counts proposed under [node and service stats](#node-and-service-stats-reported-by-agents).
 
 ### Structured logs
 
@@ -191,7 +191,7 @@ For Tug the equivalent check would assert:
 
 ## Rollout order
 
-1. Event hygiene (in progress). Independent of everything else.
+1. Event hygiene (implemented, in review in [PR #13](https://github.com/wpelevator/tug/pull/13)). Independent of everything else.
 2. Structured logs and the `/metrics` endpoint on control with the control-side metrics and the readiness endpoint, plus the test gate so later metrics cannot ship undocumented.
 3. Agent-reported node and service stats, then ingress metrics once the open questions are settled.
 4. Sample alert rules (they need steps 2 and 3) and outbound webhooks.
