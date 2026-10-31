@@ -362,6 +362,8 @@ test('a cancel that arrives while the stream is opening closes it on arrival', a
 test('query and stream timeouts terminate and clean up', async () => {
   const { engine, children, events, state } = fixture({ queryTimeoutMs: 5, maxSessionMs: 5 });
   state.ps = () => new Promise(() => {});
+  // Engine timers are unref'd; keep the loop alive so the timeout can fire.
+  const keepAlive = setInterval(() => {}, 5);
   await engine.start({ operation: 'ps', sessionId: 'ps', projects: ['demo'] }).catch(() => {});
   await engine.start(execRequest());
   await new Promise((resolve) => setTimeout(resolve, 25));
@@ -377,6 +379,7 @@ test('query and stream timeouts terminate and clean up', async () => {
   );
   for (const child of children)
     assert.deepEqual(child.signals, ['SIGKILL'], 'Timeout should kill every timed-out stream');
+  clearInterval(keepAlive);
 });
 
 test('dispose cancels all operations and validates engine bounds', async () => {

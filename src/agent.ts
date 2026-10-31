@@ -677,7 +677,7 @@ async function publicPortsCheck(ctx: AgentContext): Promise<DiagnosticCheck> {
 }
 
 const MIN_API_VERSION = API_VERSION.replace(/^v/, '');
-/** The minor number of an Engine API version such as `1.43`; 0 when unparseable. */
+/** The minor number of an Engine API version such as `1.41`; 0 when unparseable. */
 const apiMinor = (version: string | undefined): number => Number(version?.split('.')[1]) || 0;
 
 export async function executeCommand(
@@ -698,7 +698,7 @@ export async function executeCommand(
           const version = await ctx.docker.version();
           if (apiMinor(version.ApiVersion) < apiMinor(MIN_API_VERSION))
             throw new Error(
-              `Docker Engine API ${version.ApiVersion} is older than the ${MIN_API_VERSION} the agent needs (Docker 24+)`,
+              `Docker Engine API ${version.ApiVersion} is older than the ${MIN_API_VERSION} the agent needs (Docker 20.10+)`,
             );
           return JSON.stringify(version, null, 2);
         },

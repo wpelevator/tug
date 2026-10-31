@@ -635,14 +635,14 @@ test('executeCommand drives the Engine API for restart, logs, volume delete and 
 
 test('diagnostics fail on a daemon older than the Engine API the agent needs', async () => {
   const ctx = await makeCtx();
-  fake(ctx).version_ = { Version: '20.10.0', ApiVersion: '1.41' };
+  fake(ctx).version_ = { Version: '20.10.0', ApiVersion: '1.40' };
   const diag = await executeCommand({ id: 'c1', type: 'diagnostics.run' }, ctx);
   assert.equal(diag.state, 'failed');
   const check = (
     diag.result as { checks: { name: string; ok: boolean; error?: string }[] }
   ).checks.find((c) => c.name === 'docker.version');
   assert.equal(check?.ok, false);
-  assert.match(String(check?.error), /older than the 1\.43/);
+  assert.match(String(check?.error), /older than the 1\.41/);
 });
 
 test('executeCommand tolerates a missing volume, reports failing diagnostics, rejects unknown types', async () => {

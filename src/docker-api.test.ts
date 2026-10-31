@@ -28,7 +28,7 @@ test('requests are versioned, filters are JSON and errors carry the daemon messa
     await d.engine.listContainers({ label: ['tug.project=p'] });
     assert.match(
       seen[0],
-      /^GET \/v1\.43\/containers\/json\?all=1&filters=%7B%22label%22%3A%5B%22tug\.project%3Dp%22%5D%7D$/,
+      /^GET \/v1\.41\/containers\/json\?all=1&filters=%7B%22label%22%3A%5B%22tug\.project%3Dp%22%5D%7D$/,
     );
     await assert.rejects(
       d.engine.inspectContainer('missing'),

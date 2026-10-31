@@ -5,8 +5,8 @@ import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import type { Readable, Writable } from 'node:stream';
 
-/** Oldest Engine API the agent speaks (Docker 24+). */
-export const API_VERSION = 'v1.43';
+/** Oldest Engine API the agent speaks (Docker 20.10+, which the nested daemons in the integration tests run). */
+export const API_VERSION = 'v1.41';
 export const DEFAULT_SOCKET = '/var/run/docker.sock';
 
 /** An Engine API error; `status` is the HTTP status and `message` the daemon's own text. */
@@ -519,7 +519,11 @@ export class DockerEngine implements DockerApi {
         (await this.json<{ ExitCode?: number | null }>('GET', `/exec/${execId}/json`)).ExitCode ??
         0,
     );
-    if (tty) proc.resize = (columns, rows) => void this.resizeExec(execId, columns, rows);
+    if (tty) {
+      proc.resize = (columns, rows) => void this.resizeExec(execId, columns, rows);
+      // ConsoleSize at create needs API 1.42; resizing once started works on every supported daemon.
+      if (options.columns && options.rows) proc.resize(options.columns, options.rows);
+    }
     return proc;
   }
 
