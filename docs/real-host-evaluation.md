@@ -145,3 +145,20 @@ What this does not prove: the cloud-config was applied by re-running cloud-init 
 - **Fixed: `control-install` could not enable the mesh.** `TUG_MESH` had to be added to the generated compose file by hand; `control-install --mesh` now does it (unit-tested only).
 - **Open: NFS needs host preparation Tug does not do.** The exporter needs an NFS server and `/etc/exports`; consumers need `nfs-common`.
 - **Open: `cloud-init clean` regenerates SSH host keys.** Expected, but it makes the next SSH to the host fail strict checking.
+
+## Pull-once and backup recipe on a fresh host, 31 October 2026
+
+A single freshly wiped Ubuntu 24.04 host (Docker 29.9.2, 1 GB RAM) with control and one agent built from `main` after PR 25.
+
+| Check | Result |
+|---|---|
+| Unchanged project left alone for three minutes of agent polls | No container was recreated (same container IDs and start times) and no `service.pulling` event or pull line in the agent log appeared after the deploy finished |
+| `examples/wordpress-backup` deployed with `tug deploy` | WordPress, MariaDB 11.4.8 and the backup sidecar converged and WordPress answered on its published port |
+| `tug exec backup -- backup.sh once`, then `restic snapshots` | Exit 0, one `db` and one `files` snapshot, `restic check` reported no errors |
+| Restore drill into a scratch project (`db` and `backup` only) | The two seeded database rows and the seeded file came back; the repository was a local path, not S3 |
+
+### Findings
+
+- **Fixed: health checks cannot reach containers from a bridge-networked agent.** `node-install` starts the agent on the default bridge. On Docker 29.9.2 it cannot dial the container IPs of a project's Compose network, so every TCP or HTTP health check timed out (`tcp timeout 172.19.0.2:3306`) while MariaDB was ready, and the first deploy failed. Restarting the agent with `--network host` (what mesh mode already does) fixed it. Earlier runs on older Docker did not hit this. `node-install` and `node-enroll` now start the agent with `--network host` always, not only with `--mesh`.
+- **Open: `--build-local-image` builds for the CLI machine's architecture.** On an arm64 Mac it produced an arm64 image that the amd64 host could not run (`exec format error`). It should build for the target's architecture.
+- **Open: a deploy that fails health leaves the project half-up.** The containers kept running after the failed deployment, which hid the real cause until the agent's view was checked.
