@@ -9,7 +9,7 @@ import type { AddressInfo } from 'node:net';
 import { json as jsonBody } from '../tests/helpers.ts';
 
 async function server() {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'lp-'));
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-'));
   process.env.TUG_DATA_DIR = dir;
   process.env.TUG_OPERATOR_TOKEN = 'op-test-token';
   process.env.TUG_REGISTRY = 'registry.test';

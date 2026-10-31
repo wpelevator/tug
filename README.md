@@ -7,10 +7,10 @@ Deploy Docker Compose projects to one or more ordinary Linux VPSes through a sma
 ## Features
 
 - Control API with bearer-token auth and SQLite metadata.
-- Nodes join over SSH (`node install`) or enroll themselves with a single `docker run` (`node enroll`), with per-node agent and registry tokens. Agents only dial out, so nodes behind NAT work.
+- Nodes join over SSH (`node-install`) or enroll themselves with a single `docker run` (`node-enroll`), with per-node agent and registry tokens. Agents only dial out, so nodes behind NAT work.
 - Agents pull desired state from control, apply a generated per-node Compose file, run TCP/HTTP/Docker health checks and report status.
 - `x-tug` placement of services and volumes on nodes, with immutable desired-state records per deployment.
-- Optional remote Docker builds on the control host from an uploaded source tarball.
+- Build application images on control from uploaded source, or locally with `deploy --build-local`. Agents download saved images directly from control by default; a bring-your-own registry is optional.
 - Secrets encrypted at rest, released only to the nodes whose services reference them, with targeted service recreation when only a secret changes.
 - Deployment convergence, per-project operation locks, cancellation, rollback, per-service rollout events and log fetching through the agents.
 - Per-node registry pull tokens enforced by an htpasswd-backed registry you provide, with rotation and revocation.
@@ -27,10 +27,10 @@ npm install -g @wpelevator/tug
 
 The CLI installs the matching `ghcr.io/wpelevator/tug:<version>` image on your hosts.
 
-1. Install the control plane on a Docker host, pointing it at a registry you already run: `tug control install root@control.example.com --registry registry.example.com`.
+1. Install the control plane: `tug control-install root@control.example.com --install-docker`. The flag installs missing Docker Engine and Compose on supported Debian/Ubuntu hosts; omit it when Docker is ready. Put HTTPS in front of the control API as described in [Control plane](docs/control-plane.md).
 2. Point the CLI at it: `tug init --control-url https://control.example.com --token "$TUG_TOKEN"`.
-3. Set the secrets your services need: `tug secret:set DB_PASSWORD`.
-4. Add nodes, either `tug node install root@app1.example.com --name app1 --control-url https://control.example.com --registry registry.example.com`, or `tug node enroll --name app1` and run the printed `docker run` on the host.
+3. Set the secrets your services need: `tug secret-set DB_PASSWORD`.
+4. Add nodes with `tug node-install root@app1.example.com --name app1 --install-docker`, or `tug node-enroll --name app1` and run the printed Docker command. For a bare cloud host, `tug node-enroll --name app1 --install-docker` prints cloud-init user-data.
 5. Deploy: `tug deploy -f docker-compose.yml`. It waits until every node reports the new version healthy.
 6. Operate with `tug status`, `events`, `logs`, `restart`, `rollback` and `doctor`.
 

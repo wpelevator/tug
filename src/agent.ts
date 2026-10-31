@@ -1,5 +1,9 @@
 #!/usr/bin/env node
 import fs from 'node:fs/promises';
+import { createWriteStream } from 'node:fs';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
+import { validateImageArchive, verifyDownload } from './artifacts.ts';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import net from 'node:net';
@@ -13,7 +17,7 @@ import { CADDY_CONTAINER, reconcileIngress, removeIngress } from './ingress.ts';
 import { WG_INTERFACE, ensureWgKeys, readReportedKey, reconcileMesh, rotateWgKeys, writeReportedKey } from './mesh.ts';
 import type {
   Command, CommandResult, DesiredState, DiagnosticCheck, EnrollResponse, HealthCheck, IngressStatus, JoinKey, ProjectStatus,
-  SecretsResponse, ServiceEndpoint, ServiceState, StatusReport, WorkResponse
+  ImageArtifact, SecretsResponse, ServiceEndpoint, ServiceState, StatusReport, WorkResponse
 } from './protocol.ts';
 
 const CONTROL_URL_FROM_ENV = Boolean(process.env.TUG_CONTROL_URL);
@@ -184,27 +188,75 @@ export async function executeCommand(command: Command, ctx: AgentContext = defau
   return { commandId: command.id, state: 'failed', result: { error: `unsupported command ${command.type}` } };
 }
 
+async function managedImageFile(ctx: AgentContext): Promise<string> { await ensureDir(ctx.stateDir); return path.join(ctx.stateDir, 'managed-images.json'); }
+async function managedImages(ctx: AgentContext): Promise<string[]> {
+  try { const refs = JSON.parse(await fs.readFile(await managedImageFile(ctx), 'utf8')); return Array.isArray(refs) ? refs.filter((ref: unknown) => typeof ref === 'string' && ref.startsWith('tug-build/')) : []; } catch { return []; }
+}
+export async function ensureArtifact(ctx: AgentContext, artifact: ImageArtifact): Promise<void> {
+  const identityFile = path.join(ctx.stateDir, 'image-identities.json');
+  let identities: Record<string, { daemonId: string; artifactId: string; sha256: string }> = {};
+  try { identities = JSON.parse(await fs.readFile(identityFile, 'utf8')); } catch {}
+  const remember = async (daemonId: string) => {
+    identities[artifact.imageRef] = { daemonId, artifactId: artifact.imageId, sha256: artifact.sha256 };
+    await fs.writeFile(identityFile, JSON.stringify(identities), { mode: 0o600 });
+    const refs = await managedImages(ctx); if (!refs.includes(artifact.imageRef)) await fs.writeFile(await managedImageFile(ctx), JSON.stringify([...refs, artifact.imageRef]), { mode: 0o600 });
+  };
+  const inspect = async () => JSON.parse((await ctx.docker(['image', 'inspect', artifact.imageRef])).out)[0];
+  try { const image = await inspect(); if ((image?.Id === artifact.imageId || (identities[artifact.imageRef]?.daemonId === image?.Id && identities[artifact.imageRef]?.artifactId === artifact.imageId && identities[artifact.imageRef]?.sha256 === artifact.sha256)) && `${image.Os}/${image.Architecture}` === artifact.platform) { await remember(image.Id); return; } } catch {}
+  const host = JSON.parse((await ctx.docker(['info', '--format', '{{json .}}'])).out);
+  const arch = ({ x86_64: 'amd64', aarch64: 'arm64' } as Record<string, string>)[host.Architecture] || host.Architecture;
+  if (host.OSType && host.Architecture && `${host.OSType}/${arch}` !== artifact.platform) throw new Error(`image platform ${artifact.platform} does not match node ${host.OSType}/${arch}; build for the target platform`);
+  const downloadDir = await fs.mkdtemp(path.join(ctx.stateDir, 'image-download-'));
+  const file = path.join(downloadDir, 'image.tar.gz');
+  try {
+    const response = await ctx.http(`${ctx.controlUrl}/agent/v1/images/${encodeURIComponent(artifact.buildId)}`, { headers: authHeaders(ctx), redirect: 'error', signal: AbortSignal.timeout(10 * 60 * 1000) });
+    if (!response.ok || !response.body) throw new Error(`image download failed: HTTP ${response.status}`);
+    await pipeline(Readable.fromWeb(response.body as import('node:stream/web').ReadableStream), verifyDownload(artifact), createWriteStream(file, { mode: 0o600 }));
+    const archive = await validateImageArchive(file, artifact.imageRef);
+    if (archive.imageId !== artifact.imageId || archive.platform !== artifact.platform) throw new Error('downloaded archive image metadata differs from desired artifact');
+    await ctx.docker(['load', '-i', file]);
+    const image = await inspect();
+    if (!image?.Id || `${image.Os}/${image.Architecture}` !== artifact.platform) throw new Error('loaded image identity or platform does not match desired artifact');
+    await remember(image.Id);
+  } finally { await fs.rm(downloadDir, { recursive: true, force: true }); }
+}
+export async function pruneManagedImages(ctx: AgentContext, retained: string[]): Promise<void> {
+  if (!ctx.apply) return;
+  const keep = new Set(retained); const remaining: string[] = [];
+  for (const ref of await managedImages(ctx)) {
+    if (keep.has(ref)) { remaining.push(ref); continue; }
+    try {
+      const used = (await ctx.docker(['ps', '-aq', '--filter', `ancestor=${ref}`])).out.trim();
+      if (used) { remaining.push(ref); continue; }
+      await ctx.docker(['image', 'rm', ref]);
+    } catch { remaining.push(ref); }
+  }
+  await fs.writeFile(await managedImageFile(ctx), JSON.stringify(remaining), { mode: 0o600 });
+}
+
 export async function reconcile(desiredState: DesiredState, ctx: AgentContext = defaultContext(), endpoints: Record<string, ServiceEndpoint[]> = {}): Promise<ProjectStatus> {
   const dir = path.join(ctx.stateDir, 'projects', desiredState.project);
   await ensureDir(dir);
   const plannedCompose = composeForNode(desiredState, ctx.nodeName, {});
   const serviceNames = Object.keys(plannedCompose.services || {});
-  if (!serviceNames.length) return { project: desiredState.project, observedVersion: desiredState.version, health: 'skipped', services: [], serviceStates: {} };
+  if (!serviceNames.length) return { project: desiredState.project, observedVersion: desiredState.version, ...(desiredState.revision ? { observedRevision: desiredState.revision } : {}), health: 'skipped', services: [], serviceStates: {} };
   const serviceStates: Record<string, ServiceState> = Object.fromEntries(serviceNames.map(service => [service, { rolloutState: 'pending', image: desiredState.services[service]?.image }]));
   const emit = (service: string, rolloutState: string, message = rolloutState) => api(ctx, '/agent/v1/events', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ projectId: desiredState.project, level: 'info', type: `service.${rolloutState}`, message, metadata: { service, version: desiredState.version, node: ctx.nodeName } }) }).catch(() => {});
   const sec = await api<SecretsResponse>(ctx, `/agent/v1/secrets?project=${encodeURIComponent(desiredState.project)}&services=${encodeURIComponent(serviceNames.join(','))}`);
   const currentSecretVersions = serviceSecretVersions(desiredState.compose, serviceNames, sec.versions || {});
   const db = await agentDb(ctx.stateDir);
-  const previousRow = await db.get<AppliedStateRow>('SELECT version, secret_versions_json FROM applied_state WHERE project = ?', desiredState.project);
-  const previous: { version?: string; secretVersions?: Record<string, Record<string, number>> } = previousRow ? { version: previousRow.version, secretVersions: JSON.parse(previousRow.secret_versions_json) } : {};
+  const previousRow = await db.get<AppliedStateRow>('SELECT version, revision, secret_versions_json FROM applied_state WHERE project = ?', desiredState.project);
+  const previous: { version?: string; revision?: string | null; secretVersions?: Record<string, Record<string, number>> } = previousRow ? { version: previousRow.version, revision: previousRow.revision, secretVersions: JSON.parse(previousRow.secret_versions_json) } : {};
   const secretChangedServices = serviceNames.filter(service => JSON.stringify(previous.secretVersions?.[service] || {}) !== JSON.stringify(currentSecretVersions[service] || {}));
-  const sameDesiredVersion = previous.version === desiredState.version;
+  const sameDesiredVersion = desiredState.revision ? previous.revision === desiredState.revision : previous.version === desiredState.version;
   const nodeCompose = composeForNode(desiredState, ctx.nodeName, sec.secrets || {}, endpoints);
   await fs.writeFile(path.join(dir, 'docker-compose.yml'), dumpYaml(nodeCompose));
   await writeEnv(path.join(dir, '.env'), sec.secrets || {});
   if (ctx.apply) {
     for (const service of serviceNames) { serviceStates[service].rolloutState = 'pulling'; await emit(service, 'pulling'); }
-    await ctx.docker(['compose', '-p', desiredState.project, 'pull'], { cwd: dir });
+    for (const service of serviceNames) { const artifact = desiredState.services[service].artifact; if (artifact) await ensureArtifact(ctx, artifact); }
+    const pullServices = serviceNames.filter(service => !desiredState.services[service].artifact);
+    if (pullServices.length) await ctx.docker(['compose', '-p', desiredState.project, 'pull', ...(pullServices.length === serviceNames.length ? [] : pullServices)], { cwd: dir });
     for (const service of serviceNames) { serviceStates[service].rolloutState = 'starting'; await emit(service, 'starting'); }
     await ctx.docker(['compose', '-p', desiredState.project, 'up', '-d', '--remove-orphans'], { cwd: dir });
     if (sameDesiredVersion && secretChangedServices.length) {
@@ -220,13 +272,13 @@ export async function reconcile(desiredState: DesiredState, ctx: AgentContext = 
     for (const service of serviceNames) serviceStates[service].rolloutState = 'serving';
   }
   await db.run(
-    `INSERT INTO applied_state(project, version, applied_at, service_states_json, secret_versions_json)
-     VALUES(?,?,?,?,?)
-     ON CONFLICT(project) DO UPDATE SET version=excluded.version, applied_at=excluded.applied_at,
+    `INSERT INTO applied_state(project, version, revision, applied_at, service_states_json, secret_versions_json)
+     VALUES(?,?,?,?,?,?)
+     ON CONFLICT(project) DO UPDATE SET version=excluded.version, revision=excluded.revision, applied_at=excluded.applied_at,
        service_states_json=excluded.service_states_json, secret_versions_json=excluded.secret_versions_json`,
-    desiredState.project, desiredState.version, now(), JSON.stringify(serviceStates), JSON.stringify(currentSecretVersions)
+    desiredState.project, desiredState.version, desiredState.revision || null, now(), JSON.stringify(serviceStates), JSON.stringify(currentSecretVersions)
   );
-  return { project: desiredState.project, observedVersion: desiredState.version, health: 'serving', services: serviceNames, serviceStates };
+  return { project: desiredState.project, observedVersion: desiredState.version, ...(desiredState.revision ? { observedRevision: desiredState.revision } : {}), health: 'serving', services: serviceNames, serviceStates };
 }
 
 /** Reports this node's WireGuard public key when control has not seen the current one yet. */
@@ -258,7 +310,7 @@ export async function pollOnce(ctx: AgentContext = defaultContext()): Promise<Pr
   const projects: ProjectStatus[] = [];
   for (const desired of work.desiredStates || (work.desiredState ? [work.desiredState] : [])) {
     try { projects.push(await reconcile(desired, ctx, work.serviceEndpoints?.[desired.project])); }
-    catch (e) { projects.push({ project: desired.project, observedVersion: desired.version, health: 'failed', error: errMessage(e) }); }
+    catch (e) { projects.push({ project: desired.project, observedVersion: desired.version, ...(desired.revision ? { observedRevision: desired.revision } : {}), health: 'failed', error: errMessage(e) }); }
   }
   let ingress: IngressStatus | undefined;
   if (ctx.apply) {
@@ -273,6 +325,7 @@ export async function pollOnce(ctx: AgentContext = defaultContext()): Promise<Pr
   }
   const report: StatusReport = { node: ctx.nodeName, projects, commandResults };
   if (ingress) report.ingress = ingress;
+  if (work.retainedImages && projects.every(project => project.health !== 'failed')) await pruneManagedImages(ctx, work.retainedImages);
   await api(ctx, '/agent/v1/status', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(report) });
   return projects;
 }

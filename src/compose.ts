@@ -65,17 +65,17 @@ export function validateCompose(compose: ComposeFile | undefined, nodes: string[
   if (errors.length) throw new Error(errors.join('; '));
 }
 
-export interface BuildDesiredStateOptions { project: string; version: string; compose: ComposeFile; registry: string; defaultNode?: string | null }
+export interface BuildDesiredStateOptions { project: string; version: string; compose: ComposeFile; registry: string; revision?: string; defaultNode?: string | null }
 
-export function buildDesiredState({ project, version, compose, registry, defaultNode = null }: BuildDesiredStateOptions): DesiredState {
+export function buildDesiredState({ project, version, compose, registry, revision, defaultNode = null }: BuildDesiredStateOptions): DesiredState {
   const services: Record<string, ServiceSpec> = {};
   for (const [name, src] of Object.entries(compose.services || {})) {
     const lp = src['x-tug'] || {};
     const placement = lp.placement || (defaultNode ? { nodes: [defaultNode] } : {});
-    const image = src.build ? `${registry}/${project}/${name}:${version}` : src.image;
+    const image = src.build ? `${registry ? `${registry}/` : "tug-build/"}${project}/${name}:${revision || version}` : src.image;
     services[name] = { image, build: src.build || null, placement, replicas: lp.replicas || placement.nodes?.length || 1, health: lp.health || null };
   }
-  return { project, version, services, compose };
+  return { project, version, ...(revision ? { revision } : {}), services, compose };
 }
 
 /** `extra_hosts` entries (`name:ip`) for services that run on other nodes, from health-aware endpoints. */
@@ -98,11 +98,11 @@ export function composeForNode(desiredState: DesiredState, nodeName: string, sec
   const outVolumes = out.volumes!;
   const usedVolumes = new Set<string>();
   for (const [name, src] of Object.entries(desiredState.compose.services || {})) {
-    const lp = src['x-tug'] || {};
-    const nodes = lp.placement?.nodes || [];
+    const nodes = desiredState.services[name].placement?.nodes || [];
     if (nodes.length && !nodes.includes(nodeName)) continue;
     const svc: ComposeService = { ...src, image: desiredState.services[name].image };
     delete svc.build; delete svc['x-tug']; delete svc.deploy; delete svc.container_name;
+    if (desiredState.services[name].artifact) svc.pull_policy = 'never';
     if (Object.keys(secrets).length) svc.env_file = Array.from(new Set([...(Array.isArray(svc.env_file) ? svc.env_file : svc.env_file ? [svc.env_file] : []), '.env']));
     for (const vol of svc.volumes || []) {
       const source = typeof vol === 'string' ? vol.split(':')[0] : vol.source;

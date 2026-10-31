@@ -42,7 +42,7 @@ test('generated keypairs are valid WireGuard keys and the public key derives fro
 });
 
 test('private key stays in the state dir with mode 0600 and rotation replaces it', async () => {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'lp-wgkeys-'));
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-wgkeys-'));
   const first = await ensureWgKeys(dir);
   assert.deepEqual(await ensureWgKeys(dir), first, 'keys are stable across restarts');
   const file = path.join(dir, 'wireguard', 'private.key');
@@ -110,7 +110,7 @@ test('diffPeers reports added, removed and changed peers and ignores roamed endp
 });
 
 test('reconcileMesh creates wg0 once, then only syncs when peers change', async () => {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'lp-mesh-'));
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-mesh-'));
   const { publicKey } = await ensureWgKeys(dir);
   const network: NetworkConfig = { interface: 'wg0', overlayIp: '10.210.0.5', cidr: '10.210.0.0/16', listenPort: 51820, peers: [peer(1)] };
   const state = { link: false, dump: '' };
@@ -146,7 +146,7 @@ test('reconcileMesh creates wg0 once, then only syncs when peers change', async 
 });
 
 test('reconcileMesh resyncs after the local key rotates', async () => {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'lp-mesh-rot-'));
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-mesh-rot-'));
   const old = await ensureWgKeys(dir);
   const network: NetworkConfig = { interface: 'wg0', overlayIp: '10.210.0.5', cidr: '10.210.0.0/16', listenPort: 51820, peers: [] };
   const state = { link: true, dump: `x\t${old.publicKey}\t51820\toff\n` };

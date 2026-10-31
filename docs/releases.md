@@ -34,4 +34,4 @@ The workflow publishes with npm [trusted publishing](https://docs.npmjs.com/trus
 
 ## Local development image
 
-To try an unreleased build, `tug control install` and `tug node install` accept `--build-local-image`, which builds `tug:local` from the checkout and copies it over SSH, or `--image ghcr.io/wpelevator/tug:edge`. See [Nodes](nodes.md) and [Control plane](control-plane.md).
+To try an unreleased build, `tug control-install` and `tug node-install` accept `--build-local-image`, which builds `tug:local` from the checkout and copies it over SSH, or `--image ghcr.io/wpelevator/tug:edge`. See [Nodes](nodes.md) and [Control plane](control-plane.md).

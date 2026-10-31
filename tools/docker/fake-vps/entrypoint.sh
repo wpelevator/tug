@@ -9,6 +9,8 @@ set -euo pipefail
 
 echo "[$TUG_NODE_NAME] starting fake VPS Docker daemon"
 mkdir -p /var/lib/docker /var/run "$TUG_STATE_DIR"
+# A container restart kills dockerd without its normal pid-file cleanup.
+rm -f /var/run/docker.pid /var/run/docker.sock
 dockerd --host=unix:///var/run/docker.sock --storage-driver=vfs ${TUG_REGISTRY:+--insecure-registry "$TUG_REGISTRY"} >/var/log/dockerd.log 2>&1 &
 
 for i in $(seq 1 60); do

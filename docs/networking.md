@@ -1,18 +1,18 @@
 # Networking: mesh, service DNS and ingress
 
-Three independent, opt-in layers close the gap between "services run on several hosts" and "services can find each other and the internet can find them". With every layer off, deploys behave exactly as before. The control plane stays single-writer: it allocates addresses, stores peers and renders configuration, but never carries data-plane traffic.
+Three independent, opt-in layers let services on different hosts find each other and let the internet find them. With every layer off, deploys behave exactly as before. The control plane stays single-writer: it allocates addresses, stores peers and renders configuration, but never carries data-plane traffic.
 
 | Layer | What it adds | Turned on by |
 |---|---|---|
 | A. WireGuard mesh | Every node gets an overlay IP and a `wg0` tunnel to every other node | `TUG_MESH=true` on control and on each agent |
 | B. Service DNS | Services on other nodes resolve by name to their node's overlay IP, only while healthy | on by default with the mesh; `TUG_SERVICE_DNS` on control overrides |
-| C. Ingress and TLS | A managed Caddy on an ingress node routes hostnames to services anywhere, with automatic HTTPS | `tug node:ingress <node>` plus `x-tug.ingress` on a service |
+| C. Ingress and TLS | A managed Caddy on an ingress node routes hostnames to services anywhere, with automatic HTTPS | `tug node-ingress <node>` plus `x-tug.ingress` on a service |
 
 ## Layer A: WireGuard mesh
 
 Control owns addressing. When `TUG_MESH=true`, registering or enrolling a node allocates a stable `nodes.overlay_ip` from `TUG_MESH_CIDR` (default `10.210.0.0/16`, first free host address; re-registering keeps it). The default does not overlap the integration subnet `10.89.240.0/24`, Docker's default `172.16.0.0/12` pools or the usual home and VPN ranges; pick another CIDR if it collides with a network you route to. The mesh needs at least a `/29`.
 
-Keys never leave the node. The agent generates an X25519 keypair locally, keeps the private key in `<state dir>/wireguard/private.key` (mode `0600`) and sends only the public key: at enrollment (`wgPublicKey`), or on its first poll with `POST /agent/v1/wireguard/key` for nodes registered by the CLI or `node install`. Control stores it in the `wg_peers` table (`node_id`, `public_key`, `overlay_ip`, `endpoint`, `allowed_ips`).
+Keys never leave the node. The agent generates an X25519 keypair locally, keeps the private key in `<state dir>/wireguard/private.key` (mode `0600`) and sends only the public key: at enrollment (`wgPublicKey`), or on its first poll with `POST /agent/v1/wireguard/key` for nodes registered by the CLI or `node-install`. Control stores it in the `wg_peers` table (`node_id`, `public_key`, `overlay_ip`, `endpoint`, `allowed_ips`).
 
 Every `GET /agent/v1/work` response then carries a `network` block (see `NetworkConfig` in `src/protocol.ts`): this node's overlay IP, the mesh CIDR, the listen port and one peer per other node with a key. Each poll the agent compares that with `wg show wg0 dump` and:
 
@@ -24,11 +24,11 @@ A peer's `Endpoint` is the node's `public_address` (the WireGuard port is append
 
 Containers reach other nodes through the host: traffic leaves the container, is routed by the host over `wg0` to the peer's overlay IP and is masqueraded by Docker, so the target sees the source node's overlay address. This is the host-routed model. Routable container networks (advertising per-project subnets in `AllowedIPs`) are deferred.
 
-**Running the agent.** The agent needs `wg` and `ip` (both are in the Tug image), `NET_ADMIN`, and the host network namespace so that `wg0` exists on the host. `node install --mesh` and `node enroll --mesh` generate the right `docker run` (`--network host --cap-add NET_ADMIN -e TUG_MESH=true`). The host needs WireGuard support in the kernel (built in since Linux 5.6; older kernels need the `wireguard` module or DKMS package).
+**Running the agent.** The agent needs `wg` and `ip` (both are in the Tug image), `NET_ADMIN`, and the host network namespace so that `wg0` exists on the host. `node-install --mesh` and `node-enroll --mesh` generate the right `docker run` (`--network host --cap-add NET_ADMIN -e TUG_MESH=true`). The host needs WireGuard support in the kernel (built in since Linux 5.6; older kernels need the `wireguard` module or DKMS package).
 
-**Key rotation.** `tug node:rotate-wg-key <node>` queues a `wg.rotate-key` command. The agent generates a new keypair, reports the public key and returns it in the command result; every other node picks up the new key on its next poll, and the node itself resyncs `wg0` with the new private key. Expect a few seconds of lost traffic to that node. A rotation that fails after the key was replaced is retried by the normal key report on the next poll.
+**Key rotation.** `tug node-rotate-wg-key <node>` queues a `wg.rotate-key` command. The agent generates a new keypair, reports the public key and returns it in the command result; every other node picks up the new key on its next poll, and the node itself resyncs `wg0` with the new private key. Expect a few seconds of lost traffic to that node. A rotation that fails after the key was replaced is retried by the normal key report on the next poll.
 
-**Firewall.** Open UDP `51820` (or `TUG_WG_PORT` on control) between nodes that act as endpoints. Allow outbound UDP from nodes behind NAT. Nothing else is required between nodes, and agents still only dial out to control over HTTP(S). `node install --mesh` checks that kernel support exists and the UDP port is free.
+**Firewall.** Open UDP `51820` (or `TUG_WG_PORT` on control) between nodes that act as endpoints. Allow outbound UDP from nodes behind NAT. Nothing else is required between nodes, and agents still only dial out to control over HTTP(S). `node-install --mesh` checks that kernel support exists and that the UDP port is free, or already held by this node's own running Tug mesh agent, so repeating the install to upgrade or repair an agent works.
 
 ## Layer B: service DNS
 
@@ -42,7 +42,7 @@ When service DNS is on (default with the mesh; force with `TUG_SERVICE_DNS=true|
 
 `address` is the node's overlay IP, or its `address` column when it has no mesh key. `composeForNode` adds `extra_hosts` to every service on the node for every service that runs elsewhere, as both `<service>` and `<service>.<project>.tug`. Services placed on the same node keep resolving through Compose's own DNS, and entries you wrote yourself in `extra_hosts` win. A service on several nodes gets one entry per serving node.
 
-Consequences to know about:
+Consequences:
 
 - The name resolves to the node's address, not the container. The target service must publish its port (`ports: ["3306:3306"]`) and clients connect to the published host port.
 - `/etc/hosts` has no load balancing: most resolvers use the first entry, so multi-node services give failover on node loss rather than round robin. Real load balancing is a non-goal.
@@ -67,7 +67,7 @@ services:
         tls: auto
 ```
 
-`tug node:ingress edge1` marks a node as an ingress node (`--disable` removes the role). `port` may be the container port or the published host port; control resolves it to the published host port, and `validateCompose` rejects an ingress port that is not published, because the edge reaches services on `<node address>:<published port>`.
+`tug node-ingress edge1` marks a node as an ingress node (`--disable` removes the role). `port` may be the container port or the published host port; control resolves it to the published host port, and `validateCompose` rejects an ingress port that is not published, because the edge reaches services on `<node address>:<published port>`.
 
 Control aggregates the `ingress` blocks of every project's current deployment, and for each ingress node renders:
 
@@ -78,7 +78,7 @@ Control aggregates the `ingress` blocks of every project's current deployment, a
 TLS modes:
 
 - `auto` (default): Caddy obtains and renews certificates with ACME. Ports 80 and 443 must be reachable from the internet and the host's DNS record must point at the ingress node.
-- `custom`: `cert` and `key` name two project secrets holding the PEM certificate chain and private key (`tug secret:set WEB_CERT --project blog --value "$(cat fullchain.pem)"`). Deploy fails if either secret is missing. Control decrypts them only for the ingress node, which receives them as files in the work response; they never reach the nodes running the service, and they never appear in the Caddyfile.
+- `custom`: `cert` and `key` name two project secrets holding the PEM certificate chain and private key (`tug secret-set WEB_CERT --project blog --value "$(cat fullchain.pem)"`). Deploy fails if either secret is missing. Control decrypts them only for the ingress node, which receives them as files in the work response; they never reach the nodes running the service, and they never appear in the Caddyfile.
 - `off`: plain HTTP on port 80, for development.
 
 The agent on an ingress node creates the `tug-caddy` container with host networking and three named volumes (`/data` for ACME accounts and certificates, `/config`, `/etc/caddy`), so certificates survive container recreation and image updates. Config is copied in with `docker cp` (which works whether the agent runs on the host or in a container) and applied with `caddy reload`, which swaps config gracefully without dropping connections or restarting the container. If Caddy rejects the config the agent restores the last applied files, reports `failed` with Caddy's error in the node's ingress status, and retries on the next poll; `tug doctor` flags ingress nodes that are not `serving`. Removing the ingress role removes the container but keeps the volumes. The Caddy image is `caddy:2-alpine` (override with `TUG_CADDY_IMAGE` on the agent).
@@ -95,11 +95,11 @@ sequenceDiagram
     participant E as Agent edge1 (mesh + ingress)
     participant Caddy as Caddy on edge1
 
-    Op->>Ctrl: node install --mesh app1 / edge1 (register, overlay IP allocated)
+    Op->>Ctrl: node-install --mesh app1 / edge1 (register, overlay IP allocated)
     A->>A: generate keypair, keep private key in state dir
     A->>Ctrl: POST /agent/v1/wireguard/key (public key only)
     E->>Ctrl: POST /agent/v1/wireguard/key (public key only)
-    Op->>Ctrl: node:ingress edge1
+    Op->>Ctrl: node-ingress edge1
     Op->>Ctrl: deploy (web on app1 with x-tug.ingress)
     loop every poll
         A->>Ctrl: GET /agent/v1/work
@@ -117,4 +117,4 @@ sequenceDiagram
 
 ## Verifying
 
-`npm run test:integration:network` starts three privileged fake VPSes with the mesh on (`vps-c` as ingress node), deploys `docker-compose.network-sample.yml`, and checks pings and a WireGuard handshake between nodes, name resolution of `web` from a container on another node, Caddy on `vps-c` serving `app.test` from `vps-a`, and connectivity after `node:rotate-wg-key`. It needs a Docker host whose kernel has WireGuard. See [Development](development.md#integration-test).
+`npm run test:integration:network` starts three privileged fake VPSes with the mesh on (`vps-c` as ingress node), deploys `docker-compose.network-sample.yml`, and checks pings and a WireGuard handshake between nodes, name resolution of `web` from a container on another node, Caddy on `vps-c` serving `app.test` from `vps-a`, and connectivity after `node-rotate-wg-key`. It needs a Docker host whose kernel has WireGuard. See [Development](development.md#integration-test).

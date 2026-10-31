@@ -9,7 +9,7 @@ import type { AddressInfo } from 'node:net';
 import { json } from '../tests/helpers.ts';
 
 async function makeServer() {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'lp-vol-'));
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-vol-'));
   process.env.TUG_DATA_DIR = dir;
   process.env.TUG_OPERATOR_TOKEN = 'op-volume-token';
   const app = await createApp();
@@ -28,8 +28,8 @@ test('volume metadata is protected and delete-data queues deletion after unrefer
     const registered = await post(s.base, '/api/v1/nodes/register', { name: 'n1' });
     const withVolume = { services: { app: { image: 'busybox', volumes: ['data:/data'], 'x-tug': { placement: { nodes: ['n1'] } } } }, volumes: { data: { 'x-tug': { type: 'local', persistent: true, placement: { nodes: ['n1'] } } } } };
     const noVolume = { services: { app: { image: 'busybox', 'x-tug': { placement: { nodes: ['n1'] } } } } };
-    await post(s.base, '/api/v1/deployments', { project: 'site', version: 'v1', compose: withVolume });
-    let res = await fetch(`${s.base}/agent/v1/status`, { method: 'POST', headers: { Authorization: `Bearer ${registered.agentToken}`, 'content-type': 'application/json' }, body: JSON.stringify({ projects: [{ project: 'site', observedVersion: 'v1', health: 'serving' }] }) });
+    const first = await post(s.base, '/api/v1/deployments', { project: 'site', version: 'v1', compose: withVolume });
+    let res = await fetch(`${s.base}/agent/v1/status`, { method: 'POST', headers: { Authorization: `Bearer ${registered.agentToken}`, 'content-type': 'application/json' }, body: JSON.stringify({ projects: [{ project: 'site', observedVersion: 'v1', observedRevision: first.desiredState.revision, health: 'serving' }] }) });
     assert.equal(res.status, 200);
     res = await fetch(`${s.base}/api/v1/volumes?project=site`, { headers: op });
     assert.equal((await json(res)).volumes[0].name, 'data');

@@ -36,14 +36,14 @@ Example commands:
 
 ```bash
 # one-time bootstrap
-tug control install root@control.example.com
-tug node install root@front.example.com --name front --address 10.0.0.10
-tug node install root@wp1.example.com --name wp1 --address 10.0.0.11
-tug node install root@wp2.example.com --name wp2 --address 10.0.0.12
-tug node install root@wp3.example.com --name wp3 --address 10.0.0.13
-tug node install root@db.example.com --name db --address 10.0.0.20
-tug node install root@cache.example.com --name cache --address 10.0.0.30
-tug node install root@storage.example.com --name storage --address 10.0.0.40
+tug control-install root@control.example.com
+tug node-install root@front.example.com --name front --address 10.0.0.10
+tug node-install root@wp1.example.com --name wp1 --address 10.0.0.11
+tug node-install root@wp2.example.com --name wp2 --address 10.0.0.12
+tug node-install root@wp3.example.com --name wp3 --address 10.0.0.13
+tug node-install root@db.example.com --name db --address 10.0.0.20
+tug node-install root@cache.example.com --name cache --address 10.0.0.30
+tug node-install root@storage.example.com --name storage --address 10.0.0.40
 
 # app lifecycle
 tug init
@@ -315,7 +315,7 @@ V1 assumes:
 - SSH access from the CLI machine to each host is already configured.
 - Runtime node-to-node networking is already available through configured addresses.
 
-`tug control install` should install and configure:
+`tug control-install` should install and configure:
 
 - tug-control API service,
 - SQLite database,
@@ -325,7 +325,7 @@ V1 assumes:
 - initial operator token,
 - server-side token storage for agents and registry pulls.
 
-`tug node install` should, over SSH:
+`tug node-install` should, over SSH:
 
 - register the node with the control plane,
 - assign/store node name and addresses,
@@ -846,7 +846,7 @@ Secrets live in the control plane, encrypted at rest.
 
 Implementation:
 
-- generate a master key during `control install`,
+- generate a master key during `control-install`,
 - store it on the control VPS, e.g. `/etc/tug/master.key`,
 - encrypt secret values before writing to SQLite,
 - issue scoped node tokens,

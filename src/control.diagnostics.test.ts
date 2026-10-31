@@ -9,7 +9,7 @@ import type { AddressInfo } from 'node:net';
 import { json } from '../tests/helpers.ts';
 
 async function makeServer() {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'lp-diag-'));
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-diag-'));
   process.env.TUG_DATA_DIR = dir;
   process.env.TUG_OPERATOR_TOKEN = 'op-diag-token';
   const app = await createApp();

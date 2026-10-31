@@ -42,7 +42,7 @@ services:
 
 Services that run on a different node than a given service are reachable from it by name (`db` or `db.<project>.tug`) when the mesh and service DNS are on, as long as the target publishes its port. Control injects these names into the per-node Compose file as `extra_hosts`; see [Networking](networking.md#layer-b-service-dns).
 
-Services with `build:` are built by control from the uploaded source tarball and tagged `<registry>/<project>/<service>:<version>`.
+Services with `build:` are built by control from the uploaded source tarball, or on the operator machine with `deploy --build-local`. Each build receives an immutable tag distinct from the display version, so reusing a version label does not replace rollback images. Without `TUG_REGISTRY`, agents download saved images from control and generated Compose forces `pull_policy: never` for those services, overriding a source pull policy. With a registry configured, agents pull the pushed images. Published `image:` services retain their normal registry source. `--no-build-upload` with `build:` requires an explicitly configured registry and an existing image at `<registry>/<project>/<service>:<version>`; without a registry, send a source context or use local builds. Uploaded source contexts must contain regular files/directories within the build root; symlinks and escaping build paths are rejected.
 
 ## Volumes
 
@@ -56,11 +56,11 @@ volumes:
         nodes: [vps-c]
 ```
 
-Control records volumes per project. A volume is included in a node's Compose file only when a service on that node uses it and, if the volume has `placement.nodes`, the node is listed. `tug volume:rm` refuses to remove a persistent volume without `--delete-data`, and refuses any volume still referenced by a service in the current deployment. `--delete-data` queues a `docker volume rm` on the volume's placement node.
+Control records volumes per project. A volume is included in a node's Compose file only when a service on that node uses it and, if the volume has `placement.nodes`, the node is listed. `tug volume-remove` refuses to remove a persistent volume without `--delete-data`, and refuses any volume still referenced by a service in the current deployment. `--delete-data` queues a `docker volume rm` on the volume's placement node.
 
 ## Secrets in services
 
-Reference secrets through `environment`, either as keys (`DB_PASSWORD:` or `- DB_PASSWORD=...`) or as `${NAME}` / `${NAME:-default}` substitutions. Only referenced secrets are released to a node. Set them with `tug secret:set NAME`.
+Reference secrets through `environment`, either as keys (`DB_PASSWORD:` or `- DB_PASSWORD=...`) or as `${NAME}` / `${NAME:-default}` substitutions. Only referenced secrets are released to a node. Set them with `tug secret-set NAME`.
 
 ## Not supported
 

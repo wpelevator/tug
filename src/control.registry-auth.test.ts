@@ -8,7 +8,7 @@ import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
 async function server() {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'lp-reg-'));
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-reg-'));
   process.env.TUG_DATA_DIR = dir;
   process.env.TUG_OPERATOR_TOKEN = 'op-registry-token';
   process.env.TUG_REGISTRY = 'registry.test';

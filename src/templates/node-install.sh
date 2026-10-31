@@ -1,4 +1,4 @@
-set -euo pipefail
+set -eu
 mkdir -p /etc/tug /var/lib/tug
 cat > /etc/tug/agent.env <<'ENV'
 {{ENV}}ENV
