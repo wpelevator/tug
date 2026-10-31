@@ -35,7 +35,7 @@ async function server() {
     assert.equal(res.status, 200);
   };
   const deployment = async (id: string) => get(`/api/v1/deployments/${id}`);
-  const events = async (project = 'site') => (await get(`/api/v1/events?project=${project}&limit=100`)).events as { type: string; message: string; deployment_id: string | null }[];
+  const events = async (project = 'site') => (await get(`/api/v1/events?project=${project}&limit=100`)).events as { type: string; message: string; deployment_id: string | null; actor: string | null }[];
   const waitFor = async <T>(label: string, fn: () => Promise<T | undefined | false>, timeoutMs = 5000): Promise<T> => {
     const started = Date.now();
     for (;;) {
@@ -137,6 +137,7 @@ test('with rollback: auto a failed deployment is rolled back to the previous suc
 
     const event = await s.waitFor('the auto rollback event', async () => (await s.events()).find(e => e.type === 'deployment.auto_rollback'));
     assert.match(event.message, new RegExp(`${v2.deployment.id}.*rolled back to v1`), 'the event explains what failed and what it went back to');
+    assert.equal(event.actor, 'system:auto-rollback', 'the audit trail names the reserved system actor, not a token');
     assert.equal((await s.deployment(v2.deployment.id)).state, 'failed', 'the failed deployment stays failed');
     const work = await json(await fetch(`${s.base}/agent/v1/work`, { headers: s.agent(app.agentToken) }));
     const rollback = work.desiredStates[0];
@@ -147,6 +148,7 @@ test('with rollback: auto a failed deployment is rolled back to the previous suc
     const rollbackDeployment = await s.deployment(rollback.revision);
     assert.match(rollbackDeployment.version, /^rollback-v1-/, 'the rollback deployment is marked by its version prefix');
     assert.equal(rollbackDeployment.state, 'rolling_out', 'the rollback converges like any deployment');
+    assert.equal(rollbackDeployment.actor, 'system:auto-rollback', 'the automatic rollback deployment records who started it');
 
     await s.report(app.agentToken, 'app', 'serving', serving(20000));
     assert.equal((await s.deployment(rollback.revision)).state, 'succeeded', 'the rollback succeeds when the node serves it');
@@ -207,6 +209,8 @@ test('manual rollback still works and deployments cannot use the reserved rollba
     const body = await json(rb);
     assert.equal(rb.status, 200, JSON.stringify(body));
     assert.equal(body.desiredState.version, 'v1', 'manual rollback copies the previous desired state');
+    assert.equal(body.deployment.actor, 'operator', 'a manual rollback records the caller, as before automatic rollback existed');
+    assert.equal((await s.events()).find(e => e.type === 'rollback')?.actor, 'operator', 'the audit event for a manual rollback names the caller');
     assert.equal((await s.post('/api/v1/rollback', { project: 'nothing' })).status, 404, 'a project without history reports no previous deployment');
 
     const reserved = await s.post('/api/v1/deployments', { project: 'site', version: 'rollback-v1-1', compose: stack('web:9') });

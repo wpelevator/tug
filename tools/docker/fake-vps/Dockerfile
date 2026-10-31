@@ -1,4 +1,4 @@
-FROM node:lts-bookworm-slim
+FROM node:24-bookworm-slim
 WORKDIR /app
 ARG DOCKER_COMPOSE_VERSION=2.32.4
 RUN apt-get update \

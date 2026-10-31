@@ -82,7 +82,8 @@ function stopLoad() {
 }
 const bodies = lines => new Set(lines.map(l => l.split(' ').slice(1).join(' ')));
 
-docker(['up', '-d', '--build', 'control', 'registry', 'provisioner', 'vps-a']);
+// CI prebuilds the images with a layer cache and sets TUG_COMPOSE_BUILD="" to skip the rebuild.
+docker(['up', '-d', ...(process.env.TUG_COMPOSE_BUILD ?? '--build').split(' ').filter(Boolean), 'control', 'registry', 'provisioner', 'vps-a']);
 try {
   await until('control is healthy', async () => ({ ok: await fetch(`${control}/healthz`).then(r => r.ok, () => false), out: 'not ready' }));
   await until('vps-a registered and polling', async () => {

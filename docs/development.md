@@ -1,6 +1,6 @@
 # Development
 
-The source is TypeScript. Development and tests run the `.ts` files directly through Node's built-in type stripping, so there is no build step, but it needs Node >= 22.18 (`engines.node`). Compilation to `dist/` happens when building the Docker image and when packing the npm package (`prepack`).
+The source is TypeScript. Development and tests run the `.ts` files directly through Node's built-in type stripping, so there is no build step, but it needs Node >= 22.18 (`engines.node`); development and CI use Node 24 (`.nvmrc`). Compilation to `dist/` happens when building the Docker image and when packing the npm package (`prepack`).
 
 ```bash
 npm install
@@ -27,7 +27,11 @@ Run `npm run test:smoke:image` to build the actual shipped runtime image and exe
 
 ## Continuous integration and releases
 
-`.github/workflows/ci.yml` runs on pushes to `main` and on pull requests: typecheck, lint, unit tests and the dist smoke test on Node 22 and 24, plus the Docker integration tests (fake VPS containers, registry-free image delivery, the WireGuard mesh and rolling rollouts) as separate jobs. `.github/workflows/release.yml` versions and publishes; see [Releases](releases.md). Every user-facing change needs a changeset (`npm run changeset`).
+`.github/workflows/ci.yml` runs on pushes to `main` and on pull requests: typecheck and lint on Node 24 (the version in `.nvmrc`), unit tests and the dist smoke test on Node 22 and 24, plus the Docker integration tests (fake VPS containers, registry-free image delivery, the WireGuard mesh and rolling rollouts) as separate jobs. `.github/workflows/release.yml` versions and publishes; see [Releases](releases.md). Every user-facing change needs a changeset (`npm run changeset`).
+
+### CI caching
+
+The `.github/actions/setup` composite action installs Node.js with the npm download cache (keyed on the lockfile) and runs `npm ci`; every job uses it. The integration jobs prebuild their images with `.github/actions/build-images` (Buildx and the GitHub Actions layer cache, scopes `runtime`, `fake-vps` and `registry`) and set `TUG_COMPOSE_BUILD=` so the integration scripts run `compose up` without `--build`; the Compose files tag those images `tug-runtime:integration`, `tug-fake-vps:integration` and `tug-registry:integration`. Locally the variable is unset and the scripts keep passing `--build`. Only pushes to `main` write the cache, because a pull request can read the default branch's cache but not another pull request's. The release workflow's `edge` job exports the `runtime` scope and the versioned `image` job reads it. The Dockerfiles pin the Node.js major (`node:24-*`), so an upstream LTS bump cannot silently invalidate the cache or change the shipped runtime.
 
 Published images are `ghcr.io/wpelevator/tug`. To test an unreleased CLI against a checkout, use `--build-local-image` on `control-install` and `node-install` (builds `tug:local` from the working directory and copies it over SSH). The dev Compose files (`docker-compose*.yml`) and the integration tests always build the image from the checkout with `build: .` and never pull from GHCR.
 

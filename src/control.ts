@@ -23,6 +23,8 @@ import { DEFAULT_MESH_CIDR, DEFAULT_WG_PORT, WG_INTERFACE, WG_KEEPALIVE, allocat
 import { buildIngressWork, resolveServiceEndpoints } from './ingress.ts';
 import type { NodeView } from './ingress.ts';
 import { ACTIVE_DEPLOYMENT_STATES } from './protocol.ts';
+import { AUTO_ROLLBACK_ACTOR, ROUTE_ROLES, assertProject, bodyProject, createGuard, createToken, listTokens, parseTokenRequest, queryProject, recordEvent, revokeToken } from './tokens.ts';
+import type { Actor, ProjectResolver, RouteRole } from './tokens.ts';
 import type {
   ImageArtifact, LocalImageUpload, AgentEvent, CommandResult, CommandType, ComposeFile, DesiredState, EnrollRequest, EnrollResponse, NetworkConfig, NodeInfo,
   RegisterResponse, SecretsResponse, ServiceEndpoints, StatusReport, WgKeyRequest, WorkResponse
@@ -139,14 +141,22 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
   const route = (method: 'get' | 'post' | 'delete', url: string, handlers: RequestHandler[]) => app[method](url, ...handlers.map(safe));
   const get = (url: string, ...handlers: RequestHandler[]) => route('get', url, handlers);
   const post = (url: string, ...handlers: RequestHandler[]) => route('post', url, handlers);
-  const remove = (url: string, ...handlers: RequestHandler[]) => route('delete', url, handlers);
 
-  const authOperator = async (req: Request, res: Response, next: NextFunction) => {
-    const raw = (req.headers.authorization || '').replace(/^Bearer /, '');
-    const row = await db.get('SELECT value FROM meta WHERE key=?', 'operator_token_hash');
-    if (!raw || hashToken(raw) !== row?.value) return res.status(401).json({ error: 'unauthorized' });
-    next();
+  // Operator-facing routes go through api(): the role table in tokens.ts is the only place a route's access is declared.
+  const guard = createGuard(db);
+  const apiRoutes = new Map<string, RouteRole>();
+  app.locals.apiRoutes = apiRoutes;
+  const api = (method: 'get' | 'post' | 'delete', url: string, resolve: ProjectResolver | null, ...handlers: RequestHandler[]) => {
+    const key = `${method.toUpperCase()} ${url}`; const role = ROUTE_ROLES[key];
+    if (!role || role === 'public') throw new Error(`API route ${key} has no declared role in ROUTE_ROLES`);
+    apiRoutes.set(key, role);
+    route(method, url, [guard(role, resolve ?? undefined), ...handlers]);
   };
+  const deploymentProject: ProjectResolver = async req => (await db.get<{ project_id: string }>('SELECT project_id FROM deployments WHERE id=?', req.params.id))?.project_id;
+  const commandProject: ProjectResolver = async req => { const row = await db.get<{ project_id: string | null }>('SELECT project_id FROM commands WHERE id=?', req.params.id); return row ? row.project_id : undefined; };
+  /** Audit trail entry for a control action; bookkeeping failures are logged, never returned to the caller. */
+  const audit = (actor: Actor, event: Omit<Parameters<typeof recordEvent>[1], 'actor'>) => recordEvent(db, { ...event, actor: actor.name }).catch(e => console.error(`audit event failed: ${errMessage(e)}`));
+  const projectScope = (actor: Actor, column: string) => actor.projects ? { where: `${column} IN (${actor.projects.map(() => '?').join(',') || "''"})`, args: actor.projects } : { where: '1=1', args: [] as string[] };
   const authAgent = async (req: Request, res: Response, next: NextFunction) => {
     const raw = (req.headers.authorization || '').replace(/^Bearer /, '');
     const node = raw && await db.get<NodeRow>('SELECT * FROM nodes WHERE agent_token_hash=?', hashToken(raw));
@@ -175,8 +185,9 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
     if (ok) await db.run('UPDATE deployments SET state=?,updated_at=? WHERE id=? AND state=?', 'succeeded', now(), project.current_deployment_id, 'rolling_out');
   }
 
-  async function recordEvent(projectId: string, deploymentId: string | null, level: string, type: string, message: string, metadata: Record<string, unknown> = {}): Promise<void> {
-    await db.run('INSERT INTO events(id,project_id,deployment_id,node_id,level,type,message,metadata_json,created_at) VALUES(?,?,?,?,?,?,?,?,?)', id('evt'), projectId, deploymentId, null, level, type, message, JSON.stringify(metadata), now());
+  /** Events control writes when it rolls back on its own; they are attributed to a reserved system actor. */
+  async function recordAutoRollbackEvent(projectId: string, deploymentId: string | null, type: string, message: string, metadata: Record<string, unknown> = {}): Promise<void> {
+    await db.run('INSERT INTO events(id,project_id,deployment_id,node_id,level,type,message,metadata_json,created_at,actor) VALUES(?,?,?,?,?,?,?,?,?,?)', id('evt'), projectId, deploymentId, null, 'warn', type, message, JSON.stringify(metadata), now(), AUTO_ROLLBACK_ACTOR);
   }
 
   /**
@@ -184,7 +195,7 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
    * new revision. Shared by `POST /api/v1/rollback` and automatic rollback; the caller holds the writer queue.
    * `auto` only considers `succeeded` deployments and requires `failedDeploymentId` to still be current.
    */
-  async function createRollback(project: string, opts: { force?: boolean; auto?: boolean; failedDeploymentId?: string }): Promise<{ deployment: DeploymentRow | undefined; desiredState: DesiredState }> {
+  async function createRollback(project: string, opts: { actor: string; force?: boolean; auto?: boolean; failedDeploymentId?: string }): Promise<{ deployment: DeploymentRow | undefined; desiredState: DesiredState }> {
     let lock;
     try {
       lock = await acquireProjectLock(project, opts.auto ? 'auto-rollback' : 'rollback');
@@ -199,7 +210,7 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
       const ts = now(); const depId = id('dep');
       const previousState: DesiredState = JSON.parse(previousDs.state_json);
       previousState.revision = depId;
-      await db.run('INSERT INTO deployments(id,project_id,version,state,created_at,updated_at) VALUES(?,?,?,?,?,?)', depId, project, `${ROLLBACK_VERSION_PREFIX}${previousState.version}-${Date.now()}`, 'rolling_out', ts, ts);
+      await db.run('INSERT INTO deployments(id,project_id,version,state,created_at,updated_at,actor) VALUES(?,?,?,?,?,?,?)', depId, project, `${ROLLBACK_VERSION_PREFIX}${previousState.version}-${Date.now()}`, 'rolling_out', ts, ts, opts.actor);
       await db.run('INSERT INTO desired_states(id,project_id,deployment_id,version,state_json,created_at) VALUES(?,?,?,?,?,?)', id('ds'), project, depId, previousState.version, JSON.stringify(previousState), ts);
       await db.run('UPDATE projects SET current_deployment_id=?,updated_at=? WHERE id=?', depId, now(), project);
       return { deployment: await db.get<DeploymentRow>('SELECT * FROM deployments WHERE id=?', depId), desiredState: previousState };
@@ -217,14 +228,14 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
     void (async () => {
       const failed = await db.get<DeploymentRow>('SELECT * FROM deployments WHERE id=?', deploymentId);
       if (failed?.version.startsWith(ROLLBACK_VERSION_PREFIX)) {
-        await recordEvent(projectId, deploymentId, 'warn', 'deployment.auto_rollback_skipped', `rollback deployment ${failed.version} failed; not rolling back a rollback`);
+        await recordAutoRollbackEvent(projectId, deploymentId, 'deployment.auto_rollback_skipped', `rollback deployment ${failed.version} failed; not rolling back a rollback`);
         return;
       }
       try {
-        const out = await withWriter(() => createRollback(projectId, { auto: true, failedDeploymentId: deploymentId }));
-        await recordEvent(projectId, out.deployment!.id, 'warn', 'deployment.auto_rollback', `deployment ${deploymentId} (${failed?.version}) reported failed health; rolled back to ${out.desiredState.version} as deployment ${out.deployment!.id}`, { failedDeploymentId: deploymentId, rollbackDeploymentId: out.deployment!.id, version: out.desiredState.version });
+        const out = await withWriter(() => createRollback(projectId, { actor: AUTO_ROLLBACK_ACTOR, auto: true, failedDeploymentId: deploymentId }));
+        await recordAutoRollbackEvent(projectId, out.deployment!.id, 'deployment.auto_rollback', `deployment ${deploymentId} (${failed?.version}) reported failed health; rolled back to ${out.desiredState.version} as deployment ${out.deployment!.id}`, { failedDeploymentId: deploymentId, rollbackDeploymentId: out.deployment!.id, version: out.desiredState.version });
       } catch (e) {
-        await recordEvent(projectId, deploymentId, 'warn', 'deployment.auto_rollback_skipped', `deployment ${deploymentId} failed but automatic rollback was not possible: ${errMessage(e)}`).catch(() => {});
+        await recordAutoRollbackEvent(projectId, deploymentId, 'deployment.auto_rollback_skipped', `deployment ${deploymentId} failed but automatic rollback was not possible: ${errMessage(e)}`).catch(() => {});
       }
     })().catch(e => console.error('auto rollback failed:', errMessage(e)));
   }
@@ -258,12 +269,12 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
 
   get('/healthz', (req, res) => res.json({ ok: true }));
 
-  post('/api/v1/projects', authOperator, async (req, res) => {
+  api('post', '/api/v1/projects', req => String(req.body?.name || 'site'), async (req, res) => {
     const name = req.body.name || 'site'; const ts = now();
     await db.run('INSERT OR IGNORE INTO projects(id,name,created_at,updated_at) VALUES(?,?,?,?)', name, name, ts, ts);
     res.json(await db.get<ProjectRow>('SELECT * FROM projects WHERE id=?', name));
   });
-  get('/api/v1/projects/:project', authOperator, async (req, res) => res.json(await db.get('SELECT * FROM projects WHERE id=?', req.params.project)));
+  api('get', '/api/v1/projects/:project', req => req.params.project, async (req, res) => res.json(await db.get('SELECT * FROM projects WHERE id=?', req.params.project)));
 
   const NODE_INFO_SQL = 'SELECT id,name,address,public_address,overlay_ip,status,created_at,updated_at FROM nodes WHERE id=?';
 
@@ -303,7 +314,7 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
     const node = (await db.get<NodeInfo>(NODE_INFO_SQL, name))!;
     return { node, agentToken, registryToken };
   }
-  post('/api/v1/nodes/register', authOperator, async (req, res) => {
+  api('post', '/api/v1/nodes/register', null, async (req, res) => {
     const name = req.body.name; if (!name) return res.status(400).json({ error: 'name required' });
     try { res.json(await registerNode({ name, address: req.body.address, publicAddress: req.body.publicAddress, wgPublicKey: req.body.wgPublicKey })); }
     catch (e) { sendError(res, e); }
@@ -311,7 +322,7 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
 
   // Self-service enrollment: operator mints a short-lived, limited-use key; the agent
   // exchanges it for durable credentials on first boot (Portainer Edge-style join).
-  post('/api/v1/nodes/enroll-token', authOperator, async (req, res) => {
+  api('post', '/api/v1/nodes/enroll-token', null, async (req, res) => {
     const name = req.body.name || null;
     const ttlSeconds = Math.max(1, Number(req.body.ttlSeconds ?? 3600));
     const uses = Math.max(1, Number(req.body.uses ?? 1));
@@ -341,8 +352,8 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
     const enrolled: EnrollResponse = { ...result, registry: REGISTRY };
     res.json(enrolled);
   });
-  get('/api/v1/nodes', authOperator, async (req, res) => res.json({ nodes: await db.all('SELECT id,name,address,public_address,overlay_ip,ingress,ingress_status_json,status,last_seen_at,created_at,updated_at FROM nodes ORDER BY name') }));
-  post('/api/v1/nodes/:name/rotate-registry-token', authOperator, async (req, res) => {
+  api('get', '/api/v1/nodes', null, async (req, res) => res.json({ nodes: await db.all('SELECT id,name,address,public_address,overlay_ip,ingress,ingress_status_json,status,last_seen_at,created_at,updated_at FROM nodes ORDER BY name') }));
+  api('post', '/api/v1/nodes/:name/rotate-registry-token', null, async (req, res) => {
     const node = await db.get('SELECT id,name FROM nodes WHERE name=? OR id=?', req.params.name, req.params.name);
     if (!node) return res.status(404).json({ error: 'node not found' });
     const registryToken = token('tug_reg');
@@ -350,7 +361,7 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
     await upsertRegistryCredential(node.name, registryToken);
     res.json({ ok: true, node: node.name, registryToken });
   });
-  post('/api/v1/nodes/:name/revoke-registry-token', authOperator, async (req, res) => {
+  api('post', '/api/v1/nodes/:name/revoke-registry-token', null, async (req, res) => {
     const node = await db.get('SELECT id,name FROM nodes WHERE name=? OR id=?', req.params.name, req.params.name);
     if (!node) return res.status(404).json({ error: 'node not found' });
     await db.run('UPDATE nodes SET registry_token_hash=NULL,updated_at=? WHERE id=?', now(), node.id);
@@ -364,13 +375,13 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
   }
   // The private key lives only on the node, so rotation is a command the agent executes: it
   // generates a new keypair, reports the public key and peers pick it up from their next work response.
-  post('/api/v1/nodes/:name/rotate-wg-key', authOperator, async (req, res) => {
+  api('post', '/api/v1/nodes/:name/rotate-wg-key', null, async (req, res) => {
     if (!MESH) return res.status(409).json({ error: 'the WireGuard mesh is not enabled (TUG_MESH=true)' });
     const node = await findNode(req.params.name);
     if (!node) return res.status(404).json({ error: 'node not found' });
     res.json({ commandId: await queueCommand(node.id, null, 'wg.rotate-key'), nodeId: node.id });
   });
-  post('/api/v1/nodes/:name/ingress', authOperator, async (req, res) => {
+  api('post', '/api/v1/nodes/:name/ingress', null, async (req, res) => {
     const node = await findNode(req.params.name);
     if (!node) return res.status(404).json({ error: 'node not found' });
     const enabled = req.body.enabled !== false;
@@ -392,7 +403,20 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
     res.json({ ok: true, node: node.name });
   });
 
-  post('/api/v1/secrets', authOperator, async (req, res) => {
+  api('post', '/api/v1/tokens', null, async (req, res) => {
+    const request = parseTokenRequest(req.body);
+    const created = await createToken(db, request, req.actor!.name);
+    await audit(req.actor!, { type: 'token.create', message: `token ${created.name} (${created.role}${created.projects ? `, projects: ${created.projects.join(', ')}` : ''}) created by ${req.actor!.name}`, metadata: { name: created.name, role: created.role, projects: created.projects, expiresAt: created.expiresAt } });
+    res.json(created);
+  });
+  api('get', '/api/v1/tokens', null, async (_req, res) => res.json({ tokens: await listTokens(db) }));
+  api('delete', '/api/v1/tokens/:name', null, async (req, res) => {
+    if (!await revokeToken(db, req.params.name)) return res.status(404).json({ error: 'token not found' });
+    await audit(req.actor!, { type: 'token.revoke', message: `token ${req.params.name} revoked by ${req.actor!.name}`, metadata: { name: req.params.name } });
+    res.json({ ok: true, name: req.params.name });
+  });
+
+  api('post', '/api/v1/secrets', bodyProject, async (req, res) => {
     const { project='site', name, value } = req.body; if (!name || value == null) return res.status(400).json({ error: 'name and value required' });
     let lock;
     try {
@@ -401,12 +425,18 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
       await db.run(`INSERT INTO secrets(id,project_id,name,encrypted_value,version,created_at,updated_at) VALUES(?,?,?,?,?,?,?)
         ON CONFLICT(project_id,name) DO UPDATE SET encrypted_value=excluded.encrypted_value,version=excluded.version,updated_at=excluded.updated_at`,
         id('sec'), project, name, encrypt(value, masterKey), (old?.version || 0) + 1, ts, ts);
+      await audit(req.actor!, { type: 'secret.set', project, message: `secret ${name} set to version ${(old?.version || 0) + 1} by ${req.actor!.name}`, metadata: { name, version: (old?.version || 0) + 1 } });
       res.json({ ok: true, name, version: (old?.version || 0) + 1 });
     } catch (e) { sendError(res, e); }
     finally { await releaseLock(lock); }
   });
-  get('/api/v1/secrets', authOperator, async (req, res) => res.json({ secrets: await db.all('SELECT project_id,name,version,updated_at FROM secrets WHERE project_id=? ORDER BY name', req.query.project || 'site') }));
-  remove('/api/v1/secrets/:name', authOperator, async (req, res) => { await db.run('DELETE FROM secrets WHERE project_id=? AND name=?', req.query.project || 'site', req.params.name); res.json({ ok: true }); });
+  api('get', '/api/v1/secrets', queryProject, async (req, res) => res.json({ secrets: await db.all('SELECT project_id,name,version,updated_at FROM secrets WHERE project_id=? ORDER BY name', req.query.project || 'site') }));
+  api('delete', '/api/v1/secrets/:name', queryProject, async (req, res) => {
+    const project = String(req.query.project || 'site');
+    const removed = await db.run('DELETE FROM secrets WHERE project_id=? AND name=?', project, req.params.name);
+    if (removed.changes) await audit(req.actor!, { type: 'secret.delete', project, message: `secret ${req.params.name} deleted by ${req.actor!.name}`, metadata: { name: req.params.name } });
+    res.json({ ok: true });
+  });
 
   interface BuildRow { id: string; project_id: string; deployment_id: string; service: string; image_ref: string; image_id: string; platform: string; sha256: string; size_bytes: number; artifact_path: string | null; state: string }
   const artifactDir = path.join(DATA_DIR, 'images');
@@ -436,7 +466,7 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
   await db.run("UPDATE deployments SET state='build_failed',error_message='control restarted during build' WHERE state IN ('uploading','building')");
   await collectArtifacts();
   const receiveDeployment = upload.any();
-  post('/api/v1/deployments', authOperator, (req, res) => {
+  api('post', '/api/v1/deployments', null, (req, res) => {
     receiveDeployment(req, res, error => {
       void withWriter(() => deployRequest(req, res, error)).catch(async failure => {
         const files = Array.isArray(req.files) ? req.files : [];
@@ -456,6 +486,7 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
       catch { throw httpError(400, 'invalid deployment payload JSON'); }
       if (!body || typeof body !== 'object') throw httpError(400, 'deployment payload is required');
       const project: string = body.project || 'site'; const compose: ComposeFile = body.compose; const version = body.version || `git-${Date.now()}`;
+      assertProject(req.actor!, project);
       if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(project) || typeof version !== 'string' || !version.length) throw httpError(400, 'invalid project or version');
       if (version.startsWith(ROLLBACK_VERSION_PREFIX)) throw httpError(400, `version cannot start with "${ROLLBACK_VERSION_PREFIX}" (reserved for rollback deployments)`);
       const nodes = await db.all<{ name: string }[]>('SELECT name FROM nodes ORDER BY created_at,name');
@@ -484,7 +515,7 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
       if (active) throw httpError(409, `deployment ${active.id} is already ${active.state}`);
       depId = id('dep'); const ts = now();
       await db.run('INSERT OR IGNORE INTO projects(id,name,created_at,updated_at) VALUES(?,?,?,?)', project, project, ts, ts);
-      await db.run('INSERT INTO deployments(id,project_id,version,state,created_at,updated_at) VALUES(?,?,?,?,?,?)', depId, project, version, 'building', ts, ts);
+      await db.run('INSERT INTO deployments(id,project_id,version,state,created_at,updated_at,actor) VALUES(?,?,?,?,?,?,?)', depId, project, version, 'building', ts, ts, req.actor!.name);
       const desired = buildDesiredState({ project, version, revision: depId, compose, registry: REGISTRY, defaultNode: nodes[0]?.name || null });
       if (context) { contextDir = path.resolve(DATA_DIR, 'build-contexts', depId); await unpackContext(context.path, contextDir); }
       for (const service of builtServices) {
@@ -538,7 +569,8 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
         await db.exec('COMMIT');
       } catch (e) { await db.exec('ROLLBACK'); throw e; }
       });
-      responseBody = { deployment: { id: depId, project, version, state: 'rolling_out' }, desiredState: desired };
+      await audit(req.actor!, { type: 'deploy', project, deploymentId: depId, message: `deployment ${depId} (${version}) started by ${req.actor!.name}`, metadata: { version } });
+      responseBody = { deployment: { id: depId, project, version, state: 'rolling_out', actor: req.actor!.name }, desiredState: desired };
     } catch (e) {
       if (depId) await db.run("UPDATE deployments SET state='build_failed',error_message=?,updated_at=? WHERE id=? AND state='building'", errMessage(e), now(), depId).catch(() => {});
       responseError = e;
@@ -563,20 +595,26 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
     } catch { if (!res.headersSent) res.status(404).json({ error: 'image artifact unavailable' }); }
   });
 
-  get('/api/v1/deployments/:id', authOperator, async (req, res) => res.json(await db.get('SELECT * FROM deployments WHERE id=?', req.params.id)));
-  post('/api/v1/deployments/:id/cancel', authOperator, async (req, res) => withPublication(async () => {
+  api('get', '/api/v1/deployments/:id', deploymentProject, async (req, res) => res.json(await db.get('SELECT * FROM deployments WHERE id=?', req.params.id)));
+  api('post', '/api/v1/deployments/:id/cancel', deploymentProject, async (req, res) => withPublication(async () => {
     const row = await db.get<DeploymentRow>('SELECT * FROM deployments WHERE id=?', req.params.id);
     if (!row) return res.status(404).json({ error: 'deployment not found' });
     if (!(ACTIVE_DEPLOYMENT_STATES as readonly string[]).includes(row.state)) return res.status(409).json({ error: `deployment is ${row.state}` });
     const result = await db.run(`UPDATE deployments SET state=?,updated_at=? WHERE id=? AND state IN (${ACTIVE_STATES_SQL})`, 'cancelled', now(), req.params.id);
     if (result.changes !== 1) return res.status(409).json({ error: 'deployment is no longer active' });
+    await audit(req.actor!, { type: 'cancel', project: row.project_id, deploymentId: row.id, message: `deployment ${row.id} cancelled by ${req.actor!.name}` });
     res.json({ ok: true });
   }));
-  post('/api/v1/rollback', authOperator, async (req, res) => withWriter(async () => {
-    try { res.json(await createRollback(req.body.project || 'site', { force: Boolean(req.body.force) })); } catch (e) { sendError(res, e); }
+  api('post', '/api/v1/rollback', bodyProject, async (req, res) => withWriter(async () => {
+    const project = req.body.project || 'site';
+    try {
+      const out = await createRollback(project, { actor: req.actor!.name, force: Boolean(req.body.force) });
+      await audit(req.actor!, { type: 'rollback', project, deploymentId: out.deployment!.id, message: `rollback to ${out.desiredState.version} (deployment ${out.deployment!.id}) started by ${req.actor!.name}`, metadata: { version: out.desiredState.version, force: Boolean(req.body.force) } });
+      res.json(out);
+    } catch (e) { sendError(res, e); }
   }));
-  get('/api/v1/volumes', authOperator, async (req, res) => res.json({ volumes: await db.all('SELECT * FROM volumes WHERE project_id=? ORDER BY name', req.query.project || 'site') }));
-  remove('/api/v1/volumes/:name', authOperator, async (req, res) => {
+  api('get', '/api/v1/volumes', queryProject, async (req, res) => res.json({ volumes: await db.all('SELECT * FROM volumes WHERE project_id=? ORDER BY name', req.query.project || 'site') }));
+  api('delete', '/api/v1/volumes/:name', queryProject, async (req, res) => {
     const project = String(req.query.project || 'site'); const deleteData = String(req.query.deleteData || 'false') === 'true';
     let lock;
     try {
@@ -601,7 +639,7 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
     } catch (e) { sendError(res, e); }
     finally { await releaseLock(lock); }
   });
-  post('/api/v1/control/backups/run', authOperator, async (req, res) => withWriter(async () => {
+  api('post', '/api/v1/control/backups/run', null, async (req, res) => withWriter(async () => {
     const backupDir = process.env.TUG_CONTROL_BACKUP_DIR || path.join(DATA_DIR, 'control-backups');
     await ensureDir(backupDir);
     const ts = now(); const backupId = id('cbak');
@@ -619,7 +657,7 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
     await db.run('INSERT INTO backups(id,project_id,target,node_id,state,artifact_ref,metadata_json,created_at,completed_at) VALUES(?,?,?,?,?,?,?,?,?)', backupId, '_control', 'control-plane', null, 'completed', artifactRef, JSON.stringify({ type: 'control' }), ts, now());
     res.json({ backupId, artifactRef, state: 'completed' });
   }));
-  post('/api/v1/control/restore', authOperator, async (req, res) => withWriter(async () => {
+  api('post', '/api/v1/control/restore', null, async (req, res) => withWriter(async () => {
     if (!req.body.confirm) return res.status(400).json({ error: 'confirm=true is required; restore overwrites control data then requires restart' });
     const artifactRef = req.body.artifactRef;
     if (typeof artifactRef !== 'string' || !artifactRef) return res.status(400).json({ error: 'artifactRef required' });
@@ -671,11 +709,16 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
     await db.run('INSERT INTO commands(id,node_id,project_id,type,state,payload_json,attempts,run_after,deadline,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)', cmdId, node.id, project, type, 'pending', JSON.stringify({ project, service, ...payload }), 0, ts, null, ts, ts);
     return { commandId: cmdId, nodeId: node.id };
   }
-  post('/api/v1/restart', authOperator, async (req, res) => {
-    try { res.json(await commandForService({ project: req.body.project || 'site', service: req.body.service, type: 'service.restart', payload: {} })); }
+  api('post', '/api/v1/restart', bodyProject, async (req, res) => {
+    try {
+      const project = req.body.project || 'site';
+      const queued = await commandForService({ project, service: req.body.service, type: 'service.restart', payload: {} });
+      await audit(req.actor!, { type: 'restart', project, message: `service ${req.body.service} restart requested by ${req.actor!.name}`, metadata: { service: req.body.service, commandId: queued.commandId } });
+      res.json(queued);
+    }
     catch (e) { res.status((e as HttpError).status || 500).json({ error: errMessage(e) }); }
   });
-  post('/api/v1/logs', authOperator, async (req, res) => {
+  api('post', '/api/v1/logs', bodyProject, async (req, res) => {
     const project = req.body.project || 'site'; const service = req.body.service; const tail = Number(req.body.tail || 200);
     if (!service) return res.status(400).json({ error: 'service required' });
     const ds = await currentDesired(project); if (!ds) return res.status(404).json({ error: 'project has no desired state' });
@@ -686,22 +729,25 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
     await db.run('INSERT INTO commands(id,node_id,project_id,type,state,payload_json,attempts,run_after,deadline,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)', cmdId, node.id, project, 'logs.fetch', 'pending', JSON.stringify({ project, service, tail }), 0, ts, null, ts, ts);
     res.json({ commandId: cmdId, nodeId: node.id });
   });
-  get('/api/v1/commands/:id', authOperator, async (req, res) => res.json(await db.get('SELECT * FROM commands WHERE id=?', req.params.id)));
-  get('/api/v1/status', authOperator, async (req, res) => {
+  api('get', '/api/v1/commands/:id', commandProject, async (req, res) => res.json(await db.get('SELECT * FROM commands WHERE id=?', req.params.id)));
+  api('get', '/api/v1/status', null, async (req, res) => {
     const staleSeconds = Number(process.env.TUG_STALE_SECONDS || 60);
     const cutoff = new Date(Date.now() - staleSeconds * 1000).toISOString();
     await db.run("UPDATE nodes SET status='stale',updated_at=? WHERE last_seen_at IS NOT NULL AND last_seen_at < ?", now(), cutoff);
-    res.json({ projects: await db.all('SELECT * FROM projects'), deployments: await db.all('SELECT * FROM deployments ORDER BY created_at DESC LIMIT 20'), nodes: await db.all('SELECT id,name,status,last_seen_at FROM nodes'), statuses: await db.all('SELECT * FROM node_statuses') });
+    const projects = projectScope(req.actor!, 'id'); const deployments = projectScope(req.actor!, 'project_id'); const statuses = projectScope(req.actor!, 'project_id');
+    res.json({ projects: await db.all(`SELECT * FROM projects WHERE ${projects.where}`, ...projects.args), deployments: await db.all(`SELECT * FROM deployments WHERE ${deployments.where} ORDER BY created_at DESC LIMIT 20`, ...deployments.args), nodes: await db.all('SELECT id,name,status,last_seen_at FROM nodes'), statuses: await db.all(`SELECT * FROM node_statuses WHERE ${statuses.where}`, ...statuses.args) });
   });
-  get('/api/v1/events', authOperator, async (req, res) => {
-    const project = req.query.project || null;
+  api('get', '/api/v1/events', null, async (req, res) => {
+    const project = req.query.project ? String(req.query.project) : null;
+    if (project) assertProject(req.actor!, project);
     const limit = Math.min(Number(req.query.limit || 100), 500);
+    const scope = projectScope(req.actor!, 'project_id'); // scoped tokens never see node-level or other projects' events
     const events = project
       ? await db.all('SELECT * FROM events WHERE project_id=? ORDER BY created_at DESC LIMIT ?', project, limit)
-      : await db.all('SELECT * FROM events ORDER BY created_at DESC LIMIT ?', limit);
+      : await db.all(`SELECT * FROM events WHERE ${scope.where} ORDER BY created_at DESC LIMIT ?`, ...scope.args, limit);
     res.json({ events });
   });
-  get('/api/v1/diagnostics', authOperator, async (req, res) => {
+  api('get', '/api/v1/diagnostics', null, async (req, res) => {
     const checks: { name: string; ok: boolean; [key: string]: unknown }[] = [];
     async function check(name: string, fn: () => Promise<Record<string, unknown>>) {
       try { checks.push({ name, ok: true, ...(await fn()) }); }
@@ -730,7 +776,7 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
     }
     res.json({ ok: checks.every(c => c.ok), registry: REGISTRY, checks });
   });
-  post('/api/v1/diagnostics/nodes', authOperator, async (req, res) => {
+  api('post', '/api/v1/diagnostics/nodes', null, async (req, res) => {
     const nodes = req.body.node ? await db.all('SELECT id FROM nodes WHERE id=? OR name=?', req.body.node, req.body.node) : await db.all('SELECT id FROM nodes');
     const ts = now(); const commands = [];
     for (const node of nodes) {

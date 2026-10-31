@@ -6,7 +6,7 @@ Deploy Docker Compose projects to one or more ordinary Linux VPSes through a sma
 
 ## Features
 
-- Control API with bearer-token auth and SQLite metadata.
+- Control API with bearer-token auth, scoped `read`/`deploy`/`admin` API tokens for CI and teammates, an audit trail naming who acted, and SQLite metadata.
 - Nodes join over SSH (`node-install`) or enroll themselves with a single `docker run` (`node-enroll`), with per-node agent and registry tokens. Agents only dial out, so nodes behind NAT work.
 - Agents pull desired state from control, apply a generated per-node Compose file, run TCP/HTTP/Docker health checks and report status.
 - `x-tug` placement of services and volumes on nodes, with immutable desired-state records per deployment.
@@ -40,6 +40,7 @@ The CLI installs the matching `ghcr.io/wpelevator/tug:<version>` image on your h
 - [Architecture](docs/architecture.md): components, reconciliation, workflow diagrams, secrets and runtime paths.
 - [Compose extensions](docs/compose.md): `x-tug` placement, health checks, volumes and limitations.
 - [Control plane](docs/control-plane.md): install, TLS, registry credentials, backup and restore.
+- [Access control](docs/access-control.md): scoped API tokens, roles, audit trail and a GitHub Actions deploy example.
 - [Networking](docs/networking.md): WireGuard mesh, service DNS, ingress and TLS, firewall notes.
 - [Nodes](docs/nodes.md): SSH install, self-service enrollment, registration and status.
 - [CLI reference](docs/cli.md): every `tug` command and option.
