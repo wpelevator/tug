@@ -16,7 +16,7 @@ const op = { Authorization: 'Bearer op-events-token', 'content-type': 'applicati
 async function seed(dir: string, events: { name: string; ageMs: number }[]) {
   const db = await openDb(path.join(dir, 'tug.db'));
   for (const { name, ageMs } of events) {
-    await db.run(
+    db.run(
       'INSERT INTO events(id,project_id,level,type,message,created_at) VALUES(?,?,?,?,?,?)',
       name,
       'site',
@@ -26,7 +26,7 @@ async function seed(dir: string, events: { name: string; ageMs: number }[]) {
       new Date(Date.now() - ageMs).toISOString(),
     );
   }
-  await db.close();
+  db.close();
 }
 async function makeServer(
   options: Parameters<typeof createApp>[0] = {},

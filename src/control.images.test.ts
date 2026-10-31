@@ -1,4 +1,5 @@
 import test from 'node:test';
+import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -454,80 +455,69 @@ test('cancelled long builds renew their lease but never publish after cancellati
     await s.close();
   }
 });
-function databaseGate() {
-  let pattern: string | undefined;
+// Pause actual filesystem I/O; synchronous SQL has no suspension point.
+function filesystemGate(
+  t: TestContext,
+  method: 'mkdir' | 'copyFile',
+  matches: (file: string) => boolean,
+) {
   let release!: () => void;
   let entered!: () => void;
-  let pending: Promise<void>;
-  let reached: Promise<void>;
-  const openDatabase: typeof openDb = async (filename) => {
-    const db = await openDb(filename);
-    const run = db.run.bind(db);
-    const exec = db.exec.bind(db);
-    db.run = async (...args: Parameters<typeof db.run>) => {
-      if (pattern && String(args[0]).startsWith(pattern)) {
-        pattern = undefined;
-        entered();
-        await pending;
-      }
-      return run(...args);
-    };
-    db.exec = async (...args: Parameters<typeof db.exec>) => {
-      if (pattern && String(args[0]).startsWith(pattern)) {
-        pattern = undefined;
-        entered();
-        await pending;
-      }
-      return exec(...args);
-    };
-    return db;
-  };
-  return {
-    openDatabase,
-    hold: (sql: string) => {
-      pattern = sql;
-      pending = new Promise<void>((resolve) => {
-        release = resolve;
-      });
-      reached = new Promise<void>((resolve) => {
-        entered = resolve;
-      });
-      return { release: () => release(), reached };
-    },
-  };
+  const pending = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const reached = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const original = fs[method];
+  let armed = true;
+  t.mock.method(fs, method, async (...args: unknown[]) => {
+    if (armed && matches(String(args[0]))) {
+      armed = false;
+      entered();
+      await pending;
+    }
+    return Reflect.apply(original, fs, args);
+  });
+  return { release, reached };
 }
-test('an in-flight status request returns 503 after restore instead of rejecting outside Express', async () => {
-  const gate = databaseGate();
-  const s = await server('', gate.openDatabase);
+test('requests during restore file replacement return 503 without touching the closed database', async (t) => {
+  const s = await server();
   try {
     const backup = await json(await s.post('/api/v1/control/backups/run', {}));
-    const held = gate.hold("UPDATE nodes SET status='stale'");
-    const status = fetch(`${s.base}/api/v1/status`, {
-      headers: { Authorization: 'Bearer images-op' },
+    const held = filesystemGate(t, 'copyFile', (file) => file.endsWith('/control-restore/tug.db'));
+    const restore = s.post('/api/v1/control/restore', {
+      artifactRef: backup.artifactRef,
+      confirm: true,
     });
     await held.reached;
-    assert.equal(
-      (await s.post('/api/v1/control/restore', { artifactRef: backup.artifactRef, confirm: true }))
-        .status,
-      200,
-      'restore must finish while an earlier status request is waiting',
-    );
-    held.release();
-    assert.equal(
-      (await status).status,
-      503,
-      'in-flight routes must convert closed-database failures to restart-required responses',
-    );
+    try {
+      const status = await fetch(`${s.base}/api/v1/status`, {
+        headers: { Authorization: 'Bearer images-op' },
+      });
+      assert.equal(
+        status.status,
+        503,
+        'database routes must reject requests while restore replaces live files',
+      );
+      assert.equal(
+        (await json(status)).restartRequired,
+        true,
+        'restore must advertise the required restart',
+      );
+    } finally {
+      held.release();
+    }
+    assert.equal((await restore).status, 200, 'restore must complete after files can be replaced');
   } finally {
     await s.close();
   }
 });
-test('writer operations queued behind a restore recheck restart readiness before using SQLite', async () => {
-  const gate = databaseGate();
-  const s = await server('', gate.openDatabase);
+test('writer operations queued behind a restore recheck restart readiness before using SQLite', async (t) => {
+  const s = await server();
   try {
     const backup = await json(await s.post('/api/v1/control/backups/run', {}));
-    const held = gate.hold('VACUUM INTO');
+    const held = filesystemGate(t, 'mkdir', (file) => file.endsWith('-staging'));
     const firstWriter = s.post('/api/v1/control/backups/run', {});
     await held.reached;
     const restore = s.post('/api/v1/control/restore', {
@@ -605,6 +595,106 @@ test('configured upload limits reject oversized archives and remove partial file
     );
   } finally {
     delete process.env.TUG_MAX_IMAGE_BYTES;
+    await s.close();
+  }
+});
+
+test('publication failure rolls back desired state and keeps the previous deployment current', async () => {
+  let failPublication = false;
+  let database: Awaited<ReturnType<typeof openDb>>;
+  const s = await server('', async (filename) => {
+    const db = await openDb(filename);
+    database = db;
+    const run = db.run.bind(db);
+    db.run = (sql, ...values) => {
+      if (failPublication && sql.startsWith('INSERT INTO desired_states'))
+        throw new Error('injected publication failure');
+      return run(sql, ...values);
+    };
+    return db;
+  });
+  try {
+    const node = await s.node('n1');
+    const first = await json(await s.deploy('first'));
+    await s.report(node.agentToken, first.desiredState);
+    failPublication = true;
+    const response = await s.deploy('failed');
+    assert.equal(response.status, 500, 'publication failures must be returned as server errors');
+    assert.match(
+      (await json(response)).error,
+      /injected publication failure/,
+      'rollback must preserve the publication failure',
+    );
+    assert.deepEqual(
+      database!.get('SELECT current_deployment_id FROM projects WHERE id=?', 'app'),
+      { current_deployment_id: first.deployment.id },
+      'failed publication must keep the previous deployment current',
+    );
+    assert.deepEqual(
+      database!.all('SELECT deployment_id FROM desired_states'),
+      [{ deployment_id: first.deployment.id }],
+      'failed publication must not leave a partial desired-state record',
+    );
+    assert.deepEqual(
+      database!.get('SELECT state FROM deployments WHERE version=?', 'failed'),
+      { state: 'build_failed' },
+      'rolling_out transition must roll back before recording build failure',
+    );
+    failPublication = false;
+    assert.equal(
+      (await s.deploy('recovered')).status,
+      200,
+      'a rolled-back transaction must leave the connection and lock usable',
+    );
+  } finally {
+    await s.close();
+  }
+});
+
+test('a build that loses its lease cannot publish or delete the replacement lease', async () => {
+  let database: Awaited<ReturnType<typeof openDb>>;
+  const s = await server('', async (filename) => {
+    database = await openDb(filename);
+    return database;
+  });
+  const release = s.pauseBuild();
+  try {
+    await s.node('n1');
+    const request = s.deploy('lost-lease');
+    for (
+      let attempt = 0;
+      attempt < 100 && !s.calls.some((call) => call.startsWith('build '));
+      attempt++
+    )
+      await delay(5);
+    assert.ok(
+      s.calls.some((call) => call.startsWith('build ')),
+      'the build must reach external I/O before replacing its lease',
+    );
+    database!.run('UPDATE locks SET owner=? WHERE name=?', 'replacement-owner', 'project:app');
+    release();
+    assert.equal(
+      (await request).status,
+      409,
+      'a build without its original lease must not publish',
+    );
+    assert.deepEqual(
+      database!.all('SELECT * FROM desired_states'),
+      [],
+      'lease loss must leave no published desired state',
+    );
+    assert.deepEqual(
+      database!.get('SELECT current_deployment_id FROM projects WHERE id=?', 'app'),
+      { current_deployment_id: null },
+      'lease loss must not make the failed deployment current',
+    );
+    assert.deepEqual(
+      database!.get('SELECT owner FROM locks WHERE name=?', 'project:app'),
+      { owner: 'replacement-owner' },
+      'owner-checked cleanup must preserve the replacement lease',
+    );
+  } finally {
+    release();
     await s.close();
   }
 });

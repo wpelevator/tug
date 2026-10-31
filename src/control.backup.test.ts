@@ -19,6 +19,7 @@ async function makeServer() {
     const s = app.listen(0, () => resolve(s));
   });
   return {
+    dir,
     base: `http://127.0.0.1:${(srv.address() as AddressInfo).port}`,
     close: () => new Promise((resolve) => srv.close(resolve)),
   };
@@ -45,5 +46,40 @@ test('creates control-plane backup and requires confirmation for restore', async
     assert.equal(res.status, 400);
   } finally {
     await s.close();
+  }
+});
+
+test('bound snapshot destinations preserve apostrophes in backup directory names', async () => {
+  const s = await makeServer();
+  process.env.TUG_CONTROL_BACKUP_DIR = path.join(s.dir, "backups 'quoted'");
+  try {
+    const response = await fetch(`${s.base}/api/v1/control/backups/run`, {
+      method: 'POST',
+      headers: op,
+      body: '{}',
+    });
+    assert.equal(
+      response.status,
+      200,
+      'backup paths with apostrophes must work without manual SQL escaping',
+    );
+    const backup = await json(response);
+    assert.ok(
+      (await fs.stat(backup.artifactRef)).size > 0,
+      'the quoted path must contain the completed archive',
+    );
+    const restore = await fetch(`${s.base}/api/v1/control/restore`, {
+      method: 'POST',
+      headers: op,
+      body: JSON.stringify({ artifactRef: backup.artifactRef, confirm: true }),
+    });
+    assert.equal(
+      restore.status,
+      200,
+      'snapshots created under quoted paths must restore successfully',
+    );
+  } finally {
+    await s.close();
+    await fs.rm(s.dir, { recursive: true, force: true });
   }
 });

@@ -21,7 +21,7 @@ jobs:
       fail-fast: false
       matrix:
         # engines.node is the oldest version; .nvmrc is the one used for development and the other jobs.
-        node: [22, 24]
+        node: ['22.18.0', 22, 24]
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup

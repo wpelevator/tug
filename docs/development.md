@@ -1,6 +1,6 @@
 # Development
 
-The source is TypeScript. Development and tests run the `.ts` files directly through Node's built-in type stripping, so there is no build step, but it needs Node >= 22.18 (`engines.node`); development and CI use Node 24 (`.nvmrc`). Compilation to `dist/` happens when building the Docker image and when packing the npm package (`prepack`).
+The source is TypeScript. Development and tests run the `.ts` files directly through Node's built-in type stripping, so there is no build step, but it needs Node >= 22.18 (`engines.node`); development and CI use Node 24 (`.nvmrc`). SQLite uses built-in `node:sqlite`; installation requires no SQLite npm addon, Python or C++ compiler. The module is marked active development on Node 22.18.0 and can emit an experimental warning on supported Node releases; warnings are not globally suppressed. Compilation to `dist/` happens when building the Docker image and when packing the npm package (`prepack`).
 
 ```bash
 npm install
@@ -26,11 +26,11 @@ The Dockerfiles are multi-stage: a build stage runs `npm ci && npm run build`, a
 
 The runtime image ships its own Docker client and Compose plugin for the control host, which still installs through Compose, because mounting the host Docker socket does not make the host's CLI plugins available inside the agent. Runtime and fake-VPS Dockerfiles pin `DOCKER_COMPOSE_VERSION=2.32.4` and support `amd64`/`arm64`; update and verify both pins together. This Compose version retains compatibility with the older nested Docker daemons used in integration tests.
 
-Run `npm run test:smoke:image` to build the actual shipped runtime image and execute its Docker, Compose and Node binaries without mounting the host socket or CLI plugins. To test an already-built image, set `TUG_RUNTIME_IMAGE=<tag>`. CI runs this packaging smoke before the registry integration test, so the fake-VPS image cannot mask missing runtime tools.
+Run `npm run test:smoke:image` to build the actual shipped runtime image and execute its Docker, Compose and Node binaries plus compiled control/agent database initialization, a writable snapshot and read-only validation without mounting the host socket or CLI plugins. To test an already-built image, set `TUG_RUNTIME_IMAGE=<tag>`. CI runs this packaging smoke before the registry integration test, so the fake-VPS image cannot mask missing runtime tools.
 
 ## Continuous integration and releases
 
-`.github/workflows/ci.yml` runs on pushes to `main` and on pull requests: typecheck and lint on Node 24 (the version in `.nvmrc`), unit tests and the dist smoke test on Node 22 and 24, plus the Docker integration tests (fake VPS containers, registry-free image delivery, the WireGuard mesh and rolling rollouts) as separate jobs. `.github/workflows/release.yml` versions and publishes; see [Releases](releases.md). Every user-facing change needs a changeset (`npm run changeset`).
+`.github/workflows/ci.yml` runs on pushes to `main` and on pull requests: typecheck and lint on Node 24 (the version in `.nvmrc`), unit tests and the dist smoke test on the exact minimum Node 22.18.0 and current Node 22 and 24, plus the Docker integration tests (fake VPS containers, registry-free image delivery, the WireGuard mesh and rolling rollouts) as separate jobs. `.github/workflows/release.yml` versions and publishes; see [Releases](releases.md). Every user-facing change needs a changeset (`npm run changeset`).
 
 ### CI caching
 
