@@ -110,3 +110,37 @@ test('digest pulls strip display tags, preserve registry ports and carry credent
     d.close();
   }
 });
+
+test('registry auth uses padded base64url for every credential byte length', async () => {
+  for (const length of [1, 2, 3]) {
+    const auth = { username: 'tester', password: '🔐' + 'a'.repeat(length) };
+    const expected = Buffer.from(JSON.stringify(auth))
+      .toString('base64')
+      .replaceAll('+', '-')
+      .replaceAll('/', '_');
+    const d = await daemon((req, res) => {
+      const encoded = String(req.headers['x-registry-auth']);
+      assert.equal(
+        encoded,
+        expected,
+        'Engine registry auth must preserve the padding required by Go base64.URLEncoding',
+      );
+      assert.equal(
+        encoded.length % 4,
+        0,
+        'registry auth must contain complete four-character base64 groups',
+      );
+      assert.deepEqual(
+        JSON.parse(Buffer.from(encoded, 'base64url').toString()),
+        auth,
+        'padded registry auth must preserve Unicode credentials',
+      );
+      res.end('{"status":"Downloaded"}\n');
+    });
+    try {
+      await d.engine.pullImage('private.example/app:latest', auth);
+    } finally {
+      d.close();
+    }
+  }
+});

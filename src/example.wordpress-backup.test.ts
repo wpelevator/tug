@@ -101,3 +101,18 @@ test('wordpress-backup builds a service from a directory that holds its Dockerfi
     'desired state places backup on the app node',
   );
 });
+
+test('WordPress health executes PHP locally without requiring its public ingress route', () => {
+  const health = compose.services.wordpress['x-tug']?.health;
+  assert.equal(health?.type, 'http', 'the WordPress example must check the HTTP server');
+  assert.equal(
+    health?.path,
+    '/wp-includes/version.php',
+    'the PHP health endpoint must return directly after installation instead of redirecting through public ingress',
+  );
+  assert.equal(
+    compose.services.db['x-tug']?.health?.type,
+    'tcp',
+    'database readiness must be checked separately from the direct PHP health endpoint',
+  );
+});

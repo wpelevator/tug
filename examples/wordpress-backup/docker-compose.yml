@@ -42,7 +42,7 @@ services:
       health:
         type: http
         port: 80
-        path: /wp-login.php
+        path: /wp-includes/version.php
       ingress:
         host: blog.example.com
         port: 80
