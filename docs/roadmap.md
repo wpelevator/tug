@@ -71,6 +71,7 @@ What a single control plane makes easy:
 - Metrics per service and node (CPU, memory, restarts) via the M5 channel
 - Managed DNS convenience domain for ingress, similar to uncloud's `*.uncloud.run`
 
+- Standalone Bun-compiled `tug` binaries and a Homebrew tap, so operators need no Node.js; see [Standalone binary](standalone-binary.md)
 ## Sequencing notes
 
 The current priority is M3 design → M3 implementation. Real-server validation of M2 and M4 has been done on two Ubuntu 24.04 hosts (Linux 6.8): SSH installation including the Docker bootstrap, a WireGuard mesh with handshakes between hosts, an agent behind bridge NAT on a real host, a publicly trusted Let's Encrypt certificate issued by the managed Caddy, service names resolving across nodes over the mesh, a remote-build deploy, an operator-local `--build-local` deploy and rollback from the retained image. Not yet validated on real hosts: a physically separate node behind NAT, certificate renewal, `node-enroll --install-docker` cloud-init on a cloud-init host, and arm64 nodes.
@@ -105,5 +106,6 @@ Rough parity with uncloud after M2 + M3 + M4 + M5. M3's automatic rollback and M
 - [ ] M8 outbound webhooks
 - [x] M8 named multi-operator tokens in the audit trail
 - [ ] M8 read-only web dashboard
+- [ ] Later: standalone CLI binary and Homebrew tap ([Standalone binary](standalone-binary.md))
 - [ ] Re-check uncloud releases at the start of each milestone and update the baseline above
 - [ ] Each milestone: tests added, README.md and docs updated, its own plan file folded into docs and deleted when done
