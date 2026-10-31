@@ -73,7 +73,7 @@ What a single control plane makes easy:
 
 ## Sequencing notes
 
-The current priority is real-server validation → M4 → M3 design → M3 implementation. First verify SSH installation, automatic ACME certificates on public ports 80/443, an agent behind NAT without a public address and WireGuard on a real Linux kernel, then fix failures before adding features.
+The current priority is M3 design → M3 implementation. Real-server validation of M2 and M4 has been done on two Ubuntu 24.04 hosts (Linux 6.8): SSH installation including the Docker bootstrap, a WireGuard mesh with handshakes between hosts, an agent behind bridge NAT on a real host, a publicly trusted Let's Encrypt certificate issued by the managed Caddy, service names resolving across nodes over the mesh, a remote-build deploy, an operator-local `--build-local` deploy and rollback from the retained image. Not yet validated on real hosts: a physically separate node behind NAT, certificate renewal, `node-enroll --install-docker` cloud-init on a cloud-init host, and arm64 nodes.
 
 M3 depends on M2's ingress and needs a design decision about reaching old and new containers concurrently: either routable container addresses over the mesh or per-version host ports with Caddy upstream switching. Today's service names depend on published host ports, so this decision belongs in the M3 spec before implementation. M4 is technically independent of M2/M3. After M3, prioritize M5's day-to-day operations; M8 can provide small independent wins, while M6/M7 primarily serve the WordPress topology. M5 should follow M1 so the stream protocol lives in `protocol.ts`. M6 is independent; M7 depends on M2.
 
@@ -88,11 +88,12 @@ Rough parity with uncloud after M2 + M3 + M4 + M5. M3's automatic rollback and M
 - [ ] M3 `x-tug.rollout` options, `recreate` default for stateful services
 - [ ] M3 opt-in automatic rollback on failed health
 - [x] M4 spec written
-- [ ] M4 `--registry` optional; built images stored on control and downloaded by agents, bring-your-own registry still supported
-- [ ] M4 image file retention tied to rollback history, and image pruning on agents
-- [ ] M4 `deploy --build-local` uploads the saved image to control
+- [x] M4 `--registry` optional; built images stored on control and downloaded by agents, bring-your-own registry still supported
+- [x] M4 image file retention tied to rollback history, and image pruning on agents
+- [x] M4 `deploy --build-local` uploads the saved image to control
 - [ ] M4 later, if transfer size matters: control serves the read-only registry API for layer reuse
-- [ ] M4 opt-in Docker install for `node-install`/`control-install` and `node-enroll --install-docker` cloud-init
+- [x] M4 opt-in Docker install for `node-install`/`control-install`, verified on fresh Ubuntu 24.04 hosts
+- [ ] M4 `node-enroll --install-docker` cloud-init verified on a real cloud-init host (the output is unit-tested only)
 - [ ] M5 spec written (`plan-agent-stream.md`)
 - [ ] M5 agent-initiated persistent channel (WebSocket, long-poll fallback), dial-out only
 - [ ] M5 `exec` (incl. TTY), `logs -f`, `ps`, `inspect`
