@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import yaml from 'js-yaml';
 import { buildDesiredState, validateCompose } from './compose.ts';
 import type { ComposeFile } from './protocol.ts';
+import { normalized } from '../tests/fake-docker.ts';
 
 const dir = new URL('../examples/wordpress-backup/', import.meta.url);
 const compose = yaml.load(
@@ -16,11 +17,11 @@ const envOf = (svc: ComposeFile['services'][string]): Record<string, string> =>
 
 test('wordpress-backup example passes validateCompose, also with several registered nodes', () => {
   assert.doesNotThrow(
-    () => validateCompose(compose),
+    () => validateCompose(normalized(compose)),
     'the example is valid on a single-node setup',
   );
   assert.doesNotThrow(
-    () => validateCompose(compose, ['app', 'other']),
+    () => validateCompose(normalized(compose), ['app', 'other']),
     'every service names its placement, so extra nodes do not make it ambiguous',
   );
   assert.deepEqual(

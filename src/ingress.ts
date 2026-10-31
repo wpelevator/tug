@@ -17,7 +17,9 @@ import type {
   ServiceEndpoint,
   ServiceEndpoints,
 } from './protocol.ts';
-import type { DockerRunner } from './runners.ts';
+import * as tar from 'tar';
+import { isNotFound } from './docker-api.ts';
+import type { DockerApi } from './docker-api.ts';
 
 export const CADDY_CONTAINER = 'tug-caddy';
 export const DEFAULT_CADDY_IMAGE = 'caddy:2-alpine';
@@ -208,7 +210,7 @@ export function ingressConfigHash(work: Pick<IngressWork, 'caddyfile' | 'files'>
 }
 
 export interface IngressContext {
-  docker: DockerRunner;
+  docker: DockerApi;
   stateDir: string;
   caddyImage?: string;
 }
@@ -224,11 +226,36 @@ async function writeStage(dir: string, work: IngressWork): Promise<void> {
   }
 }
 
+async function tarOf(dir: string): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of tar.c({ cwd: dir, portable: true }, ['.']))
+    chunks.push(chunk as Buffer);
+  return Buffer.concat(chunks);
+}
+
+async function ensureImage(ctx: IngressContext): Promise<string> {
+  const image = ctx.caddyImage || DEFAULT_CADDY_IMAGE;
+  if (!(await ctx.docker.inspectImage(image))) await ctx.docker.pullImage(image);
+  return image;
+}
+
+async function reload(ctx: IngressContext): Promise<void> {
+  const r = await ctx.docker.execRun(CADDY_CONTAINER, [
+    'caddy',
+    'reload',
+    '--config',
+    `${CADDY_ETC}/Caddyfile`,
+    '--adapter',
+    'caddyfile',
+  ]);
+  if (r.code !== 0) throw new Error(`caddy reload failed (${r.code}): ${(r.err || r.out).trim()}`);
+}
+
 /**
- * Makes the Caddy container match the control-rendered config. Config is copied into the
- * container (`docker cp`, so it works whether the agent runs on the host or in a container) and
- * applied with `caddy reload`, which swaps config gracefully without dropping connections. If
- * Caddy rejects the new config the previous one is restored and the error reported.
+ * Makes the Caddy container match the control-rendered config. Config is uploaded into the
+ * container with the archive endpoint (so it works whether the agent runs on the host or in a
+ * container) and applied with `caddy reload`, which swaps config gracefully without dropping
+ * connections. If Caddy rejects the new config the previous one is restored and the error reported.
  */
 export async function reconcileIngress(
   ctx: IngressContext,
@@ -239,12 +266,11 @@ export async function reconcileIngress(
   const applied = path.join(root, 'applied');
   const configHash = ingressConfigHash(work);
   const routes = work.routes.length;
-  const running: boolean | null = await ctx
-    .docker(['container', 'inspect', '-f', '{{.State.Running}}', CADDY_CONTAINER])
-    .then(
-      (r) => r.out.trim() === 'true',
-      () => null,
-    );
+  const existing = await ctx.docker.inspectContainer(CADDY_CONTAINER).catch((e) => {
+    if (isNotFound(e)) return null;
+    throw e;
+  });
+  const running: boolean | null = existing ? Boolean(existing.State?.Running) : null;
   const appliedHash = await fs.readFile(path.join(root, 'applied.hash'), 'utf8').then(
     (s) => s.trim(),
     () => '',
@@ -254,41 +280,26 @@ export async function reconcileIngress(
   await writeStage(stage, work);
   try {
     if (running === null) {
-      await ctx.docker([
-        'create',
-        '--name',
-        CADDY_CONTAINER,
-        '--restart',
-        'unless-stopped',
-        '--network',
-        'host',
-        '-v',
-        'tug-caddy-data:/data',
-        '-v',
-        'tug-caddy-config:/config',
-        '-v',
-        `tug-caddy-etc:${CADDY_ETC}`,
-        ctx.caddyImage || DEFAULT_CADDY_IMAGE,
-      ]);
-      await ctx.docker(['cp', `${stage}/.`, `${CADDY_CONTAINER}:${CADDY_ETC}/`]);
-      await ctx.docker(['start', CADDY_CONTAINER]);
+      const image = await ensureImage(ctx);
+      await ctx.docker.createContainer(CADDY_CONTAINER, {
+        Image: image,
+        Labels: { 'tug.managed': 'ingress' },
+        HostConfig: {
+          NetworkMode: 'host',
+          RestartPolicy: { Name: 'unless-stopped' },
+          Binds: ['tug-caddy-data:/data', 'tug-caddy-config:/config', `tug-caddy-etc:${CADDY_ETC}`],
+        },
+      });
+      await ctx.docker.putArchive(CADDY_CONTAINER, CADDY_ETC, await tarOf(stage));
+      await ctx.docker.startContainer(CADDY_CONTAINER);
     } else if (running === false) {
-      await ctx.docker(['cp', `${stage}/.`, `${CADDY_CONTAINER}:${CADDY_ETC}/`]);
-      await ctx.docker(['start', CADDY_CONTAINER]);
+      await ctx.docker.putArchive(CADDY_CONTAINER, CADDY_ETC, await tarOf(stage));
+      await ctx.docker.startContainer(CADDY_CONTAINER);
     } else {
       try {
-        await ctx.docker(['exec', CADDY_CONTAINER, 'rm', '-rf', `${CADDY_ETC}/certs`]);
-        await ctx.docker(['cp', `${stage}/.`, `${CADDY_CONTAINER}:${CADDY_ETC}/`]);
-        await ctx.docker([
-          'exec',
-          CADDY_CONTAINER,
-          'caddy',
-          'reload',
-          '--config',
-          `${CADDY_ETC}/Caddyfile`,
-          '--adapter',
-          'caddyfile',
-        ]);
+        await ctx.docker.execRun(CADDY_CONTAINER, ['rm', '-rf', `${CADDY_ETC}/certs`]);
+        await ctx.docker.putArchive(CADDY_CONTAINER, CADDY_ETC, await tarOf(stage));
+        await reload(ctx);
       } catch (e) {
         if (
           await fs.stat(applied).then(
@@ -296,8 +307,8 @@ export async function reconcileIngress(
             () => false,
           )
         )
-          await ctx
-            .docker(['cp', `${applied}/.`, `${CADDY_CONTAINER}:${CADDY_ETC}/`])
+          await ctx.docker
+            .putArchive(CADDY_CONTAINER, CADDY_ETC, await tarOf(applied))
             .catch(() => {});
         throw e;
       }
@@ -322,7 +333,7 @@ export async function removeIngress(ctx: IngressContext): Promise<boolean> {
     ))
   )
     return false;
-  await ctx.docker(['rm', '-f', CADDY_CONTAINER]).catch(() => {});
+  await ctx.docker.removeContainer(CADDY_CONTAINER).catch(() => {});
   await fs.rm(root, { recursive: true, force: true });
   return true;
 }

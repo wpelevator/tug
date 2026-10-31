@@ -80,7 +80,7 @@ Control stores built images as saved image files and agents download them with t
 
 ### M5 — Streaming channel between agent and control (mostly done)
 
-Agent-initiated WebSocket with long-poll fallback that wakes agents when work is queued and carries live sessions: non-TTY `tug exec` with stdin, `logs -f`, `ps` and `inspect` ([Architecture](architecture.md#agent-wake-channel), [Observability](observability.md#live-commands)). Remaining, at low priority: dropping the long-poll fallback (the WebSocket plus the periodic poll cover a lost socket), agent and daemon log streams, and terminating the remote process when an exec session is cancelled. PTY allocation and resize for `exec -t` move to [M14](#m14--engine-api-agent), where the Engine API provides them.
+Agent-initiated WebSocket with long-poll fallback that wakes agents when work is queued and carries live sessions: non-TTY `tug exec` with stdin, `logs -f`, `ps` and `inspect` ([Architecture](architecture.md#agent-wake-channel), [Observability](observability.md#live-commands)). Remaining, at low priority: dropping the long-poll fallback (the WebSocket plus the periodic poll cover a lost socket), agent and daemon log streams, and terminating the remote process when an exec session is cancelled. PTY allocation and resize for `exec -t` shipped with [M14](#m14--engine-api-agent) through the Engine API.
 
 ### M6 — Placement and scheduling (done)
 
@@ -139,7 +139,7 @@ Each deploy still transfers whole Tug-built images; a control-hosted image store
 
 The agent stops running the `docker compose` CLI and reconciles containers through the Docker Engine API. The agent already works around Compose: rolling revisions are separate Compose projects with hand-made networks and volumes carrying copied Compose labels, `depends_on` is stripped across them, and secret changes need forced recreates.
 
-- The CLI normalizes the Compose file with `docker compose config` (Compose does interpolation, `extends`, profiles and `env_file`; secret variables are left as sentinels for the agent to substitute) and sends JSON; control validates an explicit allowlist of supported keys, including resource limits; agents never parse Compose YAML. Nodes need only the Docker Engine, not the Compose plugin. The control host keeps using Compose for its own install unless that moves to `docker run`.
+- The CLI normalizes the Compose file with `docker compose config` (Compose does interpolation, `extends`, profiles and `env_file`; secret variables are left as sentinels for the agent to substitute) and sends the canonical definition (read from Compose's YAML rendering, since its JSON rendering drops `x-tug`); control validates an explicit allowlist of supported keys, including resource limits; agents never parse Compose YAML. Nodes need only the Docker Engine, not the Compose plugin. The control host keeps using Compose for its own install unless that moves to `docker run`.
 - One reconciler for every service: containers carry `tug.*` labels with a hash of their resolved configuration, including the image reference and the versions of the secrets they use, and are recreated when it changes. `recreate` and `rolling` become two strategies of the same loop. Tug names its own networks, volumes and containers; service names are network aliases.
 - Secrets are substituted into the container environment by the agent; no `.env` file on disk. Health checks stay agent-run, because images often lack the tools a Docker `HEALTHCHECK` would need.
 - `exec -t` with a real PTY and resize, and `logs`, `ps` and `inspect` from the API instead of CLI output.
@@ -215,10 +215,10 @@ The test layers, the metrics milestones are held to and the backlog of mocked te
 - [x] M13 stopgap: published images pulled only when a deployment revision is new to the node
 - [ ] M13 digest pinning for every `image:` at deploy time, used by rollback
 - [ ] M13 bring-your-own registry, registry pull tokens and `docker login` removed; one node credential
-- [ ] M14 Compose normalized on the operator machine; allowlist validation on control
-- [ ] M14 Engine API reconciler with config-hash recreation, `recreate` and `rolling` strategies, no `.env` on disk
-- [ ] M14 `exec -t` with PTY and resize; `logs`, `ps`, `inspect` and ingress on the Engine API
-- [ ] M14 Compose plugin no longer required on nodes
+- [x] M14 Compose normalized on the operator machine; allowlist validation on control
+- [x] M14 Engine API reconciler with config-hash recreation, `recreate` and `rolling` strategies, no `.env` on disk
+- [x] M14 `exec -t` with PTY and resize; `logs`, `ps`, `inspect` and ingress on the Engine API
+- [x] M14 Compose plugin no longer required on nodes
 - [ ] M15 control on a runtime node behind the managed Caddy, with a break-glass control port
 - [ ] M15 builds on `builder`-labelled nodes, uploaded to control as saved images
 - [ ] Scaled WordPress reference example (code in image, shared uploads) validated on real hosts

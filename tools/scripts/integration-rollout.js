@@ -58,7 +58,7 @@ function appCompose(version, { healthPort = 80 } = {}) {
           '-c',
           `echo ${version} > /usr/share/nginx/html/index.html && exec nginx -g 'daemon off;'`,
         ],
-        ports: ['8080:80'],
+        ports: [{ mode: 'ingress', target: 80, published: '8080', protocol: 'tcp' }],
         'x-tug': {
           placement: { nodes: ['vps-a'] },
           health: { type: 'http', port: healthPort, path: '/', retries: 4, interval: '1s' },
@@ -96,14 +96,11 @@ async function waitState(id, wanted) {
   });
 }
 const webContainers = () =>
-  vps(
-    `docker ps --filter label=com.docker.compose.service=web --format '{{.ID}} {{.Image}} {{.Ports}}'`,
-  )
+  vps(`docker ps --filter label=tug.service=web --format '{{.ID}} {{.Image}} {{.Ports}}'`)
     .out.trim()
     .split('\n')
     .filter(Boolean);
-const cacheId = () =>
-  vps(`docker ps -q --filter label=com.docker.compose.service=cache`).out.trim();
+const cacheId = () => vps(`docker ps -q --filter label=tug.service=cache`).out.trim();
 
 // Continuous client: one request every ~50 ms through the Caddy ingress, logged as "<status> <body>".
 function startLoad() {

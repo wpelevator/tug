@@ -1,7 +1,6 @@
-import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { PassThrough } from 'node:stream';
 import { LIVE_MAX_FRAME_BYTES } from './protocol.ts';
+import type { DockerApi } from './docker-api.ts';
 import type { Readable, Writable } from 'node:stream';
 
 export interface LiveProcess extends EventEmitter {
@@ -12,7 +11,6 @@ export interface LiveProcess extends EventEmitter {
   /** PTY adapters implement this in terminal columns and rows. */
   resize?(columns: number, rows: number): void;
 }
-export type LiveSpawn = (file: string, args: string[]) => LiveProcess;
 export type LiveRequest =
   | {
       operation: 'exec';
@@ -46,22 +44,20 @@ export type LiveEvent =
     };
 export interface LiveEngineOptions {
   emit: (event: LiveEvent) => void;
-  spawn?: LiveSpawn;
-  /** A real PTY adapter is required for interactive Docker exec. */
-  spawnTty?: LiveSpawn;
+  /** The Engine API: exec (with a real PTY), logs, `ps` and `inspect` all go through it. */
+  docker: DockerApi;
   maxSessions?: number;
-  maxResultBytes?: number;
   maxSessionMs?: number;
   queryTimeoutMs?: number;
 }
 interface Session {
   request: LiveRequest;
-  child: LiveProcess;
+  /** Absent for `ps` and `inspect`, which are single API calls. */
+  child?: LiveProcess;
   timer: ReturnType<typeof setTimeout>;
   cleanup: (awaitClose?: boolean) => void;
-  output: Buffer[];
-  bytes: number;
-  errorOutput: Buffer[];
+  /** Releases a query that is still waiting on the Engine when the session is closed early. */
+  abort?: () => void;
 }
 const identifier = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,255}$/;
 function object(value: unknown): value is Record<string, unknown> {
@@ -119,221 +115,188 @@ function validate(value: unknown): asserts value is LiveRequest {
   )
     throw new Error('Invalid projects');
 }
-function argv(request: LiveRequest): string[] {
-  switch (request.operation) {
-    case 'exec':
-      return [
-        'exec',
-        ...(request.interactive === false ? [] : ['-i']),
-        ...(request.tty ? ['-t'] : []),
-        request.container,
-        ...request.command,
-      ];
-    case 'logs':
-      return [
-        'logs',
-        '--follow',
-        '--tail',
-        String(request.tail ?? 100),
-        ...(request.timestamps ? ['--timestamps'] : []),
-        request.container,
-      ];
-    case 'ps':
-      return [
-        'ps',
-        '--all',
-        '--no-trunc',
-        '--format',
-        '{{json .}}',
-        '--filter',
-        `label=com.docker.compose.project=${request.projects[0]}`,
-      ];
-    case 'inspect':
-      return ['inspect', '--type', 'container', request.container];
-  }
-}
-
-/** Execute exact project-label queries sequentially; Docker label predicates must not broaden project scope. */
-function spawnProjectQueries(
-  spawnProcess: LiveSpawn,
-  request: Extract<LiveRequest, { operation: 'ps' }>,
-): LiveProcess {
-  const projects = [...new Set(request.projects)];
-  const stdout = new PassThrough();
-  const stderr = new PassThrough();
-  let current: LiveProcess;
-  let stopped = false;
-  let detachOutput = () => {};
-  const process = Object.assign(new EventEmitter(), {
-    stdin: null,
-    stdout,
-    stderr,
-    kill(signal?: NodeJS.Signals): boolean {
-      stopped = true;
-      detachOutput();
-      return current.kill(signal);
-    },
-  });
-  const next = () => {
-    const child = spawnProcess('docker', argv({ ...request, projects: [projects.shift()!] }));
-    current = child;
-    const out = (data: Buffer | string) => {
-      stdout.write(data);
-    };
-    const err = (data: Buffer | string) => {
-      stderr.write(data);
-    };
-    const error = (cause: Error) => {
-      process.emit('error', cause);
-    };
-    const close = (code: number | null, signal: string | null) => {
-      child.off('error', error).off('close', close);
-      child.stdout?.off('data', out);
-      child.stderr?.off('data', err);
-      if (!stopped && code === 0 && projects.length) {
-        stdout.write('\n');
-        if (stopped) {
-          process.emit('close', null, null);
-          return;
-        }
-        try {
-          next();
-        } catch (cause) {
-          process.emit('error', cause);
-        }
-      } else process.emit('close', code, signal);
-    };
-    detachOutput = () => {
-      child.stdout?.off('data', out);
-      child.stderr?.off('data', err);
-    };
-    child.stdout?.on('data', out);
-    child.stderr?.on('data', err);
-    child.on('error', error).on('close', close);
-  };
-  next();
-  return process;
-}
-
-/** Owns Docker process lifetimes; callers own authentication, authorization and transport backpressure. */
+/** Owns Engine API streams and their lifetimes; callers own authentication, authorization and transport backpressure. */
 export class LiveOperationEngine {
   private readonly options: LiveEngineOptions;
   private readonly sessions = new Map<string, Session>();
+  /** Sessions whose container stream is still being opened; a cancel marks them so they close on arrival. */
+  private readonly starting = new Map<string, { cancelled: boolean }>();
   constructor(options: LiveEngineOptions) {
-    for (const key of [
-      'maxSessions',
-      'maxResultBytes',
-      'maxSessionMs',
-      'queryTimeoutMs',
-    ] as const) {
+    for (const key of ['maxSessions', 'maxSessionMs', 'queryTimeoutMs'] as const) {
       if (options[key] !== undefined && (!Number.isSafeInteger(options[key]) || options[key]! < 1))
         throw new Error(`Invalid ${key}`);
     }
     this.options = options;
   }
   get activeSessions(): number {
-    return this.sessions.size;
+    return this.sessions.size + this.starting.size;
   }
-  start(value: unknown): void {
+  async start(value: unknown): Promise<void> {
     validate(value);
-    if (this.sessions.has(value.sessionId)) throw new Error('Duplicate live session ID');
-    if (this.sessions.size >= (this.options.maxSessions ?? 16))
+    if (this.sessions.has(value.sessionId) || this.starting.has(value.sessionId))
+      throw new Error('Duplicate live session ID');
+    if (this.activeSessions >= (this.options.maxSessions ?? 16))
       throw new Error('Live session limit reached');
     const request = structuredClone(value);
-    const spawnProcess: LiveSpawn | undefined =
-      request.operation === 'exec' && request.tty
-        ? this.options.spawnTty
-        : (this.options.spawn ??
-          ((file, args) => spawn(file, args, { stdio: 'pipe', shell: false })));
-    if (!spawnProcess) throw new Error('TTY exec requires a PTY adapter');
-    const child =
-      request.operation === 'ps' && request.projects.length > 1
-        ? spawnProjectQueries(spawnProcess, request)
-        : spawnProcess('docker', argv(request));
+    const id = request.sessionId;
+    const pending = { cancelled: false };
+    this.starting.set(id, pending);
     const query = request.operation === 'ps' || request.operation === 'inspect';
-    const onError = (error: Error) => {
-      if (this.sessions.get(request.sessionId)?.child === child)
-        this.finish(request.sessionId, null, null, false, error.message, true);
-    };
-    const stopErrors = () => {
-      child.off('error', onError).off('close', onClose);
-      child.stdin?.off('error', onError);
-    };
-    const onClose = (code: number | null, signal: string | null) => {
-      stopErrors();
-      if (this.sessions.get(request.sessionId)?.child === child)
-        this.finish(request.sessionId, code, signal, false);
-    };
-    const stdout = (data: Buffer | string) => this.output(request.sessionId, 'stdout', data);
-    const stderr = (data: Buffer | string) => this.output(request.sessionId, 'stderr', data);
     const timer = setTimeout(
-      () => this.finish(request.sessionId, null, null, false, 'Live operation timed out', true),
+      () => this.finish(id, null, null, false, 'Live operation timed out', true),
       query ? (this.options.queryTimeoutMs ?? 30000) : (this.options.maxSessionMs ?? 3600000),
     );
     timer.unref();
-    this.sessions.set(request.sessionId, {
+    let child: LiveProcess | undefined;
+    try {
+      if (query) {
+        this.starting.delete(id);
+        await this.query(request, timer);
+        return;
+      }
+      child = await this.open(request);
+    } catch (error) {
+      clearTimeout(timer);
+      this.starting.delete(id);
+      throw error;
+    }
+    this.starting.delete(id);
+    if (pending.cancelled) {
+      clearTimeout(timer);
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        /* Already gone. */
+      }
+      this.options.emit({ sessionId: id, type: 'exit', code: null, signal: null, cancelled: true });
+      return;
+    }
+    const live = child;
+    const onError = (error: Error) => {
+      if (this.sessions.get(id)?.child === live)
+        this.finish(id, null, null, false, error.message, true);
+    };
+    const stopErrors = () => {
+      live.off('error', onError).off('close', onClose);
+      live.stdin?.off('error', onError);
+    };
+    const onClose = (code: number | null, signal: string | null) => {
+      stopErrors();
+      if (this.sessions.get(id)?.child === live) this.finish(id, code, signal, false);
+    };
+    const stdout = (data: Buffer | string) => this.output(id, 'stdout', data);
+    const stderr = (data: Buffer | string) => this.output(id, 'stderr', data);
+    this.sessions.set(id, {
       request,
-      child,
+      child: live,
       timer,
-      output: [],
-      errorOutput: [],
-      bytes: 0,
       cleanup: (awaitClose = false) => {
         clearTimeout(timer);
         if (!awaitClose) stopErrors();
-        child.stdout?.off('data', stdout);
-        child.stderr?.off('data', stderr);
+        live.stdout?.off('data', stdout);
+        live.stderr?.off('data', stderr);
       },
     });
-    child.on('error', onError).on('close', onClose);
-    child.stdout?.on('data', stdout);
-    child.stderr?.on('data', stderr);
-    child.stdin?.on('error', onError);
-    if (request.operation === 'exec' && request.interactive === false) child.stdin?.end();
-    if (request.operation === 'exec' && request.tty) {
-      if (!child.resize) {
-        this.finish(
-          request.sessionId,
-          null,
-          null,
-          false,
-          'PTY adapter does not support resize',
-          true,
-        );
-        return;
-      }
+    live.on('error', onError).on('close', onClose);
+    live.stdout?.on('data', stdout);
+    live.stderr?.on('data', stderr);
+    live.stdin?.on('error', onError);
+    if (request.operation === 'exec' && request.interactive === false) live.stdin?.end();
+  }
+  /** `ps` and `inspect` are one Engine API call whose JSON result is the whole session. */
+  private async query(
+    request: Extract<LiveRequest, { operation: 'ps' | 'inspect' }>,
+    timer: ReturnType<typeof setTimeout>,
+  ): Promise<void> {
+    const id = request.sessionId;
+    const session: Session = { request, timer, cleanup: () => clearTimeout(timer) };
+    const aborted = new Promise<void>((resolve) => {
+      session.abort = resolve;
+    });
+    this.sessions.set(id, session);
+    let error: string | undefined;
+    let result: Record<string, unknown>[] | undefined;
+    let settled = false;
+    const work = (async () => {
       try {
-        child.resize(request.columns ?? 80, request.rows ?? 24);
-      } catch (error) {
-        onError(error instanceof Error ? error : new Error(String(error)));
+        if (request.operation === 'ps') {
+          const lists = await Promise.all(
+            [...new Set(request.projects)].map((project) =>
+              this.options.docker.listContainers({ label: [`tug.project=${project}`] }),
+            ),
+          );
+          result = lists.flat() as unknown as Record<string, unknown>[];
+        } else result = [await this.options.docker.inspectContainer(request.container)];
+        const frame = { v: 1, type: 'live.result', sessionId: id, result };
+        if (Buffer.byteLength(JSON.stringify(frame)) > LIVE_MAX_FRAME_BYTES)
+          throw new Error('Live result exceeds serialized frame size limit');
+      } catch (cause) {
+        error = cause instanceof Error ? cause.message : String(cause);
       }
-    }
+      settled = true;
+    })();
+    await Promise.race([work, aborted]);
+    // A cancel or timeout already closed the session while the call was in flight.
+    if (!settled || !this.sessions.has(id)) return;
+    clearTimeout(timer);
+    this.sessions.delete(id);
+    if (result && !error) this.options.emit({ sessionId: id, type: 'result', result });
+    this.options.emit({
+      sessionId: id,
+      type: 'exit',
+      code: error ? 1 : 0,
+      signal: null,
+      cancelled: false,
+      ...(error ? { error: error.slice(0, 4096) } : {}),
+    });
+  }
+  private async open(
+    request: Exclude<LiveRequest, { operation: 'ps' | 'inspect' }>,
+  ): Promise<LiveProcess> {
+    const { docker } = this.options;
+    if (request.operation === 'logs')
+      return docker.logs(request.container, {
+        follow: true,
+        tail: request.tail ?? 100,
+        timestamps: request.timestamps,
+      });
+    const proc = await docker.execStart(request.container, {
+      cmd: request.command,
+      stdin: request.interactive !== false,
+      tty: Boolean(request.tty),
+      columns: request.columns,
+      rows: request.rows,
+    });
+    return proc;
   }
   /** Returns the writable backpressure signal; callers must pause transport input on false. */
   stdin(sessionId: string, data: Uint8Array): boolean {
     const session = this.requireExec(sessionId);
     if (!(data instanceof Uint8Array) || data.byteLength > 65536)
       throw new Error('Invalid stdin frame');
-    if (!session.child.stdin || session.child.stdin.destroyed || session.child.stdin.writableEnded)
+    const stdin = session.child?.stdin;
+    if (!stdin || stdin.destroyed || stdin.writableEnded)
       throw new Error('Session stdin is closed');
-    if (session.child.stdin.writableLength + data.byteLength > 262144)
+    if (stdin.writableLength + data.byteLength > 262144)
       throw new Error('Live stdin queue exceeds size limit');
-    return session.child.stdin.write(data);
+    return stdin.write(data);
   }
   endStdin(sessionId: string): void {
-    this.requireExec(sessionId).child.stdin?.end();
+    this.requireExec(sessionId).child?.stdin?.end();
   }
   resize(sessionId: string, columns: number, rows: number): void {
     const session = this.requireExec(sessionId);
     if (!dimension(columns) || !dimension(rows)) throw new Error('Invalid terminal dimensions');
-    if (!session.request.tty || !session.child.resize) throw new Error('Session has no terminal');
+    if (!session.request.tty || !session.child?.resize) throw new Error('Session has no terminal');
     session.child.resize(columns, rows);
   }
   cancel(sessionId: string): void {
+    const pending = this.starting.get(sessionId);
+    if (pending) pending.cancelled = true;
     this.finish(sessionId, null, null, true, undefined, true);
   }
   dispose(): void {
-    for (const id of this.sessions.keys()) this.cancel(id);
+    for (const id of [...this.sessions.keys(), ...this.starting.keys()]) this.cancel(id);
   }
   private requireExec(
     sessionId: string,
@@ -343,18 +306,8 @@ export class LiveOperationEngine {
     return session as Session & { request: Extract<LiveRequest, { operation: 'exec' }> };
   }
   private output(id: string, stream: 'stdout' | 'stderr', data: Buffer | string): void {
-    const session = this.sessions.get(id);
-    if (!session) return;
+    if (!this.sessions.has(id)) return;
     const bytes = Buffer.isBuffer(data) ? data : Buffer.from(data);
-    if (session.request.operation === 'ps' || session.request.operation === 'inspect') {
-      session.bytes += bytes.length;
-      if (session.bytes > (this.options.maxResultBytes ?? 4194304)) {
-        this.finish(id, null, null, false, 'Live result exceeds size limit', true);
-        return;
-      }
-      (stream === 'stdout' ? session.output : session.errorOutput).push(bytes);
-      return;
-    }
     for (let offset = 0; offset < bytes.length && this.sessions.has(id); offset += 65536)
       this.options.emit({
         sessionId: id,
@@ -375,43 +328,14 @@ export class LiveOperationEngine {
     const session = this.sessions.get(id);
     if (!session) return;
     this.sessions.delete(id);
-    // Keep error handlers until close when killing: spawn errors and pending stdin errors can arrive after cancellation.
+    session.abort?.();
+    // Keep error handlers until close when killing: errors can arrive after cancellation.
     session.cleanup(kill);
-    if (kill) {
+    if (kill && session.child) {
       try {
         session.child.kill('SIGKILL');
       } catch {
         /* Already exited. */
-      }
-    }
-    if (
-      !error &&
-      !cancelled &&
-      (session.request.operation === 'ps' || session.request.operation === 'inspect')
-    ) {
-      if (code !== 0)
-        error =
-          Buffer.concat(session.errorOutput).toString('utf8').trim() ||
-          `Docker exited with code ${code}`;
-      else {
-        try {
-          const raw = Buffer.concat(session.output).toString('utf8').trim();
-          const result: unknown =
-            session.request.operation === 'ps'
-              ? raw
-                  .split('\n')
-                  .filter(Boolean)
-                  .map((line) => JSON.parse(line))
-              : JSON.parse(raw);
-          if (!Array.isArray(result) || !result.every(object))
-            throw new Error('Expected an array of container objects');
-          const frame = { v: 1, type: 'live.result', sessionId: id, result };
-          if (Buffer.byteLength(JSON.stringify(frame)) > LIVE_MAX_FRAME_BYTES)
-            throw new Error('Live result exceeds serialized frame size limit');
-          this.options.emit({ sessionId: id, type: 'result', result });
-        } catch (cause) {
-          error = `Invalid Docker result: ${cause instanceof Error ? cause.message : String(cause)}`;
-        }
       }
     }
     this.options.emit({

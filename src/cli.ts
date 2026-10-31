@@ -20,7 +20,8 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readCompose, composeHash } from './compose.ts';
+import { composeHash } from './compose.ts';
+import { normalizeCompose } from './normalize.ts';
 import { errMessage, token, loadTemplate } from './util.ts';
 import { PROJECT_NAME_PATTERN, ROLES, TOKEN_NAME_PATTERN } from './tokens.ts';
 import { packageVersion, resolveImage } from './image.ts';
@@ -139,12 +140,15 @@ function preflightRemote(
     udpPorts = [],
     minDiskMb = 1024,
     mesh = false,
+    compose = false,
   }: {
     controlUrl?: string;
     ports?: number[];
     udpPorts?: number[];
     minDiskMb?: number;
     mesh?: boolean;
+    /** Requires the Compose plugin; only the control host runs Compose, nodes need the Docker Engine alone. */
+    compose?: boolean;
   } = {},
 ): void {
   const checks: [string, string, string][] = [
@@ -153,7 +157,15 @@ function preflightRemote(
       'docker version >/dev/null',
       'Install Docker Engine and ensure the SSH user can access it.',
     ],
-    ['docker.compose.version', 'docker compose version >/dev/null', 'Install Docker Compose v2.'],
+    ...(compose
+      ? ([
+          [
+            'docker.compose.version',
+            'docker compose version >/dev/null',
+            'Install Docker Compose v2.',
+          ],
+        ] as [string, string, string][])
+      : []),
     [
       'paths',
       'mkdir -p /opt/tug-preflight /var/lib/tug-preflight /etc/tug && test -w /opt/tug-preflight && test -w /var/lib/tug-preflight && test -w /etc/tug',
@@ -218,8 +230,13 @@ async function transferTugImage(target: string, imageTag: string): Promise<void>
 async function dockerBootstrap(): Promise<string> {
   return fs.readFile(path.join(templatesDir, 'install-docker.sh'), 'utf8');
 }
-async function bootstrapDocker(target: string): Promise<void> {
-  runLocal('ssh', ['--', target, `sh -eu -c ${sh(await dockerBootstrap())}`]);
+/** Installs Docker over SSH; `compose` also installs the Compose plugin, which only the control host needs. */
+async function bootstrapDocker(target: string, compose = false): Promise<void> {
+  runLocal('ssh', [
+    '--',
+    target,
+    `${compose ? 'TUG_INSTALL_COMPOSE=1 ' : ''}sh -eu -c ${sh(await dockerBootstrap())}`,
+  ]);
 }
 async function waitForDeployment(
   deploymentId: string,
@@ -425,8 +442,8 @@ program
       },
     ) => {
       const operatorToken = o.token || process.env.TUG_TOKEN || token('tug_op');
-      if (o.installDocker) await bootstrapDocker(sshTarget);
-      preflightRemote(sshTarget, { ports: [Number(o.port)], minDiskMb: 2048 });
+      if (o.installDocker) await bootstrapDocker(sshTarget, true);
+      preflightRemote(sshTarget, { ports: [Number(o.port)], minDiskMb: 2048, compose: true });
       const image = resolveImage(o.image, o.buildLocalImage);
       if (o.buildLocalImage) await transferTugImage(sshTarget, image);
       const registryHost = o.registry || '';
@@ -748,8 +765,17 @@ program
         WaitOpts & { file: string; version?: string; buildUpload: boolean; buildLocal?: boolean },
     ) => {
       const cfg = await loadCfg();
-      const compose = await readCompose(o.file);
       const project = o.project || cfg.project || 'site';
+      // Control secrets are interpolated as sentinels; the agent substitutes the node's released values.
+      const { secrets } = await request<{ secrets: { name: string }[] }>(
+        'GET',
+        `/api/v1/secrets?project=${encodeURIComponent(project)}`,
+      );
+      const compose = await normalizeCompose(
+        o.file,
+        secrets.map((secret) => secret.name),
+        { project },
+      );
       const version = o.version || `git-${composeHash(compose)}`;
       let response: DeployResponse;
       if (o.buildLocal) {

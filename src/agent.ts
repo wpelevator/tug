@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import fs from 'node:fs/promises';
-import { createWriteStream } from 'node:fs';
+import { createReadStream, createWriteStream } from 'node:fs';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { validateImageArchive, verifyDownload } from './artifacts.ts';
@@ -10,13 +10,10 @@ import net from 'node:net';
 import dns from 'node:dns/promises';
 import { WebSocket } from 'ws';
 import { createHash } from 'node:crypto';
-import {
-  addressBoundServices,
-  composeForNode,
-  dumpYaml,
-  isRolling,
-  serviceSecretVersions,
-} from './compose.ts';
+import { addressBoundServices, isRolling, serviceSecretVersions } from './compose.ts';
+import { containerSpecs, networkName, volumeName } from './container-spec.ts';
+import { API_VERSION, DockerEngine, isNotFound } from './docker-api.ts';
+import type { ContainerSummary, DockerApi } from './docker-api.ts';
 import type { PortBind } from './compose.ts';
 import { LIVE_MAX_FRAME_BYTES, LIVE_START_TIMEOUT_MS } from './protocol.ts';
 import type {
@@ -27,18 +24,20 @@ import type {
 import { LiveOperationEngine } from './live.ts';
 import type { LiveEngineOptions } from './live.ts';
 import {
-  loadRolloutState,
   activeRollingStates,
-  composeBase,
-  hasLegacyContainers,
+  clearRolloutState,
+  ensureProjectResources,
+  loadRolloutState,
+  projectContainers,
+  reconcileRecreate,
   reconcileRolling,
-  retireAll,
-} from './rollout.ts';
+  sweepOrphans,
+} from './reconciler.ts';
 import { ensureDir, errMessage, isPublicAddress, now, parseDuration } from './util.ts';
 import { openAgentDb } from './db.ts';
 import type { AppliedStateRow, Db, EventStateRow } from './db.ts';
-import { createDockerRunner, createHostRunner } from './runners.ts';
-import type { DockerRunner, HostRunner, HttpClient } from './runners.ts';
+import { createHostRunner } from './runners.ts';
+import type { HostRunner, HttpClient } from './runners.ts';
 import { CADDY_CONTAINER, reconcileIngress, removeIngress } from './ingress.ts';
 import {
   WG_INTERFACE,
@@ -81,7 +80,7 @@ const MESH = process.env.TUG_MESH === 'true';
 // Everything the reconcile/command logic needs from the outside world. Production wiring is
 // `defaultContext()`; tests pass a fake `docker` runner / `http` client and temp dirs.
 export interface AgentContext {
-  docker: DockerRunner;
+  docker: DockerApi;
   http: HttpClient;
   nodeName: string;
   stateDir: string;
@@ -99,7 +98,7 @@ export interface AgentContext {
 
 export function defaultContext(): AgentContext {
   return {
-    docker: createDockerRunner(),
+    docker: new DockerEngine(),
     http: fetch,
     nodeName: NODE_NAME,
     stateDir: STATE_DIR,
@@ -331,29 +330,20 @@ export async function resolveLiveContainer(
   const state = await loadRolloutState(path.join(ctx.stateDir, 'projects', request.project));
   const rolling = state.services[request.service];
   if (rolling && !rolling.active) throw new Error('Rolling service has no active revision');
-  const project = rolling?.active?.project ?? request.project;
-  if (!name.test(project)) throw new Error('Invalid active rollout project');
-  const result = await ctx.docker([
-    'ps',
-    '--all',
-    '--no-trunc',
-    '--quiet',
-    '--filter',
-    'label=com.docker.compose.project=' + project,
-    '--filter',
-    'label=com.docker.compose.service=' + request.service,
-    '--filter',
-    'label=com.docker.compose.oneoff=False',
-  ]);
-  const ids = result.out.trim().split(/\s+/).filter(Boolean);
-  if (ids.length !== 1)
+  const containers = await projectContainers(ctx.docker, request.project, request.service);
+  // A rolling service has the draining revision beside the serving one; only the serving one is addressed.
+  const candidates = rolling?.active
+    ? containers.filter((c) => c.Names.includes(`/${rolling.active!.container}`))
+    : containers;
+  if (candidates.length !== 1)
     throw new Error(
-      ids.length
+      candidates.length
         ? 'Service has multiple containers; select an unambiguous service'
         : 'Service has no container on this node',
     );
-  if (!/^[a-f0-9]{12,64}$/.test(ids[0])) throw new Error('Docker returned an invalid container ID');
-  return ids[0];
+  if (!/^[a-f0-9]{12,64}$/.test(candidates[0].Id))
+    throw new Error('Docker returned an invalid container ID');
+  return candidates[0].Id;
 }
 
 export class AgentLiveOperations {
@@ -364,11 +354,12 @@ export class AgentLiveOperations {
   constructor(
     ctx: AgentContext,
     emit: (frame: AgentLiveOutputFrame) => void,
-    options: Omit<LiveEngineOptions, 'emit'> = {},
+    options: Omit<LiveEngineOptions, 'emit' | 'docker'> = {},
   ) {
     this.ctx = ctx;
     this.emit = emit;
     this.engine = new LiveOperationEngine({
+      docker: ctx.docker,
       ...options,
       emit: (event) => {
         if (!this.sessions.has(event.sessionId)) return;
@@ -477,6 +468,8 @@ export class AgentLiveOperations {
     this.engine.cancel(id);
   }
   private async open(request: LiveAgentRequest, entry: PendingLiveSession): Promise<void> {
+    const current = () => this.sessions.get(request.sessionId) === entry;
+    const started = () => this.emit({ v: 1, type: 'live.started', sessionId: request.sessionId });
     try {
       if (this.sessions.size > 16) throw new Error('Live session limit reached');
       if (!this.ctx.apply) throw new Error('Live operations require an applying agent');
@@ -488,97 +481,74 @@ export class AgentLiveOperations {
       )
         throw new Error('Invalid project');
       if (request.operation === 'ps') {
-        const rollout = await loadRolloutState(
-          path.join(this.ctx.stateDir, 'projects', request.project),
-        );
-        if (this.sessions.get(request.sessionId) !== entry) return;
-        const projects = [
-          ...new Set([
-            request.project,
-            ...Object.values(rollout.services).flatMap((service) =>
-              service.active ? [service.active.project] : [],
-            ),
-          ]),
-        ];
-        this.engine.start({ operation: 'ps', sessionId: request.sessionId, projects });
-      } else {
-        if (!['exec', 'logs', 'inspect'].includes(request.operation))
-          throw new Error('Invalid live operation');
-        let timer: ReturnType<typeof setTimeout> | undefined;
-        let container: string;
-        try {
-          container = await Promise.race([
-            resolveLiveContainer(this.ctx, request),
-            new Promise<never>((_resolve, reject) => {
-              timer = setTimeout(
-                () => reject(new Error('Live container resolution timed out')),
-                LIVE_START_TIMEOUT_MS,
-              );
-              timer.unref();
-            }),
-          ]);
-        } finally {
-          clearTimeout(timer);
-        }
-        if (this.sessions.get(request.sessionId) !== entry) return;
-        if (request.operation === 'exec')
-          this.engine.start({
-            operation: 'exec',
-            sessionId: request.sessionId,
-            container,
-            command: request.command,
-            interactive: request.interactive,
-            tty: request.tty,
-            columns: request.columns,
-            rows: request.rows,
-          });
-        else if (request.operation === 'logs')
-          this.engine.start({
-            operation: 'logs',
-            sessionId: request.sessionId,
-            container,
-            tail: request.tail,
-          });
-        else this.engine.start({ operation: 'inspect', sessionId: request.sessionId, container });
+        // A query's result and exit follow `started` immediately, so announce it first.
+        started();
+        await this.engine.start({
+          operation: 'ps',
+          sessionId: request.sessionId,
+          projects: [request.project],
+        });
+        return;
       }
-      if (this.sessions.get(request.sessionId) === entry)
-        this.emit({ v: 1, type: 'live.started', sessionId: request.sessionId });
+      if (!['exec', 'logs', 'inspect'].includes(request.operation))
+        throw new Error('Invalid live operation');
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let container: string;
+      try {
+        container = await Promise.race([
+          resolveLiveContainer(this.ctx, request),
+          new Promise<never>((_resolve, reject) => {
+            timer = setTimeout(
+              () => reject(new Error('Live container resolution timed out')),
+              LIVE_START_TIMEOUT_MS,
+            );
+            timer.unref();
+          }),
+        ]);
+      } finally {
+        clearTimeout(timer);
+      }
+      if (!current()) return;
+      if (request.operation === 'inspect') {
+        started();
+        await this.engine.start({ operation: 'inspect', sessionId: request.sessionId, container });
+        return;
+      }
+      if (request.operation === 'exec')
+        await this.engine.start({
+          operation: 'exec',
+          sessionId: request.sessionId,
+          container,
+          command: request.command,
+          interactive: request.interactive,
+          tty: request.tty,
+          columns: request.columns,
+          rows: request.rows,
+        });
+      else
+        await this.engine.start({
+          operation: 'logs',
+          sessionId: request.sessionId,
+          container,
+          tail: request.tail,
+        });
+      if (current()) started();
+      else this.engine.cancel(request.sessionId);
     } catch (error) {
       this.fail(request.sessionId, entry, error);
     }
   }
 }
 
-async function writeEnv(file: string, secrets: Record<string, string>): Promise<void> {
-  const body =
-    Object.entries(secrets)
-      .map(([k, v]) => `${k}=${String(v).replace(/\n/g, '\\n')}`)
-      .join('\n') + '\n';
-  await fs.writeFile(file, body, { mode: 0o600 });
-}
-
-/** `docker compose` prefix for a project; rolling revision projects pass their own Compose file. */
-const composeCmd = (project: string, cwd: string, composeFile?: string): string[] =>
-  composeFile ? composeBase(project, cwd, composeFile) : ['compose', '-p', project];
-
+/** The container's address on the project network, which health checks dial. */
 export async function containerIp(
   ctx: AgentContext,
   project: string,
-  service: string,
-  cwd: string,
-  composeFile?: string,
+  container: string,
 ): Promise<string> {
-  const ids = (
-    await ctx.docker([...composeCmd(project, cwd, composeFile), 'ps', '-q', service], { cwd })
-  ).out
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean);
-  if (!ids.length) throw new Error(`${service}: no container found`);
-  const inspected = JSON.parse((await ctx.docker(['inspect', ids[0]], { cwd })).out)[0];
-  const networks: Record<string, { IPAddress?: string }> =
-    inspected?.NetworkSettings?.Networks || {};
-  return Object.values(networks)[0]?.IPAddress || '127.0.0.1';
+  const networks = (await ctx.docker.inspectContainer(container)).NetworkSettings?.Networks || {};
+  const net = networks[networkName(project)] ?? Object.values(networks)[0];
+  return net?.IPAddress || net?.GlobalIPv6Address || '127.0.0.1';
 }
 
 function tcpCheck(host: string, port: number | string, timeoutMs = 2000): Promise<boolean> {
@@ -598,10 +568,9 @@ function tcpCheck(host: string, port: number | string, timeoutMs = 2000): Promis
 export async function waitForHealth(
   ctx: AgentContext,
   project: string,
+  container: string,
   service: string,
   health: HealthCheck | null | undefined,
-  cwd: string,
-  composeFile?: string,
 ): Promise<void> {
   if (!ctx.apply || !health) return;
   const retries = Number(health.retries || 10);
@@ -610,23 +579,18 @@ export async function waitForHealth(
   for (let i = 0; i < retries; i++) {
     try {
       if (health.type === 'docker') {
-        const id = (
-          await ctx.docker([...composeCmd(project, cwd, composeFile), 'ps', '-q', service], { cwd })
-        ).out
-          .trim()
-          .split(/\s+/)[0];
-        const state = JSON.parse((await ctx.docker(['inspect', id], { cwd })).out)[0]?.State;
+        const state = (await ctx.docker.inspectContainer(container)).State;
         if (!state?.Running) throw new Error(`${service}: not running`);
         if (state.Health && state.Health.Status !== 'healthy')
           throw new Error(`${service}: docker health ${state.Health.Status}`);
       } else if (health.type === 'tcp') {
         await tcpCheck(
-          await containerIp(ctx, project, service, cwd, composeFile),
+          await containerIp(ctx, project, container),
           health.port as number | string,
           parseDuration(health.timeout || '2s'),
         );
       } else if (health.type === 'http') {
-        const ip = await containerIp(ctx, project, service, cwd, composeFile);
+        const ip = await containerIp(ctx, project, container);
         const res = await ctx.http(`http://${ip}:${health.port || 80}${health.path || '/'}`, {
           signal: AbortSignal.timeout(parseDuration(health.timeout || '2s')),
         });
@@ -664,20 +628,23 @@ export interface PublicListener {
   listen: string;
 }
 
-/**
- * Containers of Tug projects (`projects`, plus their rolling revision projects `<project>-…`) that
- * listen on all interfaces or on a public IP, from `docker ps --format '{{.Label "com.docker.compose.project"}}\t{{.Names}}\t{{.Ports}}'`.
- */
-export function publicListeners(psOutput: string, projects: readonly string[]): PublicListener[] {
+/** Containers of Tug projects (`projects`) that publish a port on all interfaces or on a public IP. */
+export function publicListeners(
+  containers: ContainerSummary[],
+  projects: readonly string[],
+): PublicListener[] {
   const out: PublicListener[] = [];
-  for (const line of psOutput.split('\n')) {
-    const [project, container, ports = ''] = line.split('\t');
-    if (!project || !projects.some((p) => project === p || project.startsWith(`${p}-`))) continue;
-    for (const m of ports.matchAll(
-      /(\[[0-9a-fA-F:.]+\]|[0-9a-fA-F:.]+):(\d+(?:-\d+)?)->(\S+?)(?:,|$)/g,
-    )) {
-      if (isPublicAddress(m[1]))
-        out.push({ project, container, listen: `${m[1]}:${m[2]}->${m[3]}` });
+  for (const c of containers) {
+    const project = c.Labels?.['tug.project'];
+    if (!project || !projects.includes(project)) continue;
+    for (const p of c.Ports || []) {
+      if (!p.PublicPort || !p.IP || !isPublicAddress(p.IP)) continue;
+      const host = p.IP.includes(':') ? `[${p.IP}]` : p.IP;
+      out.push({
+        project,
+        container: (c.Names?.[0] || c.Id).replace(/^\//, ''),
+        listen: `${host}:${p.PublicPort}->${p.PrivatePort}/${p.Type}`,
+      });
     }
   }
   return out;
@@ -689,14 +656,8 @@ async function publicPortsCheck(ctx: AgentContext): Promise<DiagnosticCheck> {
     const projects = await fs
       .readdir(path.join(ctx.stateDir, 'projects'))
       .catch(() => [] as string[]);
-    const ps = await ctx.docker([
-      'ps',
-      '--filter',
-      'label=com.docker.compose.project',
-      '--format',
-      '{{.Label "com.docker.compose.project"}}\t{{.Names}}\t{{.Ports}}',
-    ]);
-    const listeners = publicListeners(ps.out, projects);
+    const containers = await ctx.docker.listContainers({ label: ['tug.project'] }, false);
+    const listeners = publicListeners(containers, projects);
     const stdout = listeners.map((l) => `${l.project}\t${l.container}\t${l.listen}`).join('\n');
     return listeners.length
       ? {
@@ -715,6 +676,10 @@ async function publicPortsCheck(ctx: AgentContext): Promise<DiagnosticCheck> {
   }
 }
 
+const MIN_API_VERSION = API_VERSION.replace(/^v/, '');
+/** The minor number of an Engine API version such as `1.41`; 0 when unparseable. */
+const apiMinor = (version: string | undefined): number => Number(version?.split('.')[1]) || 0;
+
 export async function executeCommand(
   command: Command,
   ctx: AgentContext = defaultContext(),
@@ -725,19 +690,23 @@ export async function executeCommand(
       : command.payload || {};
   if (command.type === 'diagnostics.run') {
     const checks: DiagnosticCheck[] = [];
-    for (const [name, args] of [
-      ['docker.info', ['info']],
-      ['docker.version', ['version']],
-      ['docker.compose.version', ['compose', 'version']],
-    ] as const) {
+    const daemon: [string, () => Promise<string>][] = [
+      ['docker.info', async () => JSON.stringify(await ctx.docker.info(), null, 2)],
+      [
+        'docker.version',
+        async () => {
+          const version = await ctx.docker.version();
+          if (apiMinor(version.ApiVersion) < apiMinor(MIN_API_VERSION))
+            throw new Error(
+              `Docker Engine API ${version.ApiVersion} is older than the ${MIN_API_VERSION} the agent needs (Docker 20.10+)`,
+            );
+          return JSON.stringify(version, null, 2);
+        },
+      ],
+    ];
+    for (const [name, fn] of daemon) {
       try {
-        const result = await ctx.docker([...args]);
-        checks.push({
-          name,
-          ok: true,
-          stdout: result.out.slice(-4000),
-          stderr: result.err.slice(-4000),
-        });
+        checks.push({ name, ok: true, stdout: (await fn()).slice(-4000), stderr: '' });
       } catch (e) {
         checks.push({ name, ok: false, error: errMessage(e).slice(-4000) });
       }
@@ -758,7 +727,10 @@ export async function executeCommand(
     ) {
       extra.push([
         'ingress.caddy',
-        () => ctx.docker(['container', 'inspect', '-f', '{{.State.Status}}', CADDY_CONTAINER]),
+        async () => ({
+          out: String((await ctx.docker.inspectContainer(CADDY_CONTAINER)).State?.Status),
+          err: '',
+        }),
       ]);
     }
     for (const [name, fn] of extra) {
@@ -782,10 +754,8 @@ export async function executeCommand(
     };
   }
   if (command.type === 'service.restart') {
-    const project = payload.project;
-    const service = payload.service;
-    const dir = path.join(ctx.stateDir, 'projects', project);
-    await ctx.docker(['compose', '-p', project, 'restart', service], { cwd: dir });
+    const { project, service } = payload;
+    await ctx.docker.restartContainer(await resolveLiveContainer(ctx, { project, service }));
     return {
       commandId: command.id,
       state: 'succeeded',
@@ -793,29 +763,32 @@ export async function executeCommand(
     };
   }
   if (command.type === 'logs.fetch') {
-    const project = payload.project;
-    const service = payload.service;
-    const tail = String(payload.tail || 200);
-    const dir = path.join(ctx.stateDir, 'projects', project);
-    const result = await ctx.docker(
-      ['compose', '-p', project, 'logs', '--no-color', '--tail', tail, service],
-      { cwd: dir },
-    );
+    const { project, service } = payload;
+    const id = await resolveLiveContainer(ctx, { project, service });
+    const logs = await ctx.docker.logs(id, { follow: false, tail: Number(payload.tail || 200) });
+    const out: Buffer[] = [];
+    const err: Buffer[] = [];
+    logs.stdout.on('data', (d: Buffer) => out.push(d));
+    logs.stderr.on('data', (d: Buffer) => err.push(d));
+    await new Promise<void>((resolve, reject) => {
+      logs.on('error', reject);
+      logs.on('close', () => resolve());
+    });
     return {
       commandId: command.id,
       state: 'succeeded',
-      result: { stdout: result.out, stderr: result.err },
+      result: {
+        stdout: Buffer.concat(out).toString('utf8'),
+        stderr: Buffer.concat(err).toString('utf8'),
+      },
     };
   }
   if (command.type === 'volume.delete') {
-    const project = payload.project;
-    const volume = payload.volume;
-    const composeVolume = `${project}_${volume}`;
-    try {
-      await ctx.docker(['volume', 'rm', composeVolume]);
-    } catch (e) {
-      if (!errMessage(e).includes('No such volume')) throw e;
-    }
+    const { project, volume } = payload;
+    // Volumes are never removed by reconciliation; this explicit command is the only way one goes away.
+    await ctx.docker.removeVolume(volumeName(project, volume)).catch((e) => {
+      if (!isNotFound(e)) throw e;
+    });
     return {
       commandId: command.id,
       state: 'succeeded',
@@ -876,11 +849,11 @@ export async function ensureArtifact(ctx: AgentContext, artifact: ImageArtifact)
         { mode: 0o600 },
       );
   };
-  const inspect = async () =>
-    JSON.parse((await ctx.docker(['image', 'inspect', artifact.imageRef])).out)[0];
+  const inspect = () => ctx.docker.inspectImage(artifact.imageRef);
   try {
     const image = await inspect();
     if (
+      image &&
       (image?.Id === artifact.imageId ||
         (identities[artifact.imageRef]?.daemonId === image?.Id &&
           identities[artifact.imageRef]?.artifactId === artifact.imageId &&
@@ -891,11 +864,12 @@ export async function ensureArtifact(ctx: AgentContext, artifact: ImageArtifact)
       return;
     }
   } catch {}
-  const host = JSON.parse((await ctx.docker(['info', '--format', '{{json .}}'])).out);
-  const arch =
-    ({ x86_64: 'amd64', aarch64: 'arm64' } as Record<string, string>)[host.Architecture] ||
-    host.Architecture;
-  if (host.OSType && host.Architecture && `${host.OSType}/${arch}` !== artifact.platform)
+  const host = await ctx.docker.info();
+  const arch = host.Architecture
+    ? ({ x86_64: 'amd64', aarch64: 'arm64' } as Record<string, string>)[host.Architecture] ||
+      host.Architecture
+    : undefined;
+  if (host.OSType && arch && `${host.OSType}/${arch}` !== artifact.platform)
     throw new Error(
       `image platform ${artifact.platform} does not match node ${host.OSType}/${arch}; build for the target platform`,
     );
@@ -916,7 +890,7 @@ export async function ensureArtifact(ctx: AgentContext, artifact: ImageArtifact)
     const archive = await validateImageArchive(file, artifact.imageRef);
     if (archive.imageId !== artifact.imageId || archive.platform !== artifact.platform)
       throw new Error('downloaded archive image metadata differs from desired artifact');
-    await ctx.docker(['load', '-i', file]);
+    await ctx.docker.loadImage(createReadStream(file));
     const image = await inspect();
     if (!image?.Id || `${image.Os}/${image.Architecture}` !== artifact.platform)
       throw new Error('loaded image identity or platform does not match desired artifact');
@@ -935,12 +909,11 @@ export async function pruneManagedImages(ctx: AgentContext, retained: string[]):
       continue;
     }
     try {
-      const used = (await ctx.docker(['ps', '-aq', '--filter', `ancestor=${ref}`])).out.trim();
-      if (used) {
+      if ((await ctx.docker.listContainers({ ancestor: ref })).length) {
         remaining.push(ref);
         continue;
       }
-      await ctx.docker(['image', 'rm', ref]);
+      await ctx.docker.removeImage(ref);
     } catch {
       remaining.push(ref);
     }
@@ -980,10 +953,12 @@ export async function reconcile(
 ): Promise<ProjectStatus> {
   const dir = path.join(ctx.stateDir, 'projects', desiredState.project);
   await ensureDir(dir);
-  const plannedCompose = composeForNode(desiredState, ctx.nodeName, {});
-  const serviceNames = Object.keys(plannedCompose.services || {});
+  const serviceNames = Object.keys(containerSpecs(desiredState, ctx.nodeName).specs);
   if (!serviceNames.length) {
-    if (ctx.apply) await retireAll(ctx, dir, desiredState).catch(() => {});
+    if (ctx.apply) {
+      await sweepOrphans(ctx.docker, desiredState.project, new Set()).catch(() => {});
+      await clearRolloutState(dir).catch(() => {});
+    }
     return {
       project: desiredState.project,
       observedVersion: desiredState.version,
@@ -1022,34 +997,21 @@ export async function reconcile(
   );
   const db = await agentDb(ctx.stateDir);
   const previousRow = await db.get<AppliedStateRow>(
-    'SELECT version, revision, secret_versions_json FROM applied_state WHERE project = ?',
+    'SELECT version, revision FROM applied_state WHERE project = ?',
     desiredState.project,
   );
-  const previous: {
-    version?: string;
-    revision?: string | null;
-    secretVersions?: Record<string, Record<string, number>>;
-  } = previousRow
-    ? {
-        version: previousRow.version,
-        revision: previousRow.revision,
-        secretVersions: JSON.parse(previousRow.secret_versions_json),
-      }
-    : {};
   const rolling = serviceNames.filter((service) =>
     isRolling(desiredState.compose.services[service]),
   );
   const rollingSet = new Set(rolling);
   const mainServices = serviceNames.filter((service) => !rollingSet.has(service));
-  const secretChangedServices = mainServices.filter(
-    (service) =>
-      JSON.stringify(previous.secretVersions?.[service] || {}) !==
-      JSON.stringify(currentSecretVersions[service] || {}),
-  );
-  const sameDesiredVersion = desiredState.revision
-    ? previous.revision === desiredState.revision
-    : previous.version === desiredState.version;
-  // Rolling services run in their own revision projects; the main project holds only the recreated ones.
+  // Published images are pulled only for a new desired revision. Pulling on every poll would let a tag that moved
+  // upstream (`mariadb:11`) recreate the container without a deploy.
+  const sameDesiredVersion = previousRow
+    ? desiredState.revision
+      ? previousRow.revision === desiredState.revision
+      : previousRow.version === desiredState.version
+    : false;
   const loopback = new Set(ports.loopback[desiredState.project] || []);
   // Resolve only when some port actually binds to the node address; a hostname nobody needs must not fail the apply.
   const needsAddress =
@@ -1058,15 +1020,13 @@ export async function reconcile(
     address: needsAddress ? await resolveBindAddress(ports.address) : '127.0.0.1',
     loopback,
   };
-  const nodeCompose = composeForNode(desiredState, ctx.nodeName, {
+  const plan = containerSpecs(desiredState, ctx.nodeName, {
     secrets: sec.secrets || {},
+    secretVersions: sec.versions || {},
     endpoints,
-    exclude: rollingSet,
     bind,
   });
   await warnPublicPorts(ctx, desiredState, serviceNames, bind);
-  await fs.writeFile(path.join(dir, 'docker-compose.yml'), dumpYaml(nodeCompose));
-  await writeEnv(path.join(dir, '.env'), sec.secrets || {});
   const failedStatus = (error: string): ProjectStatus => ({
     project: desiredState.project,
     observedVersion: desiredState.version,
@@ -1076,14 +1036,14 @@ export async function reconcile(
     serviceStates,
     error,
   });
-  // Lifecycle events say what changed, not that the agent is still polling. They are sent when the desired revision,
-  // this node's rendered configuration or the secrets change, when an apply fails (once) and when it recovers (once).
+  // Lifecycle events say what changed, not that the agent is still polling. They are sent when the desired revision
+  // or any container definition (which includes the secret versions it uses) changes, when an apply fails (once)
+  // and when it recovers (once).
   const eventFingerprint = createHash('sha256')
     .update(
       JSON.stringify([
         desiredState.revision || desiredState.version,
-        dumpYaml(nodeCompose),
-        mainServices.map((service) => currentSecretVersions[service] || {}),
+        mainServices.map((service) => plan.specs[service].hash),
       ]),
     )
     .digest('hex')
@@ -1103,87 +1063,67 @@ export async function reconcile(
       eventFingerprint,
       phase,
     );
+  const deps = {
+    waitForHealth: (container: string, service: string, dependency?: boolean) =>
+      waitForHealth(
+        ctx,
+        desiredState.project,
+        container,
+        service,
+        desiredState.services[service]?.health ?? (dependency ? { type: 'docker' } : null),
+      ),
+    ensureArtifact: async (service: string) => {
+      const artifact = desiredState.services[service].artifact;
+      if (artifact) await ensureArtifact(ctx, artifact);
+    },
+    pullImage: (service: string) => ctx.docker.pullImage(plan.specs[service].body.Image),
+    emit,
+  };
   let failing: string | undefined;
   if (ctx.apply) {
     try {
-      for (const service of mainServices) {
-        serviceStates[service].rolloutState = 'pulling';
-        if (announce) await emit(service, 'pulling');
-      }
-      for (const service of mainServices) {
-        const artifact = desiredState.services[service].artifact;
-        if (artifact) await ensureArtifact(ctx, artifact);
-      }
-      // Registry images are pulled only for a new desired revision. Pulling on every poll would let a tag that moved
-      // upstream (`mariadb:11`) recreate the container without a deploy; `up -d` still pulls images that are missing.
-      const pullServices = sameDesiredVersion
-        ? []
-        : mainServices.filter((service) => !desiredState.services[service].artifact);
-      if (pullServices.length)
-        await ctx.docker(
-          [
-            'compose',
-            '-p',
-            desiredState.project,
-            'pull',
-            ...(pullServices.length === mainServices.length ? [] : pullServices),
-          ],
-          { cwd: dir },
+      await ensureProjectResources(ctx.docker, desiredState.project, plan);
+      await sweepOrphans(ctx.docker, desiredState.project, new Set(serviceNames));
+      if (mainServices.length)
+        await reconcileRecreate(
+          ctx.docker,
+          {
+            desired: desiredState,
+            dir,
+            plan,
+            nodeName: ctx.nodeName,
+            deps,
+            services: mainServices,
+            pull: !sameDesiredVersion,
+          },
+          {
+            pulling: async (service) => {
+              serviceStates[service].rolloutState = 'pulling';
+              if (announce) await emit(service, 'pulling');
+            },
+            starting: async (service) => {
+              serviceStates[service].rolloutState = 'starting';
+              if (announce) await emit(service, 'starting');
+            },
+            checking: async (service) => {
+              serviceStates[service].rolloutState = 'health_checking';
+              if (announce) await emit(service, 'health_checking');
+            },
+            serving: async (service) => {
+              serviceStates[service].rolloutState = 'serving';
+              serviceStates[service].healthyAt = now();
+              if (announce || wasFailed)
+                await emit(
+                  service,
+                  'serving',
+                  wasFailed ? 'serving again after a failure' : 'serving',
+                );
+            },
+            failing: (service) => {
+              failing = service;
+            },
+          },
         );
-      for (const service of mainServices) {
-        serviceStates[service].rolloutState = 'starting';
-        if (announce) await emit(service, 'starting');
-      }
-      if (mainServices.length) {
-        // Services that just became rolling still run here until their replacement takes over; keep them.
-        const keepLegacy =
-          rolling.length > 0 && (await hasLegacyContainers(ctx, desiredState.project, rolling));
-        await ctx.docker(
-          [
-            'compose',
-            '-p',
-            desiredState.project,
-            'up',
-            '-d',
-            ...(keepLegacy ? [] : ['--remove-orphans']),
-          ],
-          { cwd: dir },
-        );
-      }
-      if (sameDesiredVersion && secretChangedServices.length) {
-        for (const service of secretChangedServices)
-          await emit(service, 'secret_recreate', 'secret version changed; recreating service');
-        await ctx.docker(
-          [
-            'compose',
-            '-p',
-            desiredState.project,
-            'up',
-            '-d',
-            '--no-deps',
-            '--force-recreate',
-            ...secretChangedServices,
-          ],
-          { cwd: dir },
-        );
-      }
-      for (const service of mainServices) {
-        serviceStates[service].rolloutState = 'health_checking';
-        if (announce) await emit(service, 'health_checking');
-        failing = service;
-        await waitForHealth(
-          ctx,
-          desiredState.project,
-          service,
-          desiredState.services[service]?.health,
-          dir,
-        );
-        failing = undefined;
-        serviceStates[service].rolloutState = 'serving';
-        serviceStates[service].healthyAt = now();
-        if (announce || wasFailed)
-          await emit(service, 'serving', wasFailed ? 'serving again after a failure' : 'serving');
-      }
       if (mainServices.length && (announce || wasFailed)) await markEvents('serving');
     } catch (e) {
       if (mainServices.length && !wasFailed) {
@@ -1197,38 +1137,20 @@ export async function reconcile(
       return failedStatus(errMessage(e));
     }
     if (rolling.length) {
-      const rolled = await reconcileRolling(ctx, {
+      const rolled = await reconcileRolling(ctx.docker, {
         desired: desiredState,
         dir,
         services: rolling,
-        secretVersions: currentSecretVersions,
-        full: composeForNode(desiredState, ctx.nodeName, {
-          secrets: sec.secrets || {},
-          endpoints,
-          bind,
-        }),
-        deps: {
-          waitForHealth: (project, service, composeFile) =>
-            waitForHealth(
-              ctx,
-              project,
-              service,
-              desiredState.services[service]?.health,
-              dir,
-              composeFile,
-            ),
-          ensureArtifact: async (service) => {
-            const artifact = desiredState.services[service].artifact;
-            if (artifact) await ensureArtifact(ctx, artifact);
-          },
-          emit,
-        },
+        plan,
+        nodeName: ctx.nodeName,
+        rolloutPorts: ctx.rolloutPorts,
+        deps,
       });
       Object.assign(serviceStates, rolled.serviceStates);
       const errors = Object.entries(rolled.errors);
       if (errors.length)
         return failedStatus(errors.map(([service, error]) => `${service}: ${error}`).join('; '));
-    } else await retireAll(ctx, dir, desiredState);
+    } else await clearRolloutState(dir);
   } else {
     for (const service of serviceNames) serviceStates[service].rolloutState = 'serving';
   }

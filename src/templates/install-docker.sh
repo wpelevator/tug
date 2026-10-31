@@ -1,6 +1,9 @@
 set -eu
-if docker version >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
-  echo 'Docker Engine and Compose are already available.' >&2
+# Nodes need only the Docker Engine. The control host also runs its own install with Docker Compose,
+# which the caller asks for with TUG_INSTALL_COMPOSE=1.
+want_compose="${TUG_INSTALL_COMPOSE:-0}"
+if docker version >/dev/null 2>&1 && { [ "$want_compose" != 1 ] || docker compose version >/dev/null 2>&1; }; then
+  echo 'Docker Engine is already available.' >&2
   exit 0
 fi
 os_release="${TUG_OS_RELEASE:-/etc/os-release}"
@@ -61,9 +64,10 @@ Signed-By: /etc/apt/keyrings/docker.asc
 REPO
   apt-get update >&2
   if [ "$engine_present" = true ]; then
-    apt-get install -y --no-upgrade --no-remove docker-compose-plugin >&2
+    [ "$want_compose" != 1 ] || apt-get install -y --no-upgrade --no-remove docker-compose-plugin >&2
   else
-    apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin >&2
+    apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin >&2
+    [ "$want_compose" != 1 ] || apt-get install -y docker-compose-plugin >&2
   fi
 else
   if [ "$engine_present" = false ]; then
@@ -75,11 +79,12 @@ else
   command -v curl >/dev/null 2>&1 || dnf install -y curl >&2
   curl -fsSL "https://download.docker.com/linux/$repo_os/docker-ce.repo" -o /etc/yum.repos.d/docker-ce.repo
   if [ "$engine_present" = true ]; then
-    dnf install -y docker-compose-plugin >&2
+    [ "$want_compose" != 1 ] || dnf install -y docker-compose-plugin >&2
   else
-    dnf install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin >&2
+    dnf install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin >&2
+    [ "$want_compose" != 1 ] || dnf install -y docker-compose-plugin >&2
   fi
 fi
 [ "$engine_present" = true ] || systemctl enable --now docker >&2
 docker version >/dev/null
-docker compose version >/dev/null
+[ "$want_compose" != 1 ] || docker compose version >/dev/null

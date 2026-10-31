@@ -8,17 +8,14 @@ import type { AgentContext } from './agent.ts';
 import { buildDesiredState } from './compose.ts';
 import { ensureWgKeys, generateWgKeyPair, readReportedKey } from './mesh.ts';
 import type { ComposeFile, WorkResponse } from './protocol.ts';
-import type { DockerRunner, HostRunner, HttpClient } from './runners.ts';
+import type { HostRunner, HttpClient } from './runners.ts';
+import { FakeDocker, normalized } from '../tests/fake-docker.ts';
 
 /** One ordered log across docker, wg/ip and control calls so tests can assert ordering between them. */
 function harness(work: () => Partial<WorkResponse>) {
-  const log: string[] = [];
+  const docker = new FakeDocker();
+  const log = docker.calls;
   const posts: { route: string; body: any }[] = [];
-  const docker: DockerRunner = async (args) => {
-    log.push(`docker ${args.join(' ')}`);
-    if (args[0] === 'container' && args[1] === 'inspect') throw new Error('No such container');
-    return { out: '', err: '' };
-  };
   const host: HostRunner = async (cmd, args) => {
     log.push(`${cmd} ${args.join(' ')}`);
     if (cmd === 'ip' && args[0] === 'link' && args[1] === 'show') throw new Error('does not exist');
@@ -68,7 +65,7 @@ const compose: ComposeFile = {
 const desired = buildDesiredState({
   project: 'blog',
   version: 'v1',
-  compose,
+  compose: normalized(compose),
   registry: 'reg.test',
 });
 const peer = generateWgKeyPair().publicKey;
@@ -112,21 +109,18 @@ test('mesh-enabled poll reports the public key once, brings up wg0 before contai
   );
 
   const syncAt = h.log.findIndex((l) => l.startsWith('wg syncconf wg0'));
-  const pullAt = h.log.findIndex((l) => l.startsWith('docker compose -p blog pull'));
+  const pullAt = h.log.findIndex((l) => l.startsWith('pull nginx'));
   assert.ok(syncAt >= 0 && syncAt < pullAt, 'mesh is reconciled before the project rolls out');
   assert.ok(
     h.log.includes('ip address replace 10.210.0.1/16 dev wg0'),
     'overlay address assigned to wg0',
   );
 
-  const written = await fs.readFile(
-    path.join(ctx.stateDir, 'projects', 'blog', 'docker-compose.yml'),
-    'utf8',
-  );
-  assert.match(written, /- db:10\.210\.0\.2/, 'db on another node resolves via extra_hosts');
-  assert.match(
-    written,
-    /- db\.blog\.tug:10\.210\.0\.2/,
+  const extraHosts = h.docker.service('blog', 'web')[0].body.HostConfig?.ExtraHosts as
+    string[] | undefined;
+  assert.ok(extraHosts?.includes('db:10.210.0.2'), 'db on another node resolves via ExtraHosts');
+  assert.ok(
+    extraHosts?.includes('db.blog.tug:10.210.0.2'),
     'project-qualified name is injected as well',
   );
 
@@ -175,10 +169,8 @@ test('an ingress node runs Caddy and reports its status; losing the role removes
   const h = harness(() => current);
   const ctx = await makeCtx(h, { mesh: false });
   await pollOnce(ctx);
-  assert.ok(
-    h.log.some((l) => l.startsWith('docker create --name tug-caddy')),
-    'managed Caddy container created',
-  );
+  assert.ok(h.docker.byName('tug-caddy'), 'managed Caddy container created');
+  assert.equal(h.docker.byName('tug-caddy')?.state, 'running', 'and started');
   const status = h.posts.find((p) => p.route === '/agent/v1/status')!.body;
   assert.equal(status.ingress.state, 'serving', 'edge state is part of the status report');
   assert.equal(status.ingress.routes, 0);
@@ -187,8 +179,9 @@ test('an ingress node runs Caddy and reports its status; losing the role removes
   h.log.length = 0;
   h.posts.length = 0;
   await pollOnce(ctx);
-  assert.ok(
-    h.log.includes('docker rm -f tug-caddy'),
+  assert.equal(
+    h.docker.byName('tug-caddy'),
+    undefined,
     'the container is removed once control stops sending ingress',
   );
   assert.equal(
@@ -235,19 +228,12 @@ test('diagnostics include WireGuard checks only when the mesh is enabled', async
     ).checks.map((c) => c.name);
   assert.deepEqual(
     await names(await makeCtx(h)),
-    [
-      'docker.info',
-      'docker.version',
-      'docker.compose.version',
-      'wireguard.version',
-      'wireguard.interface',
-      'ports.public',
-    ],
+    ['docker.info', 'docker.version', 'wireguard.version', 'wireguard.interface', 'ports.public'],
     'mesh agents add the WireGuard checks before the public-port check',
   );
   assert.deepEqual(
     await names(await makeCtx(h, { mesh: false })),
-    ['docker.info', 'docker.version', 'docker.compose.version', 'ports.public'],
+    ['docker.info', 'docker.version', 'ports.public'],
     'without the mesh there are no WireGuard checks',
   );
 });

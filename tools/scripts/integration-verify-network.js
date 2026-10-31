@@ -79,7 +79,7 @@ await until(
   async () => {
     const r = sh(
       'vps-b',
-      `c=$(docker ps -q --filter label=com.docker.compose.service=client | head -1); [ -n "$c" ] && docker exec "$c" wget -qO- -T 5 http://web:8080/`,
+      `c=$(docker ps -q --filter label=tug.service=client | head -1); [ -n "$c" ] && docker exec "$c" wget -qO- -T 5 http://web:8080/`,
     );
     return { ok: r.ok && r.out.includes('Welcome to nginx'), out: r.out };
   },

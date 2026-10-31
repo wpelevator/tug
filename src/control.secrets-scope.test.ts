@@ -44,12 +44,12 @@ test('agent secret fetch is scoped to requested assigned services', async () => 
       services: {
         web: {
           image: 'nginx',
-          environment: { WEB_SECRET: '${WEB_SECRET}', STATIC: 'literal' },
+          environment: { WEB_SECRET: '@@tug:secret:WEB_SECRET@@', STATIC: 'literal' },
           'x-tug': { placement: { nodes: ['n1'] } },
         },
         db: {
           image: 'postgres',
-          environment: { DB_PASSWORD: '${DB_PASSWORD}' },
+          environment: { DB_PASSWORD: '@@tug:secret:DB_PASSWORD@@' },
           'x-tug': { placement: { nodes: ['n2'] } },
         },
       },

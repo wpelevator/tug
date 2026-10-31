@@ -65,7 +65,7 @@ Bootstrap requires systemd and supports these releases:
 | RHEL (dnf) | 9, 10 | [RHEL](https://docs.docker.com/engine/install/rhel/) |
 | Rocky Linux, AlmaLinux, CentOS Stream (dnf) | 9, 10 | [CentOS](https://docs.docker.com/engine/install/centos/) |
 
-It adds Docker's official apt or dnf repository, installs Engine, Buildx and the Compose plugin, and enables Docker. A working Engine and Compose installation is preserved. If only Compose is missing, it installs the plugin without upgrading Engine. An inaccessible existing daemon, unsupported OS or release, or conflicting distribution packages (`docker.io` and `podman-docker` on Debian/Ubuntu; `docker`, `moby-engine` and `podman-docker` on RPM hosts) produce a clear error for manual resolution; Tug does not remove them or alter Docker daemon trust settings. Other distributions, such as Alpine or Arch, and hosts without systemd need Docker installed manually.
+It adds Docker's official apt or dnf repository, installs Engine and Buildx, and enables Docker (the control host also gets the Compose plugin). A working Engine installation is preserved. If only Compose is missing, it installs the plugin without upgrading Engine. An inaccessible existing daemon, unsupported OS or release, or conflicting distribution packages (`docker.io` and `podman-docker` on Debian/Ubuntu; `docker`, `moby-engine` and `podman-docker` on RPM hosts) produce a clear error for manual resolution; Tug does not remove them or alter Docker daemon trust settings. Other distributions, such as Alpine or Arch, and hosts without systemd need Docker installed manually.
 
 ## Image
 

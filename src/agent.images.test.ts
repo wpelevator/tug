@@ -5,7 +5,9 @@ import path from 'node:path';
 import os from 'node:os';
 import { createHash } from 'node:crypto';
 import * as tar from 'tar';
-import { buildDesiredState, composeForNode } from './compose.ts';
+import { buildDesiredState } from './compose.ts';
+import { containerSpecs } from './container-spec.ts';
+import { FakeDocker } from '../tests/fake-docker.ts';
 import { reconcile, ensureArtifact, pruneManagedImages } from './agent.ts';
 import type { AgentContext } from './agent.ts';
 import type { ImageArtifact } from './protocol.ts';
@@ -32,9 +34,15 @@ async function context() {
   bytes = await fs.readFile(archiveFile);
   artifact.sha256 = createHash('sha256').update(bytes).digest('hex');
   artifact.sizeBytes = bytes.length;
-  let loaded = false;
   let badBytes = false;
-  const calls: string[] = [];
+  const docker = new FakeDocker();
+  docker.addImage('redis:7');
+  docker.onLoad = () =>
+    docker.images.set(artifact.imageRef, {
+      Id: `sha256:${'c'.repeat(64)}`,
+      Os: 'linux',
+      Architecture: 'amd64',
+    });
   const requests: string[] = [];
   const ctx: AgentContext = {
     nodeName: 'n1',
@@ -42,29 +50,7 @@ async function context() {
     apply: true,
     controlUrl: 'https://control.test',
     token: 'node-token',
-    docker: async (args) => {
-      calls.push(args.join(' '));
-      if (args[0] === 'image' && args[1] === 'inspect') {
-        if (!loaded) throw new Error('missing');
-        return {
-          out: JSON.stringify([
-            { Id: `sha256:${'c'.repeat(64)}`, Os: 'linux', Architecture: 'amd64' },
-          ]),
-          err: '',
-        };
-      }
-      if (args[0] === 'info')
-        return { out: JSON.stringify({ OSType: 'linux', Architecture: 'x86_64' }), err: '' };
-      if (args[0] === 'load') {
-        assert.deepEqual(
-          await fs.readFile(args[2]),
-          bytes,
-          'Docker must load only verified downloaded bytes',
-        );
-        loaded = true;
-      }
-      return { out: '', err: '' };
-    },
+    docker,
     http: async (input, init) => {
       requests.push(String(input));
       if (String(input).includes('/images/')) {
@@ -80,7 +66,7 @@ async function context() {
   };
   return {
     ctx,
-    calls,
+    docker,
     requests,
     corrupt: () => {
       badBytes = true;
@@ -104,14 +90,14 @@ test('artifact-backed services load verified images once, never pull and report 
     desired.services.app.artifact = artifact;
     desired.services.app.image = artifact.imageRef;
     assert.equal(
-      composeForNode(desired, 'n1').services.app.pull_policy,
-      'never',
-      'artifact policy must override a source pull policy',
+      containerSpecs(desired, 'n1').specs.app.body.Image,
+      artifact.imageRef,
+      'artifact services run the loaded image reference, whatever pull_policy the source declares',
     );
     assert.deepEqual(
-      Object.keys(composeForNode(desired, 'n2').services),
+      Object.keys(containerSpecs(desired, 'n2').specs),
       [],
-      'default placement must be honored by generated Compose on every node',
+      'default placement must be honored by container specs on every node',
     );
     const status = await reconcile(desired, s.ctx);
     assert.equal(
@@ -119,14 +105,12 @@ test('artifact-backed services load verified images once, never pull and report 
       'rev1',
       'serving reports must acknowledge the immutable desired-state revision',
     );
-    assert.ok(
-      s.calls.includes('compose -p proj pull cache'),
-      'only published-image services must be pulled',
+    assert.deepEqual(
+      s.docker.verbs('pull'),
+      ['pull redis:7'],
+      'only published-image services must be pulled, never artifact services',
     );
-    assert.ok(
-      !s.calls.some((call) => call.includes('pull app')),
-      'artifact services must never be pulled from a registry',
-    );
+    assert.deepEqual(s.docker.verbs('load'), ['load'], 'the artifact is loaded exactly once');
     await reconcile(desired, s.ctx);
     assert.equal(
       s.requests.filter((url) => url.includes('/images/')).length,
@@ -151,10 +135,7 @@ test('corrupt downloads fail before load and dry-run mode performs no image I/O'
       /checksum or size/,
       'corrupt compressed bytes must never reach Docker load',
     );
-    assert.ok(
-      !s.calls.some((call) => call.startsWith('load ')),
-      'failed verification must prevent image loading',
-    );
+    assert.deepEqual(s.docker.verbs('load'), [], 'failed verification must prevent image loading');
     assert.equal(
       (await fs.readdir(s.ctx.stateDir)).some((name) => name.startsWith('image-download-')),
       false,
@@ -168,11 +149,11 @@ test('corrupt downloads fail before load and dry-run mode performs no image I/O'
       compose: { services: { app: { build: '.' } } },
     });
     desired.services.app.artifact = artifact;
-    s.calls.length = 0;
+    s.docker.calls.length = 0;
     s.requests.length = 0;
     await reconcile(desired, { ...s.ctx, apply: false });
     assert.deepEqual(
-      s.calls,
+      s.docker.calls,
       [],
       'dry-run reconciliation must never inspect, download or load images',
     );
@@ -194,24 +175,19 @@ test('agent pruning removes only recorded unused Tug images and protects retaine
       'redis:7',
     ];
     await fs.writeFile(path.join(s.ctx.stateDir, 'managed-images.json'), JSON.stringify(refs));
-    const calls: string[] = [];
-    await pruneManagedImages(
-      {
-        ...s.ctx,
-        docker: async (args) => {
-          calls.push(args.join(' '));
-          return { out: args.at(-1)?.includes('used') ? 'container-id' : '', err: '' };
-        },
-      },
-      [refs[0]],
-    );
+    for (const ref of refs) s.docker.addImage(ref);
+    s.docker.addImage('busybox');
+    const used = await s.docker.createContainer('uses-image', { Image: 'tug-build/proj/used:v1' });
+    await s.docker.startContainer(used);
+    s.docker.calls.length = 0;
+    await pruneManagedImages(s.ctx, [refs[0]]);
     assert.deepEqual(
-      calls.filter((call) => call.startsWith('image rm')),
-      ['image rm tug-build/proj/remove:v1'],
+      s.docker.verbs('image-rm'),
+      ['image-rm tug-build/proj/remove:v1'],
       'pruning must remove only an unreferenced unused recorded Tug image',
     );
     assert.ok(
-      !calls.some((call) => call.includes('redis:7')),
+      s.docker.images.has('redis:7'),
       'pruning must never touch unrelated published images',
     );
     assert.deepEqual(

@@ -35,6 +35,7 @@ import {
   validateCompose,
 } from './compose.ts';
 import { buildAndPush, unpackContext, run as runCommand } from './build.ts';
+import { sentinelNames } from './normalize.ts';
 import { ensureDir, errMessage, hashToken, id, now, token } from './util.ts';
 import {
   DEFAULT_MESH_CIDR,
@@ -1784,6 +1785,21 @@ export async function createApp(
         );
       } catch (e) {
         throw httpError(400, errMessage(e));
+      }
+      // The CLI interpolates control secrets as sentinels; a reference to a secret that is gone would deploy an empty value.
+      const referenced = sentinelNames(compose);
+      if (referenced.length) {
+        const known = new Set(
+          (
+            await db.all<{ name: string }[]>('SELECT name FROM secrets WHERE project_id=?', project)
+          ).map((row) => row.name),
+        );
+        const missing = referenced.filter((name) => !known.has(name));
+        if (missing.length)
+          throw httpError(
+            400,
+            `secrets not found in project ${project}: ${missing.join(', ')}; create them with tug secret-set`,
+          );
       }
       const builtServices = Object.entries(compose.services)
         .filter(([, service]) => service.build)

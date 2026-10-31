@@ -3,12 +3,13 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import yaml from 'js-yaml';
 import { executeCommand, publicListeners, reconcile, resolveBindAddress } from './agent.ts';
 import type { AgentContext } from './agent.ts';
 import { buildDesiredState } from './compose.ts';
 import type { ComposeFile, DiagnosticCheck } from './protocol.ts';
-import type { DockerRunner, HttpClient } from './runners.ts';
+import type { HttpClient } from './runners.ts';
+import type { ContainerSummary } from './docker-api.ts';
+import { FakeDocker, normalized } from '../tests/fake-docker.ts';
 
 interface Event {
   type: string;
@@ -18,7 +19,7 @@ interface Event {
 }
 
 async function makeCtx(
-  docker: DockerRunner = async () => ({ out: '', err: '' }),
+  docker: FakeDocker = new FakeDocker(),
 ): Promise<{ ctx: AgentContext; events: Event[] }> {
   const events: Event[] = [];
   const http = (async (url: string | URL | Request, init?: RequestInit) => {
@@ -57,11 +58,19 @@ const compose: ComposeFile = {
   },
 };
 const desired = (version = 'v1') =>
-  buildDesiredState({ project: 'proj', version, compose, registry: '' });
-const rendered = async (ctx: AgentContext) =>
-  yaml.load(
-    await fs.readFile(path.join(ctx.stateDir, 'projects', 'proj', 'docker-compose.yml'), 'utf8'),
-  ) as ComposeFile;
+  buildDesiredState({ project: 'proj', version, compose: normalized(compose), registry: '' });
+/** Published ports of a service as `host:hostPort->port` strings, as created on the fake engine. */
+const published = (ctx: AgentContext, service: string): string[] =>
+  (ctx.docker as FakeDocker)
+    .service('proj', service)
+    .flatMap((c) =>
+      Object.entries(
+        (c.body.HostConfig?.PortBindings || {}) as Record<
+          string,
+          { HostIp: string; HostPort: string }[]
+        >,
+      ).flatMap(([key, list]) => list.map((b) => `${b.HostIp}:${b.HostPort}->${key}`)),
+    );
 
 test('resolveBindAddress uses loopback without an address, IPs as given and resolves hostnames', async () => {
   assert.equal(
@@ -98,15 +107,14 @@ test('resolveBindAddress uses loopback without an address, IPs as given and reso
 test('reconcile renders ports on the bind address control sends, with the loopback ingress port on 127.0.0.1', async () => {
   const { ctx, events } = await makeCtx();
   await reconcile(desired(), ctx, {}, { address: '10.210.0.4', loopback: { proj: ['web'] } });
-  const file = await rendered(ctx);
   assert.deepEqual(
-    file.services.web.ports,
-    ['127.0.0.1:8080:80'],
+    published(ctx, 'web'),
+    ['127.0.0.1:8080->80/tcp'],
     'the ingress port only the local Caddy dials listens on loopback',
   );
   assert.deepEqual(
-    file.services.db.ports,
-    ['10.210.0.4:3306:3306', '0.0.0.0:3307:3307'],
+    published(ctx, 'db'),
+    ['10.210.0.4:3306->3306/tcp', '0.0.0.0:3307->3307/tcp'],
     'other ports listen on the overlay address and an explicit 0.0.0.0 is left as written',
   );
   assert.equal(
@@ -120,8 +128,8 @@ test('reconcile without a port binding never publishes on every interface', asyn
   const { ctx } = await makeCtx();
   await reconcile(desired(), ctx);
   assert.deepEqual(
-    (await rendered(ctx)).services.db.ports,
-    ['127.0.0.1:3306:3306', '0.0.0.0:3307:3307'],
+    published(ctx, 'db'),
+    ['127.0.0.1:3306->3306/tcp', '0.0.0.0:3307->3307/tcp'],
     'with no binding from control, unbound ports fall back to loopback',
   );
 });
@@ -145,8 +153,8 @@ test('a public bind address raises one ports.public warning until it changes', a
     'the message names the public address',
   );
   assert.deepEqual(
-    (await rendered(ctx)).services.db.ports,
-    ['203.0.113.7:3306:3306', '0.0.0.0:3307:3307'],
+    published(ctx, 'db'),
+    ['203.0.113.7:3306->3306/tcp', '0.0.0.0:3307->3307/tcp'],
     'without the mesh ports bind to the node address even when it is public',
   );
 
@@ -163,9 +171,9 @@ test('reconcile does not resolve the node address when no port binds to it', asy
   const portless = buildDesiredState({
     project: 'proj',
     version: 'v1',
-    compose: {
+    compose: normalized({
       services: { worker: { image: 'busybox', 'x-tug': { placement: { nodes: ['n1'] } } } },
-    },
+    }),
     registry: '',
   });
   const status = await reconcile(
@@ -182,36 +190,57 @@ test('reconcile does not resolve the node address when no port binds to it', asy
 });
 
 test('publicListeners finds Tug project containers listening on all interfaces or a public IP', () => {
-  const ps = [
-    'proj\tproj-db-1\t0.0.0.0:3306->3306/tcp, [::]:3306->3306/tcp',
-    'proj\tproj-cache-1\t10.210.0.4:6379->6379/tcp',
-    'proj-web-1a2b3c4d\tproj-web-1a2b3c4d-web-1\t127.0.0.1:20001->80/tcp',
-    'proj-api-9f8e7d6c\tproj-api-9f8e7d6c-api-1\t203.0.113.7:20002->8080/tcp',
-    'other\tother-web-1\t0.0.0.0:80->80/tcp',
-    'proj\tproj-dns-1\t0.0.0.0:5353-5354->53-54/udp',
-    'proj\tproj-worker-1\t',
-  ].join('\n');
+  const container = (
+    project: string,
+    name: string,
+    ports: ContainerSummary['Ports'],
+  ): ContainerSummary => ({
+    Id: name,
+    Names: [`/${name}`],
+    Image: 'x',
+    State: 'running',
+    Labels: { 'tug.project': project },
+    Ports: ports,
+  });
+  const containers: ContainerSummary[] = [
+    container('proj', 'tug-proj-db-1', [
+      { IP: '0.0.0.0', PrivatePort: 3306, PublicPort: 3306, Type: 'tcp' },
+      { IP: '::', PrivatePort: 3306, PublicPort: 3306, Type: 'tcp' },
+    ]),
+    container('proj', 'tug-proj-cache-1', [
+      { IP: '10.210.0.4', PrivatePort: 6379, PublicPort: 6379, Type: 'tcp' },
+    ]),
+    container('proj', 'tug-proj-web-1', [
+      { IP: '127.0.0.1', PrivatePort: 80, PublicPort: 20001, Type: 'tcp' },
+    ]),
+    container('proj', 'tug-proj-api-1', [
+      { IP: '203.0.113.7', PrivatePort: 8080, PublicPort: 20002, Type: 'tcp' },
+    ]),
+    container('other', 'other-web-1', [
+      { IP: '0.0.0.0', PrivatePort: 80, PublicPort: 80, Type: 'tcp' },
+    ]),
+    container('proj', 'tug-proj-worker-1', [{ PrivatePort: 9000, Type: 'tcp' }]),
+  ];
   assert.deepEqual(
-    publicListeners(ps, ['proj']),
+    publicListeners(containers, ['proj']),
     [
-      { project: 'proj', container: 'proj-db-1', listen: '0.0.0.0:3306->3306/tcp' },
-      { project: 'proj', container: 'proj-db-1', listen: '[::]:3306->3306/tcp' },
-      {
-        project: 'proj-api-9f8e7d6c',
-        container: 'proj-api-9f8e7d6c-api-1',
-        listen: '203.0.113.7:20002->8080/tcp',
-      },
-      { project: 'proj', container: 'proj-dns-1', listen: '0.0.0.0:5353-5354->53-54/udp' },
+      { project: 'proj', container: 'tug-proj-db-1', listen: '0.0.0.0:3306->3306/tcp' },
+      { project: 'proj', container: 'tug-proj-db-1', listen: '[::]:3306->3306/tcp' },
+      { project: 'proj', container: 'tug-proj-api-1', listen: '203.0.113.7:20002->8080/tcp' },
     ],
-    'all-interface and public listeners of Tug projects and their rolling revisions are reported; overlay, loopback and non-Tug containers are not',
+    'all-interface and public listeners of Tug projects are reported; overlay, loopback, unpublished and non-Tug containers are not',
   );
 });
 
 test('diagnostics report public listeners as a warning that does not fail the check', async () => {
-  const docker: DockerRunner = async (args) => ({
-    out: args[0] === 'ps' ? 'proj\tproj-db-1\t0.0.0.0:3306->3306/tcp\n' : 'ok',
-    err: '',
+  const docker = new FakeDocker();
+  docker.addImage('mariadb');
+  const id = await docker.createContainer('tug-proj-db-1', {
+    Image: 'mariadb',
+    Labels: { 'tug.project': 'proj', 'tug.service': 'db' },
+    HostConfig: { PortBindings: { '3306/tcp': [{ HostIp: '', HostPort: '3306' }] } },
   });
+  await docker.startContainer(id);
   const { ctx } = await makeCtx(docker);
   await fs.mkdir(path.join(ctx.stateDir, 'projects', 'proj'), { recursive: true });
   const result = await executeCommand({ id: 'd', type: 'diagnostics.run' }, ctx);
@@ -227,11 +256,11 @@ test('diagnostics report public listeners as a warning that does not fail the ch
   );
   assert.match(
     check?.stdout || '',
-    /proj-db-1\t0\.0\.0\.0:3306->3306\/tcp/,
+    /tug-proj-db-1\t0\.0\.0\.0:3306->3306\/tcp/,
     'the output names the container and listen address',
   );
 
-  const quiet = await makeCtx(async () => ({ out: '', err: '' }));
+  const quiet = await makeCtx();
   const clean = (await executeCommand({ id: 'd2', type: 'diagnostics.run' }, quiet.ctx)).result as {
     checks: DiagnosticCheck[];
   };
