@@ -1,4 +1,4 @@
-FROM node:lts-alpine AS build
+FROM node:24-alpine AS build
 WORKDIR /app
 RUN apk add --no-cache python3 make g++ ca-certificates
 COPY package*.json ./
@@ -8,7 +8,7 @@ COPY src ./src
 COPY tools/scripts ./tools/scripts
 RUN npm run build && npm prune --omit=dev
 
-FROM node:lts-alpine
+FROM node:24-alpine
 WORKDIR /app
 RUN apk add --no-cache docker-cli ca-certificates apache2-utils
 COPY --from=build /app/package*.json ./

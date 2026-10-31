@@ -20,16 +20,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # engines.node is the oldest version; .nvmrc is the one used for development and the other jobs.
         node: [22, 24]
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
         with:
           node-version: ${{ matrix.node }}
-          cache: npm
-      - run: npm ci
-      - run: npm run typecheck
-      - run: npm run lint
+      - if: matrix.node == 24
+        run: npm run typecheck
+      - if: matrix.node == 24
+        run: npm run lint
       - run: npm test
       - run: npm run test:smoke:dist
 
@@ -37,13 +38,17 @@ jobs:
     name: Integration (fake VPS containers)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      TUG_COMPOSE_BUILD: ''
+      TUG_RUNTIME_IMAGE: tug-runtime:integration
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+      - uses: ./.github/actions/build-images
         with:
-          node-version: 24
-          cache: npm
-      - run: npm ci
+          runtime: true
+          fake-vps: true
+          registry: true
       - run: npm run test:smoke:image
       - run: npm run test:integration
 
@@ -51,24 +56,29 @@ jobs:
     name: Integration (WireGuard mesh)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      TUG_COMPOSE_BUILD: ''
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+      - uses: ./.github/actions/build-images
         with:
-          node-version: 24
-          cache: npm
-      - run: npm ci
+          runtime: true
+          fake-vps: true
+          registry: true
       - run: npm run test:integration:network
 
   integration-no-registry:
     name: Integration (registry-free image delivery)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      TUG_COMPOSE_BUILD: ''
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+      - uses: ./.github/actions/build-images
         with:
-          node-version: 24
-          cache: npm
-      - run: npm ci
+          runtime: true
+          fake-vps: true
       - run: npm run test:integration:no-registry

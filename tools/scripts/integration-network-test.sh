@@ -3,6 +3,9 @@
 # fake VPSes. Needs a Docker host whose kernel supports WireGuard (e.g. Docker Desktop, any Linux 5.6+).
 set -euo pipefail
 
+# CI prebuilds the images with a layer cache and sets TUG_COMPOSE_BUILD="" to skip the rebuild.
+BUILD_FLAG=${TUG_COMPOSE_BUILD---build}
+
 COMPOSE_FILES=(-f docker-compose.integration.yml -f docker-compose.integration-network.yml)
 PROJECT=${COMPOSE_PROJECT_NAME:-tug-it-net}
 TOKEN=${TUG_TOKEN:-integration-token}
@@ -15,7 +18,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-docker compose -p "$PROJECT" "${COMPOSE_FILES[@]}" up -d --build
+docker compose -p "$PROJECT" "${COMPOSE_FILES[@]}" up -d $BUILD_FLAG
 
 for i in $(seq 1 120); do
   if curl -fsS "$CONTROL/healthz" >/dev/null 2>&1; then

@@ -1,5 +1,6 @@
 services:
   control:
+    image: tug-runtime:integration
     build: .
     command: control
     environment:
@@ -13,6 +14,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
 
   provisioner:
+    image: tug-runtime:integration
     build: .
     entrypoint: ["node"]
     command: ["tools/scripts/integration-provision.js"]
@@ -27,6 +29,7 @@ services:
       - control
 
   node:
+    image: tug-fake-vps:integration
     build:
       context: .
       dockerfile: tools/docker/fake-vps/Dockerfile

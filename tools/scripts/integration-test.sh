@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# CI prebuilds the images with a layer cache and sets TUG_COMPOSE_BUILD="" to skip the rebuild.
+BUILD_FLAG=${TUG_COMPOSE_BUILD---build}
+
 COMPOSE_FILE=${COMPOSE_FILE:-docker-compose.integration.yml}
 PROJECT=${COMPOSE_PROJECT_NAME:-tug-it}
 TOKEN=${TUG_TOKEN:-integration-token}
@@ -13,7 +16,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-docker compose -p "$PROJECT" -f "$COMPOSE_FILE" up -d --build
+docker compose -p "$PROJECT" -f "$COMPOSE_FILE" up -d $BUILD_FLAG
 
 for i in $(seq 1 120); do
   if curl -fsS "$CONTROL/healthz" >/dev/null 2>&1; then

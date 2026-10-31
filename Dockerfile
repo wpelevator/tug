@@ -1,4 +1,4 @@
-FROM node:lts-bookworm-slim AS build
+FROM node:24-bookworm-slim AS build
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ ca-certificates && rm -rf /var/lib/apt/lists/*
 COPY package*.json ./
@@ -8,7 +8,7 @@ COPY src ./src
 COPY tools/scripts ./tools/scripts
 RUN npm run build && npm prune --omit=dev
 
-FROM node:lts-bookworm-slim
+FROM node:24-bookworm-slim
 WORKDIR /app
 # Keep Compose compatible with the Docker 20.x daemons used by the isolated-node tests.
 ARG DOCKER_COMPOSE_VERSION=2.32.4

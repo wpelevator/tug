@@ -1,5 +1,6 @@
 services:
   registry:
+    image: tug-registry:integration
     build: ./tools/docker/registry
     container_name: tug-registry-it
     ports:
@@ -9,6 +10,7 @@ services:
       - registry-auth:/auth
 
   control:
+    image: tug-runtime:integration
     build: .
     command: control
     environment:
@@ -29,6 +31,7 @@ services:
       - registry
 
   provisioner:
+    image: tug-runtime:integration
     build: .
     entrypoint: ["node"]
     command: ["tools/scripts/integration-provision.js"]
@@ -44,6 +47,7 @@ services:
       - control
 
   vps-a:
+    image: tug-fake-vps:integration
     build:
       context: .
       dockerfile: tools/docker/fake-vps/Dockerfile
@@ -62,6 +66,7 @@ services:
       - provisioner
 
   vps-b:
+    image: tug-fake-vps:integration
     build:
       context: .
       dockerfile: tools/docker/fake-vps/Dockerfile
@@ -80,6 +85,7 @@ services:
       - provisioner
 
   vps-c:
+    image: tug-fake-vps:integration
     build:
       context: .
       dockerfile: tools/docker/fake-vps/Dockerfile
