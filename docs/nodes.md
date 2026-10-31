@@ -79,7 +79,7 @@ It adds Docker's official apt or dnf repository, installs Engine, Buildx and the
 
 ## Joining the WireGuard mesh
 
-Add `--mesh` to `node-install` or `node-enroll` (and set `TUG_MESH=true` on control) to run the agent with host networking and `NET_ADMIN`, so it can create `wg0` and join the overlay. Give nodes that other nodes must dial a `--public-address`; nodes behind NAT can omit it. See [Networking](networking.md).
+The agent always runs with host networking (`--network host`): it dials container IPs for TCP and HTTP health checks, which a bridge-networked agent cannot reach on current Docker (29.x). Add `--mesh` to `node-install` or `node-enroll` (and set `TUG_MESH=true` on control) to also give it `NET_ADMIN`, so it can create `wg0` and join the overlay. Give nodes that other nodes must dial a `--public-address`; nodes behind NAT can omit it. See [Networking](networking.md).
 
 ## Register only (`node-register`)
 
