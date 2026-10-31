@@ -1,6 +1,6 @@
 # Development
 
-The source is TypeScript. Development and tests run the `.ts` files directly through Node's built-in type stripping, so there is no build step, but it needs Node >= 22.18 (`engines.node`). Compilation to `dist/` happens only when building the Docker image.
+The source is TypeScript. Development and tests run the `.ts` files directly through Node's built-in type stripping, so there is no build step, but it needs Node >= 22.18 (`engines.node`). Compilation to `dist/` happens when building the Docker image and when packing the npm package (`prepack`).
 
 ```bash
 npm install
@@ -20,6 +20,12 @@ Unit tests sit next to the source files as `src/*.test.ts`. The agent integratio
 ## Docker image
 
 The Dockerfiles are multi-stage: a build stage runs `npm ci && npm run build`, and the final image ships `dist/` plus production dependencies only, with entrypoint `node dist/main.js`. `tsc` does not copy `src/templates/*`, so `npm run build` copies them next to the emitted `dist/cli.js`; the CLI resolves them relative to the running file, so `node src/cli.ts` and `node dist/cli.js` both work.
+
+## Continuous integration and releases
+
+`.github/workflows/ci.yml` runs on pushes to `main` and on pull requests: typecheck, lint, unit tests and the dist smoke test on Node 22 and 24, plus the two Docker integration tests as separate jobs. `.github/workflows/release.yml` versions and publishes; see [Releases](releases.md). Every user-facing change needs a changeset (`npm run changeset`).
+
+Published images are `ghcr.io/wpelevator/tug`. To test an unreleased CLI against a checkout, use `--build-local-image` on `control install` and `node install` (builds `tug:local` from the working directory and copies it over SSH). The dev Compose files (`docker-compose*.yml`) and the integration tests always build the image from the checkout with `build: .` and never pull from GHCR.
 
 ## Compose stack
 

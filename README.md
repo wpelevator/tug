@@ -19,6 +19,14 @@ Deploy Docker Compose projects to one or more ordinary Linux VPSes through a sma
 
 ## Quick start
 
+Install the CLI (Node >= 22.18), or run it without installing through `npx @wpelevator/tug`:
+
+```bash
+npm install -g @wpelevator/tug
+```
+
+The CLI installs the matching `ghcr.io/wpelevator/tug:<version>` image on your hosts.
+
 1. Install the control plane on a Docker host, pointing it at a registry you already run: `tug control install root@control.example.com --registry registry.example.com`.
 2. Point the CLI at it: `tug init --control-url https://control.example.com --token "$TUG_TOKEN"`.
 3. Set the secrets your services need: `tug secret:set DB_PASSWORD`.
@@ -35,7 +43,8 @@ Deploy Docker Compose projects to one or more ordinary Linux VPSes through a sma
 - [Nodes](docs/nodes.md): SSH install, self-service enrollment, registration and status.
 - [CLI reference](docs/cli.md): every `tug` command and option.
 - [Configuration](docs/configuration.md): CLI, control and agent environment variables.
-- [Development](docs/development.md): local setup, Compose stack, host mode and the integration test.
+- [Development](docs/development.md): local setup, CI, Compose stack, host mode and the integration test.
+- [Releases](docs/releases.md): changesets, npm and Docker image publishing.
 - [Roadmap](docs/roadmap.md): planned milestones toward parity with and beyond uncloud.
 
 ## Development

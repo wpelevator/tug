@@ -1,0 +1,131 @@
+name: Release
+
+# The file name is registered as the npm trusted publisher for @wpelevator/tug; do not rename it.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# Never run two releases at once, and never cancel one that is publishing.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  # Opens or updates the "Version Packages" PR; once that PR is merged, publishes to npm.
+  release:
+    name: Version PR / npm publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+      id-token: write # npm trusted publishing (OIDC) and provenance
+    outputs:
+      published: ${{ steps.changesets.outputs.published }}
+      version: ${{ steps.published-version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+      # Trusted publishing needs npm >= 11.5.1; the npm bundled with Node 24 can be older.
+      - run: npm install -g npm@^11.5.1
+      - run: npm ci
+      - id: changesets
+        uses: changesets/action@v1
+        with:
+          version: npm run version-packages
+          publish: npm run release
+          commit: 'chore: version packages'
+          title: 'chore: version packages'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # No NPM_TOKEN: npm authenticates with the workflow's OIDC identity.
+          NPM_CONFIG_PROVENANCE: 'true'
+      - id: published-version
+        if: steps.changesets.outputs.published == 'true'
+        env:
+          PUBLISHED_PACKAGES: ${{ steps.changesets.outputs.publishedPackages }}
+        run: echo "version=$(node -p "JSON.parse(process.env.PUBLISHED_PACKAGES).find(p => p.name === '@wpelevator/tug').version")" >> "$GITHUB_OUTPUT"
+
+  # Versioned image, built from the commit that was just published: X.Y.Z, X.Y and latest.
+  image:
+    name: Docker image (release)
+    needs: release
+    if: needs.release.outputs.published == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+      - id: tags
+        env:
+          VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          {
+            echo "version=${VERSION}"
+            echo "minor=${VERSION%.*}"
+          } >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/wpelevator/tug
+          tags: |
+            type=raw,value=${{ steps.tags.outputs.version }}
+            type=raw,value=${{ steps.tags.outputs.minor }}
+            type=raw,value=latest
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # Rolling image of main, for trying unreleased changes.
+  edge:
+    name: Docker image (edge)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/wpelevator/tug
+          tags: type=raw,value=edge
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

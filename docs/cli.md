@@ -5,13 +5,13 @@ Commands that take `--project` default to the project in `.tug.json`, then `site
 ## Setup
 
 - `tug init [--control-url <url>] [--token <token>] [--project <name>]` writes `.tug.json`. Defaults: `http://localhost:8080`, `$TUG_TOKEN` or a new token, `site`.
-- `tug control install <sshTarget> --registry <host> [--token <token>] [--port <port>] [--image <tag>] [--registry-auth-path <path>] [--registry-container <name>] [--no-transfer-image]` installs the control plane over SSH. See [Control plane](control-plane.md).
+- `tug control install <sshTarget> --registry <host> [--token <token>] [--port <port>] [--image <tag>] [--build-local-image] [--registry-auth-path <path>] [--registry-container <name>]` installs the control plane over SSH. `--image` defaults to `ghcr.io/wpelevator/tug:<CLI version>`; `--build-local-image` builds and copies a local image instead (development). See [Control plane](control-plane.md).
 - `tug control:token` prints the local development operator token from `./data/operator.token`.
 
 ## Nodes
 
-- `tug node install <sshTarget> --name <node> [--address <ip>] [--public-address <ip>] [--control-url <url>] [--registry <host>] [--mesh] [--wg-port <port>] [--image <tag>] [--no-transfer-image] [--http-only-dev]` registers a node and installs its agent over SSH. `--mesh` runs the agent with host networking and `NET_ADMIN` for the WireGuard mesh and adds kernel and UDP-port preflight checks.
-- `tug node enroll [--name <node>] [--control-url <url>] [--ttl <seconds>] [--uses <n>] [--ca <ca.pem>] [--image <tag>] [--mesh] [--json] [--http-only-dev]` mints an enrollment key and prints a `docker run` for the host.
+- `tug node install <sshTarget> --name <node> [--address <ip>] [--public-address <ip>] [--control-url <url>] [--registry <host>] [--mesh] [--wg-port <port>] [--image <tag>] [--build-local-image] [--http-only-dev]` registers a node and installs its agent over SSH. `--image` and `--build-local-image` work as for `control install`. `--mesh` runs the agent with host networking and `NET_ADMIN` for the WireGuard mesh and adds kernel and UDP-port preflight checks.
+- `tug node enroll [--name <node>] [--control-url <url>] [--ttl <seconds>] [--uses <n>] [--ca <ca.pem>] [--image <tag>] [--mesh] [--json] [--http-only-dev]` mints an enrollment key and prints a `docker run` for the host, using `ghcr.io/wpelevator/tug:<CLI version>` unless `--image` is given.
 - `tug node:register --name <node> [--address <ip>] [--public-address <ip>]` registers a node and prints its tokens.
 - `tug node:rotate-wg-key <node> [--timeout <seconds>]` has the node generate a new WireGuard keypair and waits for the result; peers pick up the new public key on their next poll.
 - `tug node:ingress <node> [--disable]` marks a node as an ingress node (managed Caddy), or removes the role.
