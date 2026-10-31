@@ -117,7 +117,7 @@ The test layers, the metrics milestones are held to and the backlog of mocked te
 - [ ] M8 outbound webhooks
 - [x] M8 named multi-operator tokens in the audit trail
 - [ ] M8 read-only web dashboard
-- [ ] M9 event hygiene: lifecycle events only on change, retention by age and row count (in progress)
+- [ ] M9 event hygiene: lifecycle events only on change, retention by age and row count (implemented in [PR #13](https://github.com/wpelevator/tug/pull/13), in review)
 - [ ] M9 structured logs (`TUG_LOG_FORMAT`, `TUG_LOG_LEVEL`)
 - [ ] M9 `GET /metrics` on control (Prometheus text, `read` token)
 - [ ] M9 agent-reported node and service stats exposed on `/metrics`
