@@ -1,7 +1,7 @@
 services:
   registry:
     build: ./services/registry
-    container_name: launchpad-registry-it
+    container_name: tug-registry-it
     ports:
       - "15000:5000"
     volumes:
@@ -13,16 +13,16 @@ services:
     command: control
     environment:
       PORT: 8080
-      LAUNCHPAD_DATA_DIR: /data
-      LAUNCHPAD_OPERATOR_TOKEN: integration-token
-      LAUNCHPAD_REGISTRY: registry:5000
-      LAUNCHPAD_PUSH: "false"
-      LAUNCHPAD_REGISTRY_AUTH_PATH: /registry-auth/htpasswd
-      LAUNCHPAD_REGISTRY_CONTAINER: launchpad-registry-it
+      TUG_DATA_DIR: /data
+      TUG_OPERATOR_TOKEN: integration-token
+      TUG_REGISTRY: registry:5000
+      TUG_PUSH: "false"
+      TUG_REGISTRY_AUTH_PATH: /registry-auth/htpasswd
+      TUG_REGISTRY_CONTAINER: tug-registry-it
     ports:
       - "18080:8080"
     volumes:
-      - launchpad-data:/data
+      - tug-data:/data
       - registry-auth:/registry-auth
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
@@ -34,10 +34,10 @@ services:
     command: ["scripts/integration-provision.js"]
     restart: "no"
     environment:
-      LAUNCHPAD_CONTROL_URL: http://control:8080
-      LAUNCHPAD_TOKEN: integration-token
-      LAUNCHPAD_TOKEN_DIR: /tokens
-      LAUNCHPAD_NODES: vps-a,vps-b,vps-c
+      TUG_CONTROL_URL: http://control:8080
+      TUG_TOKEN: integration-token
+      TUG_TOKEN_DIR: /tokens
+      TUG_NODES: vps-a,vps-b,vps-c
     volumes:
       - node-tokens:/tokens
     depends_on:
@@ -49,15 +49,15 @@ services:
       dockerfile: integration/Dockerfile.fake-vps
     privileged: true
     environment:
-      LAUNCHPAD_NODE_NAME: vps-a
-      LAUNCHPAD_CONTROL_URL: http://control:8080
-      LAUNCHPAD_REGISTRY: registry:5000
-      LAUNCHPAD_APPLY: "true"
-      LAUNCHPAD_POLL_INTERVAL_MS: 2000
+      TUG_NODE_NAME: vps-a
+      TUG_CONTROL_URL: http://control:8080
+      TUG_REGISTRY: registry:5000
+      TUG_APPLY: "true"
+      TUG_POLL_INTERVAL_MS: 2000
     volumes:
       - node-tokens:/tokens:ro
       - vps-a-docker:/var/lib/docker
-      - vps-a-state:/var/lib/launchpad
+      - vps-a-state:/var/lib/tug
     depends_on:
       - provisioner
 
@@ -67,15 +67,15 @@ services:
       dockerfile: integration/Dockerfile.fake-vps
     privileged: true
     environment:
-      LAUNCHPAD_NODE_NAME: vps-b
-      LAUNCHPAD_CONTROL_URL: http://control:8080
-      LAUNCHPAD_REGISTRY: registry:5000
-      LAUNCHPAD_APPLY: "true"
-      LAUNCHPAD_POLL_INTERVAL_MS: 2000
+      TUG_NODE_NAME: vps-b
+      TUG_CONTROL_URL: http://control:8080
+      TUG_REGISTRY: registry:5000
+      TUG_APPLY: "true"
+      TUG_POLL_INTERVAL_MS: 2000
     volumes:
       - node-tokens:/tokens:ro
       - vps-b-docker:/var/lib/docker
-      - vps-b-state:/var/lib/launchpad
+      - vps-b-state:/var/lib/tug
     depends_on:
       - provisioner
 
@@ -85,15 +85,15 @@ services:
       dockerfile: integration/Dockerfile.fake-vps
     privileged: true
     environment:
-      LAUNCHPAD_NODE_NAME: vps-c
-      LAUNCHPAD_CONTROL_URL: http://control:8080
-      LAUNCHPAD_REGISTRY: registry:5000
-      LAUNCHPAD_APPLY: "true"
-      LAUNCHPAD_POLL_INTERVAL_MS: 2000
+      TUG_NODE_NAME: vps-c
+      TUG_CONTROL_URL: http://control:8080
+      TUG_REGISTRY: registry:5000
+      TUG_APPLY: "true"
+      TUG_POLL_INTERVAL_MS: 2000
     volumes:
       - node-tokens:/tokens:ro
       - vps-c-docker:/var/lib/docker
-      - vps-c-state:/var/lib/launchpad
+      - vps-c-state:/var/lib/tug
     depends_on:
       - provisioner
 
@@ -104,7 +104,7 @@ networks:
         - subnet: 10.89.240.0/24
 
 volumes:
-  launchpad-data:
+  tug-data:
   registry-data:
   registry-auth:
   node-tokens:

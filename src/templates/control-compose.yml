@@ -5,14 +5,14 @@ services:
     command: control
     environment:
       PORT: 8080
-      LAUNCHPAD_DATA_DIR: /data
-      LAUNCHPAD_OPERATOR_TOKEN: {{OPERATOR_TOKEN}}
-      LAUNCHPAD_REGISTRY: {{REGISTRY_HOST}}
-      LAUNCHPAD_REGISTRY_AUTH_PATH: {{REGISTRY_AUTH_PATH}}
-      LAUNCHPAD_REGISTRY_CONTAINER: {{REGISTRY_CONTAINER}}
+      TUG_DATA_DIR: /data
+      TUG_OPERATOR_TOKEN: {{OPERATOR_TOKEN}}
+      TUG_REGISTRY: {{REGISTRY_HOST}}
+      TUG_REGISTRY_AUTH_PATH: {{REGISTRY_AUTH_PATH}}
+      TUG_REGISTRY_CONTAINER: {{REGISTRY_CONTAINER}}
     ports:
       - "{{PORT}}:8080"
     volumes:
-      - /var/lib/launchpad-control:/data
-      - /var/lib/launchpad-registry-auth:/registry-auth
+      - /var/lib/tug-control:/data
+      - /var/lib/tug-registry-auth:/registry-auth
       - /var/run/docker.sock:/var/run/docker.sock

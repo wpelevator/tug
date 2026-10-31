@@ -4,9 +4,9 @@
 // rotation heals the mesh. Everything runs through `docker compose exec` into the fake VPSes.
 import { spawnSync } from 'node:child_process';
 
-const project = process.env.COMPOSE_PROJECT_NAME || 'pad-launch-it-net';
-const control = process.env.LAUNCHPAD_CONTROL_URL || 'http://localhost:18080';
-const token = process.env.LAUNCHPAD_TOKEN || 'integration-token';
+const project = process.env.COMPOSE_PROJECT_NAME || 'tug-it-net';
+const control = process.env.TUG_CONTROL_URL || 'http://localhost:18080';
+const token = process.env.TUG_TOKEN || 'integration-token';
 const files = ['-f', 'docker-compose.integration.yml', '-f', 'docker-compose.integration-network.yml'];
 
 function sh(vps, script) {

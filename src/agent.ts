@@ -16,15 +16,15 @@ import type {
   SecretsResponse, ServiceEndpoint, ServiceState, StatusReport, WorkResponse
 } from './protocol.ts';
 
-const CONTROL_URL_FROM_ENV = Boolean(process.env.LAUNCHPAD_CONTROL_URL);
-let CONTROL_URL = process.env.LAUNCHPAD_CONTROL_URL || 'http://localhost:8080';
-let TOKEN: string | undefined = process.env.LAUNCHPAD_AGENT_TOKEN;
-let NODE_NAME = process.env.LAUNCHPAD_NODE_NAME || process.env.HOSTNAME || 'node1';
-const STATE_DIR = process.env.LAUNCHPAD_STATE_DIR || '/var/lib/launchpad';
-const APPLY = process.env.LAUNCHPAD_APPLY !== 'false';
-const INTERVAL = Number(process.env.LAUNCHPAD_POLL_INTERVAL_MS || 5000);
+const CONTROL_URL_FROM_ENV = Boolean(process.env.TUG_CONTROL_URL);
+let CONTROL_URL = process.env.TUG_CONTROL_URL || 'http://localhost:8080';
+let TOKEN: string | undefined = process.env.TUG_AGENT_TOKEN;
+let NODE_NAME = process.env.TUG_NODE_NAME || process.env.HOSTNAME || 'node1';
+const STATE_DIR = process.env.TUG_STATE_DIR || '/var/lib/tug';
+const APPLY = process.env.TUG_APPLY !== 'false';
+const INTERVAL = Number(process.env.TUG_POLL_INTERVAL_MS || 5000);
 // Opt-in WireGuard mesh: needs `wg`/`ip` in the agent image, host networking and NET_ADMIN.
-const MESH = process.env.LAUNCHPAD_MESH === 'true';
+const MESH = process.env.TUG_MESH === 'true';
 
 // Everything the reconcile/command logic needs from the outside world. Production wiring is
 // `defaultContext()`; tests pass a fake `docker` runner / `http` client and temp dirs.
@@ -44,7 +44,7 @@ export interface AgentContext {
 }
 
 export function defaultContext(): AgentContext {
-  return { docker: createDockerRunner(), http: fetch, nodeName: NODE_NAME, stateDir: STATE_DIR, apply: APPLY, controlUrl: CONTROL_URL, token: TOKEN, host: createHostRunner(), mesh: MESH, caddyImage: process.env.LAUNCHPAD_CADDY_IMAGE };
+  return { docker: createDockerRunner(), http: fetch, nodeName: NODE_NAME, stateDir: STATE_DIR, apply: APPLY, controlUrl: CONTROL_URL, token: TOKEN, host: createHostRunner(), mesh: MESH, caddyImage: process.env.TUG_CADDY_IMAGE };
 }
 
 const dbsByStateDir = new Map<string, Db>();
@@ -58,7 +58,7 @@ async function agentDb(stateDir: string): Promise<Db> {
   return db;
 }
 
-function authHeaders(ctx: AgentContext): Record<string, string> { if (!ctx.token) throw new Error('LAUNCHPAD_AGENT_TOKEN required'); return { Authorization: `Bearer ${ctx.token}` }; }
+function authHeaders(ctx: AgentContext): Record<string, string> { if (!ctx.token) throw new Error('TUG_AGENT_TOKEN required'); return { Authorization: `Bearer ${ctx.token}` }; }
 async function api<T = unknown>(ctx: AgentContext, route: string, opts: RequestInit = {}): Promise<T> {
   const res = await ctx.http(`${ctx.controlUrl}${route}`, { ...opts, headers: { ...authHeaders(ctx), ...(opts.headers as Record<string, string> | undefined || {}) } });
   if (!res.ok) throw new Error(`${opts.method || 'GET'} ${route}: ${res.status} ${await res.text()}`);
@@ -175,7 +175,7 @@ export async function executeCommand(command: Command, ctx: AgentContext = defau
     return { commandId: command.id, state: 'succeeded', result: { project, volume, deleted: true } };
   }
   if (command.type === 'wg.rotate-key') {
-    if (!ctx.mesh) throw new Error('the WireGuard mesh is not enabled on this agent (LAUNCHPAD_MESH=true)');
+    if (!ctx.mesh) throw new Error('the WireGuard mesh is not enabled on this agent (TUG_MESH=true)');
     const { publicKey } = await rotateWgKeys(ctx.stateDir);
     await api(ctx, '/agent/v1/wireguard/key', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ publicKey }) });
     await writeReportedKey(ctx.stateDir, publicKey);
@@ -288,11 +288,11 @@ async function saveCreds(creds: Creds): Promise<void> {
   await fs.writeFile(CREDS_FILE(), JSON.stringify(creds), { mode: 0o600 });
 }
 async function readJoinKey(): Promise<string | null> {
-  if (process.env.LAUNCHPAD_JOIN_KEY) return process.env.LAUNCHPAD_JOIN_KEY.trim();
-  const file = process.env.LAUNCHPAD_JOIN_KEY_FILE;
+  if (process.env.TUG_JOIN_KEY) return process.env.TUG_JOIN_KEY.trim();
+  const file = process.env.TUG_JOIN_KEY_FILE;
   if (file) {
     try { return (await fs.readFile(file, 'utf8')).trim(); }
-    catch (e) { throw new Error(`cannot read LAUNCHPAD_JOIN_KEY_FILE ${file}: ${errMessage(e)}`, { cause: e }); }
+    catch (e) { throw new Error(`cannot read TUG_JOIN_KEY_FILE ${file}: ${errMessage(e)}`, { cause: e }); }
   }
   return null;
 }
@@ -308,7 +308,7 @@ function dockerLogin(registry: string, user: string, password: string): Promise<
 async function enroll(joinKey: string): Promise<Creds> {
   let decoded: JoinKey;
   try { decoded = JSON.parse(Buffer.from(joinKey, 'base64url').toString('utf8')); }
-  catch (e) { throw new Error('invalid LAUNCHPAD_JOIN_KEY (expected base64url-encoded JSON)', { cause: e }); }
+  catch (e) { throw new Error('invalid TUG_JOIN_KEY (expected base64url-encoded JSON)', { cause: e }); }
   if (!decoded.enrollToken) throw new Error('join key is missing enrollToken');
   const controlUrl = (!CONTROL_URL_FROM_ENV && decoded.controlUrl) ? decoded.controlUrl : CONTROL_URL;
   // node's fetch reads NODE_EXTRA_CA_CERTS only at startup, so apply an embedded CA by
@@ -324,7 +324,7 @@ async function enroll(joinKey: string): Promise<Creds> {
   const wgPublicKey = MESH ? (await ensureWgKeys(STATE_DIR)).publicKey : undefined;
   const res = await fetch(`${controlUrl}/agent/v1/enroll`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ enrollToken: decoded.enrollToken, name: NODE_NAME, address: process.env.LAUNCHPAD_NODE_ADDRESS, publicAddress: process.env.LAUNCHPAD_NODE_PUBLIC_ADDRESS, wgPublicKey })
+    body: JSON.stringify({ enrollToken: decoded.enrollToken, name: NODE_NAME, address: process.env.TUG_NODE_ADDRESS, publicAddress: process.env.TUG_NODE_PUBLIC_ADDRESS, wgPublicKey })
   });
   if (!res.ok) throw new Error(`enroll failed: ${res.status} ${await res.text()}`);
   const out = await res.json() as EnrollResponse;
@@ -340,7 +340,7 @@ export async function loadOrEnroll(): Promise<Creds> {
   let creds: Creds | null = TOKEN ? { agentToken: TOKEN, nodeName: NODE_NAME, controlUrl: CONTROL_URL } : await loadCreds();
   if (!creds) {
     const joinKey = await readJoinKey();
-    if (!joinKey) throw new Error('no LAUNCHPAD_AGENT_TOKEN, no persisted credentials, and no LAUNCHPAD_JOIN_KEY to enroll with');
+    if (!joinKey) throw new Error('no TUG_AGENT_TOKEN, no persisted credentials, and no TUG_JOIN_KEY to enroll with');
     creds = await enroll(joinKey);
   }
   TOKEN = creds.agentToken;
@@ -355,7 +355,7 @@ export async function loadOrEnroll(): Promise<Creds> {
 
 export async function main(): Promise<void> {
   await loadOrEnroll();
-  console.log(`launchpad-agent node=${NODE_NAME} control=${CONTROL_URL} apply=${APPLY}`);
+  console.log(`tug-agent node=${NODE_NAME} control=${CONTROL_URL} apply=${APPLY}`);
   for (;;) { try { await pollOnce(); } catch (e) { console.error(errMessage(e)); } await new Promise(r => setTimeout(r, INTERVAL)); }
 }
 if (import.meta.url === `file://${process.argv[1]}`) main();

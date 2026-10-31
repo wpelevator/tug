@@ -11,18 +11,18 @@ import { openDb } from './db.ts';
 
 async function server() {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'lp-lock-'));
-  const dbFile = path.join(dir, 'launchpad.db');
-  process.env.LAUNCHPAD_DATA_DIR = dir;
-  process.env.LAUNCHPAD_OPERATOR_TOKEN = 'op-lock-token';
-  process.env.LAUNCHPAD_REGISTRY = 'registry.test';
-  delete process.env.LAUNCHPAD_REGISTRY_AUTH_PATH;
-  delete process.env.LAUNCHPAD_REGISTRY_CONTAINER;
+  const dbFile = path.join(dir, 'tug.db');
+  process.env.TUG_DATA_DIR = dir;
+  process.env.TUG_OPERATOR_TOKEN = 'op-lock-token';
+  process.env.TUG_REGISTRY = 'registry.test';
+  delete process.env.TUG_REGISTRY_AUTH_PATH;
+  delete process.env.TUG_REGISTRY_CONTAINER;
   const app = await createApp();
   const srv = await new Promise<Server>(resolve => { const s = app.listen(0, () => resolve(s)); });
   return { base: `http://127.0.0.1:${(srv.address() as AddressInfo).port}`, dbFile, close: () => new Promise(resolve => srv.close(resolve)) };
 }
 const headers = { Authorization: 'Bearer op-lock-token', 'content-type': 'application/json' };
-const compose = { services: { web: { image: 'nginx:alpine', 'x-launchpad': { placement: { nodes: ['n1'] } } } } };
+const compose = { services: { web: { image: 'nginx:alpine', 'x-tug': { placement: { nodes: ['n1'] } } } } };
 
 test('a stale lock is purged and no longer blocks new operations', async () => {
   const s = await server();

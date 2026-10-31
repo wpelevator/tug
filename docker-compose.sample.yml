@@ -5,7 +5,7 @@ services:
       - "8088:80"
     environment:
       SAMPLE_SECRET: ${SAMPLE_SECRET:-not-set}
-    x-launchpad:
+    x-tug:
       placement:
         nodes: [vps-a]
       health:
@@ -18,7 +18,7 @@ services:
     command: ["sh", "-c", "while true; do echo worker alive; sleep 30; done"]
     environment:
       SAMPLE_SECRET: ${SAMPLE_SECRET:-not-set}
-    x-launchpad:
+    x-tug:
       placement:
         nodes: [vps-b]
 
@@ -27,7 +27,7 @@ services:
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - cache-data:/data
-    x-launchpad:
+    x-tug:
       placement:
         nodes: [vps-c]
       health:
@@ -36,7 +36,7 @@ services:
 
 volumes:
   cache-data:
-    x-launchpad:
+    x-tug:
       type: local
       persistent: true
       placement:

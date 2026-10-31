@@ -34,9 +34,9 @@ export function publishedPort(svc: ComposeService, port: number): number | null 
 const HOSTNAME_RE = /^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i;
 
 function validateIngress(name: string, svc: ComposeService, seen: Map<string, string>, errors: string[]): void {
-  const ingress = svc['x-launchpad']?.ingress;
+  const ingress = svc['x-tug']?.ingress;
   if (ingress === undefined) return;
-  if (!ingress || typeof ingress !== 'object') { errors.push(`${name}: x-launchpad.ingress must be an object`); return; }
+  if (!ingress || typeof ingress !== 'object') { errors.push(`${name}: x-tug.ingress must be an object`); return; }
   const host = typeof ingress.host === 'string' ? ingress.host.toLowerCase() : '';
   if (!HOSTNAME_RE.test(host)) errors.push(`${name}: ingress.host must be a fully qualified hostname`);
   else if (seen.has(host)) errors.push(`${name}: ingress.host ${host} is already used by ${seen.get(host)}`);
@@ -56,9 +56,9 @@ export function validateCompose(compose: ComposeFile | undefined, nodes: string[
   for (const [name, svc] of Object.entries(compose.services)) {
     if (svc.container_name) errors.push(`${name}: container_name is not supported`);
     if (svc.deploy) errors.push(`${name}: swarm deploy semantics are not supported`);
-    const lp = svc['x-launchpad'] || {};
+    const lp = svc['x-tug'] || {};
     const selected = lp.placement?.nodes || [];
-    if (nodes.length > 1 && selected.length === 0) errors.push(`${name}: multi-node deployments require x-launchpad.placement.nodes`);
+    if (nodes.length > 1 && selected.length === 0) errors.push(`${name}: multi-node deployments require x-tug.placement.nodes`);
     if (lp.replicas && selected.length && lp.replicas !== selected.length) errors.push(`${name}: replicas must match placement node count in v1`);
     validateIngress(name, svc, ingressHosts, errors);
   }
@@ -70,7 +70,7 @@ export interface BuildDesiredStateOptions { project: string; version: string; co
 export function buildDesiredState({ project, version, compose, registry, defaultNode = null }: BuildDesiredStateOptions): DesiredState {
   const services: Record<string, ServiceSpec> = {};
   for (const [name, src] of Object.entries(compose.services || {})) {
-    const lp = src['x-launchpad'] || {};
+    const lp = src['x-tug'] || {};
     const placement = lp.placement || (defaultNode ? { nodes: [defaultNode] } : {});
     const image = src.build ? `${registry}/${project}/${name}:${version}` : src.image;
     services[name] = { image, build: src.build || null, placement, replicas: lp.replicas || placement.nodes?.length || 1, health: lp.health || null };
@@ -83,7 +83,7 @@ export function crossNodeHosts(project: string, endpoints: Record<string, Servic
   const hosts: string[] = [];
   for (const [service, list] of Object.entries(endpoints).sort(([a], [b]) => a.localeCompare(b))) {
     if (local.has(service)) continue;
-    for (const ep of list) hosts.push(`${service}:${ep.address}`, `${service}.${project}.launchpad:${ep.address}`);
+    for (const ep of list) hosts.push(`${service}:${ep.address}`, `${service}.${project}.tug:${ep.address}`);
   }
   return hosts;
 }
@@ -98,11 +98,11 @@ export function composeForNode(desiredState: DesiredState, nodeName: string, sec
   const outVolumes = out.volumes!;
   const usedVolumes = new Set<string>();
   for (const [name, src] of Object.entries(desiredState.compose.services || {})) {
-    const lp = src['x-launchpad'] || {};
+    const lp = src['x-tug'] || {};
     const nodes = lp.placement?.nodes || [];
     if (nodes.length && !nodes.includes(nodeName)) continue;
     const svc: ComposeService = { ...src, image: desiredState.services[name].image };
-    delete svc.build; delete svc['x-launchpad']; delete svc.deploy; delete svc.container_name;
+    delete svc.build; delete svc['x-tug']; delete svc.deploy; delete svc.container_name;
     if (Object.keys(secrets).length) svc.env_file = Array.from(new Set([...(Array.isArray(svc.env_file) ? svc.env_file : svc.env_file ? [svc.env_file] : []), '.env']));
     for (const vol of svc.volumes || []) {
       const source = typeof vol === 'string' ? vol.split(':')[0] : vol.source;
@@ -120,7 +120,7 @@ export function composeForNode(desiredState: DesiredState, nodeName: string, sec
   }
   for (const name of usedVolumes) {
     const vol = desiredState.compose.volumes?.[name] || {};
-    const nodes = vol['x-launchpad']?.placement?.nodes || [];
+    const nodes = vol['x-tug']?.placement?.nodes || [];
     if (!nodes.length || nodes.includes(nodeName)) outVolumes[name] = vol;
   }
   if (!Object.keys(outVolumes).length) delete out.volumes;

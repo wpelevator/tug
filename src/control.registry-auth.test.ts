@@ -9,16 +9,16 @@ import type { AddressInfo } from 'node:net';
 
 async function server() {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'lp-reg-'));
-  process.env.LAUNCHPAD_DATA_DIR = dir;
-  process.env.LAUNCHPAD_OPERATOR_TOKEN = 'op-registry-token';
-  process.env.LAUNCHPAD_REGISTRY = 'registry.test';
-  process.env.LAUNCHPAD_REGISTRY_AUTH_PATH = path.join(dir, 'htpasswd');
-  delete process.env.LAUNCHPAD_REGISTRY_CONTAINER;
+  process.env.TUG_DATA_DIR = dir;
+  process.env.TUG_OPERATOR_TOKEN = 'op-registry-token';
+  process.env.TUG_REGISTRY = 'registry.test';
+  process.env.TUG_REGISTRY_AUTH_PATH = path.join(dir, 'htpasswd');
+  delete process.env.TUG_REGISTRY_CONTAINER;
   const app = await createApp();
   const srv = await new Promise<Server>(resolve => { const s = app.listen(0, () => resolve(s)); });
   return {
     base: `http://127.0.0.1:${(srv.address() as AddressInfo).port}`,
-    htpasswdPath: process.env.LAUNCHPAD_REGISTRY_AUTH_PATH,
+    htpasswdPath: process.env.TUG_REGISTRY_AUTH_PATH,
     close: () => new Promise(resolve => srv.close(resolve)),
   };
 }
@@ -49,7 +49,7 @@ test('rotating a registry token replaces the node htpasswd entry', async () => {
     await post(s.base, '/api/v1/nodes/register', { name: 'n1' });
     const before = await readHtpasswd(s.htpasswdPath);
     const rotated = await post(s.base, '/api/v1/nodes/n1/rotate-registry-token', {});
-    assert.match(rotated.registryToken, /^lpr_/);
+    assert.match(rotated.registryToken, /^tug_reg_/);
     const after = await readHtpasswd(s.htpasswdPath);
     assert.equal(after.length, 1);
     assert.notEqual(after[0], before[0]);

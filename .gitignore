@@ -1,7 +1,7 @@
 node_modules/
 data/
 registry-data/
-.launchpad.json
+.tug.json
 *.log
 .DS_Store
 plan-*.md

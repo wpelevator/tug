@@ -38,8 +38,8 @@ const makeCtx = async (h: ReturnType<typeof harness>, overrides: Partial<AgentCo
 });
 
 const compose: ComposeFile = { services: {
-  web: { image: 'nginx', 'x-launchpad': { placement: { nodes: ['n1'] } } },
-  db: { image: 'mariadb', 'x-launchpad': { placement: { nodes: ['n2'] } } }
+  web: { image: 'nginx', 'x-tug': { placement: { nodes: ['n1'] } } },
+  db: { image: 'mariadb', 'x-tug': { placement: { nodes: ['n2'] } } }
 } };
 const desired = buildDesiredState({ project: 'blog', version: 'v1', compose, registry: 'reg.test' });
 const peer = generateWgKeyPair().publicKey;
@@ -62,7 +62,7 @@ test('mesh-enabled poll reports the public key once, brings up wg0 before contai
 
   const written = await fs.readFile(path.join(ctx.stateDir, 'projects', 'blog', 'docker-compose.yml'), 'utf8');
   assert.match(written, /- db:10\.210\.0\.2/, 'db on another node resolves via extra_hosts');
-  assert.match(written, /- db\.blog\.launchpad:10\.210\.0\.2/, 'project-qualified name is injected as well');
+  assert.match(written, /- db\.blog\.tug:10\.210\.0\.2/, 'project-qualified name is injected as well');
 
   h.posts.length = 0;
   await pollOnce(ctx);
@@ -90,7 +90,7 @@ test('an ingress node runs Caddy and reports its status; losing the role removes
   const h = harness(() => current);
   const ctx = await makeCtx(h, { mesh: false });
   await pollOnce(ctx);
-  assert.ok(h.log.some(l => l.startsWith('docker create --name launchpad-caddy')), 'managed Caddy container created');
+  assert.ok(h.log.some(l => l.startsWith('docker create --name tug-caddy')), 'managed Caddy container created');
   const status = h.posts.find(p => p.route === '/agent/v1/status')!.body;
   assert.equal(status.ingress.state, 'serving', 'edge state is part of the status report');
   assert.equal(status.ingress.routes, 0);
@@ -98,7 +98,7 @@ test('an ingress node runs Caddy and reports its status; losing the role removes
   current = {};
   h.log.length = 0; h.posts.length = 0;
   await pollOnce(ctx);
-  assert.ok(h.log.includes('docker rm -f launchpad-caddy'), 'the container is removed once control stops sending ingress');
+  assert.ok(h.log.includes('docker rm -f tug-caddy'), 'the container is removed once control stops sending ingress');
   assert.equal(h.posts.find(p => p.route === '/agent/v1/status')!.body.ingress, undefined, 'no ingress status for non-ingress nodes');
 });
 

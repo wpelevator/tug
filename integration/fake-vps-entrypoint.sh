@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-: "${LAUNCHPAD_NODE_NAME:?LAUNCHPAD_NODE_NAME is required}"
-: "${LAUNCHPAD_CONTROL_URL:=http://control:8080}"
-: "${LAUNCHPAD_STATE_DIR:=/var/lib/launchpad}"
-: "${LAUNCHPAD_APPLY:=true}"
-: "${LAUNCHPAD_POLL_INTERVAL_MS:=2000}"
+: "${TUG_NODE_NAME:?TUG_NODE_NAME is required}"
+: "${TUG_CONTROL_URL:=http://control:8080}"
+: "${TUG_STATE_DIR:=/var/lib/tug}"
+: "${TUG_APPLY:=true}"
+: "${TUG_POLL_INTERVAL_MS:=2000}"
 
-echo "[$LAUNCHPAD_NODE_NAME] starting fake VPS Docker daemon"
-mkdir -p /var/lib/docker /var/run "$LAUNCHPAD_STATE_DIR"
-dockerd --host=unix:///var/run/docker.sock --storage-driver=vfs ${LAUNCHPAD_REGISTRY:+--insecure-registry "$LAUNCHPAD_REGISTRY"} >/var/log/dockerd.log 2>&1 &
+echo "[$TUG_NODE_NAME] starting fake VPS Docker daemon"
+mkdir -p /var/lib/docker /var/run "$TUG_STATE_DIR"
+dockerd --host=unix:///var/run/docker.sock --storage-driver=vfs ${TUG_REGISTRY:+--insecure-registry "$TUG_REGISTRY"} >/var/log/dockerd.log 2>&1 &
 
 for i in $(seq 1 60); do
   if docker info >/dev/null 2>&1; then
@@ -23,8 +23,8 @@ for i in $(seq 1 60); do
   sleep 1
 done
 
-echo "[$LAUNCHPAD_NODE_NAME] waiting for provisioned token"
-TOKEN_FILE="/tokens/${LAUNCHPAD_NODE_NAME}.env"
+echo "[$TUG_NODE_NAME] waiting for provisioned token"
+TOKEN_FILE="/tokens/${TUG_NODE_NAME}.env"
 for i in $(seq 1 120); do
   if [ -s "$TOKEN_FILE" ]; then
     # shellcheck disable=SC1090
@@ -34,24 +34,24 @@ for i in $(seq 1 120); do
   sleep 1
 done
 
-if [ -z "${LAUNCHPAD_AGENT_TOKEN:-}" ]; then
+if [ -z "${TUG_AGENT_TOKEN:-}" ]; then
   echo "missing token file $TOKEN_FILE" >&2
   exit 1
 fi
 
-if [ -n "${LAUNCHPAD_REGISTRY:-}" ] && [ -n "${LAUNCHPAD_REGISTRY_TOKEN:-}" ]; then
-  echo "[$LAUNCHPAD_NODE_NAME] docker login $LAUNCHPAD_REGISTRY"
+if [ -n "${TUG_REGISTRY:-}" ] && [ -n "${TUG_REGISTRY_TOKEN:-}" ]; then
+  echo "[$TUG_NODE_NAME] docker login $TUG_REGISTRY"
   for i in $(seq 1 10); do
-    if echo "$LAUNCHPAD_REGISTRY_TOKEN" | docker login "$LAUNCHPAD_REGISTRY" --username "$LAUNCHPAD_NODE_NAME" --password-stdin; then
+    if echo "$TUG_REGISTRY_TOKEN" | docker login "$TUG_REGISTRY" --username "$TUG_NODE_NAME" --password-stdin; then
       break
     fi
     if [ "$i" = "10" ]; then
-      echo "docker login to $LAUNCHPAD_REGISTRY failed" >&2
+      echo "docker login to $TUG_REGISTRY failed" >&2
       exit 1
     fi
     sleep 2
   done
 fi
 
-export LAUNCHPAD_CONTROL_URL LAUNCHPAD_NODE_NAME LAUNCHPAD_AGENT_TOKEN LAUNCHPAD_STATE_DIR LAUNCHPAD_APPLY LAUNCHPAD_POLL_INTERVAL_MS
+export TUG_CONTROL_URL TUG_NODE_NAME TUG_AGENT_TOKEN TUG_STATE_DIR TUG_APPLY TUG_POLL_INTERVAL_MS
 exec node /app/src/main.ts agent

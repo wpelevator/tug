@@ -1,7 +1,7 @@
 services:
   registry:
     build: ./services/registry
-    container_name: launchpad-registry
+    container_name: tug-registry
     ports:
       - "5000:5000"
     volumes:
@@ -13,20 +13,20 @@ services:
     command: ["control"]
     environment:
       PORT: 8080
-      LAUNCHPAD_DATA_DIR: /data
-      LAUNCHPAD_REGISTRY: localhost:5000
-      LAUNCHPAD_PUSH: "false"
-      LAUNCHPAD_REGISTRY_AUTH_PATH: /registry-auth/htpasswd
-      LAUNCHPAD_REGISTRY_CONTAINER: launchpad-registry
+      TUG_DATA_DIR: /data
+      TUG_REGISTRY: localhost:5000
+      TUG_PUSH: "false"
+      TUG_REGISTRY_AUTH_PATH: /registry-auth/htpasswd
+      TUG_REGISTRY_CONTAINER: tug-registry
       # Set both to terminate TLS directly in control.ts instead of relying on Caddy/ACME
       # (e.g. private networks without a public domain). Use a self-signed cert and point
-      # agents at it with LAUNCHPAD_CONTROL_URL=https://... plus NODE_EXTRA_CA_CERTS=<ca.pem>.
-      # LAUNCHPAD_TLS_CERT_FILE: /data/tls/cert.pem
-      # LAUNCHPAD_TLS_KEY_FILE: /data/tls/key.pem
+      # agents at it with TUG_CONTROL_URL=https://... plus NODE_EXTRA_CA_CERTS=<ca.pem>.
+      # TUG_TLS_CERT_FILE: /data/tls/cert.pem
+      # TUG_TLS_KEY_FILE: /data/tls/key.pem
     ports:
       - "8080:8080"
     volumes:
-      - launchpad-data:/data
+      - tug-data:/data
       - registry-auth:/registry-auth
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
@@ -37,20 +37,20 @@ services:
     command: ["agent"]
     profiles: ["agent"]
     environment:
-      LAUNCHPAD_CONTROL_URL: http://control:8080
-      LAUNCHPAD_NODE_NAME: dev-node
-      LAUNCHPAD_AGENT_TOKEN: ${LAUNCHPAD_AGENT_TOKEN:-}
-      LAUNCHPAD_STATE_DIR: /var/lib/launchpad
-      LAUNCHPAD_APPLY: "false"
-      LAUNCHPAD_POLL_INTERVAL_MS: 5000
+      TUG_CONTROL_URL: http://control:8080
+      TUG_NODE_NAME: dev-node
+      TUG_AGENT_TOKEN: ${TUG_AGENT_TOKEN:-}
+      TUG_STATE_DIR: /var/lib/tug
+      TUG_APPLY: "false"
+      TUG_POLL_INTERVAL_MS: 5000
     volumes:
-      - agent-state:/var/lib/launchpad
+      - agent-state:/var/lib/tug
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       - control
 
 volumes:
-  launchpad-data:
+  tug-data:
   registry-data:
   registry-auth:
   agent-state:

@@ -10,8 +10,8 @@ import { json } from '../test/helpers.ts';
 
 async function makeServer() {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'lp-sec-scope-'));
-  process.env.LAUNCHPAD_DATA_DIR = dir;
-  process.env.LAUNCHPAD_OPERATOR_TOKEN = 'op-scope-token';
+  process.env.TUG_DATA_DIR = dir;
+  process.env.TUG_OPERATOR_TOKEN = 'op-scope-token';
   const app = await createApp();
   const srv = await new Promise<Server>(resolve => { const s = app.listen(0, () => resolve(s)); });
   return { base: `http://127.0.0.1:${(srv.address() as AddressInfo).port}`, close: () => new Promise(resolve => srv.close(resolve)) };
@@ -30,8 +30,8 @@ test('agent secret fetch is scoped to requested assigned services', async () => 
     await post(s.base, '/api/v1/secrets', { project: 'site', name: 'DB_PASSWORD', value: 'db' });
     await post(s.base, '/api/v1/secrets', { project: 'site', name: 'UNUSED', value: 'unused' });
     const compose = { services: {
-      web: { image: 'nginx', environment: { WEB_SECRET: '${WEB_SECRET}', STATIC: 'literal' }, 'x-launchpad': { placement: { nodes: ['n1'] } } },
-      db: { image: 'postgres', environment: { DB_PASSWORD: '${DB_PASSWORD}' }, 'x-launchpad': { placement: { nodes: ['n2'] } } }
+      web: { image: 'nginx', environment: { WEB_SECRET: '${WEB_SECRET}', STATIC: 'literal' }, 'x-tug': { placement: { nodes: ['n1'] } } },
+      db: { image: 'postgres', environment: { DB_PASSWORD: '${DB_PASSWORD}' }, 'x-tug': { placement: { nodes: ['n2'] } } }
     } };
     await post(s.base, '/api/v1/deployments', { project: 'site', version: 'v1', compose });
     const res = await fetch(`${s.base}/agent/v1/secrets?project=site&services=web`, { headers: { Authorization: `Bearer ${node.agentToken}` } });

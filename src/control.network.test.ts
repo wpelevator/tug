@@ -9,12 +9,12 @@ import { createApp } from './control.ts';
 import { generateWgKeyPair } from './mesh.ts';
 import { json } from '../test/helpers.ts';
 
-const NETWORK_ENV = ['LAUNCHPAD_MESH', 'LAUNCHPAD_MESH_CIDR', 'LAUNCHPAD_SERVICE_DNS', 'LAUNCHPAD_WG_PORT', 'LAUNCHPAD_ACME_EMAIL'];
+const NETWORK_ENV = ['TUG_MESH', 'TUG_MESH_CIDR', 'TUG_SERVICE_DNS', 'TUG_WG_PORT', 'TUG_ACME_EMAIL'];
 
 async function server(env: Record<string, string> = {}) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'lp-net-'));
   for (const key of NETWORK_ENV) delete process.env[key];
-  Object.assign(process.env, { LAUNCHPAD_DATA_DIR: dir, LAUNCHPAD_OPERATOR_TOKEN: 'op-net-token', LAUNCHPAD_REGISTRY: 'registry.test', LAUNCHPAD_PUSH: 'false' }, env);
+  Object.assign(process.env, { TUG_DATA_DIR: dir, TUG_OPERATOR_TOKEN: 'op-net-token', TUG_REGISTRY: 'registry.test', TUG_PUSH: 'false' }, env);
   const app = await createApp();
   const srv = await new Promise<Server>(resolve => { const s = app.listen(0, () => resolve(s)); });
   const base = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`;
@@ -43,7 +43,7 @@ test('with every networking layer off, the work response and node info are uncha
 });
 
 test('mesh allocates stable overlay IPs and each node receives every other node as a peer', async () => {
-  const s = await server({ LAUNCHPAD_MESH: 'true', LAUNCHPAD_WG_PORT: '51999' });
+  const s = await server({ TUG_MESH: 'true', TUG_WG_PORT: '51999' });
   try {
     const a = generateWgKeyPair(); const b = generateWgKeyPair(); const c = generateWgKeyPair();
     const regA = await s.register('a', { publicAddress: '203.0.113.1', wgPublicKey: a.publicKey });
@@ -74,7 +74,7 @@ test('mesh allocates stable overlay IPs and each node receives every other node 
 });
 
 test('enroll accepts the agent public key and rejects malformed ones', async () => {
-  const s = await server({ LAUNCHPAD_MESH: 'true' });
+  const s = await server({ TUG_MESH: 'true' });
   try {
     const minted = await json(await s.post('/api/v1/nodes/enroll-token', { uses: 2 }));
     const bad = await fetch(`${s.base}/agent/v1/enroll`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enrollToken: minted.enrollToken, name: 'x', wgPublicKey: 'nope' }) });
@@ -90,7 +90,7 @@ test('enroll accepts the agent public key and rejects malformed ones', async () 
 });
 
 test('rotate-wg-key queues a command for the node and a new key replaces the old one in peers', async () => {
-  const s = await server({ LAUNCHPAD_MESH: 'true' });
+  const s = await server({ TUG_MESH: 'true' });
   try {
     const k1 = generateWgKeyPair(); const k2 = generateWgKeyPair();
     const a = await s.register('a', { wgPublicKey: k1.publicKey });
@@ -108,13 +108,13 @@ test('rotate-wg-key queues a command for the node and a new key replaces the old
 
 const stack = {
   services: {
-    web: { image: 'nginx', ports: ['8080:80'], 'x-launchpad': { placement: { nodes: ['app'] }, ingress: { host: 'app.example.com', port: 80 } } },
-    db: { image: 'mariadb', ports: ['3306:3306'], 'x-launchpad': { placement: { nodes: ['dbn'] } } }
+    web: { image: 'nginx', ports: ['8080:80'], 'x-tug': { placement: { nodes: ['app'] }, ingress: { host: 'app.example.com', port: 80 } } },
+    db: { image: 'mariadb', ports: ['3306:3306'], 'x-tug': { placement: { nodes: ['dbn'] } } }
   }
 };
 
 test('service endpoints are published per project only once the node reports the service serving', async () => {
-  const s = await server({ LAUNCHPAD_MESH: 'true' });
+  const s = await server({ TUG_MESH: 'true' });
   try {
     const app = await s.register('app', { wgPublicKey: generateWgKeyPair().publicKey });
     const dbn = await s.register('dbn', { wgPublicKey: generateWgKeyPair().publicKey });
@@ -131,7 +131,7 @@ test('service endpoints are published per project only once the node reports the
 });
 
 test('only ingress nodes get an edge config, built from all projects and serving upstreams', async () => {
-  const s = await server({ LAUNCHPAD_MESH: 'true', LAUNCHPAD_ACME_EMAIL: 'ops@example.com' });
+  const s = await server({ TUG_MESH: 'true', TUG_ACME_EMAIL: 'ops@example.com' });
   try {
     const edge = await s.register('edge', { wgPublicKey: generateWgKeyPair().publicKey });
     const app = await s.register('app', { wgPublicKey: generateWgKeyPair().publicKey });
@@ -179,10 +179,10 @@ test('deploy rejects invalid ingress annotations and custom TLS without its secr
   const s = await server();
   try {
     const app = await s.register('app', { address: '192.168.1.5' });
-    const bad = await s.post('/api/v1/deployments', { project: 'blog', version: 'v1', compose: { services: { web: { image: 'nginx', 'x-launchpad': { ingress: { host: 'nope', port: 80 } } } } } });
+    const bad = await s.post('/api/v1/deployments', { project: 'blog', version: 'v1', compose: { services: { web: { image: 'nginx', 'x-tug': { ingress: { host: 'nope', port: 80 } } } } } });
     assert.equal(bad.status, 400);
     assert.match((await json(bad)).error, /ingress\.host must be a fully qualified hostname/);
-    const custom = { services: { web: { image: 'nginx', ports: ['8080:80'], 'x-launchpad': { ingress: { host: 'a.example.com', port: 80, tls: 'custom', cert: 'C', key: 'K' } } } } };
+    const custom = { services: { web: { image: 'nginx', ports: ['8080:80'], 'x-tug': { ingress: { host: 'a.example.com', port: 80, tls: 'custom', cert: 'C', key: 'K' } } } } };
     const missing = await s.post('/api/v1/deployments', { project: 'blog', version: 'v1', compose: custom });
     assert.equal(missing.status, 400);
     assert.match((await json(missing)).error, /custom TLS secret C not found/);

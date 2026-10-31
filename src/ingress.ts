@@ -11,7 +11,7 @@ import type {
 } from './protocol.ts';
 import type { DockerRunner } from './runners.ts';
 
-export const CADDY_CONTAINER = 'launchpad-caddy';
+export const CADDY_CONTAINER = 'tug-caddy';
 export const DEFAULT_CADDY_IMAGE = 'caddy:2-alpine';
 const CADDY_ETC = '/etc/caddy';
 
@@ -71,7 +71,7 @@ export function buildIngressWork({ states, endpoints, node, secrets, acmeEmail }
   const tagged: { project: string; service: string; ingress: IngressSpec; port: number | null }[] = [];
   for (const state of states) {
     for (const [service, svc] of Object.entries(state.compose.services || {})) {
-      const ingress = svc['x-launchpad']?.ingress;
+      const ingress = svc['x-tug']?.ingress;
       if (ingress) tagged.push({ project: state.project, service, ingress, port: publishedPort(svc, ingress.port) });
     }
   }
@@ -151,7 +151,7 @@ export async function reconcileIngress(ctx: IngressContext, work: IngressWork): 
     if (running === null) {
       await ctx.docker([
         'create', '--name', CADDY_CONTAINER, '--restart', 'unless-stopped', '--network', 'host',
-        '-v', 'launchpad-caddy-data:/data', '-v', 'launchpad-caddy-config:/config', '-v', `launchpad-caddy-etc:${CADDY_ETC}`,
+        '-v', 'tug-caddy-data:/data', '-v', 'tug-caddy-config:/config', '-v', `tug-caddy-etc:${CADDY_ETC}`,
         ctx.caddyImage || DEFAULT_CADDY_IMAGE
       ]);
       await ctx.docker(['cp', `${stage}/.`, `${CADDY_CONTAINER}:${CADDY_ETC}/`]);

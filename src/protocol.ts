@@ -18,7 +18,7 @@ export interface HealthCheck {
 
 export type IngressTls = 'auto' | 'custom' | 'off';
 
-/** `x-launchpad.ingress`: publish a service on a hostname through the managed Caddy edge. */
+/** `x-tug.ingress`: publish a service on a hostname through the managed Caddy edge. */
 export interface IngressSpec {
   host: string;
   /** Container port (or the host port) of the service; must be published in the service's `ports`. */
@@ -30,10 +30,10 @@ export interface IngressSpec {
   key?: string;
 }
 
-/** The `x-launchpad` extension on a Compose service. */
+/** The `x-tug` extension on a Compose service. */
 export interface ServiceExtension { placement?: Placement; replicas?: number; health?: HealthCheck; ingress?: IngressSpec }
 
-/** The `x-launchpad` extension on a top-level Compose volume. */
+/** The `x-tug` extension on a top-level Compose volume. */
 export interface VolumeExtension {
   type?: string;
   driver?: string;
@@ -54,11 +54,11 @@ export interface ComposeService {
   deploy?: unknown;
   ports?: (string | number | { target?: number; published?: number | string; [key: string]: unknown })[];
   extra_hosts?: string[] | Record<string, string>;
-  'x-launchpad'?: ServiceExtension;
+  'x-tug'?: ServiceExtension;
   [key: string]: unknown;
 }
 
-export interface ComposeVolume { 'x-launchpad'?: VolumeExtension; [key: string]: unknown }
+export interface ComposeVolume { 'x-tug'?: VolumeExtension; [key: string]: unknown }
 
 export interface ComposeFile {
   services: Record<string, ComposeService>;
@@ -279,7 +279,7 @@ export interface EnrollTokenResponse {
   registry: string;
 }
 
-/** The base64url-encoded JSON payload of LAUNCHPAD_JOIN_KEY. */
+/** The base64url-encoded JSON payload of TUG_JOIN_KEY. */
 export interface JoinKey {
   v: number;
   controlUrl?: string;

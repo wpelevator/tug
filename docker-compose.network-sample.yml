@@ -5,7 +5,7 @@ services:
     image: nginx:1.27-alpine
     ports:
       - "8080:80"
-    x-launchpad:
+    x-tug:
       placement:
         nodes: [vps-a]
       health:
@@ -20,6 +20,6 @@ services:
   client:
     image: busybox:1.36
     command: ["sh", "-c", "while true; do sleep 30; done"]
-    x-launchpad:
+    x-tug:
       placement:
         nodes: [vps-b]

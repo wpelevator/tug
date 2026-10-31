@@ -1,7 +1,7 @@
 set -euo pipefail
-mkdir -p /opt/launchpad-control /var/lib/launchpad-control
-cat > /opt/launchpad-control/docker-compose.yml <<'YAML'
+mkdir -p /opt/tug-control /var/lib/tug-control
+cat > /opt/tug-control/docker-compose.yml <<'YAML'
 {{COMPOSE}}YAML
-docker compose -f /opt/launchpad-control/docker-compose.yml up -d
-install -m 0600 /dev/null /var/lib/launchpad-control/operator.token
-printf %s {{OPERATOR_TOKEN_SH}} > /var/lib/launchpad-control/operator.token
+docker compose -f /opt/tug-control/docker-compose.yml up -d
+install -m 0600 /dev/null /var/lib/tug-control/operator.token
+printf %s {{OPERATOR_TOKEN_SH}} > /var/lib/tug-control/operator.token

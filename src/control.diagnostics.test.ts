@@ -10,8 +10,8 @@ import { json } from '../test/helpers.ts';
 
 async function makeServer() {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'lp-diag-'));
-  process.env.LAUNCHPAD_DATA_DIR = dir;
-  process.env.LAUNCHPAD_OPERATOR_TOKEN = 'op-diag-token';
+  process.env.TUG_DATA_DIR = dir;
+  process.env.TUG_OPERATOR_TOKEN = 'op-diag-token';
   const app = await createApp();
   const srv = await new Promise<Server>(resolve => { const s = app.listen(0, () => resolve(s)); });
   return { base: `http://127.0.0.1:${(srv.address() as AddressInfo).port}`, close: () => new Promise(resolve => srv.close(resolve)) };

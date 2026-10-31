@@ -42,7 +42,7 @@ async function makeCtx(overrides: Partial<AgentContext> = {}): Promise<AgentCont
   return { docker: fakeDocker().docker, http: fakeControl(() => ({ secrets: {}, versions: {} })).http, nodeName: 'n1', stateDir, apply: true, controlUrl: 'http://control.test', token: 'tok', ...overrides };
 }
 
-const place = { 'x-launchpad': { placement: { nodes: ['n1'] } } };
+const place = { 'x-tug': { placement: { nodes: ['n1'] } } };
 function desired(compose: ComposeFile, version = 'v1', project = 'proj') {
   return buildDesiredState({ project, version, compose, registry: 'reg.test', defaultNode: 'n1' });
 }
@@ -139,7 +139,7 @@ test('reconcile sends the bearer token to control and fails without one', async 
   const ctx = await makeCtx({ http, apply: false });
   await reconcile(desired(twoServices), ctx);
   assert.ok(seen.length > 0 && seen.every(h => h === 'Bearer tok'));
-  await assert.rejects(reconcile(desired(twoServices, 'v2'), { ...ctx, token: undefined }), /LAUNCHPAD_AGENT_TOKEN required/);
+  await assert.rejects(reconcile(desired(twoServices, 'v2'), { ...ctx, token: undefined }), /TUG_AGENT_TOKEN required/);
 });
 
 const fastRetry = { interval: '1ms', retries: 3 } as const;
@@ -214,7 +214,7 @@ test('health check is skipped without apply or without a health spec', async () 
 
 test('reconcile fails the rollout when a service health check never passes', async () => {
   const d = fakeDocker(args => args[0] === 'inspect' ? inspectJson({ Running: false }) : 'cid1\n');
-  const compose: ComposeFile = { services: { web: { image: 'nginx', 'x-launchpad': { placement: { nodes: ['n1'] }, health: { type: 'docker', interval: '1ms', retries: 2 } } } } };
+  const compose: ComposeFile = { services: { web: { image: 'nginx', 'x-tug': { placement: { nodes: ['n1'] }, health: { type: 'docker', interval: '1ms', retries: 2 } } } } };
   const ctx = await makeCtx({ docker: d.docker });
   await assert.rejects(reconcile(desired(compose), ctx), /not running/);
 });
@@ -271,7 +271,7 @@ test('executeCommand tolerates a missing volume, reports failing diagnostics, re
 test('pollOnce reconciles desired states, runs commands and posts one status report', async () => {
   const posted: unknown[] = [];
   const d = fakeDocker();
-  const work = { serverTime: 't', nodeId: 'n1', desiredStates: [desired(twoServices), desired({ services: { bad: { image: 'x', environment: {}, 'x-launchpad': { placement: { nodes: ['n1'] }, health: { type: 'docker', interval: '1ms', retries: 1 } } } } }, 'v1', 'bad-proj')], commands: [{ id: 'c1', type: 'service.restart', payload_json: JSON.stringify({ project: 'proj', service: 'web' }) }] };
+  const work = { serverTime: 't', nodeId: 'n1', desiredStates: [desired(twoServices), desired({ services: { bad: { image: 'x', environment: {}, 'x-tug': { placement: { nodes: ['n1'] }, health: { type: 'docker', interval: '1ms', retries: 1 } } } } }, 'v1', 'bad-proj')], commands: [{ id: 'c1', type: 'service.restart', payload_json: JSON.stringify({ project: 'proj', service: 'web' }) }] };
   const http = (async (url: string | URL | Request, init?: RequestInit) => {
     const u = String(url);
     if (u.endsWith('/agent/v1/work')) return Response.json(work);

@@ -11,5 +11,5 @@ http:
     X-Content-Type-Options: [nosniff]
 auth:
   htpasswd:
-    realm: launchpad-registry
+    realm: tug-registry
     path: /auth/htpasswd

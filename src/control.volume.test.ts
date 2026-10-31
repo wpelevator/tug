@@ -10,8 +10,8 @@ import { json } from '../test/helpers.ts';
 
 async function makeServer() {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'lp-vol-'));
-  process.env.LAUNCHPAD_DATA_DIR = dir;
-  process.env.LAUNCHPAD_OPERATOR_TOKEN = 'op-volume-token';
+  process.env.TUG_DATA_DIR = dir;
+  process.env.TUG_OPERATOR_TOKEN = 'op-volume-token';
   const app = await createApp();
   const srv = await new Promise<Server>(resolve => { const s = app.listen(0, () => resolve(s)); });
   return { base: `http://127.0.0.1:${(srv.address() as AddressInfo).port}`, close: () => new Promise(resolve => srv.close(resolve)) };
@@ -26,8 +26,8 @@ test('volume metadata is protected and delete-data queues deletion after unrefer
   const s = await makeServer();
   try {
     const registered = await post(s.base, '/api/v1/nodes/register', { name: 'n1' });
-    const withVolume = { services: { app: { image: 'busybox', volumes: ['data:/data'], 'x-launchpad': { placement: { nodes: ['n1'] } } } }, volumes: { data: { 'x-launchpad': { type: 'local', persistent: true, placement: { nodes: ['n1'] } } } } };
-    const noVolume = { services: { app: { image: 'busybox', 'x-launchpad': { placement: { nodes: ['n1'] } } } } };
+    const withVolume = { services: { app: { image: 'busybox', volumes: ['data:/data'], 'x-tug': { placement: { nodes: ['n1'] } } } }, volumes: { data: { 'x-tug': { type: 'local', persistent: true, placement: { nodes: ['n1'] } } } } };
+    const noVolume = { services: { app: { image: 'busybox', 'x-tug': { placement: { nodes: ['n1'] } } } } };
     await post(s.base, '/api/v1/deployments', { project: 'site', version: 'v1', compose: withVolume });
     let res = await fetch(`${s.base}/agent/v1/status`, { method: 'POST', headers: { Authorization: `Bearer ${registered.agentToken}`, 'content-type': 'application/json' }, body: JSON.stringify({ projects: [{ project: 'site', observedVersion: 'v1', health: 'serving' }] }) });
     assert.equal(res.status, 200);

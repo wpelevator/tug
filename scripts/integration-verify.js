@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-const control = process.env.LAUNCHPAD_CONTROL_URL || 'http://localhost:8080';
-const token = process.env.LAUNCHPAD_TOKEN || 'integration-token';
-const project = process.env.LAUNCHPAD_PROJECT || 'sample';
-const nodes = (process.env.LAUNCHPAD_NODES || 'vps-a,vps-b,vps-c').split(',').map(s => s.trim()).filter(Boolean);
-const timeoutMs = Number(process.env.LAUNCHPAD_VERIFY_TIMEOUT_MS || 120000);
+const control = process.env.TUG_CONTROL_URL || 'http://localhost:8080';
+const token = process.env.TUG_TOKEN || 'integration-token';
+const project = process.env.TUG_PROJECT || 'sample';
+const nodes = (process.env.TUG_NODES || 'vps-a,vps-b,vps-c').split(',').map(s => s.trim()).filter(Boolean);
+const timeoutMs = Number(process.env.TUG_VERIFY_TIMEOUT_MS || 120000);
 
 async function status() {
   const res = await fetch(`${control}/api/v1/status`, { headers: { authorization: `Bearer ${token}` } });

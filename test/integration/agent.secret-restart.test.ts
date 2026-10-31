@@ -38,17 +38,17 @@ test('changing one secret only recreates the service that references it', { time
   await new Promise<void>(resolve => server.listen(0, resolve));
   const port = (server.address() as AddressInfo).port;
 
-  process.env.LAUNCHPAD_CONTROL_URL = `http://127.0.0.1:${port}`;
-  process.env.LAUNCHPAD_AGENT_TOKEN = 'test-token';
-  process.env.LAUNCHPAD_NODE_NAME = 'n1';
-  process.env.LAUNCHPAD_STATE_DIR = path.join(dir);
-  process.env.LAUNCHPAD_APPLY = 'true';
+  process.env.TUG_CONTROL_URL = `http://127.0.0.1:${port}`;
+  process.env.TUG_AGENT_TOKEN = 'test-token';
+  process.env.TUG_NODE_NAME = 'n1';
+  process.env.TUG_STATE_DIR = path.join(dir);
+  process.env.TUG_APPLY = 'true';
   const { reconcile } = await import('../../src/agent.ts');
 
   const compose = {
     services: {
-      svc_with_secret: { image: 'busybox:1.36', command: ['sh', '-c', 'sleep 600'], environment: { SECRET_A: '${SECRET_A}' }, 'x-launchpad': { placement: { nodes: ['n1'] } } },
-      svc_without_secret: { image: 'busybox:1.36', command: ['sh', '-c', 'sleep 600'], environment: { STATIC: 'unrelated' }, 'x-launchpad': { placement: { nodes: ['n1'] } } },
+      svc_with_secret: { image: 'busybox:1.36', command: ['sh', '-c', 'sleep 600'], environment: { SECRET_A: '${SECRET_A}' }, 'x-tug': { placement: { nodes: ['n1'] } } },
+      svc_without_secret: { image: 'busybox:1.36', command: ['sh', '-c', 'sleep 600'], environment: { STATIC: 'unrelated' }, 'x-tug': { placement: { nodes: ['n1'] } } },
     },
   };
   const desired = buildDesiredState({ project: 'lpsecrettest', version: 'v1', compose, registry: 'unused', defaultNode: 'n1' });

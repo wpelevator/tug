@@ -1,10 +1,10 @@
 {
-  "name": "pad-launch",
+  "name": "tug",
   "private": true,
   "type": "module",
   "bin": {
-    "launchpad": "./dist/cli.js",
-    "launchpad-node": "./dist/main.js"
+    "tug": "./dist/cli.js",
+    "tug-node": "./dist/main.js"
   },
   "scripts": {
     "start:control": "node src/main.ts control",

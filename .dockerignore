@@ -2,6 +2,6 @@
 node_modules
 data
 registry-data
-.launchpad.json
+.tug.json
 *.log
 dist

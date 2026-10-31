@@ -28,12 +28,12 @@ interface InstallOpts { transferImage: boolean; image: string }
 const MESH_RUN_FLAGS = '--network host --cap-add NET_ADMIN';
 
 const program = new Command();
-program.name('launchpad').description('Portable VPS Launch Pad').version('0.1.0');
-const cfgPath = () => process.env.LAUNCHPAD_CONFIG || path.join(process.cwd(), '.launchpad.json');
+program.name('tug').description('Portable VPS deployments with Docker Compose').version('0.1.0');
+const cfgPath = () => process.env.TUG_CONFIG || path.join(process.cwd(), '.tug.json');
 async function loadCfg(): Promise<Config> { try { return JSON.parse(await fs.readFile(cfgPath(), 'utf8')); } catch { return {}; } }
 async function saveCfg(c: Config): Promise<void> { await fs.writeFile(cfgPath(), JSON.stringify(c, null, 2)); }
 async function request<T = any>(method: string, route: string, body?: unknown, multipart = false): Promise<T> { // eslint-disable-line @typescript-eslint/no-explicit-any
-  const c = await loadCfg(); const base = process.env.LAUNCHPAD_CONTROL_URL || c.controlUrl || 'http://localhost:8080'; const tok = process.env.LAUNCHPAD_TOKEN || c.operatorToken;
+  const c = await loadCfg(); const base = process.env.TUG_CONTROL_URL || c.controlUrl || 'http://localhost:8080'; const tok = process.env.TUG_TOKEN || c.operatorToken;
   const headers: Record<string, string> = tok ? { Authorization: `Bearer ${tok}` } : {};
   if (!multipart) headers['content-type'] = 'application/json';
   const res = await fetch(`${base}${route}`, { method, headers, body: multipart ? body as FormData : body ? JSON.stringify(body) : undefined });
@@ -58,7 +58,7 @@ function preflightRemote(target: string, { controlUrl, ports = [], udpPorts = []
   const checks: [string, string, string][] = [
     ['docker.version', 'docker version >/dev/null', 'Install Docker Engine and ensure the SSH user can access it.'],
     ['docker.compose.version', 'docker compose version >/dev/null', 'Install Docker Compose v2.'],
-    ['paths', 'mkdir -p /opt/launchpad-preflight /var/lib/launchpad-preflight /etc/launchpad && test -w /opt/launchpad-preflight && test -w /var/lib/launchpad-preflight && test -w /etc/launchpad', 'Ensure /opt, /var/lib, and /etc/launchpad are writable by the installer.'],
+    ['paths', 'mkdir -p /opt/tug-preflight /var/lib/tug-preflight /etc/tug && test -w /opt/tug-preflight && test -w /var/lib/tug-preflight && test -w /etc/tug', 'Ensure /opt, /var/lib, and /etc/tug are writable by the installer.'],
     ['disk.space', `[ "$(df -Pm /var/lib | tail -1 | awk '{print $4}')" -ge ${Number(minDiskMb)} ]`, `Free at least ${minDiskMb}MB on the filesystem backing /var/lib.`]
   ];
   for (const port of ports) {
@@ -68,7 +68,7 @@ function preflightRemote(target: string, { controlUrl, ports = [], udpPorts = []
     checks.push(['wireguard.kernel', 'ip link add lpwgtest type wireguard && ip link del lpwgtest || modprobe -n wireguard 2>/dev/null', 'Install WireGuard (kernel 5.6+ has it built in; older kernels need the wireguard-dkms package) and ensure iproute2 is present.']);
   }
   for (const port of udpPorts) {
-    checks.push([`udp.${port}.free`, `! ( command -v ss >/dev/null 2>&1 && ss -lun | awk '{print $4}' | grep -qE "[.:]${port}$" )`, `UDP port ${port} is already in use on the target host; the WireGuard mesh needs it (set LAUNCHPAD_WG_PORT on control and open it between nodes).`]);
+    checks.push([`udp.${port}.free`, `! ( command -v ss >/dev/null 2>&1 && ss -lun | awk '{print $4}' | grep -qE "[.:]${port}$" )`, `UDP port ${port} is already in use on the target host; the WireGuard mesh needs it (set TUG_WG_PORT on control and open it between nodes).`]);
   }
   if (controlUrl) checks.push(['control.reachable', `curl -fsS ${sh(controlUrl)}/healthz >/dev/null`, 'Verify DNS/firewall/TLS for the control URL from the node.']);
   const script = `set -e
@@ -76,12 +76,12 @@ ${checks.map(([name, cmd, fix]) => `echo "preflight: ${name}"; (${cmd}) || { ech
 `;
   runLocal('ssh', [target, script]);
 }
-async function transferLaunchpadImage(target: string, imageTag: string): Promise<void> {
-  const archive = path.join(os.tmpdir(), `launchpad-image-${Date.now()}.tar.gz`);
+async function transferTugImage(target: string, imageTag: string): Promise<void> {
+  const archive = path.join(os.tmpdir(), `tug-image-${Date.now()}.tar.gz`);
   runLocal('docker', ['build', '-t', imageTag, '.']);
   runLocal('bash', ['-lc', `docker save ${sh(imageTag)} | gzip > ${sh(archive)}`]);
-  runLocal('scp', [archive, `${target}:/tmp/launchpad-image.tar.gz`]);
-  runLocal('ssh', [target, 'gzip -dc /tmp/launchpad-image.tar.gz | docker load && rm -f /tmp/launchpad-image.tar.gz']);
+  runLocal('scp', [archive, `${target}:/tmp/tug-image.tar.gz`]);
+  runLocal('ssh', [target, 'gzip -dc /tmp/tug-image.tar.gz | docker load && rm -f /tmp/tug-image.tar.gz']);
   await fs.rm(archive, { force: true });
 }
 async function waitForDeployment(deploymentId: string, timeoutSeconds = 300): Promise<DeploymentRecord> {
@@ -98,7 +98,7 @@ async function waitForDeployment(deploymentId: string, timeoutSeconds = 300): Pr
 }
 
 program.command('init').option('--control-url <url>', 'control API URL', 'http://localhost:8080').option('--token <token>', 'operator token').option('--project <name>', 'project name', 'site').action(async (o: { controlUrl: string; token?: string; project: string }) => {
-  const operatorToken = o.token || process.env.LAUNCHPAD_TOKEN || token('lpo');
+  const operatorToken = o.token || process.env.TUG_TOKEN || token('tug_op');
   await saveCfg({ controlUrl: o.controlUrl, operatorToken, project: o.project });
   console.log(`wrote ${cfgPath()}`);
 });
@@ -128,17 +128,17 @@ program.command('control:token').description('print local dev operator token if 
 const control = program.command('control');
 control.command('install <sshTarget>')
   .description('install the control plane on a Docker-capable host over SSH; front it with your own reverse proxy/TLS if exposing it publicly')
-  .option('--image <tag>', 'local/remote image tag', 'launchpad:local')
+  .option('--image <tag>', 'local/remote image tag', 'tug:local')
   .option('--token <token>', 'operator token')
   .option('--port <port>', 'published API port', '8080')
-  .requiredOption('--registry <host>', 'registry host used in desired images; bring your own registry, Launchpad does not provision one')
-  .option('--registry-auth-path <path>', 'container path to an htpasswd file launchpad-control should manage credentials in, if your registry uses one')
+  .requiredOption('--registry <host>', 'registry host used in desired images; bring your own registry, Tug does not provision one')
+  .option('--registry-auth-path <path>', 'container path to an htpasswd file tug-control should manage credentials in, if your registry uses one')
   .option('--registry-container <name>', 'docker container name to restart when a node\'s registry credentials change, if your registry uses an htpasswd file')
   .option('--no-transfer-image', 'skip docker build/save/scp/load')
   .action(async (sshTarget: string, o: InstallOpts & { token?: string; port: string; registry: string; registryAuthPath?: string; registryContainer?: string }) => {
-    const operatorToken = o.token || process.env.LAUNCHPAD_TOKEN || token('lpo');
+    const operatorToken = o.token || process.env.TUG_TOKEN || token('tug_op');
     preflightRemote(sshTarget, { ports: [Number(o.port)], minDiskMb: 2048 });
-    if (o.transferImage) await transferLaunchpadImage(sshTarget, o.image);
+    if (o.transferImage) await transferTugImage(sshTarget, o.image);
     const registryHost = o.registry;
     const compose = await loadTemplate(templatesDir, 'control-compose.yml', {
       IMAGE: o.image, OPERATOR_TOKEN: operatorToken, REGISTRY_HOST: registryHost, PORT: o.port,
@@ -161,20 +161,20 @@ node.command('install <sshTarget>')
   .option('--control-url <url>', 'URL agents use to reach control')
   .option('--registry <host>', 'registry host for docker login')
   .option('--http-only-dev', 'allow plaintext HTTP control URL for local/private development')
-  .option('--mesh', 'join the WireGuard mesh (agent runs with host networking and NET_ADMIN; control needs LAUNCHPAD_MESH=true)')
+  .option('--mesh', 'join the WireGuard mesh (agent runs with host networking and NET_ADMIN; control needs TUG_MESH=true)')
   .option('--wg-port <port>', 'WireGuard UDP port checked by preflight', '51820')
-  .option('--image <tag>', 'local/remote image tag', 'launchpad:local')
+  .option('--image <tag>', 'local/remote image tag', 'tug:local')
   .option('--no-transfer-image', 'skip docker build/save/scp/load')
   .action(async (sshTarget: string, o: InstallOpts & { name: string; address?: string; publicAddress?: string; controlUrl?: string; registry?: string; httpOnlyDev?: boolean; mesh?: boolean; wgPort: string }) => {
     const cfg = await loadCfg();
-    const controlUrl = o.controlUrl || cfg.controlUrl || process.env.LAUNCHPAD_CONTROL_URL || 'http://localhost:8080';
+    const controlUrl = o.controlUrl || cfg.controlUrl || process.env.TUG_CONTROL_URL || 'http://localhost:8080';
     assertHttps(controlUrl, o.httpOnlyDev);
     preflightRemote(sshTarget, { controlUrl, mesh: o.mesh, udpPorts: o.mesh ? [Number(o.wgPort)] : [] });
     const registered = await request<RegisterResponse>('POST', '/api/v1/nodes/register', { name: o.name, address: o.address, publicAddress: o.publicAddress });
-    if (o.transferImage) await transferLaunchpadImage(sshTarget, o.image);
+    if (o.transferImage) await transferTugImage(sshTarget, o.image);
     const env = await loadTemplate(templatesDir, 'agent.env', {
       CONTROL_URL: controlUrl, NODE_NAME: o.name, AGENT_TOKEN: registered.agentToken
-    }) + (o.mesh ? 'LAUNCHPAD_MESH=true\n' : '');
+    }) + (o.mesh ? 'TUG_MESH=true\n' : '');
     const dockerLogin = o.registry ? `printf %s ${sh(registered.registryToken)} | docker login ${sh(o.registry)} --username ${sh(o.name)} --password-stdin` : 'true';
     const remote = await loadTemplate(templatesDir, 'node-install.sh', {
       ENV: env, DOCKER_LOGIN: dockerLogin, IMAGE_SH: sh(o.image), RUN_FLAGS: o.mesh ? `${MESH_RUN_FLAGS} ` : ''
@@ -184,10 +184,10 @@ node.command('install <sshTarget>')
   });
 
 function dockerRunSnippet(image: string, joinKey: string, mesh = false): string {
-  return `docker run -d --name launchpad-agent --restart unless-stopped \\
-${mesh ? `  ${MESH_RUN_FLAGS} -e LAUNCHPAD_MESH=true \\\n` : ''}  -v /var/run/docker.sock:/var/run/docker.sock \\
-  -v launchpad-agent:/var/lib/launchpad \\
-  -e LAUNCHPAD_JOIN_KEY=${joinKey} \\
+  return `docker run -d --name tug-agent --restart unless-stopped \\
+${mesh ? `  ${MESH_RUN_FLAGS} -e TUG_MESH=true \\\n` : ''}  -v /var/run/docker.sock:/var/run/docker.sock \\
+  -v tug-agent:/var/lib/tug \\
+  -e TUG_JOIN_KEY=${joinKey} \\
   ${image} agent`;
 }
 node.command('enroll')
@@ -198,12 +198,12 @@ node.command('enroll')
   .option('--uses <n>', 'how many hosts may enroll with this key', '1')
   .option('--ca <file>', 'PEM CA cert to embed so agents trust a private/self-signed control')
   .option('--http-only-dev', 'allow a plaintext HTTP control URL for local/private development')
-  .option('--image <tag>', 'agent image used in the printed docker run', 'launchpad:local')
+  .option('--image <tag>', 'agent image used in the printed docker run', 'tug:local')
   .option('--mesh', 'print a docker run that joins the WireGuard mesh (host networking, NET_ADMIN)')
   .option('--json', 'print machine-readable JSON instead of the docker run snippet')
   .action(async (o: { name?: string; controlUrl?: string; ttl: string; uses: string; ca?: string; httpOnlyDev?: boolean; image: string; mesh?: boolean; json?: boolean }) => {
     const cfg = await loadCfg();
-    const controlUrl = o.controlUrl || cfg.controlUrl || process.env.LAUNCHPAD_CONTROL_URL || 'http://localhost:8080';
+    const controlUrl = o.controlUrl || cfg.controlUrl || process.env.TUG_CONTROL_URL || 'http://localhost:8080';
     assertHttps(controlUrl, o.httpOnlyDev);
     const minted = await request<EnrollTokenResponse>('POST', '/api/v1/nodes/enroll-token', { name: o.name || null, ttlSeconds: Number(o.ttl), uses: Number(o.uses) });
     const keyPayload: JoinKey = { v: 1, controlUrl, enrollToken: minted.enrollToken };
@@ -222,7 +222,7 @@ program.command('secret:list').option('--project <name>').action(async (o: Commo
 program.command('secret:rm <name>').option('--project <name>').action(async (name: string, o: CommonOpts) => console.log(await request('DELETE', `/api/v1/secrets/${encodeURIComponent(name)}?project=${encodeURIComponent(o.project || (await loadCfg()).project || 'site')}`)));
 
 async function makeContext(): Promise<string> {
-  const tmp = path.join(os.tmpdir(), `launchpad-${Date.now()}.tgz`);
+  const tmp = path.join(os.tmpdir(), `tug-${Date.now()}.tgz`);
   const ignores = new Set(['.git', 'node_modules', 'data', 'registry-data']);
   try { (await fs.readFile('.dockerignore','utf8')).split(/\r?\n/).map(l=>l.trim()).filter(Boolean).forEach(l=>ignores.add(l)); } catch {}
   await tar.c({ gzip: true, file: tmp, cwd: process.cwd(), filter: (p: string) => ![...ignores].some(i => p === i || p.startsWith(`${i}/`)) }, ['.']);

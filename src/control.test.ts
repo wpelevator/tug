@@ -10,9 +10,9 @@ import { json } from '../test/helpers.ts';
 
 async function server() {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'lp-'));
-  process.env.LAUNCHPAD_DATA_DIR = dir;
-  process.env.LAUNCHPAD_OPERATOR_TOKEN = 'op-test-token';
-  process.env.LAUNCHPAD_REGISTRY = 'registry.test';
+  process.env.TUG_DATA_DIR = dir;
+  process.env.TUG_OPERATOR_TOKEN = 'op-test-token';
+  process.env.TUG_REGISTRY = 'registry.test';
   const app = await createApp();
   const srv = await new Promise<Server>(resolve => { const s = app.listen(0, () => resolve(s)); });
   const base = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`;
@@ -26,12 +26,12 @@ test('registers node, stores secret, creates desired state, serves agent work', 
     let res = await fetch(`${s.base}/api/v1/nodes/register`, { method: 'POST', headers: op(), body: JSON.stringify({ name: 'n1', address: '10.0.0.1' }) });
     assert.equal(res.status, 200);
     const registered = await json(res);
-    assert.match(registered.agentToken, /^lpa_/);
+    assert.match(registered.agentToken, /^tug_agent_/);
 
     res = await fetch(`${s.base}/api/v1/secrets`, { method: 'POST', headers: op(), body: JSON.stringify({ project: 'site', name: 'DB_PASSWORD', value: 'pw' }) });
     assert.equal(res.status, 200);
 
-    const compose = { services: { web: { image: 'nginx:alpine', 'x-launchpad': { placement: { nodes: ['n1'] } } } } };
+    const compose = { services: { web: { image: 'nginx:alpine', 'x-tug': { placement: { nodes: ['n1'] } } } } };
     res = await fetch(`${s.base}/api/v1/deployments`, { method: 'POST', headers: op(), body: JSON.stringify({ project: 'site', version: 'git-a', compose }) });
     assert.equal(res.status, 200);
 
@@ -64,7 +64,7 @@ test('failed node status fails deployment and unblocks future deploys', async ()
   try {
     let res = await fetch(`${s.base}/api/v1/nodes/register`, { method: 'POST', headers: op(), body: JSON.stringify({ name: 'n1' }) });
     const registered = await json(res);
-    const compose = { services: { web: { image: 'nginx:alpine', 'x-launchpad': { placement: { nodes: ['n1'] } } } } };
+    const compose = { services: { web: { image: 'nginx:alpine', 'x-tug': { placement: { nodes: ['n1'] } } } } };
     res = await fetch(`${s.base}/api/v1/deployments`, { method: 'POST', headers: op(), body: JSON.stringify({ project: 'site', version: 'bad', compose }) });
     assert.equal(res.status, 200);
     res = await fetch(`${s.base}/api/v1/deployments`, { method: 'POST', headers: op(), body: JSON.stringify({ project: 'site', version: 'blocked', compose }) });

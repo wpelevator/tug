@@ -19,8 +19,8 @@ const serving = (n: string, project: string, ...services: string[]): ReportedSta
 
 const compose: ComposeFile = {
   services: {
-    web: { image: 'nginx', ports: ['8080:80'], 'x-launchpad': { placement: { nodes: ['app1', 'app22'] }, ingress: { host: 'App.Example.com', port: 80 } } },
-    db: { image: 'mariadb', 'x-launchpad': { placement: { nodes: ['dbnode'] } } }
+    web: { image: 'nginx', ports: ['8080:80'], 'x-tug': { placement: { nodes: ['app1', 'app22'] }, ingress: { host: 'App.Example.com', port: 80 } } },
+    db: { image: 'mariadb', 'x-tug': { placement: { nodes: ['dbnode'] } } }
   }
 };
 const state = (c: ComposeFile = compose, project = 'blog'): DesiredState => buildDesiredState({ project, version: 'v1', compose: c, registry: 'reg' });
@@ -71,7 +71,7 @@ test('tls modes render the right Caddy site blocks', () => {
 });
 
 test('custom TLS ships cert and key from the project secrets and skips routes missing them', () => {
-  const c: ComposeFile = { services: { web: { image: 'x', ports: ['8080:80'], 'x-launchpad': { placement: { nodes: ['app1'] }, ingress: { host: 'secure.example.com', port: 80, tls: 'custom', cert: 'WEB_CERT', key: 'WEB_KEY' } } } } };
+  const c: ComposeFile = { services: { web: { image: 'x', ports: ['8080:80'], 'x-tug': { placement: { nodes: ['app1'] }, ingress: { host: 'secure.example.com', port: 80, tls: 'custom', cert: 'WEB_CERT', key: 'WEB_KEY' } } } } };
   const eps = { blog: { web: [{ node: 'app1', address: '10.210.0.4' }] } };
   const ok = buildIngressWork({ states: [state(c)], endpoints: eps, node: 'edge', secrets: new Map([['blog/WEB_CERT', 'CERT-PEM'], ['blog/WEB_KEY', 'KEY-PEM\n']]) });
   assert.deepEqual(ok.files, { 'certs/secure.example.com.crt': 'CERT-PEM\n', 'certs/secure.example.com.key': 'KEY-PEM\n' }, 'PEMs are delivered as files for the Caddy container');
@@ -114,9 +114,9 @@ test('first reconcile creates the Caddy container with persistent volumes, loads
   const status = await reconcileIngress({ docker: f.docker, stateDir }, work('a.example.com {\n}\n', { 'certs/a.crt': 'C' }));
   assert.equal(status.state, 'serving');
   const create = f.calls.find(c => c.startsWith('create'))!;
-  assert.match(create, /--name launchpad-caddy/);
+  assert.match(create, /--name tug-caddy/);
   assert.match(create, /--network host/, 'host networking so 80/443 and loopback upstreams work');
-  assert.match(create, /-v launchpad-caddy-data:\/data/, 'ACME state lives on a named volume that survives container recreation');
+  assert.match(create, /-v tug-caddy-data:\/data/, 'ACME state lives on a named volume that survives container recreation');
   assert.ok(f.calls.indexOf(create) < f.calls.findIndex(c => c.startsWith('cp')) && f.calls.findIndex(c => c.startsWith('cp')) < f.calls.findIndex(c => c.startsWith('start')), 'config is copied in before Caddy starts');
   assert.ok(!f.calls.some(c => c.includes('reload')), 'no reload on a fresh container');
 });
@@ -128,7 +128,7 @@ test('unchanged config is a no-op and changed config reloads gracefully without 
   await reconcileIngress(ctx, work('v1\n'));
   f.calls.length = 0;
   await reconcileIngress(ctx, work('v1\n'));
-  assert.deepEqual(f.calls, ['container inspect -f {{.State.Running}} launchpad-caddy'], 'quiet tick only inspects the container');
+  assert.deepEqual(f.calls, ['container inspect -f {{.State.Running}} tug-caddy'], 'quiet tick only inspects the container');
 
   f.calls.length = 0;
   const status = await reconcileIngress(ctx, work('v2\n'));

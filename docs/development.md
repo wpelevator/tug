@@ -26,32 +26,32 @@ The Dockerfiles are multi-stage: a build stage runs `npm ci && npm run build`, a
 `docker-compose.yml` defines:
 
 - `registry`: a local Docker Registry on port `5000`, built from `services/registry` with htpasswd auth enabled (`auth.htpasswd` in `services/registry/config/config.yml`).
-- `control`: the control API on port `8080`, with SQLite and master key data in a named volume. It mounts the `registry-auth` volume (`LAUNCHPAD_REGISTRY_AUTH_PATH`) and the Docker socket, so it can write per-node htpasswd entries and restart the registry container (`LAUNCHPAD_REGISTRY_CONTAINER`) when a node's registry token is issued, rotated or revoked.
-- `agent`: an optional profile service; run it with `--profile agent` after setting `LAUNCHPAD_AGENT_TOKEN`.
+- `control`: the control API on port `8080`, with SQLite and master key data in a named volume. It mounts the `registry-auth` volume (`TUG_REGISTRY_AUTH_PATH`) and the Docker socket, so it can write per-node htpasswd entries and restart the registry container (`TUG_REGISTRY_CONTAINER`) when a node's registry token is issued, rotated or revoked.
+- `agent`: an optional profile service; run it with `--profile agent` after setting `TUG_AGENT_TOKEN`.
 
 ```bash
 docker compose up --build control registry
 # after registering a node and obtaining its token:
-LAUNCHPAD_AGENT_TOKEN=... docker compose --profile agent up agent
+TUG_AGENT_TOKEN=... docker compose --profile agent up agent
 ```
 
-The control service prints the initial operator token and stores it in `./data/operator.token` when run on the host, or in the `launchpad-data` volume when run in Docker.
+The control service prints the initial operator token and stores it in `./data/operator.token` when run on the host, or in the `tug-data` volume when run in Docker.
 
 ## Host mode
 
 ```bash
 npm run start:control
-export LAUNCHPAD_TOKEN=$(cat data/operator.token)
-node src/cli.ts init --control-url http://localhost:8080 --token "$LAUNCHPAD_TOKEN"
+export TUG_TOKEN=$(cat data/operator.token)
+node src/cli.ts init --control-url http://localhost:8080 --token "$TUG_TOKEN"
 node src/cli.ts node:register --name dev-node --address 127.0.0.1
 ```
 
 Start an agent that renders files and reports status without applying Docker changes:
 
 ```bash
-export LAUNCHPAD_AGENT_TOKEN=<token from node:register>
-export LAUNCHPAD_NODE_NAME=dev-node
-export LAUNCHPAD_APPLY=false
+export TUG_AGENT_TOKEN=<token from node:register>
+export TUG_NODE_NAME=dev-node
+export TUG_APPLY=false
 npm run start:agent
 ```
 
@@ -62,13 +62,13 @@ node src/cli.ts deploy -f docker-compose.yml --no-build-upload
 node src/cli.ts status
 ```
 
-Omit `--no-build-upload` to upload the current directory and let control run `docker build` for services with `build:`. `LAUNCHPAD_PUSH=false` builds without pushing; enable pushing when a reachable registry is configured.
+Omit `--no-build-upload` to upload the current directory and let control run `docker build` for services with `build:`. `TUG_PUSH=false` builds without pushing; enable pushing when a reachable registry is configured.
 
 ## Integration test
 
 `docker-compose.sample.yml` is a three-service sample app with explicit placement: `web` on `vps-a`, `worker` on `vps-b`, `cache` on `vps-c`.
 
-`docker-compose.integration.yml` starts a control plane and three fake VPSes. On macOS/Docker Desktop each fake VPS is a privileged Linux container with its own Docker daemon and Launchpad agent, so agents apply Compose into isolated Docker environments rather than the host daemon.
+`docker-compose.integration.yml` starts a control plane and three fake VPSes. On macOS/Docker Desktop each fake VPS is a privileged Linux container with its own Docker daemon and Tug agent, so agents apply Compose into isolated Docker environments rather than the host daemon.
 
 ```bash
 npm run test:integration
@@ -90,4 +90,4 @@ limactl start --name=vps template-vps.yml
 npm run test:integration:network
 ```
 
-Layers `docker-compose.integration-network.yml` over the same stack with `LAUNCHPAD_MESH=true` on control and all agents and `vps-c` marked as an ingress node, deploys `docker-compose.network-sample.yml` (`web` on `vps-a`, `client` on `vps-b`) and runs `scripts/integration-verify-network.js`: node-to-node pings and a WireGuard handshake over the overlay, a container on `vps-b` fetching `http://web:8080` by name, Caddy on `vps-c` serving `Host: app.test` from `vps-a`, and mesh connectivity again after `node:rotate-wg-key`. It uses the compose project `pad-launch-it-net` and the same ports as the plain integration test, so run them one at a time. The Docker host's kernel must support WireGuard (Linux 5.6+, Docker Desktop's VM included).
+Layers `docker-compose.integration-network.yml` over the same stack with `TUG_MESH=true` on control and all agents and `vps-c` marked as an ingress node, deploys `docker-compose.network-sample.yml` (`web` on `vps-a`, `client` on `vps-b`) and runs `scripts/integration-verify-network.js`: node-to-node pings and a WireGuard handshake over the overlay, a container on `vps-b` fetching `http://web:8080` by name, Caddy on `vps-c` serving `Host: app.test` from `vps-a`, and mesh connectivity again after `node:rotate-wg-key`. It uses the compose project `tug-it-net` and the same ports as the plain integration test, so run them one at a time. The Docker host's kernel must support WireGuard (Linux 5.6+, Docker Desktop's VM included).

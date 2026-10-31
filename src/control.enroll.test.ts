@@ -10,9 +10,9 @@ import { json as jsonBody } from '../test/helpers.ts';
 
 async function server() {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'lp-'));
-  process.env.LAUNCHPAD_DATA_DIR = dir;
-  process.env.LAUNCHPAD_OPERATOR_TOKEN = 'op-test-token';
-  process.env.LAUNCHPAD_REGISTRY = 'registry.test';
+  process.env.TUG_DATA_DIR = dir;
+  process.env.TUG_OPERATOR_TOKEN = 'op-test-token';
+  process.env.TUG_REGISTRY = 'registry.test';
   const app = await createApp();
   const srv = await new Promise<Server>(resolve => { const s = app.listen(0, () => resolve(s)); });
   return { base: `http://127.0.0.1:${(srv.address() as AddressInfo).port}`, close: () => new Promise(resolve => srv.close(resolve)) };
@@ -26,15 +26,15 @@ test('enroll token exchanges for durable agent credentials and is single-use', a
     let res = await fetch(`${s.base}/api/v1/nodes/enroll-token`, { method: 'POST', headers: op(), body: JSON.stringify({ name: 'app1' }) });
     assert.equal(res.status, 200);
     const minted = await jsonBody(res);
-    assert.match(minted.enrollToken, /^lpe_/);
+    assert.match(minted.enrollToken, /^tug_enroll_/);
     assert.equal(minted.registry, 'registry.test');
 
     res = await fetch(`${s.base}/agent/v1/enroll`, { method: 'POST', headers: json, body: JSON.stringify({ enrollToken: minted.enrollToken }) });
     assert.equal(res.status, 200);
     const enrolled = await jsonBody(res);
     assert.equal(enrolled.node.name, 'app1');
-    assert.match(enrolled.agentToken, /^lpa_/);
-    assert.match(enrolled.registryToken, /^lpr_/);
+    assert.match(enrolled.agentToken, /^tug_agent_/);
+    assert.match(enrolled.registryToken, /^tug_reg_/);
     assert.equal(enrolled.registry, 'registry.test');
 
     // durable token authenticates against agent work

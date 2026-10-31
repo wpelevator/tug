@@ -1,4 +1,4 @@
-# Portable VPS Launch Pad — Spec and Implementation Plan
+# Tug: Portable VPS Deployments — Spec and Implementation Plan
 
 ## 1. Goal
 
@@ -36,23 +36,23 @@ Example commands:
 
 ```bash
 # one-time bootstrap
-launchpad control install root@control.example.com
-launchpad node install root@front.example.com --name front --address 10.0.0.10
-launchpad node install root@wp1.example.com --name wp1 --address 10.0.0.11
-launchpad node install root@wp2.example.com --name wp2 --address 10.0.0.12
-launchpad node install root@wp3.example.com --name wp3 --address 10.0.0.13
-launchpad node install root@db.example.com --name db --address 10.0.0.20
-launchpad node install root@cache.example.com --name cache --address 10.0.0.30
-launchpad node install root@storage.example.com --name storage --address 10.0.0.40
+tug control install root@control.example.com
+tug node install root@front.example.com --name front --address 10.0.0.10
+tug node install root@wp1.example.com --name wp1 --address 10.0.0.11
+tug node install root@wp2.example.com --name wp2 --address 10.0.0.12
+tug node install root@wp3.example.com --name wp3 --address 10.0.0.13
+tug node install root@db.example.com --name db --address 10.0.0.20
+tug node install root@cache.example.com --name cache --address 10.0.0.30
+tug node install root@storage.example.com --name storage --address 10.0.0.40
 
 # app lifecycle
-launchpad init
-launchpad secret set DB_PASSWORD
-launchpad deploy
-launchpad status
-launchpad logs wordpress  # proxies docker compose logs; no central log aggregation in early MVP
-launchpad backup run mariadb  # later backup milestone
-launchpad rollback
+tug init
+tug secret set DB_PASSWORD
+tug deploy
+tug status
+tug logs wordpress  # proxies docker compose logs; no central log aggregation in early MVP
+tug backup run mariadb  # later backup milestone
+tug rollback
 ```
 
 The first version should use SSH only for installation/bootstrap. Normal deploys should not require SSH; they should go through the control API and node agents.
@@ -61,7 +61,7 @@ V1 assumes Docker and Docker Compose are already installed on all hosts, and tha
 
 ### App Definition
 
-The user defines the application with a normal `docker-compose.yml`, plus `x-launchpad` metadata for deployment-specific behavior.
+The user defines the application with a normal `docker-compose.yml`, plus `x-tug` metadata for deployment-specific behavior.
 
 Local development remains:
 
@@ -72,7 +72,7 @@ docker compose up
 Production deployment becomes:
 
 ```bash
-launchpad deploy
+tug deploy
 ```
 
 ---
@@ -86,7 +86,7 @@ Developer / CI
   - watches deployment status
 
 Control VPS
-  - launchpad-control API
+  - tug-control API
   - SQLite database
   - public HTTPS Docker registry protected by token auth
   - Linux build worker
@@ -94,7 +94,7 @@ Control VPS
   - backup metadata/catalog in later milestones
 
 Runtime VPSes
-  - launchpad-agent
+  - tug-agent
   - Docker
   - generic registered nodes with names and addresses
   - services are assigned by project/service placement, not by fixed node role
@@ -139,7 +139,7 @@ The control VPS is not in the public application request path.
 
 ### 3.1 V1 Networking Model
 
-V1 does not provision a runtime overlay network. Launchpad assumes all nodes can reach required peers using configured IP addresses or hostnames. These may be provider-private addresses, public addresses protected by firewall rules, or manually managed VPN addresses.
+V1 does not provision a runtime overlay network. Tug assumes all nodes can reach required peers using configured IP addresses or hostnames. These may be provider-private addresses, public addresses protected by firewall rules, or manually managed VPN addresses.
 
 Control-plane and registry communication use HTTPS with token authentication:
 
@@ -160,13 +160,13 @@ nodes -> public registry: HTTPS
 agents -> control: HTTPS
 ```
 
-Security boundary for runtime service traffic is operator-managed in v1. The operator is responsible for private networking, provider firewalls, host firewalls, or an external VPN. Launchpad secures control-plane and registry access with HTTPS and tokens, but does not encrypt MariaDB, Memcached, NFS, or PHP-FPM traffic itself in v1.
+Security boundary for runtime service traffic is operator-managed in v1. The operator is responsible for private networking, provider firewalls, host firewalls, or an external VPN. Tug secures control-plane and registry access with HTTPS and tokens, but does not encrypt MariaDB, Memcached, NFS, or PHP-FPM traffic itself in v1.
 
 ### 3.2 TLS Model
 
 Caddy manages TLS for the control API and public HTTPS registry.
 
-For application ingress, nginx config remains user/application-owned. If the application needs TLS certificates, early MVP should use Caddy only as a certificate manager/ACME helper where practical, with nginx loading certificates from a documented host path or mounted volume. Launchpad should not generate application nginx server blocks in early MVP.
+For application ingress, nginx config remains user/application-owned. If the application needs TLS certificates, early MVP should use Caddy only as a certificate manager/ACME helper where practical, with nginx loading certificates from a documented host path or mounted volume. Tug should not generate application nginx server blocks in early MVP.
 
 Operators may also provide their own certificates and mount them into the nginx container.
 
@@ -259,7 +259,7 @@ Later implementation can use BuildKit cache exporters.
 
 Runs on every runtime node.
 
-For the initial MVP, the agent may run as a container with access to the Docker socket and Launchpad state directories. Later stateful/NFS milestones may require a host binary or privileged host helper for mount and systemd management.
+For the initial MVP, the agent may run as a container with access to the Docker socket and Tug state directories. Later stateful/NFS milestones may require a host binary or privileged host helper for mount and systemd management.
 
 Responsibilities:
 
@@ -273,7 +273,7 @@ Log behavior in early MVP:
 
 - no central log aggregation,
 - no persistent control-plane log storage,
-- `launchpad logs <service>` proxies to the assigned node/agent, which reads local `docker compose logs` output.
+- `tug logs <service>` proxies to the assigned node/agent, which reads local `docker compose logs` output.
 
 Early MVP agent non-goals:
 
@@ -292,8 +292,8 @@ For v1, use Docker Compose directly on each node.
 The agent writes generated files under:
 
 ```text
-/var/lib/launchpad/projects/<project>/docker-compose.yml
-/var/lib/launchpad/projects/<project>/.env
+/var/lib/tug/projects/<project>/docker-compose.yml
+/var/lib/tug/projects/<project>/.env
 ```
 
 Then applies:
@@ -315,9 +315,9 @@ V1 assumes:
 - SSH access from the CLI machine to each host is already configured.
 - Runtime node-to-node networking is already available through configured addresses.
 
-`launchpad control install` should install and configure:
+`tug control install` should install and configure:
 
-- launchpad-control API service,
+- tug-control API service,
 - SQLite database,
 - public HTTPS registry protected by token auth,
 - build worker,
@@ -325,14 +325,14 @@ V1 assumes:
 - initial operator token,
 - server-side token storage for agents and registry pulls.
 
-`launchpad node install` should, over SSH:
+`tug node install` should, over SSH:
 
 - register the node with the control plane,
 - assign/store node name and addresses,
 - create a per-node agent token,
 - create a per-node registry pull token,
 - install the agent container,
-- write `/etc/launchpad/agent.env` or equivalent config,
+- write `/etc/tug/agent.env` or equivalent config,
 - configure Docker registry credentials for the public HTTPS registry,
 - start the agent.
 
@@ -423,7 +423,7 @@ Only one deployment per project may be active at a time. Secret changes and depl
 
 ## 5. Compose Contract
 
-Use standard Compose where possible. Use `x-launchpad` for deployment metadata.
+Use standard Compose where possible. Use `x-tug` for deployment metadata.
 
 Example WordPress stack:
 
@@ -440,7 +440,7 @@ services:
       MEMCACHED_HOST: ${MEMCACHED_HOST}
     volumes:
       - wp-shared:/var/www/html
-    x-launchpad:
+    x-tug:
       placement:
         nodes: [wp1, wp2, wp3]
       replicas: 3
@@ -453,7 +453,7 @@ services:
     image: wordpress-nginx
     volumes:
       - wp-shared:/var/www/html:ro
-    x-launchpad:
+    x-tug:
       placement:
         nodes: [front]
       domains:
@@ -471,7 +471,7 @@ services:
       MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
     volumes:
       - mariadb-data:/var/lib/mysql
-    x-launchpad:
+    x-tug:
       placement:
         nodes: [db]
         sticky: true
@@ -483,18 +483,18 @@ services:
 
   memcached:
     image: memcached:1.6
-    x-launchpad:
+    x-tug:
       placement:
         nodes: [cache]
 
 volumes:
   mariadb-data:
-    x-launchpad:
+    x-tug:
       type: local
       persistent: true
 
   wp-shared:
-    x-launchpad:
+    x-tug:
       type: shared
       driver: nfs
       placement:
@@ -510,16 +510,16 @@ volumes:
 
 ### 5.1 V1 Compose Compatibility
 
-Launchpad uses `docker-compose.yml` as source intent, but agents write generated per-node Compose files. Distributed deployment is not a full multi-host implementation of every Compose feature.
+Tug uses `docker-compose.yml` as source intent, but agents write generated per-node Compose files. Distributed deployment is not a full multi-host implementation of every Compose feature.
 
 V1 supported:
 
 - `services.*.image`
 - `services.*.build` for remote builds
 - `services.*.environment`
-- named volumes with `x-launchpad`
-- basic health metadata under `x-launchpad.health`
-- `x-launchpad.placement`, `replicas`, and domain metadata
+- named volumes with `x-tug`
+- basic health metadata under `x-tug.health`
+- `x-tug.placement`, `replicas`, and domain metadata
 
 V1 supported with limitations:
 
@@ -538,7 +538,7 @@ V1 rejected or deferred:
 - label selectors and autoscheduling
 - release hooks
 - backup/restore metadata execution
-- ambiguous services without `x-launchpad.placement` in multi-node projects
+- ambiguous services without `x-tug.placement` in multi-node projects
 
 Notes:
 
@@ -548,16 +548,16 @@ Notes:
 - Early MVP supports generated Compose files while preserving source service names.
 - Shared NFS volumes are implemented in a later milestone as a managed storage accessory pinned to one node.
 - For the WordPress target use case, nginx and PHP-FPM both mount the same shared WordPress document root so nginx can serve static files directly and proxy PHP requests to app nodes over FastCGI/PHP-FPM TCP.
-- nginx config is user/application-owned. Launchpad does not generate nginx application config in early MVP.
+- nginx config is user/application-owned. Tug does not generate nginx application config in early MVP.
 
 ### 5.2 Health Check Contract
 
-Services should declare health checks in `x-launchpad.health` when possible.
+Services should declare health checks in `x-tug.health` when possible.
 
 Example:
 
 ```yaml
-x-launchpad:
+x-tug:
   health:
     type: tcp # tcp | http | command | docker
     port: 9000
@@ -729,7 +729,7 @@ Nodes are generic capacity. Node installation does not assign a fixed role. Serv
 Rules:
 
 - In single-node projects, services may default to the only registered node.
-- In multi-node projects, each service should declare `x-launchpad.placement`.
+- In multi-node projects, each service should declare `x-tug.placement`.
 - `placement.nodes` pins a service or volume to specific node names/IDs.
 - Label selectors are deferred beyond MVP.
 - Autoscheduling is deferred beyond MVP.
@@ -743,25 +743,25 @@ Example:
 ```yaml
 services:
   wordpress:
-    x-launchpad:
+    x-tug:
       placement:
         nodes: [wp1, wp2, wp3]
       replicas: 3
 
   nginx:
-    x-launchpad:
+    x-tug:
       placement:
         nodes: [front]
 
   mariadb:
-    x-launchpad:
+    x-tug:
       placement:
         nodes: [db]
         sticky: true
 
 volumes:
   wp-shared:
-    x-launchpad:
+    x-tug:
       type: shared
       driver: nfs
       placement:
@@ -821,13 +821,13 @@ Example runtime layout:
 
 ```text
 storage node:
-  /srv/launchpad/volumes/wp-shared -> exported by NFS
+  /srv/tug/volumes/wp-shared -> exported by NFS
 
 front node:
-  /mnt/launchpad/site/wp-shared -> mounted from storage node
+  /mnt/tug/site/wp-shared -> mounted from storage node
 
 wp node:
-  /mnt/launchpad/site/wp-shared -> mounted from storage node
+  /mnt/tug/site/wp-shared -> mounted from storage node
 
 nginx container:
   /var/www/html -> read-only bind mount from front node
@@ -836,7 +836,7 @@ wordpress/php-fpm container:
   /var/www/html -> bind mount from wp node
 ```
 
-In v1, Launchpad may initially require the operator to provide working node-to-node connectivity and firewall rules for NFS. Managed NFS mount lifecycle can be implemented in the stateful/NFS milestone.
+In v1, Tug may initially require the operator to provide working node-to-node connectivity and firewall rules for NFS. Managed NFS mount lifecycle can be implemented in the stateful/NFS milestone.
 
 ---
 
@@ -847,7 +847,7 @@ Secrets live in the control plane, encrypted at rest.
 Implementation:
 
 - generate a master key during `control install`,
-- store it on the control VPS, e.g. `/etc/launchpad/master.key`,
+- store it on the control VPS, e.g. `/etc/tug/master.key`,
 - encrypt secret values before writing to SQLite,
 - issue scoped node tokens,
 - agents fetch only secrets required by services assigned to their node.
@@ -857,9 +857,9 @@ Agent API tokens and registry pull tokens are separate credentials. Removing or 
 CLI UX:
 
 ```bash
-launchpad secret set DB_PASSWORD
-launchpad secret list
-launchpad secret rm DB_PASSWORD
+tug secret set DB_PASSWORD
+tug secret list
+tug secret rm DB_PASSWORD
 ```
 
 Runtime:
@@ -898,13 +898,13 @@ backups/site/mariadb/2026-06-26T03-00-00Z.sql.gz
 Run on storage node:
 
 ```bash
-restic backup /srv/launchpad/volumes/wp-shared
+restic backup /srv/tug/volumes/wp-shared
 ```
 
 or simple v1:
 
 ```bash
-tar -czf wp-shared.tar.gz /srv/launchpad/volumes/wp-shared
+tar -czf wp-shared.tar.gz /srv/tug/volumes/wp-shared
 ```
 
 Store in backup destination:
@@ -923,11 +923,11 @@ Required CLI:
 
 ```bash
 # later backup milestone
-launchpad backup run mariadb
-launchpad backup run wp-shared
-launchpad backup list
-launchpad restore mariadb --from latest
-launchpad restore wp-shared --from latest
+tug backup run mariadb
+tug backup run wp-shared
+tug backup list
+tug restore mariadb --from latest
+tug restore wp-shared --from latest
 ```
 
 ---
@@ -937,12 +937,12 @@ launchpad restore wp-shared --from latest
 Example: user changes WordPress theme/plugin code and runs:
 
 ```bash
-launchpad deploy
+tug deploy
 ```
 
 ### Step 1: Parse Compose
 
-CLI reads `docker-compose.yml`, resolves `x-launchpad`, identifies buildable services.
+CLI reads `docker-compose.yml`, resolves `x-tug`, identifies buildable services.
 
 For this stack, likely buildable services:
 
@@ -1027,7 +1027,7 @@ Early MVP should require the operator to run these manually or include them in a
 
 ### Step 8: Update Front Node if Needed
 
-nginx config is user/application-owned. Launchpad does not generate application nginx config in early MVP.
+nginx config is user/application-owned. Tug does not generate application nginx config in early MVP.
 
 If the nginx image or user-provided config artifact changed:
 
@@ -1037,7 +1037,7 @@ If the nginx image or user-provided config artifact changed:
 3. report healthy
 ```
 
-Later versions may add Launchpad-managed upstream generation and drain/re-enable integration.
+Later versions may add Tug-managed upstream generation and drain/re-enable integration.
 
 ### Step 9: Report Convergence
 
@@ -1062,7 +1062,7 @@ CLI exits when desired version equals observed version everywhere.
 Rollback should not rebuild.
 
 ```bash
-launchpad rollback
+tug rollback
 ```
 
 Control API selects previous deployment and updates desired state to previous immutable image tags. For deployments that changed shared WordPress files, rollback should also select the previous shared-file artifact when available. Stateful data such as database contents and user uploads are still not rolled back automatically.
@@ -1120,7 +1120,7 @@ Stateful volumes are not rolled back automatically. Database/user-content restor
 - CLI uses an admin/operator token.
 - Each agent has a node-scoped token.
 - Each node has a separate registry pull token.
-- Runtime service traffic between nodes is not encrypted by Launchpad in v1; operators must secure it with private networking, firewalls, or an external VPN.
+- Runtime service traffic between nodes is not encrypted by Tug in v1; operators must secure it with private networking, firewalls, or an external VPN.
 - Agent tokens can only:
   - read desired state for assigned node,
   - read scoped secrets for assigned services,
@@ -1163,7 +1163,7 @@ Implementation goals:
 - parse Compose subset,
 - remote build on control VPS,
 - registry push/pull over HTTPS,
-- generated per-node Compose file under `/var/lib/launchpad/projects/<project>/`,
+- generated per-node Compose file under `/var/lib/tug/projects/<project>/`,
 - agent runs `docker compose -p <project> up -d --remove-orphans`,
 - CLI waits until observed version matches desired version.
 
@@ -1194,7 +1194,7 @@ Implementation goals:
 - drain/re-enable API,
 - rolling app-node updates.
 
-Launchpad-managed nginx config generation is deferred beyond this milestone.
+Tug-managed nginx config generation is deferred beyond this milestone.
 
 ### Milestone 5: Stateful Accessories
 

@@ -4,9 +4,9 @@
 set -euo pipefail
 
 COMPOSE_FILES=(-f docker-compose.integration.yml -f docker-compose.integration-network.yml)
-PROJECT=${COMPOSE_PROJECT_NAME:-pad-launch-it-net}
-TOKEN=${LAUNCHPAD_TOKEN:-integration-token}
-CONTROL=${LAUNCHPAD_CONTROL_URL:-http://localhost:18080}
+PROJECT=${COMPOSE_PROJECT_NAME:-tug-it-net}
+TOKEN=${TUG_TOKEN:-integration-token}
+CONTROL=${TUG_CONTROL_URL:-http://localhost:18080}
 
 cleanup() {
   if [ "${KEEP_INTEGRATION_STACK:-false}" != "true" ]; then
@@ -28,8 +28,8 @@ for i in $(seq 1 120); do
   sleep 1
 done
 
-LAUNCHPAD_CONFIG=$(mktemp)
-export LAUNCHPAD_CONFIG LAUNCHPAD_TOKEN="$TOKEN" LAUNCHPAD_CONTROL_URL="$CONTROL"
+TUG_CONFIG=$(mktemp)
+export TUG_CONFIG TUG_TOKEN="$TOKEN" TUG_CONTROL_URL="$CONTROL"
 node src/cli.ts init --control-url "$CONTROL" --token "$TOKEN" --project netdemo
 node src/cli.ts deploy -f docker-compose.network-sample.yml --project netdemo --no-build-upload --timeout 240
 COMPOSE_PROJECT_NAME="$PROJECT" node scripts/integration-verify-network.js

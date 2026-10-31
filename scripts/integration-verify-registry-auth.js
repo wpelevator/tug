@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-const control = process.env.LAUNCHPAD_CONTROL_URL || 'http://localhost:18080';
-const operatorToken = process.env.LAUNCHPAD_TOKEN || 'integration-token';
-const registryUrl = process.env.LAUNCHPAD_REGISTRY_URL || 'http://localhost:15000';
-const node = process.env.LAUNCHPAD_VERIFY_NODE || 'vps-a';
+const control = process.env.TUG_CONTROL_URL || 'http://localhost:18080';
+const operatorToken = process.env.TUG_TOKEN || 'integration-token';
+const registryUrl = process.env.TUG_REGISTRY_URL || 'http://localhost:15000';
+const node = process.env.TUG_VERIFY_NODE || 'vps-a';
 
 async function controlPost(route) {
   const res = await fetch(`${control}${route}`, { method: 'POST', headers: { authorization: `Bearer ${operatorToken}` } });

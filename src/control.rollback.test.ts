@@ -9,9 +9,9 @@ import type { AddressInfo } from 'node:net';
 
 async function makeServer() {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'lp-rb-'));
-  process.env.LAUNCHPAD_DATA_DIR = dir;
-  process.env.LAUNCHPAD_OPERATOR_TOKEN = 'op-rollback-token';
-  process.env.LAUNCHPAD_REGISTRY = 'registry.test';
+  process.env.TUG_DATA_DIR = dir;
+  process.env.TUG_OPERATOR_TOKEN = 'op-rollback-token';
+  process.env.TUG_REGISTRY = 'registry.test';
   const app = await createApp();
   const srv = await new Promise<Server>(resolve => { const s = app.listen(0, () => resolve(s)); });
   return { base: `http://127.0.0.1:${(srv.address() as AddressInfo).port}`, close: () => new Promise(resolve => srv.close(resolve)) };
@@ -28,7 +28,7 @@ async function post(base: string, path: string, body: unknown) {
 test('rollback selects previous immutable desired state', async () => {
   const s = await makeServer();
   try {
-    const compose = (tag: string) => ({ services: { web: { image: `nginx:${tag}`, 'x-launchpad': { placement: { nodes: ['n1'] } } } } });
+    const compose = (tag: string) => ({ services: { web: { image: `nginx:${tag}`, 'x-tug': { placement: { nodes: ['n1'] } } } } });
     const registered = await post(s.base, '/api/v1/nodes/register', { name: 'n1' });
     const first = await post(s.base, '/api/v1/deployments', { project: 'site', version: 'v1', compose: compose('1.27-alpine') });
     const res = await fetch(`${s.base}/agent/v1/status`, { method: 'POST', headers: { Authorization: `Bearer ${registered.agentToken}`, 'content-type': 'application/json' }, body: JSON.stringify({ projects: [{ project: 'site', observedVersion: 'v1', health: 'serving' }] }) });

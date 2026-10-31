@@ -4,7 +4,7 @@ import path from 'node:path';
 
 export const now = () => new Date().toISOString();
 export const id = (prefix: string) => `${prefix}_${crypto.randomBytes(8).toString('hex')}`;
-export const token = (prefix = 'lp') => `${prefix}_${crypto.randomBytes(24).toString('base64url')}`;
+export const token = (prefix = 'tug') => `${prefix}_${crypto.randomBytes(24).toString('base64url')}`;
 export const hashToken = (value: string) => crypto.createHash('sha256').update(value).digest('hex');
 export async function ensureDir(dir: string): Promise<void> { await fs.mkdir(dir, { recursive: true }); }
 export async function exists(p: string): Promise<boolean> { try { await fs.access(p); return true; } catch { return false; } }

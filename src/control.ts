@@ -33,19 +33,19 @@ const ACTIVE_STATES_SQL = ACTIVE_DEPLOYMENT_STATES.map(s => `'${s}'`).join(',');
 const PORT = Number(process.env.PORT || 8080);
 
 export async function createApp() {
-  const DATA_DIR = process.env.LAUNCHPAD_DATA_DIR || './data';
-  const upload = multer({ dest: process.env.LAUNCHPAD_UPLOAD_DIR || path.join(DATA_DIR, 'uploads') });
-  const dbFile = path.join(DATA_DIR, 'launchpad.db');
+  const DATA_DIR = process.env.TUG_DATA_DIR || './data';
+  const upload = multer({ dest: process.env.TUG_UPLOAD_DIR || path.join(DATA_DIR, 'uploads') });
+  const dbFile = path.join(DATA_DIR, 'tug.db');
   const masterKeyFile = path.join(DATA_DIR, 'master.key');
-  const REGISTRY = process.env.LAUNCHPAD_REGISTRY || 'localhost:5000';
-  const REGISTRY_AUTH_PATH = process.env.LAUNCHPAD_REGISTRY_AUTH_PATH || null;
-  const REGISTRY_CONTAINER = process.env.LAUNCHPAD_REGISTRY_CONTAINER || null;
+  const REGISTRY = process.env.TUG_REGISTRY || 'localhost:5000';
+  const REGISTRY_AUTH_PATH = process.env.TUG_REGISTRY_AUTH_PATH || null;
+  const REGISTRY_CONTAINER = process.env.TUG_REGISTRY_CONTAINER || null;
   // Networking layers are opt-in; with all of them off the work response is unchanged.
-  const MESH = process.env.LAUNCHPAD_MESH === 'true';
-  const MESH_CIDR = process.env.LAUNCHPAD_MESH_CIDR || DEFAULT_MESH_CIDR;
-  const WG_PORT = Number(process.env.LAUNCHPAD_WG_PORT || DEFAULT_WG_PORT);
-  const SERVICE_DNS = (process.env.LAUNCHPAD_SERVICE_DNS ?? String(MESH)) === 'true';
-  const ACME_EMAIL = process.env.LAUNCHPAD_ACME_EMAIL || undefined;
+  const MESH = process.env.TUG_MESH === 'true';
+  const MESH_CIDR = process.env.TUG_MESH_CIDR || DEFAULT_MESH_CIDR;
+  const WG_PORT = Number(process.env.TUG_WG_PORT || DEFAULT_WG_PORT);
+  const SERVICE_DNS = (process.env.TUG_SERVICE_DNS ?? String(MESH)) === 'true';
+  const ACME_EMAIL = process.env.TUG_ACME_EMAIL || undefined;
   if (MESH) parseCidr(MESH_CIDR);
 
   let htpasswdQueue = Promise.resolve();
@@ -88,7 +88,7 @@ export async function createApp() {
   const masterKey = await loadOrCreateMasterKey(masterKeyFile);
   const operator = await db.get('SELECT value FROM meta WHERE key=?', 'operator_token_hash');
   if (!operator) {
-    const t = process.env.LAUNCHPAD_OPERATOR_TOKEN || token('lpo');
+    const t = process.env.TUG_OPERATOR_TOKEN || token('tug_op');
     await db.run('INSERT INTO meta(key,value) VALUES(?,?)', 'operator_token_hash', hashToken(t));
     await fs.writeFile(path.join(DATA_DIR, 'operator.token'), `${t}\n`, { mode: 0o600 }).catch(()=>{});
     console.log(`operator token: ${t}`);
@@ -131,7 +131,7 @@ export async function createApp() {
     return db.get<DesiredStateRow>('SELECT ds.* FROM desired_states ds JOIN projects p ON p.current_deployment_id=ds.deployment_id WHERE p.id=?', projectId);
   }
 
-  async function acquireProjectLock(project: string, operation: string, ttlMs = Number(process.env.LAUNCHPAD_LOCK_TTL_MS || 10 * 60 * 1000)) {
+  async function acquireProjectLock(project: string, operation: string, ttlMs = Number(process.env.TUG_LOCK_TTL_MS || 10 * 60 * 1000)) {
     const name = `project:${project}`;
     const ts = now();
     await db.run('DELETE FROM locks WHERE expires_at < ?', ts);
@@ -188,7 +188,7 @@ export async function createApp() {
 
   async function registerNode({ name, address, publicAddress, wgPublicKey }: { name: string; address?: string; publicAddress?: string; wgPublicKey?: string }): Promise<RegisterResponse> {
     if (wgPublicKey !== undefined && !isWgKey(wgPublicKey)) throw httpError(400, 'wgPublicKey must be a base64 WireGuard public key');
-    const agentToken = token('lpa'); const registryToken = token('lpr'); const ts = now();
+    const agentToken = token('tug_agent'); const registryToken = token('tug_reg'); const ts = now();
     await db.run(`INSERT INTO nodes(id,name,address,public_address,status,agent_token_hash,registry_token_hash,created_at,updated_at)
       VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,address=excluded.address,public_address=excluded.public_address,agent_token_hash=excluded.agent_token_hash,registry_token_hash=excluded.registry_token_hash,updated_at=excluded.updated_at`,
       name, name, address || null, publicAddress || null, 'registered', hashToken(agentToken), hashToken(registryToken), ts, ts);
@@ -210,7 +210,7 @@ export async function createApp() {
     const name = req.body.name || null;
     const ttlSeconds = Math.max(1, Number(req.body.ttlSeconds ?? 3600));
     const uses = Math.max(1, Number(req.body.uses ?? 1));
-    const enrollToken = token('lpe');
+    const enrollToken = token('tug_enroll');
     const expiresAt = new Date(Date.now() + ttlSeconds * 1000).toISOString();
     await db.run('INSERT INTO enroll_tokens(token_hash,name,uses_remaining,expires_at,created_at) VALUES(?,?,?,?,?)',
       hashToken(enrollToken), name, uses, expiresAt, now());
@@ -240,7 +240,7 @@ export async function createApp() {
   app.post('/api/v1/nodes/:name/rotate-registry-token', authOperator, async (req, res) => {
     const node = await db.get('SELECT id,name FROM nodes WHERE name=? OR id=?', req.params.name, req.params.name);
     if (!node) return res.status(404).json({ error: 'node not found' });
-    const registryToken = token('lpr');
+    const registryToken = token('tug_reg');
     await db.run('UPDATE nodes SET registry_token_hash=?,updated_at=? WHERE id=?', hashToken(registryToken), now(), node.id);
     await upsertRegistryCredential(node.name, registryToken);
     res.json({ ok: true, node: node.name, registryToken });
@@ -260,7 +260,7 @@ export async function createApp() {
   // The private key lives only on the node, so rotation is a command the agent executes: it
   // generates a new keypair, reports the public key and peers pick it up from their next work response.
   app.post('/api/v1/nodes/:name/rotate-wg-key', authOperator, async (req, res) => {
-    if (!MESH) return res.status(409).json({ error: 'the WireGuard mesh is not enabled (LAUNCHPAD_MESH=true)' });
+    if (!MESH) return res.status(409).json({ error: 'the WireGuard mesh is not enabled (TUG_MESH=true)' });
     const node = await findNode(req.params.name);
     if (!node) return res.status(404).json({ error: 'node not found' });
     res.json({ commandId: await queueCommand(node.id, null, 'wg.rotate-key'), nodeId: node.id });
@@ -310,7 +310,7 @@ export async function createApp() {
     try { validateCompose(compose, nodes.map(n => n.name)); }
     catch (e) { return res.status(400).json({ error: errMessage(e) }); }
     for (const [svcName, svc] of Object.entries(compose.services)) {
-      const ing = svc['x-launchpad']?.ingress;
+      const ing = svc['x-tug']?.ingress;
       if (ing?.tls !== 'custom') continue;
       for (const secret of [ing.cert, ing.key]) {
         if (!await db.get('SELECT 1 FROM secrets WHERE project_id=? AND name=?', project, secret)) return res.status(400).json({ error: `${svcName}: custom TLS secret ${secret} not found in project ${project}; set it with secret:set first` });
@@ -327,11 +327,11 @@ export async function createApp() {
       const desired = buildDesiredState({ project, version, compose, registry: REGISTRY, defaultNode: nodes[0]?.name || null });
       if (req.file) {
         const contextDir = path.resolve(DATA_DIR, 'build-contexts', depId); await unpackContext(req.file.path, contextDir);
-        for (const [svc, spec] of Object.entries(compose.services)) if (spec.build) await buildAndPush({ contextDir, service: svc, buildSpec: spec.build, imageRef: desired.services[svc].image!, push: process.env.LAUNCHPAD_PUSH !== 'false' });
+        for (const [svc, spec] of Object.entries(compose.services)) if (spec.build) await buildAndPush({ contextDir, service: svc, buildSpec: spec.build, imageRef: desired.services[svc].image!, push: process.env.TUG_PUSH !== 'false' });
       }
       await db.run('INSERT INTO desired_states(id,project_id,deployment_id,version,state_json,created_at) VALUES(?,?,?,?,?,?)', id('ds'), project, depId, version, JSON.stringify(desired), ts);
       for (const [volumeName, volumeSpec] of Object.entries(compose.volumes || {})) {
-        const lp = volumeSpec?.['x-launchpad'] || {};
+        const lp = volumeSpec?.['x-tug'] || {};
         const nodeName = lp.placement?.nodes?.[0] || null;
         const node = nodeName ? await db.get('SELECT id FROM nodes WHERE name=? OR id=?', nodeName, nodeName) : null;
         await db.run(`INSERT INTO volumes(id,project_id,name,type,driver,node_id,config_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)
@@ -402,18 +402,18 @@ export async function createApp() {
     finally { await releaseLock(lock); }
   });
   app.post('/api/v1/control/backups/run', authOperator, async (req, res) => {
-    const backupDir = process.env.LAUNCHPAD_CONTROL_BACKUP_DIR || path.join(DATA_DIR, 'control-backups');
+    const backupDir = process.env.TUG_CONTROL_BACKUP_DIR || path.join(DATA_DIR, 'control-backups');
     await ensureDir(backupDir);
     const ts = now(); const backupId = id('cbak');
     const staging = path.join(backupDir, `${backupId}-staging`);
     await fs.rm(staging, { recursive: true, force: true });
     await ensureDir(staging);
     await db.exec('PRAGMA wal_checkpoint(FULL);');
-    await fs.copyFile(dbFile, path.join(staging, 'launchpad.db'));
+    await fs.copyFile(dbFile, path.join(staging, 'tug.db'));
     await fs.copyFile(masterKeyFile, path.join(staging, 'master.key'));
     await fs.writeFile(path.join(staging, 'metadata.json'), JSON.stringify({ backupId, createdAt: ts, type: 'control' }, null, 2));
     const artifactRef = path.resolve(backupDir, `${backupId}.tar.gz`);
-    await tar.c({ gzip: true, file: artifactRef, cwd: staging }, ['launchpad.db', 'master.key', 'metadata.json']);
+    await tar.c({ gzip: true, file: artifactRef, cwd: staging }, ['tug.db', 'master.key', 'metadata.json']);
     await fs.rm(staging, { recursive: true, force: true });
     await db.run('INSERT INTO backups(id,project_id,target,node_id,state,artifact_ref,metadata_json,created_at,completed_at) VALUES(?,?,?,?,?,?,?,?,?)', backupId, '_control', 'control-plane', null, 'completed', artifactRef, JSON.stringify({ type: 'control' }), ts, now());
     res.json({ backupId, artifactRef, state: 'completed' });
@@ -422,11 +422,11 @@ export async function createApp() {
     if (!req.body.confirm) return res.status(400).json({ error: 'confirm=true is required; restore overwrites control database and master key, then requires process restart' });
     const artifactRef = req.body.artifactRef;
     if (!artifactRef) return res.status(400).json({ error: 'artifactRef required' });
-    const restoreDir = process.env.LAUNCHPAD_CONTROL_RESTORE_DIR || path.join(DATA_DIR, 'control-restore');
+    const restoreDir = process.env.TUG_CONTROL_RESTORE_DIR || path.join(DATA_DIR, 'control-restore');
     await fs.rm(restoreDir, { recursive: true, force: true });
     await ensureDir(restoreDir);
     await tar.x({ file: artifactRef, cwd: restoreDir });
-    await fs.copyFile(path.join(restoreDir, 'launchpad.db'), dbFile);
+    await fs.copyFile(path.join(restoreDir, 'tug.db'), dbFile);
     await fs.copyFile(path.join(restoreDir, 'master.key'), masterKeyFile);
     res.json({ ok: true, restored: true, restartRequired: true });
   });
@@ -457,7 +457,7 @@ export async function createApp() {
   });
   app.get('/api/v1/commands/:id', authOperator, async (req, res) => res.json(await db.get('SELECT * FROM commands WHERE id=?', req.params.id)));
   app.get('/api/v1/status', authOperator, async (req, res) => {
-    const staleSeconds = Number(process.env.LAUNCHPAD_STALE_SECONDS || 60);
+    const staleSeconds = Number(process.env.TUG_STALE_SECONDS || 60);
     const cutoff = new Date(Date.now() - staleSeconds * 1000).toISOString();
     await db.run("UPDATE nodes SET status='stale',updated_at=? WHERE last_seen_at IS NOT NULL AND last_seen_at < ?", now(), cutoff);
     res.json({ projects: await db.all('SELECT * FROM projects'), deployments: await db.all('SELECT * FROM deployments ORDER BY created_at DESC LIMIT 20'), nodes: await db.all('SELECT id,name,status,last_seen_at FROM nodes'), statuses: await db.all('SELECT * FROM node_statuses') });
@@ -485,7 +485,7 @@ export async function createApp() {
       await check('mesh', async () => {
         const nodes = await db.all<{ name: string; overlay_ip: string | null; has_key: number }[]>('SELECT n.name, n.overlay_ip, EXISTS(SELECT 1 FROM wg_peers w WHERE w.node_id=n.id) AS has_key FROM nodes n');
         const missing = nodes.filter(n => !n.has_key).map(n => n.name);
-        if (missing.length) throw new Error(`nodes without a reported WireGuard key (is LAUNCHPAD_MESH=true on their agents?): ${missing.join(', ')}`);
+        if (missing.length) throw new Error(`nodes without a reported WireGuard key (is TUG_MESH=true on their agents?): ${missing.join(', ')}`);
         return { cidr: MESH_CIDR, port: WG_PORT, nodes: nodes.length };
       });
     }
@@ -515,7 +515,7 @@ export async function createApp() {
     return rows.map((s): DesiredState => JSON.parse(s.state_json));
   }
   async function endpointsFor(states: DesiredState[]): Promise<ServiceEndpoints> {
-    const staleBefore = new Date(Date.now() - Number(process.env.LAUNCHPAD_STALE_SECONDS || 60) * 1000).toISOString();
+    const staleBefore = new Date(Date.now() - Number(process.env.TUG_STALE_SECONDS || 60) * 1000).toISOString();
     const nodes = await db.all<(NodeRow & { has_key: number })[]>('SELECT n.*, EXISTS(SELECT 1 FROM wg_peers w WHERE w.node_id=n.id) AS has_key FROM nodes n');
     const views: NodeView[] = nodes.map(n => ({ name: n.name, overlayIp: MESH && n.has_key ? n.overlay_ip : null, address: n.address, lastSeenAt: n.last_seen_at }));
     const statuses = (await db.all<{ node_id: string; project_id: string; status_json: string }[]>('SELECT node_id,project_id,status_json FROM node_statuses'))
@@ -534,7 +534,7 @@ export async function createApp() {
     const secrets = new Map<string, string>();
     for (const state of states) {
       for (const svc of Object.values(state.compose.services || {})) {
-        const ing = svc['x-launchpad']?.ingress;
+        const ing = svc['x-tug']?.ingress;
         if (ing?.tls !== 'custom') continue;
         for (const name of [ing.cert, ing.key]) {
           const row = await db.get<Pick<SecretRow, 'encrypted_value'>>('SELECT encrypted_value FROM secrets WHERE project_id=? AND name=?', state.project, name);
@@ -595,15 +595,15 @@ export async function createApp() {
 }
 
 export async function listen(app: express.Express, port = PORT): Promise<import('node:http').Server | https.Server> {
-  const certFile = process.env.LAUNCHPAD_TLS_CERT_FILE;
-  const keyFile = process.env.LAUNCHPAD_TLS_KEY_FILE;
+  const certFile = process.env.TUG_TLS_CERT_FILE;
+  const keyFile = process.env.TUG_TLS_KEY_FILE;
   if (certFile && keyFile) {
     const [cert, key] = await Promise.all([fs.readFile(certFile), fs.readFile(keyFile)]);
     const server = https.createServer({ cert, key }, app);
-    return new Promise(resolve => server.listen(port, () => { console.log(`launchpad-control listening on ${port} (tls)`); resolve(server); }));
+    return new Promise(resolve => server.listen(port, () => { console.log(`tug-control listening on ${port} (tls)`); resolve(server); }));
   }
-  console.warn('LAUNCHPAD_TLS_CERT_FILE/LAUNCHPAD_TLS_KEY_FILE not set; serving plain HTTP');
-  return new Promise(resolve => { const server = app.listen(port, () => { console.log(`launchpad-control listening on ${port}`); resolve(server); }); });
+  console.warn('TUG_TLS_CERT_FILE/TUG_TLS_KEY_FILE not set; serving plain HTTP');
+  return new Promise(resolve => { const server = app.listen(port, () => { console.log(`tug-control listening on ${port}`); resolve(server); }); });
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) createApp().then(app => listen(app));
