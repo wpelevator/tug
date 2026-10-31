@@ -27,6 +27,8 @@ CLI options override environment variables, which override the selected config f
 | `TUG_TLS_CERT_FILE`, `TUG_TLS_KEY_FILE` | unset | Serve HTTPS directly instead of plain HTTP. |
 | `TUG_LOCK_TTL_MS` | `600000` | Lease lifetime of per-project operation locks; active builds renew their lease. |
 | `TUG_STALE_SECONDS` | `60` | Seconds without a poll before a node is marked `stale`. |
+| `TUG_EVENT_RETENTION_DAYS` | `30` | Events older than this many days are deleted; `0` keeps events regardless of age. Pruning runs at startup and then at most once an hour while agents report events. |
+| `TUG_EVENT_MAX_ROWS` | `100000` | Only this many of the newest events are kept; `0` removes the limit. A value that is not a whole number falls back to the default. |
 | `TUG_CONTROL_BACKUP_DIR` | `<data dir>/control-backups` | Control backup archives. |
 | `TUG_CONTROL_RESTORE_DIR` | `<data dir>/control-restore` | Scratch directory for restores. |
 | `TUG_MESH` | `false` | Set `true` to allocate overlay IPs, store WireGuard peers and send `network` blocks. See [Networking](networking.md). |

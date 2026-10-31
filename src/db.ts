@@ -18,6 +18,8 @@ export interface SecretRow { id: string; project_id: string; name: string; encry
 export interface VolumeRow { id: string; project_id: string; name: string; type: string; driver: string | null; node_id: string | null; config_json: string; created_at: string; updated_at: string }
 export interface CommandRow { id: string; node_id: string; project_id: string | null; type: string; state: string; payload_json: string | null; result_json: string | null; attempts: number; run_after: string | null; deadline: string | null; created_at: string; updated_at: string }
 export interface LockRow { name: string; owner: string; expires_at: string; created_at: string }
+/** What the agent last announced for a project's recreated services, so unchanged polls stay silent. */
+export interface EventStateRow { project: string; fingerprint: string; phase: 'serving' | 'failed' }
 export interface AppliedStateRow { project: string; version: string; revision: string | null; applied_at: string; service_states_json: string; secret_versions_json: string }
 
 export async function openDb(filename: string): Promise<Db> {
@@ -41,6 +43,11 @@ CREATE TABLE IF NOT EXISTS applied_state(
   service_states_json TEXT,
   secret_versions_json TEXT
 );
+CREATE TABLE IF NOT EXISTS event_state(
+  project TEXT PRIMARY KEY,
+  fingerprint TEXT NOT NULL,
+  phase TEXT NOT NULL
+);
 `);
   return db;
 }
@@ -63,6 +70,7 @@ CREATE TABLE IF NOT EXISTS commands(id TEXT PRIMARY KEY, node_id TEXT, project_i
 CREATE TABLE IF NOT EXISTS events(id TEXT PRIMARY KEY, project_id TEXT, deployment_id TEXT, node_id TEXT, level TEXT, type TEXT, message TEXT, metadata_json TEXT, created_at TEXT, actor TEXT);
 CREATE INDEX IF NOT EXISTS events_project_created ON events(project_id, created_at);
 CREATE TABLE IF NOT EXISTS api_tokens(id TEXT PRIMARY KEY, name TEXT UNIQUE NOT NULL, token_hash TEXT UNIQUE NOT NULL, role TEXT NOT NULL, projects_json TEXT, created_at TEXT, created_by TEXT, last_used_at TEXT, expires_at TEXT, revoked_at TEXT);
+CREATE INDEX IF NOT EXISTS events_by_time ON events(created_at);
 CREATE TABLE IF NOT EXISTS locks(name TEXT PRIMARY KEY, owner TEXT, expires_at TEXT, created_at TEXT);
 `);
   const row = await db.get('SELECT value FROM meta WHERE key = ?', 'schema_created_at');
