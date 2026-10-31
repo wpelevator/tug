@@ -60,3 +60,29 @@ test('composeForNode injects cross-node names as extra_hosts without touching lo
   assert.deepEqual(crossNodeHosts('blog', {}, new Set()), [], 'no endpoints, no hosts');
   assert.equal((composeForNode(ds, 'n2', {}, { ...endpoints, web: [{ node: 'n1', address: '10.210.0.1' }] }).services.db.extra_hosts as string[]).includes('web:10.210.0.1'), true, 'the other direction resolves too');
 });
+
+test('validateCompose accepts label and global placement without explicit nodes', () => {
+  const nodes = ['n1', 'n2'];
+  assert.equal(validateCompose({ services: { web: { image: 'nginx', 'x-tug': { placement: { labels: ['app'] } } } } }, nodes), undefined, 'label placement should be valid');
+  assert.equal(validateCompose({ services: { web: { image: 'nginx', 'x-tug': { global: true } } } }, nodes), undefined, 'global mode should be valid');
+});
+
+test('buildDesiredState resolves label placement when nodes are provided', () => {
+  const compose = { services: { web: { image: 'nginx', 'x-tug': { placement: { labels: ['app'] }, replicas: 1 } } } };
+  const ds = buildDesiredState({ project: 'site', version: 'v1', compose, registry: 'reg', nodes: [{ name: 'n1', labels: ['app'] }, { name: 'n2', labels: ['db'] }] });
+  assert.deepEqual(ds.services.web.placement.nodes, ['n1'], 'only matching nodes should be selected');
+});
+
+test('buildDesiredState global mode selects every matching node', () => {
+  const compose = { services: { web: { image: 'nginx', 'x-tug': { placement: { labels: ['app'] }, global: true } } } };
+  const ds = buildDesiredState({ project: 'site', version: 'v1', compose, registry: 'reg', nodes: [{ name: 'n1', labels: ['app'] }, { name: 'n2', labels: ['app'] }] });
+  assert.deepEqual(ds.services.web.placement.nodes, ['n1', 'n2'], 'global mode should select all matching nodes');
+});
+
+test('composeForNode generates an NFS volume on consuming nodes', () => {
+  const compose = { services: { web: { image: 'nginx', volumes: ['shared:/data'], 'x-tug': { placement: { nodes: ['n2'] } } } }, volumes: { shared: { 'x-tug': { type: 'nfs', placement: { nodes: ['n1'] } } } } };
+  const ds = buildDesiredState({ project: 'site', version: 'v1', compose, registry: 'reg' });
+  const c = composeForNode(ds, 'n2', {}, {}, new Set(), { n1: '10.0.0.1' });
+  assert.equal(c.volumes?.shared?.driver, 'nfs', 'consumers should get an nfs driver volume');
+  assert.equal((c.volumes?.shared?.driver_opts as any)?.device, ':/shared', 'nfs device should name the volume');
+});
