@@ -7,15 +7,18 @@ import https from 'node:https';
 import path from 'node:path';
 import * as tar from 'tar';
 import { openDb } from './db.ts';
-import type { CommandRow, DeploymentRow, DesiredStateRow, EnrollTokenRow, LockRow, NodeRow, ProjectRow, SecretRow } from './db.ts';
+import type { CommandRow, DeploymentRow, DesiredStateRow, EnrollTokenRow, LockRow, NodeRow, ProjectRow, SecretRow, WgPeerRow } from './db.ts';
 import { encrypt, decrypt, loadOrCreateMasterKey } from './secrets.ts';
 import { buildDesiredState, serviceSecretNames, validateCompose } from './compose.ts';
 import { buildAndPush, unpackContext, run as runCommand } from './build.ts';
 import { ensureDir, errMessage, hashToken, id, now, token } from './util.ts';
+import { DEFAULT_MESH_CIDR, DEFAULT_WG_PORT, WG_INTERFACE, WG_KEEPALIVE, allocateOverlayIp, isWgKey, parseCidr, wgEndpoint } from './mesh.ts';
+import { buildIngressWork, resolveServiceEndpoints } from './ingress.ts';
+import type { NodeView } from './ingress.ts';
 import { ACTIVE_DEPLOYMENT_STATES } from './protocol.ts';
 import type {
-  AgentEvent, CommandResult, CommandType, ComposeFile, DesiredState, EnrollRequest, EnrollResponse, NodeInfo,
-  RegisterResponse, SecretsResponse, StatusReport, WorkResponse
+  AgentEvent, CommandResult, CommandType, ComposeFile, DesiredState, EnrollRequest, EnrollResponse, NetworkConfig, NodeInfo,
+  RegisterResponse, SecretsResponse, ServiceEndpoints, StatusReport, WgKeyRequest, WorkResponse
 } from './protocol.ts';
 
 declare module 'express-serve-static-core' {
@@ -37,6 +40,13 @@ export async function createApp() {
   const REGISTRY = process.env.LAUNCHPAD_REGISTRY || 'localhost:5000';
   const REGISTRY_AUTH_PATH = process.env.LAUNCHPAD_REGISTRY_AUTH_PATH || null;
   const REGISTRY_CONTAINER = process.env.LAUNCHPAD_REGISTRY_CONTAINER || null;
+  // Networking layers are opt-in; with all of them off the work response is unchanged.
+  const MESH = process.env.LAUNCHPAD_MESH === 'true';
+  const MESH_CIDR = process.env.LAUNCHPAD_MESH_CIDR || DEFAULT_MESH_CIDR;
+  const WG_PORT = Number(process.env.LAUNCHPAD_WG_PORT || DEFAULT_WG_PORT);
+  const SERVICE_DNS = (process.env.LAUNCHPAD_SERVICE_DNS ?? String(MESH)) === 'true';
+  const ACME_EMAIL = process.env.LAUNCHPAD_ACME_EMAIL || undefined;
+  if (MESH) parseCidr(MESH_CIDR);
 
   let htpasswdQueue = Promise.resolve();
   function withHtpasswdLock<T>(fn: () => Promise<T>): Promise<T> {
@@ -150,18 +160,48 @@ export async function createApp() {
   });
   app.get('/api/v1/projects/:project', authOperator, async (req, res) => res.json(await db.get('SELECT * FROM projects WHERE id=?', req.params.project)));
 
-  async function registerNode({ name, address, publicAddress }: { name: string; address?: string; publicAddress?: string }): Promise<RegisterResponse> {
+  const NODE_INFO_SQL = 'SELECT id,name,address,public_address,overlay_ip,status,created_at,updated_at FROM nodes WHERE id=?';
+
+  /** Allocates the node's stable overlay IP on first registration (retrying if a concurrent register took it). */
+  async function ensureOverlayIp(nodeId: string): Promise<void> {
+    if (!MESH) return;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const row = await db.get<Pick<NodeRow, 'overlay_ip'>>('SELECT overlay_ip FROM nodes WHERE id=?', nodeId);
+      if (row?.overlay_ip) return;
+      const used = (await db.all<{ overlay_ip: string }[]>('SELECT overlay_ip FROM nodes WHERE overlay_ip IS NOT NULL')).map(r => r.overlay_ip);
+      try { await db.run('UPDATE nodes SET overlay_ip=? WHERE id=? AND overlay_ip IS NULL', allocateOverlayIp(MESH_CIDR, used), nodeId); return; }
+      catch (e) { if (!/UNIQUE constraint/.test(errMessage(e))) throw e; }
+    }
+    throw new Error('could not allocate an overlay address');
+  }
+  /** Stores (or refreshes) the node's WireGuard peer entry; the private key never reaches control. */
+  async function syncWgPeer(nodeId: string, publicKey?: string): Promise<void> {
+    if (!MESH) return;
+    const node = await db.get<NodeRow>('SELECT * FROM nodes WHERE id=?', nodeId);
+    const existing = await db.get<WgPeerRow>('SELECT * FROM wg_peers WHERE node_id=?', nodeId);
+    const key = publicKey ?? existing?.public_key;
+    if (!node?.overlay_ip || !key) return;
+    await db.run(`INSERT INTO wg_peers(node_id,public_key,overlay_ip,endpoint,allowed_ips,updated_at) VALUES(?,?,?,?,?,?)
+      ON CONFLICT(node_id) DO UPDATE SET public_key=excluded.public_key,overlay_ip=excluded.overlay_ip,endpoint=excluded.endpoint,allowed_ips=excluded.allowed_ips,updated_at=excluded.updated_at`,
+      nodeId, key, node.overlay_ip, wgEndpoint(node.public_address, WG_PORT) ?? null, `${node.overlay_ip}/32`, now());
+  }
+
+  async function registerNode({ name, address, publicAddress, wgPublicKey }: { name: string; address?: string; publicAddress?: string; wgPublicKey?: string }): Promise<RegisterResponse> {
+    if (wgPublicKey !== undefined && !isWgKey(wgPublicKey)) throw httpError(400, 'wgPublicKey must be a base64 WireGuard public key');
     const agentToken = token('lpa'); const registryToken = token('lpr'); const ts = now();
     await db.run(`INSERT INTO nodes(id,name,address,public_address,status,agent_token_hash,registry_token_hash,created_at,updated_at)
       VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,address=excluded.address,public_address=excluded.public_address,agent_token_hash=excluded.agent_token_hash,registry_token_hash=excluded.registry_token_hash,updated_at=excluded.updated_at`,
       name, name, address || null, publicAddress || null, 'registered', hashToken(agentToken), hashToken(registryToken), ts, ts);
+    await ensureOverlayIp(name);
+    await syncWgPeer(name, wgPublicKey);
     await upsertRegistryCredential(name, registryToken);
-    const node = (await db.get<NodeInfo>('SELECT id,name,address,public_address,status,created_at,updated_at FROM nodes WHERE id=?', name))!;
+    const node = (await db.get<NodeInfo>(NODE_INFO_SQL, name))!;
     return { node, agentToken, registryToken };
   }
   app.post('/api/v1/nodes/register', authOperator, async (req, res) => {
     const name = req.body.name; if (!name) return res.status(400).json({ error: 'name required' });
-    res.json(await registerNode({ name, address: req.body.address, publicAddress: req.body.publicAddress }));
+    try { res.json(await registerNode({ name, address: req.body.address, publicAddress: req.body.publicAddress, wgPublicKey: req.body.wgPublicKey })); }
+    catch (e) { sendError(res, e); }
   });
 
   // Self-service enrollment: operator mints a short-lived, limited-use key; the agent
@@ -187,14 +227,16 @@ export async function createApp() {
     }
     const name = row.name || body.name;
     if (!name) return res.status(400).json({ error: 'node name required (bind one to the enroll token or send name)' });
-    const result = await registerNode({ name, address: body.address, publicAddress: body.publicAddress });
+    let result: RegisterResponse;
+    try { result = await registerNode({ name, address: body.address, publicAddress: body.publicAddress, wgPublicKey: body.wgPublicKey }); }
+    catch (e) { return sendError(res, e); }
     const remaining = row.uses_remaining - 1;
     if (remaining < 1) await db.run('DELETE FROM enroll_tokens WHERE token_hash=?', hashToken(raw));
     else await db.run('UPDATE enroll_tokens SET uses_remaining=? WHERE token_hash=?', remaining, hashToken(raw));
     const enrolled: EnrollResponse = { ...result, registry: REGISTRY };
     res.json(enrolled);
   });
-  app.get('/api/v1/nodes', authOperator, async (req, res) => res.json({ nodes: await db.all('SELECT id,name,address,public_address,status,last_seen_at,created_at,updated_at FROM nodes ORDER BY name') }));
+  app.get('/api/v1/nodes', authOperator, async (req, res) => res.json({ nodes: await db.all('SELECT id,name,address,public_address,overlay_ip,ingress,ingress_status_json,status,last_seen_at,created_at,updated_at FROM nodes ORDER BY name') }));
   app.post('/api/v1/nodes/:name/rotate-registry-token', authOperator, async (req, res) => {
     const node = await db.get('SELECT id,name FROM nodes WHERE name=? OR id=?', req.params.name, req.params.name);
     if (!node) return res.status(404).json({ error: 'node not found' });
@@ -209,6 +251,33 @@ export async function createApp() {
     await db.run('UPDATE nodes SET registry_token_hash=NULL,updated_at=? WHERE id=?', now(), node.id);
     await removeRegistryCredential(node.name);
     res.json({ ok: true, node: node.name, revoked: true });
+  });
+  async function findNode(nameOrId: string) { return db.get<Pick<NodeRow, 'id' | 'name'>>('SELECT id,name FROM nodes WHERE name=? OR id=?', nameOrId, nameOrId); }
+  function queueCommand(nodeId: string, projectId: string | null, type: CommandType, payload: Record<string, unknown> = {}): Promise<string> {
+    const commandId = id('cmd'); const ts = now();
+    return db.run('INSERT INTO commands(id,node_id,project_id,type,state,payload_json,attempts,run_after,deadline,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)', commandId, nodeId, projectId, type, 'pending', JSON.stringify(payload), 0, ts, null, ts, ts).then(() => commandId);
+  }
+  // The private key lives only on the node, so rotation is a command the agent executes: it
+  // generates a new keypair, reports the public key and peers pick it up from their next work response.
+  app.post('/api/v1/nodes/:name/rotate-wg-key', authOperator, async (req, res) => {
+    if (!MESH) return res.status(409).json({ error: 'the WireGuard mesh is not enabled (LAUNCHPAD_MESH=true)' });
+    const node = await findNode(req.params.name);
+    if (!node) return res.status(404).json({ error: 'node not found' });
+    res.json({ commandId: await queueCommand(node.id, null, 'wg.rotate-key'), nodeId: node.id });
+  });
+  app.post('/api/v1/nodes/:name/ingress', authOperator, async (req, res) => {
+    const node = await findNode(req.params.name);
+    if (!node) return res.status(404).json({ error: 'node not found' });
+    const enabled = req.body.enabled !== false;
+    await db.run('UPDATE nodes SET ingress=?,updated_at=? WHERE id=?', enabled ? 1 : 0, now(), node.id);
+    res.json({ ok: true, node: node.name, ingress: enabled });
+  });
+  app.post('/agent/v1/wireguard/key', authAgent, async (req, res) => {
+    if (!MESH) return res.status(409).json({ error: 'the WireGuard mesh is not enabled' });
+    const { publicKey }: Partial<WgKeyRequest> = req.body;
+    if (!isWgKey(publicKey)) return res.status(400).json({ error: 'publicKey must be a base64 WireGuard public key' });
+    try { await syncWgPeer(req.node!.id, publicKey); res.json({ ok: true }); }
+    catch (e) { sendError(res, /UNIQUE constraint/.test(errMessage(e)) ? httpError(409, 'public key already registered to another node') : e); }
   });
   app.post('/api/v1/registry/auth', async (req, res) => {
     const username = req.body.username;
@@ -237,7 +306,16 @@ export async function createApp() {
   app.post('/api/v1/deployments', authOperator, upload.single('context'), async (req, res) => {
     const body = req.file ? JSON.parse(req.body.payload) : req.body;
     const project: string = body.project || 'site'; const compose: ComposeFile = body.compose; const version = body.version || `git-${Date.now()}`;
-    const nodes = await db.all<{ name: string }[]>('SELECT name FROM nodes'); validateCompose(compose, nodes.map(n => n.name));
+    const nodes = await db.all<{ name: string }[]>('SELECT name FROM nodes');
+    try { validateCompose(compose, nodes.map(n => n.name)); }
+    catch (e) { return res.status(400).json({ error: errMessage(e) }); }
+    for (const [svcName, svc] of Object.entries(compose.services)) {
+      const ing = svc['x-launchpad']?.ingress;
+      if (ing?.tls !== 'custom') continue;
+      for (const secret of [ing.cert, ing.key]) {
+        if (!await db.get('SELECT 1 FROM secrets WHERE project_id=? AND name=?', project, secret)) return res.status(400).json({ error: `${svcName}: custom TLS secret ${secret} not found in project ${project}; set it with secret:set first` });
+      }
+    }
     const active = await db.get<Pick<DeploymentRow, 'id' | 'state'>>(`SELECT id,state FROM deployments WHERE project_id=? AND state IN (${ACTIVE_STATES_SQL}) ORDER BY created_at DESC LIMIT 1`, project);
     if (active) return res.status(409).json({ error: `deployment ${active.id} is already ${active.state}` });
     const depId = id('dep'); const ts = now();
@@ -403,6 +481,22 @@ export async function createApp() {
     await check('master_key', async () => ({ configured: Boolean(masterKey) }));
     await check('docker', async () => ({ output: (await runCommand('docker', ['version', '--format', '{{.Server.Version}}'])).out.trim() }));
     await check('docker_compose', async () => ({ output: (await runCommand('docker', ['compose', 'version'])).out.trim() }));
+    if (MESH) {
+      await check('mesh', async () => {
+        const nodes = await db.all<{ name: string; overlay_ip: string | null; has_key: number }[]>('SELECT n.name, n.overlay_ip, EXISTS(SELECT 1 FROM wg_peers w WHERE w.node_id=n.id) AS has_key FROM nodes n');
+        const missing = nodes.filter(n => !n.has_key).map(n => n.name);
+        if (missing.length) throw new Error(`nodes without a reported WireGuard key (is LAUNCHPAD_MESH=true on their agents?): ${missing.join(', ')}`);
+        return { cidr: MESH_CIDR, port: WG_PORT, nodes: nodes.length };
+      });
+    }
+    const ingressNodes = await db.all<Pick<NodeRow, 'name' | 'ingress_status_json'>[]>('SELECT name,ingress_status_json FROM nodes WHERE ingress=1');
+    if (ingressNodes.length) {
+      await check('ingress', async () => {
+        const bad = ingressNodes.filter(n => (n.ingress_status_json ? JSON.parse(n.ingress_status_json).state : 'unreported') !== 'serving').map(n => n.name);
+        if (bad.length) throw new Error(`ingress nodes not serving: ${bad.join(', ')}`);
+        return { nodes: ingressNodes.map(n => n.name) };
+      });
+    }
     res.json({ ok: checks.every(c => c.ok), registry: REGISTRY, checks });
   });
   app.post('/api/v1/diagnostics/nodes', authOperator, async (req, res) => {
@@ -416,13 +510,56 @@ export async function createApp() {
     res.json({ commands });
   });
 
+  async function currentDesiredStates(): Promise<DesiredState[]> {
+    const rows = await db.all<DesiredStateRow[]>(`SELECT ds.* FROM desired_states ds JOIN projects p ON p.current_deployment_id=ds.deployment_id ORDER BY ds.created_at DESC`);
+    return rows.map((s): DesiredState => JSON.parse(s.state_json));
+  }
+  async function endpointsFor(states: DesiredState[]): Promise<ServiceEndpoints> {
+    const staleBefore = new Date(Date.now() - Number(process.env.LAUNCHPAD_STALE_SECONDS || 60) * 1000).toISOString();
+    const nodes = await db.all<(NodeRow & { has_key: number })[]>('SELECT n.*, EXISTS(SELECT 1 FROM wg_peers w WHERE w.node_id=n.id) AS has_key FROM nodes n');
+    const views: NodeView[] = nodes.map(n => ({ name: n.name, overlayIp: MESH && n.has_key ? n.overlay_ip : null, address: n.address, lastSeenAt: n.last_seen_at }));
+    const statuses = (await db.all<{ node_id: string; project_id: string; status_json: string }[]>('SELECT node_id,project_id,status_json FROM node_statuses'))
+      .map(r => ({ node: nodes.find(n => n.id === r.node_id)?.name ?? r.node_id, project: r.project_id, status: JSON.parse(r.status_json) }));
+    return resolveServiceEndpoints(states, views, statuses, staleBefore);
+  }
+  async function networkFor(node: NodeRow): Promise<NetworkConfig | undefined> {
+    if (!MESH || !node.overlay_ip) return undefined;
+    const peers = await db.all<(WgPeerRow & { name: string })[]>('SELECT w.*, n.name FROM wg_peers w JOIN nodes n ON n.id=w.node_id WHERE w.node_id != ? ORDER BY n.name', node.id);
+    return {
+      interface: WG_INTERFACE, overlayIp: node.overlay_ip, cidr: MESH_CIDR, listenPort: WG_PORT,
+      peers: peers.map(p => ({ node: p.name, publicKey: p.public_key, endpoint: p.endpoint ?? undefined, allowedIps: p.allowed_ips.split(','), persistentKeepalive: WG_KEEPALIVE }))
+    };
+  }
+  async function ingressFor(node: NodeRow, states: DesiredState[]) {
+    const secrets = new Map<string, string>();
+    for (const state of states) {
+      for (const svc of Object.values(state.compose.services || {})) {
+        const ing = svc['x-launchpad']?.ingress;
+        if (ing?.tls !== 'custom') continue;
+        for (const name of [ing.cert, ing.key]) {
+          const row = await db.get<Pick<SecretRow, 'encrypted_value'>>('SELECT encrypted_value FROM secrets WHERE project_id=? AND name=?', state.project, name);
+          if (row) secrets.set(`${state.project}/${name}`, decrypt(row.encrypted_value, masterKey));
+        }
+      }
+    }
+    return buildIngressWork({ states, endpoints: await endpointsFor(states), node: node.name, secrets, acmeEmail: ACME_EMAIL });
+  }
+
   app.get('/agent/v1/work', authAgent, async (req, res) => {
     await db.run('UPDATE nodes SET last_seen_at=?,status=? WHERE id=?', now(), 'online', req.node!.id);
-    const states = await db.all<DesiredStateRow[]>(`SELECT ds.* FROM desired_states ds JOIN projects p ON p.current_deployment_id=ds.deployment_id ORDER BY ds.created_at DESC`);
-    const desiredStates: DesiredState[] = states.map((s): DesiredState => JSON.parse(s.state_json)).filter(st => Object.values(st.services).some(svc => (svc.placement?.nodes || []).includes(req.node!.name) || !(svc.placement?.nodes?.length)));
-    const commands = await db.all<CommandRow[]>('SELECT * FROM commands WHERE node_id=? AND state=?', req.node!.id, 'pending');
-    if (commands.length) await db.run(`UPDATE commands SET state='running',attempts=attempts+1,updated_at=? WHERE node_id=? AND state='pending'`, now(), req.node!.id);
-    const work: WorkResponse = { serverTime: now(), nodeId: req.node!.id, desiredStates, commands };
+    const node = (await db.get<NodeRow>('SELECT * FROM nodes WHERE id=?', req.node!.id))!;
+    const allStates = await currentDesiredStates();
+    const desiredStates = allStates.filter(st => Object.values(st.services).some(svc => (svc.placement?.nodes || []).includes(node.name) || !(svc.placement?.nodes?.length)));
+    const commands = await db.all<CommandRow[]>('SELECT * FROM commands WHERE node_id=? AND state=?', node.id, 'pending');
+    if (commands.length) await db.run(`UPDATE commands SET state='running',attempts=attempts+1,updated_at=? WHERE node_id=? AND state='pending'`, now(), node.id);
+    const work: WorkResponse = { serverTime: now(), nodeId: node.id, desiredStates, commands };
+    const network = await networkFor(node);
+    if (network) work.network = network;
+    if (SERVICE_DNS) {
+      const all = await endpointsFor(allStates);
+      work.serviceEndpoints = Object.fromEntries(desiredStates.map(st => [st.project, all[st.project] || {}]));
+    }
+    if (node.ingress) work.ingress = await ingressFor(node, allStates);
     res.json(work);
   });
   app.post('/agent/v1/status', authAgent, async (req, res) => {
@@ -436,6 +573,7 @@ export async function createApp() {
       const result = cr.result || {};
       await db.run('UPDATE commands SET state=?,result_json=?,updated_at=? WHERE id=? AND node_id=?', cr.state || 'succeeded', JSON.stringify(result), ts, cr.commandId, req.node!.id);
     }
+    if (report.ingress) await db.run('UPDATE nodes SET ingress_status_json=? WHERE id=?', JSON.stringify({ ...report.ingress, reportedAt: ts }), req.node!.id);
     await db.run('UPDATE nodes SET last_seen_at=?,status=? WHERE id=?', ts, 'online', req.node!.id);
     res.json({ ok: true });
   });

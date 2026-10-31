@@ -1,0 +1,25 @@
+# Cross-node networking sample: web on vps-a is published through the ingress node (vps-c) and
+# reachable by name from client on vps-b.
+services:
+  web:
+    image: nginx:1.27-alpine
+    ports:
+      - "8080:80"
+    x-launchpad:
+      placement:
+        nodes: [vps-a]
+      health:
+        type: http
+        port: 80
+        path: /
+      ingress:
+        host: app.test
+        port: 80
+        tls: off
+
+  client:
+    image: busybox:1.36
+    command: ["sh", "-c", "while true; do sleep 30; done"]
+    x-launchpad:
+      placement:
+        nodes: [vps-b]

@@ -16,9 +16,9 @@ Keep the single-writer control plane rather than decentralizing it like uncloud.
 
 Typed `src/protocol.ts` control↔agent contract and injectable agent runners, so later milestones build on typed payloads and unit-testable reconcile logic. Source and tests run as `.ts` through Node type stripping, and only the Docker image is compiled to `dist/`. See [Development](development.md) and [Architecture](architecture.md).
 
-### M2 — Cross-node networking, DNS, ingress/TLS
+### M2 — Cross-node networking, DNS, ingress/TLS (done)
 
-WireGuard mesh with control as the IP allocator and peer registry, health-aware service DNS, and a managed Caddy ingress with `x-launchpad.ingress` routes and automatic TLS. Working plan: `plan-networking-ingress.md` (local, not committed).
+WireGuard mesh with control as the IP allocator and peer registry, health-aware service DNS through `extra_hosts`, and a managed Caddy ingress with `x-launchpad.ingress` routes and automatic TLS. Each layer is opt-in. See [Networking](networking.md). Deferred: routable container networks over the mesh (per-project subnets in `AllowedIPs`), load-balanced service names, multiple routes per service and wildcard certificates.
 
 ### M3 — Zero-downtime rolling deploys + automatic rollback
 
@@ -75,8 +75,8 @@ Rough parity with uncloud after M2 + M3 + M4 + M5. M3's automatic rollback and M
 
 ## Checklist
 
-- [ ] M1 TypeScript adoption merged (`plan-typescript-adoption.md`)
-- [ ] M2 networking, DNS, ingress/TLS merged (`plan-networking-ingress.md`)
+- [x] M1 TypeScript adoption merged
+- [x] M2 networking, DNS, ingress/TLS: WireGuard mesh, `node:rotate-wg-key`, service DNS, `x-launchpad.ingress`, managed Caddy with `auto`/`custom`/`off` TLS ([Networking](networking.md))
 - [ ] M3 spec written (`plan-rolling-deploys.md`)
 - [ ] M3 rolling deploys with ingress upstream switching
 - [ ] M3 `x-launchpad.rollout` options, `recreate` default for stateful services

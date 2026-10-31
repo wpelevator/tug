@@ -41,6 +41,10 @@ Options:
 
 To keep the key out of shell history and `docker inspect`, mount it as a file and set `LAUNCHPAD_JOIN_KEY_FILE=/path/to/key` instead of `LAUNCHPAD_JOIN_KEY`.
 
+## Joining the WireGuard mesh
+
+Add `--mesh` to `node install` or `node enroll` (and set `LAUNCHPAD_MESH=true` on control) to run the agent with host networking and `NET_ADMIN`, so it can create `wg0` and join the overlay. Give nodes that other nodes must dial a `--public-address`; nodes behind NAT can omit it. See [Networking](networking.md).
+
 ## Register only (`node:register`)
 
 `launchpad node:register --name <node> [--address <ip>] [--public-address <ip>]` registers a node and prints its agent and registry tokens without installing anything, for running the agent yourself (see [Development](development.md)).

@@ -44,5 +44,17 @@ test('install commands render the shipped templates (src in dev, dist in the ima
     assert.ok(script.includes('LAUNCHPAD_NODE_NAME=n-tpl'), 'agent.env rendered');
     assert.ok(script.includes(controlUrl), 'agent.env carries the control URL');
     assert.doesNotMatch(script, /\{\{\w+\}\}/, 'no unrendered template variables');
+    assert.doesNotMatch(script, /NET_ADMIN|LAUNCHPAD_MESH/, 'agents join no mesh unless asked');
+
+    await fs.rm(ssh.log);
+    await cli('node', 'install', 'root@node2.test', '--name', 'n-mesh', '--control-url', controlUrl, '--http-only-dev', '--no-transfer-image', '--mesh');
+    script = await fs.readFile(ssh.log, 'utf8');
+    assert.ok(script.includes('LAUNCHPAD_MESH=true'), '--mesh sets LAUNCHPAD_MESH in agent.env');
+    assert.match(script, /--network host --cap-add NET_ADMIN/, '--mesh runs the agent with host networking and NET_ADMIN');
+    assert.ok(script.includes('lpwgtest type wireguard') && script.includes('udp.51820.free'), '--mesh adds WireGuard kernel and UDP port preflight checks');
+    assert.doesNotMatch(script, /\{\{\w+\}\}/, 'no unrendered template variables');
+
+    const enroll = await cli('node', 'enroll', '--name', 'n-enr', '--mesh', '--control-url', controlUrl, '--http-only-dev');
+    assert.match(enroll.stdout, /--network host --cap-add NET_ADMIN -e LAUNCHPAD_MESH=true/, 'node enroll --mesh prints a mesh-capable docker run');
   } finally { await new Promise(resolve => server.close(resolve)); }
 });

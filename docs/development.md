@@ -83,3 +83,11 @@ The test provisions `vps-a`, `vps-b` and `vps-c`, sets a sample secret, deploys 
 ```bash
 limactl start --name=vps template-vps.yml
 ```
+
+### Networking integration test
+
+```bash
+npm run test:integration:network
+```
+
+Layers `docker-compose.integration-network.yml` over the same stack with `LAUNCHPAD_MESH=true` on control and all agents and `vps-c` marked as an ingress node, deploys `docker-compose.network-sample.yml` (`web` on `vps-a`, `client` on `vps-b`) and runs `scripts/integration-verify-network.js`: node-to-node pings and a WireGuard handshake over the overlay, a container on `vps-b` fetching `http://web:8080` by name, Caddy on `vps-c` serving `Host: app.test` from `vps-a`, and mesh connectivity again after `node:rotate-wg-key`. It uses the compose project `pad-launch-it-net` and the same ports as the plain integration test, so run them one at a time. The Docker host's kernel must support WireGuard (Linux 5.6+, Docker Desktop's VM included).

@@ -1,0 +1,189 @@
+// Service endpoints (health-aware DNS source), ingress route resolution and Caddyfile rendering
+// on the control side; the managed Caddy container reconcile on the agent side. Docker access goes
+// through the injectable DockerRunner.
+import crypto from 'node:crypto';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { publishedPort } from './compose.ts';
+import { ensureDir, errMessage } from './util.ts';
+import type {
+  DesiredState, IngressRoute, IngressSpec, IngressStatus, IngressTls, IngressWork, ProjectStatus, ServiceEndpoint, ServiceEndpoints
+} from './protocol.ts';
+import type { DockerRunner } from './runners.ts';
+
+export const CADDY_CONTAINER = 'launchpad-caddy';
+export const DEFAULT_CADDY_IMAGE = 'caddy:2-alpine';
+const CADDY_ETC = '/etc/caddy';
+
+// ---- Control: endpoints and routes -------------------------------------------------------------
+
+export interface NodeView {
+  name: string;
+  /** Reachable mesh address; null when the mesh is off or the node has not reported a key yet. */
+  overlayIp: string | null;
+  address: string | null;
+  lastSeenAt: string | null;
+}
+export interface ReportedStatus { node: string; project: string; status: ProjectStatus }
+
+/**
+ * Where each service can be reached right now: one endpoint per placement node whose agent is
+ * fresh and reports that service `serving`. Withdrawn automatically when a node goes stale or its
+ * rollout state drops, which is what makes DNS and ingress health-aware.
+ */
+export function resolveServiceEndpoints(states: DesiredState[], nodes: NodeView[], statuses: ReportedStatus[], staleBefore: string): ServiceEndpoints {
+  const byName = new Map(nodes.map(n => [n.name, n]));
+  const reported = new Map(statuses.map(s => [`${s.node}\0${s.project}`, s.status]));
+  const out: ServiceEndpoints = {};
+  for (const state of states) {
+    for (const [service, spec] of Object.entries(state.services)) {
+      const endpoints: ServiceEndpoint[] = [];
+      for (const nodeName of spec.placement?.nodes || []) {
+        const node = byName.get(nodeName);
+        const address = node && (node.overlayIp || node.address);
+        if (!node || !address || !node.lastSeenAt || node.lastSeenAt < staleBefore) continue;
+        if (reported.get(`${nodeName}\0${state.project}`)?.serviceStates?.[service]?.rolloutState !== 'serving') continue;
+        endpoints.push({ node: nodeName, address });
+      }
+      if (endpoints.length) (out[state.project] ||= {})[service] = endpoints.sort((a, b) => a.node.localeCompare(b.node));
+    }
+  }
+  return out;
+}
+
+export interface IngressInput {
+  states: DesiredState[];
+  endpoints: ServiceEndpoints;
+  /** The ingress node being configured; its own upstreams are reached on loopback. */
+  node: string;
+  /** Decrypted project secrets for custom TLS, keyed `<project>/<secret name>`. */
+  secrets: Map<string, string>;
+  acmeEmail?: string;
+}
+
+const certFile = (host: string, ext: 'crt' | 'key') => `certs/${host.replace(/\*/g, '_wildcard_')}.${ext}`;
+
+export function buildIngressWork({ states, endpoints, node, secrets, acmeEmail }: IngressInput): IngressWork {
+  const routes: IngressRoute[] = [];
+  const files: Record<string, string> = {};
+  const warnings: string[] = [];
+  const seenHosts = new Map<string, string>();
+  const tagged: { project: string; service: string; ingress: IngressSpec; port: number | null }[] = [];
+  for (const state of states) {
+    for (const [service, svc] of Object.entries(state.compose.services || {})) {
+      const ingress = svc['x-launchpad']?.ingress;
+      if (ingress) tagged.push({ project: state.project, service, ingress, port: publishedPort(svc, ingress.port) });
+    }
+  }
+  tagged.sort((a, b) => `${a.project}/${a.service}`.localeCompare(`${b.project}/${b.service}`));
+  for (const { project, service, ingress, port } of tagged) {
+    const label = `${project}/${service}`;
+    const host = ingress.host.toLowerCase();
+    const tls: IngressTls = ingress.tls || 'auto';
+    if (seenHosts.has(host)) { warnings.push(`${label}: host ${host} is already routed by ${seenHosts.get(host)}; skipped`); continue; }
+    if (port == null) { warnings.push(`${label}: ingress.port ${ingress.port} is not published; skipped`); continue; }
+    const upstreams = (endpoints[project]?.[service] || []).map(e => `${e.node === node ? '127.0.0.1' : e.address}:${port}`);
+    if (!upstreams.length) { warnings.push(`${label}: no serving upstream for ${host}; route withheld`); continue; }
+    if (tls === 'custom') {
+      const cert = secrets.get(`${project}/${ingress.cert}`); const key = secrets.get(`${project}/${ingress.key}`);
+      if (!cert || !key) { warnings.push(`${label}: custom TLS secrets ${ingress.cert}/${ingress.key} not found in project ${project}; skipped`); continue; }
+      files[certFile(host, 'crt')] = cert.endsWith('\n') ? cert : `${cert}\n`;
+      files[certFile(host, 'key')] = key.endsWith('\n') ? key : `${key}\n`;
+    }
+    seenHosts.set(host, label);
+    routes.push({ project, service, host, tls, upstreams });
+  }
+  return { caddyfile: renderCaddyfile(routes, { acmeEmail }), files, routes, warnings };
+}
+
+export function renderCaddyfile(routes: IngressRoute[], opts: { acmeEmail?: string } = {}): string {
+  const out: string[] = [];
+  if (opts.acmeEmail) out.push('{', `\temail ${opts.acmeEmail}`, '}', '');
+  for (const route of routes) {
+    // An explicit http:// address turns off automatic HTTPS for that site.
+    out.push(`${route.tls === 'off' ? 'http://' : ''}${route.host} {`);
+    if (route.tls === 'custom') out.push(`\ttls ${CADDY_ETC}/${certFile(route.host, 'crt')} ${CADDY_ETC}/${certFile(route.host, 'key')}`);
+    out.push(`\treverse_proxy ${route.upstreams.join(' ')} {`, '\t\tlb_policy round_robin', '\t}', '}', '');
+  }
+  return out.length ? out.join('\n') : '# no ingress routes\n';
+}
+
+// ---- Agent: managed Caddy container ------------------------------------------------------------
+
+export function ingressConfigHash(work: Pick<IngressWork, 'caddyfile' | 'files'>): string {
+  const h = crypto.createHash('sha256').update(work.caddyfile);
+  for (const name of Object.keys(work.files).sort()) h.update('\0').update(name).update('\0').update(work.files[name]);
+  return h.digest('hex');
+}
+
+export interface IngressContext { docker: DockerRunner; stateDir: string; caddyImage?: string }
+
+async function writeStage(dir: string, work: IngressWork): Promise<void> {
+  await fs.rm(dir, { recursive: true, force: true });
+  await ensureDir(dir);
+  await fs.writeFile(path.join(dir, 'Caddyfile'), work.caddyfile);
+  for (const [name, body] of Object.entries(work.files)) {
+    const file = path.join(dir, name);
+    await ensureDir(path.dirname(file));
+    await fs.writeFile(file, body, { mode: name.endsWith('.key') ? 0o600 : 0o644 });
+  }
+}
+
+/**
+ * Makes the Caddy container match the control-rendered config. Config is copied into the
+ * container (`docker cp`, so it works whether the agent runs on the host or in a container) and
+ * applied with `caddy reload`, which swaps config gracefully without dropping connections. If
+ * Caddy rejects the new config the previous one is restored and the error reported.
+ */
+export async function reconcileIngress(ctx: IngressContext, work: IngressWork): Promise<IngressStatus> {
+  const root = path.join(ctx.stateDir, 'ingress');
+  const stage = path.join(root, 'stage');
+  const applied = path.join(root, 'applied');
+  const configHash = ingressConfigHash(work);
+  const routes = work.routes.length;
+  const running: boolean | null = await ctx.docker(['container', 'inspect', '-f', '{{.State.Running}}', CADDY_CONTAINER])
+    .then(r => r.out.trim() === 'true', () => null);
+  const appliedHash = await fs.readFile(path.join(root, 'applied.hash'), 'utf8').then(s => s.trim(), () => '');
+  if (running && appliedHash === configHash) return { state: 'serving', configHash, routes };
+
+  await writeStage(stage, work);
+  try {
+    if (running === null) {
+      await ctx.docker([
+        'create', '--name', CADDY_CONTAINER, '--restart', 'unless-stopped', '--network', 'host',
+        '-v', 'launchpad-caddy-data:/data', '-v', 'launchpad-caddy-config:/config', '-v', `launchpad-caddy-etc:${CADDY_ETC}`,
+        ctx.caddyImage || DEFAULT_CADDY_IMAGE
+      ]);
+      await ctx.docker(['cp', `${stage}/.`, `${CADDY_CONTAINER}:${CADDY_ETC}/`]);
+      await ctx.docker(['start', CADDY_CONTAINER]);
+    } else if (running === false) {
+      await ctx.docker(['cp', `${stage}/.`, `${CADDY_CONTAINER}:${CADDY_ETC}/`]);
+      await ctx.docker(['start', CADDY_CONTAINER]);
+    } else {
+      try {
+        await ctx.docker(['exec', CADDY_CONTAINER, 'rm', '-rf', `${CADDY_ETC}/certs`]);
+        await ctx.docker(['cp', `${stage}/.`, `${CADDY_CONTAINER}:${CADDY_ETC}/`]);
+        await ctx.docker(['exec', CADDY_CONTAINER, 'caddy', 'reload', '--config', `${CADDY_ETC}/Caddyfile`, '--adapter', 'caddyfile']);
+      } catch (e) {
+        if (await fs.stat(applied).then(() => true, () => false)) await ctx.docker(['cp', `${applied}/.`, `${CADDY_CONTAINER}:${CADDY_ETC}/`]).catch(() => {});
+        throw e;
+      }
+    }
+  } catch (e) {
+    await fs.rm(stage, { recursive: true, force: true });
+    return { state: 'failed', configHash, routes, error: errMessage(e).slice(-1000) };
+  }
+  await fs.rm(applied, { recursive: true, force: true });
+  await fs.rename(stage, applied);
+  await fs.writeFile(path.join(root, 'applied.hash'), `${configHash}\n`);
+  return { state: 'serving', configHash, routes };
+}
+
+/** Removes the Caddy container when a node stops being an ingress node; ACME data volumes are kept. */
+export async function removeIngress(ctx: IngressContext): Promise<boolean> {
+  const root = path.join(ctx.stateDir, 'ingress');
+  if (!(await fs.stat(root).then(() => true, () => false))) return false;
+  await ctx.docker(['rm', '-f', CADDY_CONTAINER]).catch(() => {});
+  await fs.rm(root, { recursive: true, force: true });
+  return true;
+}

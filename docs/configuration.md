@@ -27,6 +27,11 @@
 | `LAUNCHPAD_STALE_SECONDS` | `60` | Seconds without a poll before a node is marked `stale`. |
 | `LAUNCHPAD_CONTROL_BACKUP_DIR` | `<data dir>/control-backups` | Control backup archives. |
 | `LAUNCHPAD_CONTROL_RESTORE_DIR` | `<data dir>/control-restore` | Scratch directory for restores. |
+| `LAUNCHPAD_MESH` | `false` | Set `true` to allocate overlay IPs, store WireGuard peers and send `network` blocks. See [Networking](networking.md). |
+| `LAUNCHPAD_MESH_CIDR` | `10.210.0.0/16` | IPv4 overlay range (prefix `/8` to `/29`). |
+| `LAUNCHPAD_WG_PORT` | `51820` | WireGuard UDP port nodes listen on, and the port appended to public addresses without one. |
+| `LAUNCHPAD_SERVICE_DNS` | same as `LAUNCHPAD_MESH` | Publish health-aware `serviceEndpoints` so agents inject cross-node `extra_hosts`. Set `true` without the mesh to use plain node addresses. |
+| `LAUNCHPAD_ACME_EMAIL` | unset | Email for ACME registration in rendered Caddy configs. |
 
 ## Agent
 
@@ -37,9 +42,11 @@
 | `LAUNCHPAD_JOIN_KEY` / `LAUNCHPAD_JOIN_KEY_FILE` | unset | Enrollment key (or a file holding it) used when no token is available. |
 | `LAUNCHPAD_NODE_NAME` | hostname | Node name when not bound by the enrollment key. |
 | `LAUNCHPAD_NODE_ADDRESS`, `LAUNCHPAD_NODE_PUBLIC_ADDRESS` | unset | Addresses reported at enrollment. |
-| `LAUNCHPAD_STATE_DIR` | `/var/lib/launchpad` | Credentials, applied state and generated project files. |
+| `LAUNCHPAD_STATE_DIR` | `/var/lib/launchpad` | Credentials, applied state, WireGuard keys, ingress config and generated project files. |
 | `LAUNCHPAD_POLL_INTERVAL_MS` | `5000` | Poll interval. |
 | `LAUNCHPAD_APPLY` | `true` | Set `false` to render files and report without touching Docker. |
+| `LAUNCHPAD_MESH` | `false` | Set `true` to generate a WireGuard key, report it and reconcile `wg0`. Needs `wg`, `ip`, host networking and `NET_ADMIN`. |
+| `LAUNCHPAD_CADDY_IMAGE` | `caddy:2-alpine` | Image for the managed Caddy container on ingress nodes. |
 | `NODE_EXTRA_CA_CERTS` | unset | Extra CA for a control plane with a private certificate. |
 
 ## Entrypoint

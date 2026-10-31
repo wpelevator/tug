@@ -16,8 +16,22 @@ export interface HealthCheck {
   retries?: number | string;
 }
 
+export type IngressTls = 'auto' | 'custom' | 'off';
+
+/** `x-launchpad.ingress`: publish a service on a hostname through the managed Caddy edge. */
+export interface IngressSpec {
+  host: string;
+  /** Container port (or the host port) of the service; must be published in the service's `ports`. */
+  port: number;
+  /** `auto` (ACME, default), `custom` (cert/key from project secrets) or `off` (plain HTTP). */
+  tls?: IngressTls;
+  /** Names of project secrets holding the PEM certificate chain and private key; required for `tls: custom`. */
+  cert?: string;
+  key?: string;
+}
+
 /** The `x-launchpad` extension on a Compose service. */
-export interface ServiceExtension { placement?: Placement; replicas?: number; health?: HealthCheck }
+export interface ServiceExtension { placement?: Placement; replicas?: number; health?: HealthCheck; ingress?: IngressSpec }
 
 /** The `x-launchpad` extension on a top-level Compose volume. */
 export interface VolumeExtension {
@@ -38,6 +52,8 @@ export interface ComposeService {
   env_file?: string | string[];
   container_name?: string;
   deploy?: unknown;
+  ports?: (string | number | { target?: number; published?: number | string; [key: string]: unknown })[];
+  extra_hosts?: string[] | Record<string, string>;
   'x-launchpad'?: ServiceExtension;
   [key: string]: unknown;
 }
@@ -77,7 +93,7 @@ export type DeploymentState = (typeof ACTIVE_DEPLOYMENT_STATES)[number] | (typeo
 
 // ---- Commands (control -> agent) ---------------------------------------------------------------
 
-export type CommandType = 'diagnostics.run' | 'service.restart' | 'logs.fetch' | 'volume.delete';
+export type CommandType = 'diagnostics.run' | 'service.restart' | 'logs.fetch' | 'volume.delete' | 'wg.rotate-key';
 
 /** A `commands` table row as delivered in `GET /agent/v1/work`. */
 export interface Command {
@@ -104,6 +120,7 @@ export type CommandResultPayload =
   | { project: string; service: string; restarted: true }
   | { stdout: string; stderr: string }
   | { project: string; volume: string; deleted: true }
+  | { publicKey: string }
   | { error: string };
 
 export interface CommandResult {
@@ -119,6 +136,68 @@ export interface WorkResponse {
   nodeId: string;
   desiredStates: DesiredState[];
   commands: Command[];
+  /** WireGuard mesh config for this node; present only when the mesh is enabled on control. */
+  network?: NetworkConfig;
+  /** Healthy cross-node endpoints per project and service; present only when service DNS is enabled. */
+  serviceEndpoints?: ServiceEndpoints;
+  /** Edge proxy config; present only for nodes marked as ingress nodes. */
+  ingress?: IngressWork;
+}
+
+// ---- Networking: WireGuard mesh, service DNS, ingress ------------------------------------------
+
+export interface WgPeer {
+  node: string;
+  publicKey: string;
+  /** `host:port` the peer can be dialed on; absent for nodes behind NAT (they dial out instead). */
+  endpoint?: string;
+  allowedIps: string[];
+  persistentKeepalive: number;
+}
+
+/** The `network` block of `GET /agent/v1/work`: everything an agent needs to reconcile `wg0`. */
+export interface NetworkConfig {
+  interface: string;
+  /** This node's overlay address, e.g. `10.210.0.2`. */
+  overlayIp: string;
+  /** Mesh CIDR, e.g. `10.210.0.0/16`; `overlayIp` is assigned to `wg0` with this prefix length. */
+  cidr: string;
+  listenPort: number;
+  peers: WgPeer[];
+}
+
+/** Body of `POST /agent/v1/wireguard/key` (also accepted as `wgPublicKey` on register and enroll). */
+export interface WgKeyRequest { publicKey: string }
+
+export interface ServiceEndpoint { node: string; address: string }
+/** project -> service -> endpoints of nodes whose copy of the service reports `serving`. */
+export type ServiceEndpoints = Record<string, Record<string, ServiceEndpoint[]>>;
+
+export interface IngressRoute {
+  project: string;
+  service: string;
+  host: string;
+  tls: IngressTls;
+  /** `host:port` upstreams, one per serving node (`127.0.0.1` for the ingress node itself). */
+  upstreams: string[];
+}
+
+/** Edge config rendered by control for one ingress node. */
+export interface IngressWork {
+  caddyfile: string;
+  /** Extra files for the Caddy container, keyed by path relative to `/etc/caddy` (custom TLS certs and keys). */
+  files: Record<string, string>;
+  routes: IngressRoute[];
+  /** Routes control had to skip (no serving upstream, missing TLS secret), for operator visibility. */
+  warnings: string[];
+}
+
+export interface IngressStatus {
+  state: 'serving' | 'failed';
+  /** sha256 of the applied Caddyfile and files. */
+  configHash: string;
+  routes: number;
+  error?: string;
 }
 
 // ---- POST /agent/v1/status ---------------------------------------------------------------------
@@ -141,6 +220,7 @@ export interface StatusReport {
   node: string;
   projects: ProjectStatus[];
   commandResults: CommandResult[];
+  ingress?: IngressStatus;
 }
 
 // ---- GET /agent/v1/secrets ---------------------------------------------------------------------
@@ -168,6 +248,7 @@ export interface NodeInfo {
   name: string;
   address: string | null;
   public_address: string | null;
+  overlay_ip?: string | null;
   status: string;
   created_at: string;
   updated_at: string;
@@ -182,6 +263,8 @@ export interface EnrollRequest {
   name?: string;
   address?: string;
   publicAddress?: string;
+  /** Base64 WireGuard public key; the private key never leaves the node. */
+  wgPublicKey?: string;
 }
 
 /** Response of `POST /agent/v1/enroll`. */

@@ -1,0 +1,172 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { buildDesiredState } from './compose.ts';
+import { CADDY_CONTAINER, buildIngressWork, ingressConfigHash, reconcileIngress, removeIngress, renderCaddyfile, resolveServiceEndpoints } from './ingress.ts';
+import type { NodeView, ReportedStatus } from './ingress.ts';
+import type { ComposeFile, DesiredState, IngressWork } from './protocol.ts';
+import type { DockerRunner } from './runners.ts';
+
+const FRESH = '2026-01-01T00:00:10.000Z';
+const STALE_BEFORE = '2026-01-01T00:00:00.000Z';
+const node = (name: string, extra: Partial<NodeView> = {}): NodeView => ({ name, overlayIp: `10.210.0.${name.length}`, address: null, lastSeenAt: FRESH, ...extra });
+const serving = (n: string, project: string, ...services: string[]): ReportedStatus => ({
+  node: n, project,
+  status: { project, observedVersion: 'v1', health: 'serving', serviceStates: Object.fromEntries(services.map(s => [s, { rolloutState: 'serving' as const }])) }
+});
+
+const compose: ComposeFile = {
+  services: {
+    web: { image: 'nginx', ports: ['8080:80'], 'x-launchpad': { placement: { nodes: ['app1', 'app22'] }, ingress: { host: 'App.Example.com', port: 80 } } },
+    db: { image: 'mariadb', 'x-launchpad': { placement: { nodes: ['dbnode'] } } }
+  }
+};
+const state = (c: ComposeFile = compose, project = 'blog'): DesiredState => buildDesiredState({ project, version: 'v1', compose: c, registry: 'reg' });
+
+test('endpoints list only fresh nodes whose copy of the service reports serving', () => {
+  const nodes = [node('app1'), node('app22'), node('dbnode')];
+  const all = resolveServiceEndpoints([state()], nodes, [serving('app1', 'blog', 'web'), serving('app22', 'blog', 'web'), serving('dbnode', 'blog', 'db')], STALE_BEFORE);
+  assert.deepEqual(all.blog.web.map(e => e.node), ['app1', 'app22'], 'multi-node service yields one endpoint per serving node');
+  assert.deepEqual(all.blog.db, [{ node: 'dbnode', address: '10.210.0.6' }], 'name resolves to the placement node overlay address');
+
+  const notServing: ReportedStatus = { node: 'app22', project: 'blog', status: { project: 'blog', observedVersion: 'v1', health: 'serving', serviceStates: { web: { rolloutState: 'health_checking' } } } };
+  const withdrawn = resolveServiceEndpoints([state()], nodes, [serving('app1', 'blog', 'web'), notServing], STALE_BEFORE);
+  assert.deepEqual(withdrawn.blog.web.map(e => e.node), ['app1'], 'record withdrawn while a node is not serving');
+  assert.equal(withdrawn.blog.db, undefined, 'a service nobody reports serving has no record');
+
+  const stale = resolveServiceEndpoints([state()], [node('app1', { lastSeenAt: '2025-12-31T00:00:00.000Z' }), node('app22'), node('dbnode')], [serving('app1', 'blog', 'web'), serving('app22', 'blog', 'web')], STALE_BEFORE);
+  assert.deepEqual(stale.blog.web.map(e => e.node), ['app22'], 'record withdrawn when a node stops polling');
+});
+
+test('endpoints fall back to the node address without a mesh and skip unreachable nodes', () => {
+  const nodes = [node('app1', { overlayIp: null, address: '192.168.1.5' }), node('app22', { overlayIp: null, address: null })];
+  const eps = resolveServiceEndpoints([state()], nodes, [serving('app1', 'blog', 'web'), serving('app22', 'blog', 'web')], STALE_BEFORE);
+  assert.deepEqual(eps.blog.web, [{ node: 'app1', address: '192.168.1.5' }], 'node with no overlay or address cannot be an endpoint');
+});
+
+test('ingress routes use loopback for the local node and overlay addresses for remote ones', () => {
+  const eps = { blog: { web: [{ node: 'app1', address: '10.210.0.4' }, { node: 'app22', address: '10.210.0.5' }] } };
+  const work = buildIngressWork({ states: [state()], endpoints: eps, node: 'app1', secrets: new Map() });
+  assert.deepEqual(work.routes, [{ project: 'blog', service: 'web', host: 'app.example.com', tls: 'auto', upstreams: ['127.0.0.1:8080', '10.210.0.5:8080'] }], 'container port 80 resolves to published 8080');
+  assert.equal(work.caddyfile, `app.example.com {\n\treverse_proxy 127.0.0.1:8080 10.210.0.5:8080 {\n\t\tlb_policy round_robin\n\t}\n}\n`);
+  assert.deepEqual(work.warnings, []);
+});
+
+test('routes without serving upstreams are withheld with a warning', () => {
+  const work = buildIngressWork({ states: [state()], endpoints: {}, node: 'edge', secrets: new Map() });
+  assert.deepEqual(work.routes, []);
+  assert.match(work.warnings[0], /blog\/web: no serving upstream/);
+  assert.equal(work.caddyfile, '# no ingress routes\n', 'an empty config is still valid Caddyfile');
+});
+
+test('tls modes render the right Caddy site blocks', () => {
+  const route = (tls: 'auto' | 'off' | 'custom', host: string) => ({ project: 'p', service: 's', host, tls, upstreams: ['10.0.0.1:80'] });
+  const out = renderCaddyfile([route('auto', 'a.example.com'), route('off', 'b.example.com'), route('custom', 'c.example.com')], { acmeEmail: 'ops@example.com' });
+  assert.match(out, /^\{\n\temail ops@example\.com\n\}/, 'ACME email goes in the global block');
+  assert.match(out, /\na\.example\.com \{\n\treverse_proxy/, 'auto: bare host enables automatic HTTPS');
+  assert.match(out, /\nhttp:\/\/b\.example\.com \{/, 'off: explicit http:// disables HTTPS');
+  assert.match(out, /c\.example\.com \{\n\ttls \/etc\/caddy\/certs\/c\.example\.com\.crt \/etc\/caddy\/certs\/c\.example\.com\.key/, 'custom: tls directive points at the shipped files');
+});
+
+test('custom TLS ships cert and key from the project secrets and skips routes missing them', () => {
+  const c: ComposeFile = { services: { web: { image: 'x', ports: ['8080:80'], 'x-launchpad': { placement: { nodes: ['app1'] }, ingress: { host: 'secure.example.com', port: 80, tls: 'custom', cert: 'WEB_CERT', key: 'WEB_KEY' } } } } };
+  const eps = { blog: { web: [{ node: 'app1', address: '10.210.0.4' }] } };
+  const ok = buildIngressWork({ states: [state(c)], endpoints: eps, node: 'edge', secrets: new Map([['blog/WEB_CERT', 'CERT-PEM'], ['blog/WEB_KEY', 'KEY-PEM\n']]) });
+  assert.deepEqual(ok.files, { 'certs/secure.example.com.crt': 'CERT-PEM\n', 'certs/secure.example.com.key': 'KEY-PEM\n' }, 'PEMs are delivered as files for the Caddy container');
+  assert.doesNotMatch(ok.caddyfile, /PEM/, 'key material never appears in the Caddyfile');
+  const missing = buildIngressWork({ states: [state(c)], endpoints: eps, node: 'edge', secrets: new Map() });
+  assert.deepEqual(missing.routes, [], 'route skipped without secrets');
+  assert.match(missing.warnings[0], /custom TLS secrets WEB_CERT\/WEB_KEY not found/);
+});
+
+test('a hostname claimed by two projects is served by the first and warned about', () => {
+  const eps = { a: { web: [{ node: 'n', address: '10.0.0.1' }] }, b: { web: [{ node: 'n', address: '10.0.0.2' }] } };
+  const work = buildIngressWork({ states: [state(compose, 'b'), state(compose, 'a')], endpoints: eps, node: 'edge', secrets: new Map() });
+  assert.deepEqual(work.routes.map(r => r.project), ['a'], 'deterministic winner by project name');
+  assert.match(work.warnings[0], /b\/web: host app\.example\.com is already routed by a\/web/);
+});
+
+// ---- agent side: managed Caddy container -------------------------------------------------------
+
+interface FakeCaddy { docker: DockerRunner; calls: string[]; state: { exists: boolean; running: boolean; failReload: boolean } }
+function fakeCaddy(initial: Partial<FakeCaddy['state']> = {}): FakeCaddy {
+  const state = { exists: false, running: false, failReload: false, ...initial };
+  const calls: string[] = [];
+  const docker: DockerRunner = async args => {
+    const line = args.join(' ');
+    calls.push(line);
+    if (args[0] === 'container' && args[1] === 'inspect') { if (!state.exists) throw new Error('No such container'); return { out: String(state.running), err: '' }; }
+    if (args[0] === 'create') state.exists = true;
+    if (args[0] === 'start') state.running = true;
+    if (args[0] === 'exec' && args.includes('reload') && state.failReload) throw new Error('adapting config: unknown directive');
+    return { out: '', err: '' };
+  };
+  return { docker, calls, state };
+}
+const work = (caddyfile: string, files: Record<string, string> = {}): IngressWork => ({ caddyfile, files, routes: [], warnings: [] });
+const stateDirFor = () => fs.mkdtemp(path.join(os.tmpdir(), 'lp-ingress-'));
+
+test('first reconcile creates the Caddy container with persistent volumes, loads config and starts it', async () => {
+  const f = fakeCaddy();
+  const stateDir = await stateDirFor();
+  const status = await reconcileIngress({ docker: f.docker, stateDir }, work('a.example.com {\n}\n', { 'certs/a.crt': 'C' }));
+  assert.equal(status.state, 'serving');
+  const create = f.calls.find(c => c.startsWith('create'))!;
+  assert.match(create, /--name launchpad-caddy/);
+  assert.match(create, /--network host/, 'host networking so 80/443 and loopback upstreams work');
+  assert.match(create, /-v launchpad-caddy-data:\/data/, 'ACME state lives on a named volume that survives container recreation');
+  assert.ok(f.calls.indexOf(create) < f.calls.findIndex(c => c.startsWith('cp')) && f.calls.findIndex(c => c.startsWith('cp')) < f.calls.findIndex(c => c.startsWith('start')), 'config is copied in before Caddy starts');
+  assert.ok(!f.calls.some(c => c.includes('reload')), 'no reload on a fresh container');
+});
+
+test('unchanged config is a no-op and changed config reloads gracefully without restarting', async () => {
+  const f = fakeCaddy();
+  const stateDir = await stateDirFor();
+  const ctx = { docker: f.docker, stateDir };
+  await reconcileIngress(ctx, work('v1\n'));
+  f.calls.length = 0;
+  await reconcileIngress(ctx, work('v1\n'));
+  assert.deepEqual(f.calls, ['container inspect -f {{.State.Running}} launchpad-caddy'], 'quiet tick only inspects the container');
+
+  f.calls.length = 0;
+  const status = await reconcileIngress(ctx, work('v2\n'));
+  assert.equal(status.state, 'serving');
+  assert.ok(f.calls.includes(`exec ${CADDY_CONTAINER} caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile`), 'config applied with caddy reload');
+  assert.ok(!f.calls.some(c => c.startsWith('restart') || c.startsWith('stop') || c.startsWith('rm') || c.startsWith('start')), 'the container is never restarted, so connections are not dropped');
+});
+
+test('a rejected config is reported, keeps the old config on disk and is retried next tick', async () => {
+  const f = fakeCaddy();
+  const stateDir = await stateDirFor();
+  const ctx = { docker: f.docker, stateDir };
+  await reconcileIngress(ctx, work('good\n'));
+  f.state.failReload = true;
+  f.calls.length = 0;
+  const status = await reconcileIngress(ctx, work('bad\n'));
+  assert.equal(status.state, 'failed');
+  assert.match(status.error!, /unknown directive/);
+  assert.ok(f.calls.some(c => c.startsWith('cp') && c.includes('/applied/.')), 'previously applied config is restored into the container');
+  f.state.failReload = false;
+  assert.equal((await reconcileIngress(ctx, work('bad\n'))).state, 'serving', 'a later tick applies the same config again');
+});
+
+test('a stopped Caddy container is started again and config hash covers files', async () => {
+  const f = fakeCaddy({ exists: true, running: false });
+  const stateDir = await stateDirFor();
+  await reconcileIngress({ docker: f.docker, stateDir }, work('x\n'));
+  assert.ok(f.calls.some(c => c === `start ${CADDY_CONTAINER}`), 'existing stopped container is started');
+  assert.notEqual(ingressConfigHash(work('x\n', { a: '1' })), ingressConfigHash(work('x\n', { a: '2' })), 'changing a cert file changes the hash so it is reloaded');
+});
+
+test('removeIngress deletes the container but keeps ACME volumes, and is a no-op on non-ingress nodes', async () => {
+  const f = fakeCaddy();
+  const stateDir = await stateDirFor();
+  assert.equal(await removeIngress({ docker: f.docker, stateDir }), false, 'nothing to remove');
+  assert.deepEqual(f.calls, []);
+  await reconcileIngress({ docker: f.docker, stateDir }, work('x\n'));
+  f.calls.length = 0;
+  assert.equal(await removeIngress({ docker: f.docker, stateDir }), true);
+  assert.deepEqual(f.calls, [`rm -f ${CADDY_CONTAINER}`], 'only the container is removed; no volume rm');
+});

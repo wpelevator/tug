@@ -24,6 +24,8 @@ interface DeployResponse { deployment: DeploymentRecord; desiredState?: unknown 
 interface CommonOpts { project?: string }
 interface WaitOpts { wait: boolean; timeout: string }
 interface InstallOpts { transferImage: boolean; image: string }
+/** `docker run` flags a mesh agent needs: host networking so `wg0` lives in the host's network namespace, and NET_ADMIN to manage it. */
+const MESH_RUN_FLAGS = '--network host --cap-add NET_ADMIN';
 
 const program = new Command();
 program.name('launchpad').description('Portable VPS Launch Pad').version('0.1.0');
@@ -52,7 +54,7 @@ function remoteHost(sshTarget: string): string { return sshTarget.replace(/^[^@]
 function assertHttps(url: string, allowHttp?: boolean): void {
   if (!allowHttp && !String(url).startsWith('https://')) throw new Error(`${url} must use https:// outside local development (pass --http-only-dev to override)`);
 }
-function preflightRemote(target: string, { controlUrl, ports = [], minDiskMb = 1024 }: { controlUrl?: string; ports?: number[]; minDiskMb?: number } = {}): void {
+function preflightRemote(target: string, { controlUrl, ports = [], udpPorts = [], minDiskMb = 1024, mesh = false }: { controlUrl?: string; ports?: number[]; udpPorts?: number[]; minDiskMb?: number; mesh?: boolean } = {}): void {
   const checks: [string, string, string][] = [
     ['docker.version', 'docker version >/dev/null', 'Install Docker Engine and ensure the SSH user can access it.'],
     ['docker.compose.version', 'docker compose version >/dev/null', 'Install Docker Compose v2.'],
@@ -61,6 +63,12 @@ function preflightRemote(target: string, { controlUrl, ports = [], minDiskMb = 1
   ];
   for (const port of ports) {
     checks.push([`port.${port}.free`, `! ( command -v ss >/dev/null 2>&1 && ss -ltn | awk '{print $4}' | grep -qE "[.:]${port}$" )`, `Port ${port} is already in use on the target host; stop the conflicting service or choose another port.`]);
+  }
+  if (mesh) {
+    checks.push(['wireguard.kernel', 'ip link add lpwgtest type wireguard && ip link del lpwgtest || modprobe -n wireguard 2>/dev/null', 'Install WireGuard (kernel 5.6+ has it built in; older kernels need the wireguard-dkms package) and ensure iproute2 is present.']);
+  }
+  for (const port of udpPorts) {
+    checks.push([`udp.${port}.free`, `! ( command -v ss >/dev/null 2>&1 && ss -lun | awk '{print $4}' | grep -qE "[.:]${port}$" )`, `UDP port ${port} is already in use on the target host; the WireGuard mesh needs it (set LAUNCHPAD_WG_PORT on control and open it between nodes).`]);
   }
   if (controlUrl) checks.push(['control.reachable', `curl -fsS ${sh(controlUrl)}/healthz >/dev/null`, 'Verify DNS/firewall/TLS for the control URL from the node.']);
   const script = `set -e
@@ -101,6 +109,15 @@ program.command('node:register').description('register a node with the control p
 });
 program.command('node:rotate-registry-token <name>').description('issue a new registry pull token for a node, invalidating the old one').action(async (name: string) => {
   console.log(JSON.stringify(await request('POST', `/api/v1/nodes/${encodeURIComponent(name)}/rotate-registry-token`, {}), null, 2));
+});
+program.command('node:rotate-wg-key <name>').description('generate a new WireGuard keypair on the node; peers pick up the new public key on their next poll').option('--timeout <seconds>', 'wait timeout', '60').action(async (name: string, o: { timeout: string }) => {
+  const created = await request('POST', `/api/v1/nodes/${encodeURIComponent(name)}/rotate-wg-key`, {});
+  const cmd = await waitForCommand(created.commandId, Number(o.timeout));
+  if (cmd.state === 'failed') throw new Error(JSON.parse(cmd.result_json || '{}').error || 'key rotation failed');
+  console.log(JSON.stringify({ ok: true, node: name, ...JSON.parse(cmd.result_json || '{}') }, null, 2));
+});
+program.command('node:ingress <name>').description('mark a node as an ingress node (managed Caddy on ports 80/443), or remove the role with --disable').option('--disable', 'stop acting as an ingress node').action(async (name: string, o: { disable?: boolean }) => {
+  console.log(JSON.stringify(await request('POST', `/api/v1/nodes/${encodeURIComponent(name)}/ingress`, { enabled: !o.disable }), null, 2));
 });
 program.command('node:revoke-registry-token <name>').description('revoke a node\'s registry pull token, blocking future pulls until rotated').action(async (name: string) => {
   console.log(JSON.stringify(await request('POST', `/api/v1/nodes/${encodeURIComponent(name)}/revoke-registry-token`, {}), null, 2));
@@ -144,29 +161,31 @@ node.command('install <sshTarget>')
   .option('--control-url <url>', 'URL agents use to reach control')
   .option('--registry <host>', 'registry host for docker login')
   .option('--http-only-dev', 'allow plaintext HTTP control URL for local/private development')
+  .option('--mesh', 'join the WireGuard mesh (agent runs with host networking and NET_ADMIN; control needs LAUNCHPAD_MESH=true)')
+  .option('--wg-port <port>', 'WireGuard UDP port checked by preflight', '51820')
   .option('--image <tag>', 'local/remote image tag', 'launchpad:local')
   .option('--no-transfer-image', 'skip docker build/save/scp/load')
-  .action(async (sshTarget: string, o: InstallOpts & { name: string; address?: string; publicAddress?: string; controlUrl?: string; registry?: string; httpOnlyDev?: boolean }) => {
+  .action(async (sshTarget: string, o: InstallOpts & { name: string; address?: string; publicAddress?: string; controlUrl?: string; registry?: string; httpOnlyDev?: boolean; mesh?: boolean; wgPort: string }) => {
     const cfg = await loadCfg();
     const controlUrl = o.controlUrl || cfg.controlUrl || process.env.LAUNCHPAD_CONTROL_URL || 'http://localhost:8080';
     assertHttps(controlUrl, o.httpOnlyDev);
-    preflightRemote(sshTarget, { controlUrl });
+    preflightRemote(sshTarget, { controlUrl, mesh: o.mesh, udpPorts: o.mesh ? [Number(o.wgPort)] : [] });
     const registered = await request<RegisterResponse>('POST', '/api/v1/nodes/register', { name: o.name, address: o.address, publicAddress: o.publicAddress });
     if (o.transferImage) await transferLaunchpadImage(sshTarget, o.image);
     const env = await loadTemplate(templatesDir, 'agent.env', {
       CONTROL_URL: controlUrl, NODE_NAME: o.name, AGENT_TOKEN: registered.agentToken
-    });
+    }) + (o.mesh ? 'LAUNCHPAD_MESH=true\n' : '');
     const dockerLogin = o.registry ? `printf %s ${sh(registered.registryToken)} | docker login ${sh(o.registry)} --username ${sh(o.name)} --password-stdin` : 'true';
     const remote = await loadTemplate(templatesDir, 'node-install.sh', {
-      ENV: env, DOCKER_LOGIN: dockerLogin, IMAGE_SH: sh(o.image)
+      ENV: env, DOCKER_LOGIN: dockerLogin, IMAGE_SH: sh(o.image), RUN_FLAGS: o.mesh ? `${MESH_RUN_FLAGS} ` : ''
     });
     runLocal('ssh', [sshTarget, remote]);
     console.log(JSON.stringify({ ok: true, node: registered.node, registryToken: registered.registryToken }, null, 2));
   });
 
-function dockerRunSnippet(image: string, joinKey: string): string {
+function dockerRunSnippet(image: string, joinKey: string, mesh = false): string {
   return `docker run -d --name launchpad-agent --restart unless-stopped \\
-  -v /var/run/docker.sock:/var/run/docker.sock \\
+${mesh ? `  ${MESH_RUN_FLAGS} -e LAUNCHPAD_MESH=true \\\n` : ''}  -v /var/run/docker.sock:/var/run/docker.sock \\
   -v launchpad-agent:/var/lib/launchpad \\
   -e LAUNCHPAD_JOIN_KEY=${joinKey} \\
   ${image} agent`;
@@ -180,8 +199,9 @@ node.command('enroll')
   .option('--ca <file>', 'PEM CA cert to embed so agents trust a private/self-signed control')
   .option('--http-only-dev', 'allow a plaintext HTTP control URL for local/private development')
   .option('--image <tag>', 'agent image used in the printed docker run', 'launchpad:local')
+  .option('--mesh', 'print a docker run that joins the WireGuard mesh (host networking, NET_ADMIN)')
   .option('--json', 'print machine-readable JSON instead of the docker run snippet')
-  .action(async (o: { name?: string; controlUrl?: string; ttl: string; uses: string; ca?: string; httpOnlyDev?: boolean; image: string; json?: boolean }) => {
+  .action(async (o: { name?: string; controlUrl?: string; ttl: string; uses: string; ca?: string; httpOnlyDev?: boolean; image: string; mesh?: boolean; json?: boolean }) => {
     const cfg = await loadCfg();
     const controlUrl = o.controlUrl || cfg.controlUrl || process.env.LAUNCHPAD_CONTROL_URL || 'http://localhost:8080';
     assertHttps(controlUrl, o.httpOnlyDev);
@@ -191,7 +211,7 @@ node.command('enroll')
     const joinKey = Buffer.from(JSON.stringify(keyPayload)).toString('base64url');
     if (o.json) { console.log(JSON.stringify({ ...minted, controlUrl, joinKey }, null, 2)); return; }
     console.log(`# Enrollment key valid until ${minted.expiresAt} (${minted.usesRemaining} use(s)). Run on each fresh host:\n`);
-    console.log(dockerRunSnippet(o.image, joinKey));
+    console.log(dockerRunSnippet(o.image, joinKey, o.mesh));
   });
 
 program.command('secret:set <name>').option('--project <name>').option('--value <value>').action(async (name: string, o: CommonOpts & { value?: string }) => {

@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import yaml from 'js-yaml';
 import crypto from 'node:crypto';
-import type { ComposeFile, ComposeService, ComposeVolume, DesiredState, ServiceSpec } from './protocol.ts';
+import type { ComposeFile, ComposeService, ComposeVolume, DesiredState, ServiceEndpoint, ServiceSpec } from './protocol.ts';
 
 export async function readCompose(file = 'docker-compose.yml'): Promise<ComposeFile> {
   return yaml.load(await fs.readFile(file, 'utf8')) as ComposeFile;
@@ -11,9 +11,48 @@ export function composeHash(compose: ComposeFile): string {
   return crypto.createHash('sha1').update(JSON.stringify(compose)).digest('hex').slice(0, 12);
 }
 
+/**
+ * The host port a service publishes for `port`, matching either side of a `ports` entry (a
+ * container port resolves to its published host port). Null when the port is not published.
+ */
+export function publishedPort(svc: ComposeService, port: number): number | null {
+  for (const entry of svc.ports || []) {
+    if (typeof entry === 'object') {
+      const published = Number(entry.published);
+      if ((Number(entry.target) === port || published === port) && published > 0) return published;
+      continue;
+    }
+    const spec = String(entry).split('/')[0].split(':');
+    if (spec.length < 2) continue;
+    const container = Number(spec[spec.length - 1]);
+    const host = Number(spec[spec.length - 2]);
+    if ((container === port || host === port) && host > 0) return host;
+  }
+  return null;
+}
+
+const HOSTNAME_RE = /^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i;
+
+function validateIngress(name: string, svc: ComposeService, seen: Map<string, string>, errors: string[]): void {
+  const ingress = svc['x-launchpad']?.ingress;
+  if (ingress === undefined) return;
+  if (!ingress || typeof ingress !== 'object') { errors.push(`${name}: x-launchpad.ingress must be an object`); return; }
+  const host = typeof ingress.host === 'string' ? ingress.host.toLowerCase() : '';
+  if (!HOSTNAME_RE.test(host)) errors.push(`${name}: ingress.host must be a fully qualified hostname`);
+  else if (seen.has(host)) errors.push(`${name}: ingress.host ${host} is already used by ${seen.get(host)}`);
+  else seen.set(host, name);
+  const port = Number(ingress.port);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) errors.push(`${name}: ingress.port must be a port number`);
+  else if (publishedPort(svc, port) == null) errors.push(`${name}: ingress.port ${port} must be published in ports (e.g. "8080:${port}"); the edge reaches the service on its published host port`);
+  const tls = ingress.tls ?? 'auto';
+  if (!['auto', 'custom', 'off'].includes(tls)) errors.push(`${name}: ingress.tls must be auto, custom or off`);
+  if (tls === 'custom' && (!ingress.cert || !ingress.key)) errors.push(`${name}: ingress.tls custom requires cert and key (names of project secrets holding the PEM certificate and private key)`);
+}
+
 export function validateCompose(compose: ComposeFile | undefined, nodes: string[] = []): asserts compose is ComposeFile {
   if (!compose?.services || typeof compose.services !== 'object') throw new Error('compose file must define services');
   const errors: string[] = [];
+  const ingressHosts = new Map<string, string>();
   for (const [name, svc] of Object.entries(compose.services)) {
     if (svc.container_name) errors.push(`${name}: container_name is not supported`);
     if (svc.deploy) errors.push(`${name}: swarm deploy semantics are not supported`);
@@ -21,6 +60,7 @@ export function validateCompose(compose: ComposeFile | undefined, nodes: string[
     const selected = lp.placement?.nodes || [];
     if (nodes.length > 1 && selected.length === 0) errors.push(`${name}: multi-node deployments require x-launchpad.placement.nodes`);
     if (lp.replicas && selected.length && lp.replicas !== selected.length) errors.push(`${name}: replicas must match placement node count in v1`);
+    validateIngress(name, svc, ingressHosts, errors);
   }
   if (errors.length) throw new Error(errors.join('; '));
 }
@@ -38,7 +78,22 @@ export function buildDesiredState({ project, version, compose, registry, default
   return { project, version, services, compose };
 }
 
-export function composeForNode(desiredState: DesiredState, nodeName: string, secrets: Record<string, string> = {}): ComposeFile {
+/** `extra_hosts` entries (`name:ip`) for services that run on other nodes, from health-aware endpoints. */
+export function crossNodeHosts(project: string, endpoints: Record<string, ServiceEndpoint[]>, local: Set<string>): string[] {
+  const hosts: string[] = [];
+  for (const [service, list] of Object.entries(endpoints).sort(([a], [b]) => a.localeCompare(b))) {
+    if (local.has(service)) continue;
+    for (const ep of list) hosts.push(`${service}:${ep.address}`, `${service}.${project}.launchpad:${ep.address}`);
+  }
+  return hosts;
+}
+
+function extraHostsList(value: ComposeService['extra_hosts']): string[] {
+  if (!value) return [];
+  return Array.isArray(value) ? value.map(String) : Object.entries(value).map(([k, v]) => `${k}:${v}`);
+}
+
+export function composeForNode(desiredState: DesiredState, nodeName: string, secrets: Record<string, string> = {}, endpoints: Record<string, ServiceEndpoint[]> = {}): ComposeFile {
   const out: ComposeFile & { volumes?: Record<string, ComposeVolume> } = { services: {}, volumes: {} };
   const outVolumes = out.volumes!;
   const usedVolumes = new Set<string>();
@@ -54,6 +109,14 @@ export function composeForNode(desiredState: DesiredState, nodeName: string, sec
       if (source && desiredState.compose?.volumes?.[source]) usedVolumes.add(source);
     }
     out.services[name] = svc;
+  }
+  const hosts = crossNodeHosts(desiredState.project, endpoints, new Set(Object.keys(out.services)));
+  if (hosts.length) {
+    for (const svc of Object.values(out.services)) {
+      const existing = extraHostsList(svc.extra_hosts);
+      const taken = new Set(existing.map(h => h.split(':')[0]));
+      svc.extra_hosts = [...existing, ...hosts.filter(h => !taken.has(h.split(':')[0]))];
+    }
   }
   for (const name of usedVolumes) {
     const vol = desiredState.compose.volumes?.[name] || {};

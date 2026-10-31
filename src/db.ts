@@ -8,7 +8,8 @@ export type Db = Database<sqlite3.Database, sqlite3.Statement>;
 
 // Row shapes for the tables the control plane and agent read back (columns mirror the DDL below).
 export interface ProjectRow { id: string; name: string; current_deployment_id: string | null; created_at: string; updated_at: string }
-export interface NodeRow { id: string; name: string; address: string | null; public_address: string | null; status: string; agent_token_hash: string | null; registry_token_hash: string | null; last_seen_at: string | null; created_at: string; updated_at: string }
+export interface NodeRow { id: string; name: string; address: string | null; public_address: string | null; overlay_ip: string | null; ingress: number; ingress_status_json: string | null; status: string; agent_token_hash: string | null; registry_token_hash: string | null; last_seen_at: string | null; created_at: string; updated_at: string }
+export interface WgPeerRow { node_id: string; public_key: string; overlay_ip: string; endpoint: string | null; allowed_ips: string; updated_at: string }
 export interface EnrollTokenRow { token_hash: string; name: string | null; uses_remaining: number; expires_at: string; created_at: string }
 export interface DeploymentRow { id: string; project_id: string; version: string; state: string; created_at: string; updated_at: string; error_message: string | null }
 export interface DesiredStateRow { id: string; project_id: string; deployment_id: string; version: string; state_json: string; created_at: string }
@@ -47,7 +48,8 @@ async function migrate(db: Db): Promise<void> {
   await db.exec(`
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, name TEXT UNIQUE NOT NULL, current_deployment_id TEXT, created_at TEXT, updated_at TEXT);
-CREATE TABLE IF NOT EXISTS nodes(id TEXT PRIMARY KEY, name TEXT UNIQUE NOT NULL, address TEXT, public_address TEXT, status TEXT, agent_token_hash TEXT, registry_token_hash TEXT, last_seen_at TEXT, created_at TEXT, updated_at TEXT);
+CREATE TABLE IF NOT EXISTS nodes(id TEXT PRIMARY KEY, name TEXT UNIQUE NOT NULL, address TEXT, public_address TEXT, overlay_ip TEXT UNIQUE, ingress INTEGER NOT NULL DEFAULT 0, ingress_status_json TEXT, status TEXT, agent_token_hash TEXT, registry_token_hash TEXT, last_seen_at TEXT, created_at TEXT, updated_at TEXT);
+CREATE TABLE IF NOT EXISTS wg_peers(node_id TEXT PRIMARY KEY, public_key TEXT NOT NULL UNIQUE, overlay_ip TEXT NOT NULL, endpoint TEXT, allowed_ips TEXT NOT NULL, updated_at TEXT);
 CREATE TABLE IF NOT EXISTS enroll_tokens(token_hash TEXT PRIMARY KEY, name TEXT, uses_remaining INTEGER, expires_at TEXT, created_at TEXT);
 CREATE TABLE IF NOT EXISTS deployments(id TEXT PRIMARY KEY, project_id TEXT, version TEXT, state TEXT, created_at TEXT, updated_at TEXT, error_message TEXT);
 CREATE TABLE IF NOT EXISTS desired_states(id TEXT PRIMARY KEY, project_id TEXT, deployment_id TEXT, version TEXT, state_json TEXT, created_at TEXT);

@@ -7,10 +7,11 @@ Launchpad deploys Docker Compose projects to one or more Docker hosts through a 
 - **Control plane** (`src/control.ts`): an Express API backed by SQLite (`launchpad.db`) and an install-time master key (`master.key`) in `LAUNCHPAD_DATA_DIR`. It stores nodes, projects, deployments, desired states, encrypted secrets, volumes, queued commands, events and locks, and optionally builds and pushes images from uploaded source tarballs.
 - **Agent** (`src/agent.ts`): runs on every node, polls `GET /agent/v1/work`, renders a per-node Compose file and `.env`, runs `docker compose pull` / `up -d`, executes health checks, runs queued commands and reports back with `POST /agent/v1/status`. Agents only dial out to control, so nodes behind NAT or firewalls work.
 - **CLI** (`src/cli.ts`): the `launchpad` command for operators. It talks to the control API and uses SSH only for `control install` and `node install`. See [CLI reference](cli.md).
+- **Networking** (`src/mesh.ts`, `src/ingress.ts`): optional WireGuard mesh, health-aware service endpoints and the managed Caddy edge. `mesh.ts` has overlay IP allocation, key handling, `wg` config rendering, peer diffing and the idempotent `wg0` reconcile; `ingress.ts` resolves service endpoints and ingress routes, renders the Caddyfile (control) and reconciles the Caddy container (agent). See [Networking](networking.md).
 - **Registry**: bring your own. Launchpad can manage per-node pull credentials for a registry that uses an htpasswd file. See [Control plane](control-plane.md#registry).
 - **Entrypoint** (`src/main.ts`, `dist/main.js` in the image): one image serves both roles; `node src/main.ts control|agent` or `LAUNCHPAD_ROLE`.
-- **Protocol** (`src/protocol.ts`): the control↔agent contract. It holds the types, and a few shared constants such as the active and terminal deployment states, for everything crossing the boundary: `DesiredState`, `ServiceSpec` and `HealthCheck`; the `/agent/v1/*` payloads (`WorkResponse`, `Command` / `CommandResult`, `StatusReport` / `ProjectStatus`, `SecretsResponse`); and enrollment (`EnrollRequest` / `EnrollResponse`, `RegisterResponse`, `JoinKey`). `control.ts`, `agent.ts`, `compose.ts` and `cli.ts` all import from it, so change the wire format there first.
-- **Injectable agent runners** (`src/runners.ts`): `reconcile`, `executeCommand`, `waitForHealth`, `containerIp` and `pollOnce` take an `AgentContext` (`{ docker, http, nodeName, stateDir, apply, controlUrl, token }`). `docker` is a `DockerRunner` (`createDockerRunner()` wraps `run('docker', …)` from `build.ts`) and `http` is a `fetch`-compatible client. Production code uses `defaultContext()`; `src/agent.test.ts` passes a fake docker runner to unit-test rollout ordering, secret-triggered `--force-recreate` and the docker, tcp and http health-check branches without a Docker daemon. The privileged-Docker integration test remains the end-to-end check.
+- **Protocol** (`src/protocol.ts`): the control↔agent contract. It holds the types, and a few shared constants such as the active and terminal deployment states, for everything crossing the boundary: `DesiredState`, `ServiceSpec` and `HealthCheck`; the `/agent/v1/*` payloads (`WorkResponse` with its optional `network`, `serviceEndpoints` and `ingress` blocks, `Command` / `CommandResult`, `StatusReport` / `ProjectStatus` / `IngressStatus`, `SecretsResponse`, `WgKeyRequest`); and enrollment (`EnrollRequest` / `EnrollResponse`, `RegisterResponse`, `JoinKey`). `control.ts`, `agent.ts`, `compose.ts` and `cli.ts` all import from it, so change the wire format there first.
+- **Injectable agent runners** (`src/runners.ts`): `reconcile`, `executeCommand`, `waitForHealth`, `containerIp` and `pollOnce` take an `AgentContext` (`{ docker, http, nodeName, stateDir, apply, controlUrl, token, host?, mesh?, caddyImage? }`). `docker` is a `DockerRunner` (`createDockerRunner()` wraps `run('docker', …)` from `build.ts`), `host` is a `HostRunner` for `wg` and `ip` (`createHostRunner()`), and `http` is a `fetch`-compatible client. The Caddy reload goes through `docker`. Production code uses `defaultContext()`; `src/agent.test.ts` passes a fake docker runner to unit-test rollout ordering, secret-triggered `--force-recreate` and the docker, tcp and http health-check branches without a Docker daemon. The privileged-Docker integration test remains the end-to-end check.
 
 ## Desired state and reconciliation
 
@@ -132,6 +133,10 @@ sequenceDiagram
     CLI-->>Op: rollback deployment result
 ```
 
+## Networking
+
+With `LAUNCHPAD_MESH=true`, `GET /agent/v1/work` also returns a `network` block (this node's overlay IP and every other node's WireGuard peer), `serviceEndpoints` (serving endpoints per service for injecting `extra_hosts`) and, for nodes marked as ingress nodes, an `ingress` block with the rendered Caddyfile. Agents report their public key with `POST /agent/v1/wireguard/key` (or `wgPublicKey` at enrollment) and ingress state in the status report. Control stores overlay IPs in `nodes.overlay_ip` and keys in `wg_peers`. See [Networking](networking.md) for the model and the mesh/ingress sequence diagram.
+
 ## Secrets
 
 Secrets are encrypted at rest with AES-256-GCM using the control master key, and versioned per project. An agent only receives the secrets referenced by the `environment` of services placed on its node, written to the project's `.env` with mode `0600`. When only a referenced secret's version changes, the agent force-recreates just the affected services.
@@ -143,6 +148,9 @@ Agents write generated state under `LAUNCHPAD_STATE_DIR` (default `/var/lib/laun
 ```text
 /var/lib/launchpad/agent.json                                # durable creds persisted after self-service enrollment
 /var/lib/launchpad/agent.db                                  # last applied version and secret versions per project
+/var/lib/launchpad/wireguard/private.key                     # mesh only: node's WireGuard private key (0600), never sent to control
+/var/lib/launchpad/wireguard/wg0.conf                        # mesh only: last config passed to `wg syncconf`
+/var/lib/launchpad/ingress/                                  # ingress nodes only: applied Caddy config and its hash
 /var/lib/launchpad/projects/<project>/docker-compose.yml
 /var/lib/launchpad/projects/<project>/.env
 ```

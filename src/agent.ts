@@ -7,11 +7,13 @@ import { composeForNode, dumpYaml, serviceSecretVersions } from './compose.ts';
 import { ensureDir, errMessage, now } from './util.ts';
 import { openAgentDb } from './db.ts';
 import type { AppliedStateRow, Db } from './db.ts';
-import { createDockerRunner } from './runners.ts';
-import type { DockerRunner, HttpClient } from './runners.ts';
+import { createDockerRunner, createHostRunner } from './runners.ts';
+import type { DockerRunner, HostRunner, HttpClient } from './runners.ts';
+import { CADDY_CONTAINER, reconcileIngress, removeIngress } from './ingress.ts';
+import { WG_INTERFACE, ensureWgKeys, readReportedKey, reconcileMesh, rotateWgKeys, writeReportedKey } from './mesh.ts';
 import type {
-  Command, CommandResult, DesiredState, DiagnosticCheck, EnrollResponse, HealthCheck, JoinKey, ProjectStatus,
-  SecretsResponse, ServiceState, StatusReport, WorkResponse
+  Command, CommandResult, DesiredState, DiagnosticCheck, EnrollResponse, HealthCheck, IngressStatus, JoinKey, ProjectStatus,
+  SecretsResponse, ServiceEndpoint, ServiceState, StatusReport, WorkResponse
 } from './protocol.ts';
 
 const CONTROL_URL_FROM_ENV = Boolean(process.env.LAUNCHPAD_CONTROL_URL);
@@ -21,6 +23,8 @@ let NODE_NAME = process.env.LAUNCHPAD_NODE_NAME || process.env.HOSTNAME || 'node
 const STATE_DIR = process.env.LAUNCHPAD_STATE_DIR || '/var/lib/launchpad';
 const APPLY = process.env.LAUNCHPAD_APPLY !== 'false';
 const INTERVAL = Number(process.env.LAUNCHPAD_POLL_INTERVAL_MS || 5000);
+// Opt-in WireGuard mesh: needs `wg`/`ip` in the agent image, host networking and NET_ADMIN.
+const MESH = process.env.LAUNCHPAD_MESH === 'true';
 
 // Everything the reconcile/command logic needs from the outside world. Production wiring is
 // `defaultContext()`; tests pass a fake `docker` runner / `http` client and temp dirs.
@@ -32,10 +36,15 @@ export interface AgentContext {
   apply: boolean;
   controlUrl: string;
   token: string | undefined;
+  /** Runs `wg` / `ip` for the mesh. */
+  host?: HostRunner;
+  /** Manage the WireGuard mesh (generate a key, report it, reconcile `wg0`). */
+  mesh?: boolean;
+  caddyImage?: string;
 }
 
 export function defaultContext(): AgentContext {
-  return { docker: createDockerRunner(), http: fetch, nodeName: NODE_NAME, stateDir: STATE_DIR, apply: APPLY, controlUrl: CONTROL_URL, token: TOKEN };
+  return { docker: createDockerRunner(), http: fetch, nodeName: NODE_NAME, stateDir: STATE_DIR, apply: APPLY, controlUrl: CONTROL_URL, token: TOKEN, host: createHostRunner(), mesh: MESH, caddyImage: process.env.LAUNCHPAD_CADDY_IMAGE };
 }
 
 const dbsByStateDir = new Map<string, Db>();
@@ -126,6 +135,18 @@ export async function executeCommand(command: Command, ctx: AgentContext = defau
         checks.push({ name, ok: false, error: errMessage(e).slice(-4000) });
       }
     }
+    const extra: [string, () => Promise<{ out: string; err: string }>][] = [];
+    if (ctx.mesh && ctx.host) {
+      const host = ctx.host;
+      extra.push(['wireguard.version', () => host('wg', ['--version'])], ['wireguard.interface', () => host('wg', ['show', WG_INTERFACE])]);
+    }
+    if (await fs.stat(path.join(ctx.stateDir, 'ingress')).then(() => true, () => false)) {
+      extra.push(['ingress.caddy', () => ctx.docker(['container', 'inspect', '-f', '{{.State.Status}}', CADDY_CONTAINER])]);
+    }
+    for (const [name, fn] of extra) {
+      try { const result = await fn(); checks.push({ name, ok: true, stdout: result.out.slice(-4000), stderr: result.err.slice(-4000) }); }
+      catch (e) { checks.push({ name, ok: false, error: errMessage(e).slice(-4000) }); }
+    }
     return { commandId: command.id, state: checks.every(c => c.ok) ? 'succeeded' : 'failed', result: { checks, node: ctx.nodeName } };
   }
   if (command.type === 'service.restart') {
@@ -153,10 +174,17 @@ export async function executeCommand(command: Command, ctx: AgentContext = defau
     }
     return { commandId: command.id, state: 'succeeded', result: { project, volume, deleted: true } };
   }
+  if (command.type === 'wg.rotate-key') {
+    if (!ctx.mesh) throw new Error('the WireGuard mesh is not enabled on this agent (LAUNCHPAD_MESH=true)');
+    const { publicKey } = await rotateWgKeys(ctx.stateDir);
+    await api(ctx, '/agent/v1/wireguard/key', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ publicKey }) });
+    await writeReportedKey(ctx.stateDir, publicKey);
+    return { commandId: command.id, state: 'succeeded', result: { publicKey } };
+  }
   return { commandId: command.id, state: 'failed', result: { error: `unsupported command ${command.type}` } };
 }
 
-export async function reconcile(desiredState: DesiredState, ctx: AgentContext = defaultContext()): Promise<ProjectStatus> {
+export async function reconcile(desiredState: DesiredState, ctx: AgentContext = defaultContext(), endpoints: Record<string, ServiceEndpoint[]> = {}): Promise<ProjectStatus> {
   const dir = path.join(ctx.stateDir, 'projects', desiredState.project);
   await ensureDir(dir);
   const plannedCompose = composeForNode(desiredState, ctx.nodeName, {});
@@ -171,7 +199,7 @@ export async function reconcile(desiredState: DesiredState, ctx: AgentContext = 
   const previous: { version?: string; secretVersions?: Record<string, Record<string, number>> } = previousRow ? { version: previousRow.version, secretVersions: JSON.parse(previousRow.secret_versions_json) } : {};
   const secretChangedServices = serviceNames.filter(service => JSON.stringify(previous.secretVersions?.[service] || {}) !== JSON.stringify(currentSecretVersions[service] || {}));
   const sameDesiredVersion = previous.version === desiredState.version;
-  const nodeCompose = composeForNode(desiredState, ctx.nodeName, sec.secrets || {});
+  const nodeCompose = composeForNode(desiredState, ctx.nodeName, sec.secrets || {}, endpoints);
   await fs.writeFile(path.join(dir, 'docker-compose.yml'), dumpYaml(nodeCompose));
   await writeEnv(path.join(dir, '.env'), sec.secrets || {});
   if (ctx.apply) {
@@ -201,12 +229,42 @@ export async function reconcile(desiredState: DesiredState, ctx: AgentContext = 
   return { project: desiredState.project, observedVersion: desiredState.version, health: 'serving', services: serviceNames, serviceStates };
 }
 
+/** Reports this node's WireGuard public key when control has not seen the current one yet. */
+export async function reportWgKey(ctx: AgentContext): Promise<void> {
+  const { publicKey } = await ensureWgKeys(ctx.stateDir);
+  if (await readReportedKey(ctx.stateDir) === publicKey) return;
+  await api(ctx, '/agent/v1/wireguard/key', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ publicKey }) });
+  await writeReportedKey(ctx.stateDir, publicKey);
+}
+
+let lastNetworkError = '';
+async function networkStep(label: string, fn: () => Promise<unknown>): Promise<void> {
+  try { await fn(); lastNetworkError = ''; }
+  catch (e) {
+    const message = `${label}: ${errMessage(e)}`;
+    if (message !== lastNetworkError) console.error(message);
+    lastNetworkError = message;
+  }
+}
+
 export async function pollOnce(ctx: AgentContext = defaultContext()): Promise<ProjectStatus[]> {
+  if (ctx.mesh) await networkStep('wireguard key report failed', () => reportWgKey(ctx));
   const work = await api<WorkResponse & { desiredState?: DesiredState }>(ctx, '/agent/v1/work');
+  // The mesh comes up first so cross-node service endpoints are routable when containers start.
+  if (ctx.mesh && work.network) {
+    const network = work.network;
+    await networkStep('wireguard reconcile failed', () => reconcileMesh(ctx.host ?? createHostRunner(), ctx.stateDir, network));
+  }
   const projects: ProjectStatus[] = [];
   for (const desired of work.desiredStates || (work.desiredState ? [work.desiredState] : [])) {
-    try { projects.push(await reconcile(desired, ctx)); }
+    try { projects.push(await reconcile(desired, ctx, work.serviceEndpoints?.[desired.project])); }
     catch (e) { projects.push({ project: desired.project, observedVersion: desired.version, health: 'failed', error: errMessage(e) }); }
+  }
+  let ingress: IngressStatus | undefined;
+  if (ctx.apply) {
+    const ingressCtx = { docker: ctx.docker, stateDir: ctx.stateDir, caddyImage: ctx.caddyImage };
+    if (work.ingress) ingress = await reconcileIngress(ingressCtx, work.ingress);
+    else await removeIngress(ingressCtx).catch(() => false);
   }
   const commandResults: CommandResult[] = [];
   for (const command of work.commands || []) {
@@ -214,6 +272,7 @@ export async function pollOnce(ctx: AgentContext = defaultContext()): Promise<Pr
     catch (e) { commandResults.push({ commandId: command.id, state: 'failed', result: { error: errMessage(e) } }); }
   }
   const report: StatusReport = { node: ctx.nodeName, projects, commandResults };
+  if (ingress) report.ingress = ingress;
   await api(ctx, '/agent/v1/status', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(report) });
   return projects;
 }
@@ -262,14 +321,16 @@ async function enroll(joinKey: string): Promise<Creds> {
     process.exit(r.status ?? 1);
   }
   console.log(`enrolling with ${controlUrl} as ${NODE_NAME}`);
+  const wgPublicKey = MESH ? (await ensureWgKeys(STATE_DIR)).publicKey : undefined;
   const res = await fetch(`${controlUrl}/agent/v1/enroll`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ enrollToken: decoded.enrollToken, name: NODE_NAME, address: process.env.LAUNCHPAD_NODE_ADDRESS, publicAddress: process.env.LAUNCHPAD_NODE_PUBLIC_ADDRESS })
+    body: JSON.stringify({ enrollToken: decoded.enrollToken, name: NODE_NAME, address: process.env.LAUNCHPAD_NODE_ADDRESS, publicAddress: process.env.LAUNCHPAD_NODE_PUBLIC_ADDRESS, wgPublicKey })
   });
   if (!res.ok) throw new Error(`enroll failed: ${res.status} ${await res.text()}`);
   const out = await res.json() as EnrollResponse;
   const creds: Creds = { agentToken: out.agentToken, nodeName: out.node?.name || NODE_NAME, controlUrl, registry: out.registry || null, registryToken: out.registryToken || null };
   await saveCreds(creds);
+  if (wgPublicKey) await writeReportedKey(STATE_DIR, wgPublicKey);
   console.log(`enrolled as node ${creds.nodeName}`);
   return creds;
 }

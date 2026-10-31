@@ -1,0 +1,19 @@
+# Override for docker-compose.integration.yml that turns on the WireGuard mesh, service DNS and a
+# Caddy ingress node (vps-c). Used by scripts/integration-network-test.sh.
+services:
+  control:
+    environment:
+      LAUNCHPAD_MESH: "true"
+  provisioner:
+    environment:
+      LAUNCHPAD_PUBLIC_ADDRESS_FROM_NAME: "true"
+      LAUNCHPAD_INGRESS_NODES: vps-c
+  vps-a:
+    environment:
+      LAUNCHPAD_MESH: "true"
+  vps-b:
+    environment:
+      LAUNCHPAD_MESH: "true"
+  vps-c:
+    environment:
+      LAUNCHPAD_MESH: "true"

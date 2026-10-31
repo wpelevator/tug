@@ -10,12 +10,14 @@ Commands that take `--project` default to the project in `.launchpad.json`, then
 
 ## Nodes
 
-- `launchpad node install <sshTarget> --name <node> [--address <ip>] [--public-address <ip>] [--control-url <url>] [--registry <host>] [--image <tag>] [--no-transfer-image] [--http-only-dev]` registers a node and installs its agent over SSH.
-- `launchpad node enroll [--name <node>] [--control-url <url>] [--ttl <seconds>] [--uses <n>] [--ca <ca.pem>] [--image <tag>] [--json] [--http-only-dev]` mints an enrollment key and prints a `docker run` for the host.
+- `launchpad node install <sshTarget> --name <node> [--address <ip>] [--public-address <ip>] [--control-url <url>] [--registry <host>] [--mesh] [--wg-port <port>] [--image <tag>] [--no-transfer-image] [--http-only-dev]` registers a node and installs its agent over SSH. `--mesh` runs the agent with host networking and `NET_ADMIN` for the WireGuard mesh and adds kernel and UDP-port preflight checks.
+- `launchpad node enroll [--name <node>] [--control-url <url>] [--ttl <seconds>] [--uses <n>] [--ca <ca.pem>] [--image <tag>] [--mesh] [--json] [--http-only-dev]` mints an enrollment key and prints a `docker run` for the host.
 - `launchpad node:register --name <node> [--address <ip>] [--public-address <ip>]` registers a node and prints its tokens.
+- `launchpad node:rotate-wg-key <node> [--timeout <seconds>]` has the node generate a new WireGuard keypair and waits for the result; peers pick up the new public key on their next poll.
+- `launchpad node:ingress <node> [--disable]` marks a node as an ingress node (managed Caddy), or removes the role.
 - `launchpad node:rotate-registry-token <node>` and `launchpad node:revoke-registry-token <node>` manage registry pull tokens.
 
-See [Nodes](nodes.md).
+See [Nodes](nodes.md) and [Networking](networking.md).
 
 ## Secrets
 
@@ -43,5 +45,5 @@ See [Nodes](nodes.md).
 
 ## Operations
 
-- `launchpad doctor [--nodes] [--node <name>]` runs local, control-plane and optionally agent diagnostics.
+- `launchpad doctor [--nodes] [--node <name>]` runs local, control-plane and optionally agent diagnostics. With the mesh on it also checks that every node has reported a WireGuard key, with ingress nodes that each is `serving`, and agent diagnostics add `wg` checks (version and `wg show wg0`, which includes latest handshakes) and the Caddy container state.
 - `launchpad control-backup run` and `launchpad control-backup restore <artifactRef> --confirm` back up and restore the control plane. See [Control plane](control-plane.md#backup-and-restore).

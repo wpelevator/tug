@@ -12,6 +12,7 @@ Deploy Docker Compose projects to one or more ordinary Linux VPSes through a sma
 - Secrets encrypted at rest, released only to the nodes whose services reference them, with targeted service recreation when only a secret changes.
 - Deployment convergence, per-project operation locks, cancellation, rollback, per-service rollout events and log fetching through the agents.
 - Per-node registry pull tokens enforced by an htpasswd-backed registry you provide, with rotation and revocation.
+- Optional WireGuard mesh between nodes, health-aware cross-node service names and a managed Caddy ingress with automatic HTTPS, each opt-in. See [Networking](docs/networking.md).
 - Control-plane backup and restore, and `launchpad doctor` diagnostics.
 
 ## Quick start
@@ -28,6 +29,7 @@ Deploy Docker Compose projects to one or more ordinary Linux VPSes through a sma
 - [Architecture](docs/architecture.md): components, reconciliation, workflow diagrams, secrets and runtime paths.
 - [Compose extensions](docs/compose.md): `x-launchpad` placement, health checks, volumes and limitations.
 - [Control plane](docs/control-plane.md): install, TLS, registry credentials, backup and restore.
+- [Networking](docs/networking.md): WireGuard mesh, service DNS, ingress and TLS, firewall notes.
 - [Nodes](docs/nodes.md): SSH install, self-service enrollment, registration and status.
 - [CLI reference](docs/cli.md): every `launchpad` command and option.
 - [Configuration](docs/configuration.md): CLI, control and agent environment variables.
