@@ -9,6 +9,7 @@ import {
   HOST_NETWORK_FLAG,
   MESH_RUN_FLAGS,
   controlPortCheck,
+  localImageBuildArgs,
   meshPortCheck,
 } from './cli-install.ts';
 import { createSourceArchive, prepareLocalImages } from './cli-build.ts';
@@ -201,7 +202,8 @@ async function transferTugImage(target: string, imageTag: string): Promise<void>
   const archive = path.join(directory, 'image.tar.gz');
   const remote = `/tmp/${path.basename(directory)}.tar.gz`;
   try {
-    runLocal('docker', ['build', '-t', imageTag, '.']);
+    const uname = runCapture('ssh', ['--', target, 'uname -m']);
+    runLocal('docker', localImageBuildArgs(imageTag, uname));
     await saveImageArchive(imageTag, archive);
     runLocal('scp', ['--', archive, `${target}:${remote}`]);
     runLocal('ssh', [

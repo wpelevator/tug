@@ -3,6 +3,22 @@ import yaml from 'js-yaml';
 /** The agent dials container IPs for health checks; from the default bridge they are unreachable on current Docker (29.x), so it always shares the host network namespace. */
 export const HOST_NETWORK_FLAG = '--network host';
 export const MESH_RUN_FLAGS = `${HOST_NETWORK_FLAG} --cap-add NET_ADMIN`;
+
+/** Docker platform for the architecture a host reports with `uname -m`. */
+export function dockerPlatform(uname: string): string {
+  const arch = uname.trim();
+  if (arch === 'x86_64' || arch === 'amd64') return 'linux/amd64';
+  if (arch === 'aarch64' || arch === 'arm64') return 'linux/arm64';
+  throw new Error(
+    `unsupported host architecture '${arch}'; --build-local-image supports x86_64 and aarch64`,
+  );
+}
+
+/** Build for the host the image will run on, not the machine that builds it (an arm64 laptop and an amd64 VPS differ). */
+export function localImageBuildArgs(imageTag: string, uname: string): string[] {
+  return ['build', '--platform', dockerPlatform(uname), '-t', imageTag, '.'];
+}
+
 export function shellQuote(value: unknown): string {
   return `'${String(value).replace(/'/g, `'\\''`)}'`;
 }

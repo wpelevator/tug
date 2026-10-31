@@ -11,8 +11,10 @@ import { resolveCliConfig, integerOption } from './cli-config.ts';
 import { createSourceArchive, prepareLocalImages } from './cli-build.ts';
 import {
   controlPortCheck,
+  dockerPlatform,
   dockerRunSnippet,
   enrollmentCloudInit,
+  localImageBuildArgs,
   shellQuote,
 } from './cli-install.ts';
 
@@ -345,6 +347,25 @@ test('failed local build/save still removes only generated tags without masking 
       `failed ${failure} should report a cleanup warning when Docker refuses removal`,
     );
   }
+});
+
+test('local image builds target the host architecture, not the build machine', () => {
+  assert.equal(
+    dockerPlatform('x86_64\n'),
+    'linux/amd64',
+    'an amd64 VPS needs an amd64 image even when built on arm64',
+  );
+  assert.equal(dockerPlatform('aarch64'), 'linux/arm64', 'an arm64 VPS needs an arm64 image');
+  assert.throws(
+    () => dockerPlatform('riscv64'),
+    /unsupported host architecture 'riscv64'/,
+    'unknown architectures fail before a build starts',
+  );
+  assert.deepEqual(
+    localImageBuildArgs('tug:local', 'x86_64'),
+    ['build', '--platform', 'linux/amd64', '-t', 'tug:local', '.'],
+    'docker build receives the target platform',
+  );
 });
 
 test('the control port check passes for a free port or the control container, and fails for another listener', async () => {
