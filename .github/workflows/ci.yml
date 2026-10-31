@@ -14,14 +14,23 @@ concurrency:
 
 jobs:
   check:
-    name: Check
+    name: Check (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # engines.node is the oldest version; .nvmrc is the one used for development and the other jobs.
+        node: [22, 24]
     steps:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/setup
-      - run: npm run typecheck
-      - run: npm run lint
+        with:
+          node-version: ${{ matrix.node }}
+      - if: matrix.node == 24
+        run: npm run typecheck
+      - if: matrix.node == 24
+        run: npm run lint
       - run: npm test
       - run: npm run test:smoke:dist
 
