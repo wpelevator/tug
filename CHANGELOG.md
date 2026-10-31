@@ -1,5 +1,12 @@
 # @wpelevator/tug
 
+## 0.2.1
+
+### Patch Changes
+
+- ac04ba0: Failed deploys now include the node apply error and any rollout error in the message `tug deploy` prints, instead of only "failed health". `tug logs` and `tug restart` name the project when the service is missing. `tug doctor --node` and `--nodes` wait for the agent result.
+- f429756: Agents now report a service's lifecycle events only when something changes (a new revision, changed secrets or configuration), plus one event when an apply fails and one when it recovers, instead of four events per service on every poll. Control deletes events older than 30 days and keeps at most 100,000 (`TUG_EVENT_RETENTION_DAYS`, `TUG_EVENT_MAX_ROWS`), so `tug events` shows deployments, rollbacks and failures again.
+
 ## 0.2.0
 
 ### Minor Changes
