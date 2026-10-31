@@ -1,0 +1,30 @@
+services:
+  nginx:
+    image: nginx:stable-alpine
+    volumes:
+      - ./nginx.static.conf:/etc/nginx/nginx.conf:ro
+      - assets:/app:ro
+      - ./certs:/certs:ro
+  caddy:
+    image: caddy:2-alpine
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./certs:/certs:ro
+    depends_on:
+      - nginx
+  caddy-direct:
+    image: caddy:2-alpine
+    volumes:
+      - ./Caddyfile.static:/etc/caddy/Caddyfile:ro
+      - assets:/app:ro
+      - ./certs:/certs:ro
+  load:
+    image: node:24-alpine
+    profiles: [load]
+    volumes:
+      - ./load.mjs:/load.mjs:ro
+    entrypoint: [node, /load.mjs]
+volumes:
+  assets:
+    external: true
+    name: ${BENCH_ASSET_VOLUME:?Run the benchmark via run.mjs}

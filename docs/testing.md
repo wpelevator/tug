@@ -100,3 +100,75 @@ Proposed:
 Real hosts are the only place that shows WireGuard between separate machines, real certificate issuance, real network latency and the state a previous install leaves behind. Proposed: a manually triggered GitHub workflow that creates two throwaway DigitalOcean droplets, runs the scenarios, writes the report and always destroys the droplets, even on failure. A run should cost cents. It needs a DigitalOcean token and an SSH key as repository secrets, and should use Let's Encrypt's staging CA to stay clear of production rate limits.
 
 The scripts from the first run are the starting point: a request loop from a developer machine and one on the ingress host, a generator for the test application, and a driver for the CLI. They are not in the repository yet.
+
+## Caddy proxy overhead benchmark
+
+The benchmark compares three HTTPS server arrangements with a timestamp-only PHP document and with a static file. Four Compose files in `benchmarks/caddy-php/` define the six cases:
+
+| Case | Compose file | Request path |
+|---|---|---|
+| `direct` | `compose.direct.yml` | HTTPS → nginx → PHP-FPM |
+| `proxy` | `compose.proxy.yml` | HTTPS → Caddy → HTTP → nginx → PHP-FPM |
+| `caddy-php` | `compose.caddy-php.yml` | HTTPS → Caddy → PHP-FPM |
+| `static-nginx` | `compose.static.yml` | HTTPS → nginx → static file |
+| `static-proxy` | `compose.static.yml` | HTTPS → Caddy → HTTP → nginx → static file |
+| `static-caddy` | `compose.static.yml` | HTTPS → Caddy → static file |
+
+All PHP cases use the same PHP image, 16 static PHP-FPM workers, and PHP document printing the current UTC time with microseconds. The static cases serve the same 28-byte file containing a fixed timestamp in the same format, with no PHP-FPM service running in that stack. There is no database, application response cache or response compression. Access logging is disabled in all paths. Both PHP nginx instances have the same configuration, with HTTP and HTTPS listeners; the proxy case uses only nginx's HTTP listener. The static nginx configuration changes only the content handler to serve the file and adds the same `Cache-Control: no-store` response header as PHP and direct static Caddy. No host ports are published.
+
+Run from the repository root with Docker Compose, Node and OpenSSL installed:
+
+```sh
+node --test benchmarks/caddy-php/load.test.mjs
+node benchmarks/caddy-php/run.mjs
+```
+
+The driver generates a temporary self-signed certificate shared by all stacks, pulls the official images, records their image IDs/digests and versions, and creates uniquely named Compose projects. It copies the two application files once into a shared native Docker volume, then mounts that volume read-only in application containers. Application file operations therefore stay inside the Linux VM; they do not cross macOS bind mounts. This matters particularly for the filesystem checks in Caddy's standard `php_fastcgi` handler and `file_server`. Configuration files remain read-only bind mounts loaded at startup. It runs a Node HTTPS load generator on each stack's Docker network, so requests do not traverse Docker Desktop's host port forwarding. Certificate verification is disabled only in this test client. All cases use TLS 1.3, HTTP/1.1 and persistent client connections. Caddy reuses its HTTP connections to nginx; nginx's 180-second idle timeout exceeds Caddy's default upstream idle timeout. PHP-FPM configuration is identical across PHP cases; Caddy uses its standard `php_fastcgi` handler and nginx uses its FastCGI module.
+
+Defaults are three rounds at concurrency 1, 32 and 128, with two seconds of warmup before each ten-second measurement. Each round measures the six cases sequentially, reversing their order in the second round, for 54 measured runs. Override with `BENCH_SECONDS=30 BENCH_ROUNDS=5 BENCH_CONCURRENCY=1,16,64 node benchmarks/caddy-php/run.mjs`. Use `BENCH_CASES=direct,proxy` for the original two-case comparison, or any comma-separated selection of case names above. This is a closed-loop test: each client worker waits for a complete response before sending its next request. Reported latency includes reading the entire response; the first TLS handshakes of each measured run are included and amortized over that run. The generator checks status 200 and the timestamp body format on every request and fails the run on any error. Successful runs should show approximately one TLS connection per concurrent worker.
+
+Raw reports are saved in `benchmarks/caddy-php/results/`. They include successful requests per second, mean/p50/p95/p99 latency, errors, client connection counts, per-service cgroup CPU time, and per-service cgroup memory sampled near the middle of each run. CPU microseconds per request sums the services on that case's request path; it excludes the load generator and host networking work. CPU snapshots bracket the load-container lifecycle and include a small amount of measurement overhead. `clientCpuPercent` measures the Node load-generator process CPU during traffic generation; 100% means roughly one CPU core. This single-process client can limit measured throughput, especially for static files, so a result approaching 100% client CPU is not a measurement of maximum server capacity. Sampled cgroup memory includes charged cache and kernel memory; it is neither process RSS nor a measured peak. The driver removes only its own Compose projects and shared asset volume in a `finally` block; images, generated local certificates and result files remain. Certificates are ignored by Git.
+
+The nginx/Caddy-proxy comparison measures the combined effect of an extra HTTP proxy and switching TLS termination from nginx to Caddy. It does not isolate Caddy's HTTP forwarding cost from the two servers' different TLS implementations. Direct Caddy uses the standard `php_fastcgi php:9000` helper, including filesystem routing, while nginx forwards to the fixed `/app/index.php` script. Both connect to PHP-FPM over the Docker network; Unix sockets and routing optimizations need separate measurements. The tiny PHP response makes server overhead a large fraction of total request work. Docker Desktop results, a load generator sharing the server VM, existing workloads, and saturation at high concurrency limit how directly the numbers transfer to a dedicated production host. Treat these as local reference measurements rather than performance guarantees or CI thresholds. HTTP/2, HTTP/3, fresh TLS handshakes on every request, large responses, cross-host traffic, streaming, and real application workloads need separate measurements.
+
+### Reference measurement: 31 October 2026
+
+The [raw six-case report](../benchmarks/caddy-php/results/2026-10-31T21-03-10-626Z.json) records Docker Desktop 29.9.2 on ARM64 Linux with 6 vCPUs and 7.75 GiB RAM, nginx 1.30.6, Caddy 2.11.7, PHP 8.4.27 and Node 24.22.2. Docker reported 27 running containers at invocation startup; this was a shared development environment. Application assets were stored on the native Docker volume described above. The 54 measured runs completed 3,796,280 requests with zero errors. Each run established exactly one client TLS connection per concurrent worker. The PHP endpoint behind direct Caddy was also independently checked to return changing timestamps within milliseconds of the current time.
+
+Each value below is the median of three per-run values, not a percentile pooled across runs. Throughput ranges show the minimum and maximum observed run. CPU is total server CPU microseconds per successful request, excluding the client and host networking work. Raw reports also include p99, mean latency and memory measurements.
+
+PHP responses:
+
+| Concurrency | HTTPS path | Requests/sec, median (range) | p50, ms | p95, ms | CPU, µs/request | Client CPU, % |
+|---|---|---|---|---|---|---|
+| 1 | nginx | 2,171 (2,148–2,230) | 0.397 | 0.645 | 292 | 44 |
+| 1 | Caddy → nginx | 1,372 (609–1,377) | 0.650 | 0.998 | 661 | 34 |
+| 1 | Caddy → PHP-FPM | 1,066 (976–1,146) | 0.815 | 1.340 | 854 | 29 |
+| 32 | nginx | 6,470 (5,185–7,481) | 3.893 | 11.226 | 228 | 81 |
+| 32 | Caddy → nginx | 4,354 (2,674–5,676) | 5.958 | 14.912 | 432 | 74 |
+| 32 | Caddy → PHP-FPM | 4,297 (3,564–5,028) | 5.924 | 15.329 | 474 | 80 |
+| 128 | nginx | 7,410 (7,383–7,484) | 15.834 | 28.929 | 204 | 94 |
+| 128 | Caddy → nginx | 5,865 (5,146–5,939) | 19.643 | 40.223 | 385 | 86 |
+| 128 | Caddy → PHP-FPM | 6,807 (6,598–7,166) | 16.428 | 34.184 | 373 | 92 |
+
+Static file (28 bytes):
+
+| Concurrency | HTTPS path | Requests/sec, median (range) | p50, ms | p95, ms | CPU, µs/request | Client CPU, % |
+|---|---|---|---|---|---|---|
+| 1 | nginx | 6,941 (6,170–7,234) | 0.119 | 0.186 | 36 | 70 |
+| 1 | Caddy → nginx | 2,315 (1,969–3,380) | 0.282 | 1.017 | 286 | 42 |
+| 1 | Caddy | 4,472 (3,296–4,996) | 0.167 | 0.384 | 124 | 58 |
+| 32 | nginx | 11,448 (9,881–13,723) | 2.115 | 5.677 | 36 | 100 |
+| 32 | Caddy → nginx | 12,394 (11,435–15,564) | 2.056 | 5.224 | 150 | 95 |
+| 32 | Caddy | 9,810 (2,911–15,418) | 2.568 | 6.509 | 89 | 89 |
+| 128 | nginx | 13,905 (11,964–14,132) | 8.143 | 14.112 | 32 | 104 |
+| 128 | Caddy → nginx | 13,214 (13,189–13,216) | 8.543 | 15.044 | 167 | 102 |
+| 128 | Caddy | 12,809 (12,649–13,456) | 8.546 | 15.035 | 90 | 104 |
+
+At concurrency 1, adding Caddy in front of nginx increased p50 by 0.253 ms for PHP and 0.163 ms for the static file. Serving the static file directly through Caddy reduced p50 from 0.282 ms through Caddy/nginx to 0.167 ms; nginx directly measured 0.119 ms. Direct Caddy/PHP-FPM measured 0.815 ms, compared with 0.397 ms through nginx. This is the standard Caddy PHP helper over a Docker TCP hostname, including its filesystem routing, compared with nginx forwarding to a fixed script; the run does not isolate which implementation details explain the difference.
+
+At concurrency 128, direct Caddy/PHP-FPM achieved 6,807 requests/sec compared with 7,410 through nginx and 5,865 through Caddy/nginx. Total server CPU was approximately 373, 204 and 385 µs/request respectively. Direct Caddy therefore improved on the two-server PHP path under this load, while nginx remained the cheapest measured PHP path in server CPU. These are measurements of the tested configurations, with substantial run variation at concurrency 32.
+
+The static-file client approached one CPU core at concurrency 32 and used approximately one core at 128. The observed static throughput is client-limited and cannot rank maximum server capacities. At concurrency 128, server CPU was approximately 32 µs/request for nginx, 90 for direct Caddy and 167 for Caddy/nginx. Low-concurrency latency and server CPU distinguish these configurations more clearly than the saturated-client throughput. The static Caddy run at concurrency 32 varied from 2,911 to 15,418 requests/sec, illustrating the shared host noise; do not interpret the median as a precise capacity estimate.
+
+Caddy's median sampled cgroup memory at concurrency 128 was 44.2 MiB in the PHP proxy, 40.1 MiB for direct PHP, 45.8 MiB in the static proxy and 31.9 MiB for direct static files. Memory includes charged cache and kernel allocations, and shared pages can be charged to different containers, so subtracting total cgroup memory across stacks would not give a reliable process-memory overhead.
