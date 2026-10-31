@@ -576,7 +576,9 @@ export async function reconcile(desiredState: DesiredState, ctx: AgentContext = 
     try {
       for (const service of mainServices) { serviceStates[service].rolloutState = 'pulling'; if (announce) await emit(service, 'pulling'); }
       for (const service of mainServices) { const artifact = desiredState.services[service].artifact; if (artifact) await ensureArtifact(ctx, artifact); }
-      const pullServices = mainServices.filter(service => !desiredState.services[service].artifact);
+      // Registry images are pulled only for a new desired revision. Pulling on every poll would let a tag that moved
+      // upstream (`mariadb:11`) recreate the container without a deploy; `up -d` still pulls images that are missing.
+      const pullServices = sameDesiredVersion ? [] : mainServices.filter(service => !desiredState.services[service].artifact);
       if (pullServices.length) await ctx.docker(['compose', '-p', desiredState.project, 'pull', ...(pullServices.length === mainServices.length ? [] : pullServices)], { cwd: dir });
       for (const service of mainServices) { serviceStates[service].rolloutState = 'starting'; if (announce) await emit(service, 'starting'); }
       if (mainServices.length) {
