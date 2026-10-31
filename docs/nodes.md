@@ -53,7 +53,17 @@ To keep the key out of shell history and `docker inspect`, mount it as a file an
 
 For a host created by your cloud provider, save `tug node-enroll --name app1 --install-docker` as user-data. Its stdout starts with `#cloud-config`, includes the bootstrap script and starts the agent only after Docker installation succeeds. The default version-matched Tug runtime image must be accessible from the host; an overridden development `tug:local` image must already be loaded there. Enrollment tokens remain short-lived and should be treated as credentials when saving user-data.
 
-Bootstrap supports Debian 12/13 (`bookworm`, `trixie`) and Ubuntu 22.04/24.04/26.04/26.10 (`jammy`, `noble`, `resolute`, `stonking`) with systemd. It uses the [official Docker Ubuntu](https://docs.docker.com/engine/install/ubuntu/) or [Debian](https://docs.docker.com/engine/install/debian/) apt repository, installs Engine, Buildx and the Compose plugin, and enables Docker. A working Engine and Compose installation is preserved. If only Compose is missing, it installs the plugin without upgrading Engine. An inaccessible existing daemon, unsupported OS or conflicting distribution packages produce a clear error for manual resolution; Tug does not remove them or alter Docker daemon trust settings.
+Bootstrap requires systemd and supports these releases:
+
+| Family | Releases | Docker repository |
+| --- | --- | --- |
+| Debian (apt) | 12 `bookworm`, 13 `trixie` | [Debian](https://docs.docker.com/engine/install/debian/) |
+| Ubuntu (apt) | 22.04 `jammy`, 24.04 `noble`, 26.04 `resolute`, 26.10 `stonking` | [Ubuntu](https://docs.docker.com/engine/install/ubuntu/) |
+| Fedora (dnf) | 42, 43, 44 | [Fedora](https://docs.docker.com/engine/install/fedora/) |
+| RHEL (dnf) | 9, 10 | [RHEL](https://docs.docker.com/engine/install/rhel/) |
+| Rocky Linux, AlmaLinux, CentOS Stream (dnf) | 9, 10 | [CentOS](https://docs.docker.com/engine/install/centos/) |
+
+It adds Docker's official apt or dnf repository, installs Engine, Buildx and the Compose plugin, and enables Docker. A working Engine and Compose installation is preserved. If only Compose is missing, it installs the plugin without upgrading Engine. An inaccessible existing daemon, unsupported OS or release, or conflicting distribution packages (`docker.io` and `podman-docker` on Debian/Ubuntu; `docker`, `moby-engine` and `podman-docker` on RPM hosts) produce a clear error for manual resolution; Tug does not remove them or alter Docker daemon trust settings. Other distributions, such as Alpine or Arch, and hosts without systemd need Docker installed manually.
 
 ## Image
 

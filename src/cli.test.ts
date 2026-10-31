@@ -152,6 +152,39 @@ test('source upload excludes Tug credentials even with a broad Dockerfile and ig
   } finally { await fs.rm(dir, { recursive: true, force: true }); await fs.rm(archive, { force: true }); }
 });
 
+test('Docker bootstrap selects the package family and Docker repository for each supported OS and rejects the rest', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-os-release-'));
+  const script = path.resolve('src/templates/install-docker.sh');
+  const detect = async (release: string) => {
+    const file = path.join(dir, 'os-release');
+    await fs.writeFile(file, release);
+    return exec('/bin/sh', [script], { env: { ...process.env, PATH: dir, TUG_OS_RELEASE: file, TUG_BOOTSTRAP_DETECT: '1' } }).then(
+      result => ({ code: 0, out: result.stdout.trim(), err: result.stderr }),
+      (error: { code: number; stderr: string }) => ({ code: error.code, out: '', err: error.stderr }),
+    );
+  };
+  try {
+    const supported: [string, string, string][] = [
+      ['ID=ubuntu\nVERSION_ID="24.04"\nVERSION_CODENAME=noble\n', 'apt', 'ubuntu'],
+      ['ID=debian\nVERSION_ID="12"\nVERSION_CODENAME=bookworm\n', 'apt', 'debian'],
+      ['ID=fedora\nVERSION_ID=43\n', 'dnf', 'fedora'],
+      ['ID="rhel"\nVERSION_ID="9.4"\n', 'dnf', 'rhel'],
+      ['ID="rocky"\nVERSION_ID="9.5"\n', 'dnf', 'centos'],
+      ['ID="almalinux"\nVERSION_ID="10.0"\n', 'dnf', 'centos'],
+      ['ID="centos"\nVERSION_ID="9"\n', 'dnf', 'centos'],
+    ];
+    for (const [release, family, repo] of supported) {
+      const result = await detect(release);
+      assert.deepEqual([result.code, result.out], [0, `${family} ${repo}`], `${release.split('\n')[0]} should use the ${family} bootstrap with the ${repo} Docker repository`);
+    }
+    for (const release of ['ID=alpine\nVERSION_ID=3.20\n', 'ID=ubuntu\nVERSION_CODENAME=focal\n', 'ID=fedora\nVERSION_ID=30\n', 'ID=rocky\nVERSION_ID="8.10"\n']) {
+      const result = await detect(release);
+      assert.equal(result.code, 20, `${release.split('\n')[0]} should be refused with exit 20`);
+      assert.match(result.err, /Unsupported Docker bootstrap .*install Docker Engine and Compose manually/, 'refusal should tell the operator to install Docker manually');
+    }
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
 test('Docker bootstrap preserves a working installation without package-manager or privilege checks', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-existing-docker-'));
   try {
