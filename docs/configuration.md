@@ -26,7 +26,7 @@ CLI options override environment variables, which override the selected config f
 | `TUG_REGISTRY_CONTAINER` | unset | Registry container restarted when credentials change. |
 | `TUG_TLS_CERT_FILE`, `TUG_TLS_KEY_FILE` | unset | Serve HTTPS directly instead of plain HTTP. |
 | `TUG_LOCK_TTL_MS` | `600000` | Lease lifetime of per-project operation locks; active builds renew their lease. |
-| `TUG_STALE_SECONDS` | `60` | Seconds without a poll before a node is marked `stale`. |
+| `TUG_STALE_SECONDS` | `60` | Seconds without an authenticated work fetch, status report or wake wait before a node is marked `stale`. |
 | `TUG_EVENT_RETENTION_DAYS` | `30` | Events older than this many days are deleted; `0` keeps events regardless of age. Pruning runs at startup and then at most once an hour while agents report events. |
 | `TUG_EVENT_MAX_ROWS` | `100000` | Only this many of the newest events are kept; `0` removes the limit. A value that is not a whole number falls back to the default. |
 | `TUG_CONTROL_BACKUP_DIR` | `<data dir>/control-backups` | Control backup archives. |
@@ -47,7 +47,7 @@ CLI options override environment variables, which override the selected config f
 | `TUG_NODE_NAME` | hostname | Node name when not bound by the enrollment key. |
 | `TUG_NODE_ADDRESS`, `TUG_NODE_PUBLIC_ADDRESS` | unset | Addresses reported at enrollment. |
 | `TUG_STATE_DIR` | `/var/lib/tug` | Credentials, applied revisions, managed-image identities, temporary image downloads, WireGuard keys, ingress config and generated project files. |
-| `TUG_POLL_INTERVAL_MS` | `5000` | Poll interval. |
+| `TUG_POLL_INTERVAL_MS` | `5000` | Maximum quiet interval between reconciliations. A WebSocket or long-poll wake can start one sooner. |
 | `TUG_APPLY` | `true` | Set `false` to render files and report without touching Docker. |
 | `TUG_MESH` | `false` | Set `true` to generate a WireGuard key, report it and reconcile `wg0`. Needs `wg`, `ip`, host networking and `NET_ADMIN`. |
 | `TUG_ROLLOUT_PORTS` | `20000-20999` | Host port range (`LOW-HIGH`) for revisions of rolling services; each running or draining revision uses one port. |

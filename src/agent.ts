@@ -7,6 +7,7 @@ import { validateImageArchive, verifyDownload } from './artifacts.ts';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import net from 'node:net';
+import { WebSocket } from 'ws';
 import { createHash } from 'node:crypto';
 import { composeForNode, dumpYaml, isRolling, serviceSecretVersions } from './compose.ts';
 import { activeRollingStates, composeBase, hasLegacyContainers, reconcileRolling, retireAll } from './rollout.ts';
@@ -19,7 +20,7 @@ import { CADDY_CONTAINER, reconcileIngress, removeIngress } from './ingress.ts';
 import { WG_INTERFACE, ensureWgKeys, readReportedKey, reconcileMesh, rotateWgKeys, writeReportedKey } from './mesh.ts';
 import type {
   Command, CommandResult, DesiredState, DiagnosticCheck, EnrollResponse, HealthCheck, IngressStatus, JoinKey, ProjectStatus,
-  ImageArtifact, SecretsResponse, ServiceEndpoint, ServiceState, StatusReport, WorkResponse
+  ImageArtifact, SecretsResponse, ServiceEndpoint, ServiceState, StatusReport, StreamMessage, WakeResponse, WorkResponse
 } from './protocol.ts';
 
 const CONTROL_URL_FROM_ENV = Boolean(process.env.TUG_CONTROL_URL);
@@ -71,6 +72,86 @@ async function api<T = unknown>(ctx: AgentContext, route: string, opts: RequestI
   const res = await ctx.http(`${ctx.controlUrl}${route}`, { ...opts, headers: { ...authHeaders(ctx), ...(opts.headers as Record<string, string> | undefined || {}) } });
   if (!res.ok) throw new Error(`${opts.method || 'GET'} ${route}: ${res.status} ${await res.text()}`);
   return res.json() as Promise<T>;
+}
+
+type WebSocketFactory = (url: string, token: string) => WebSocket;
+
+/** Keeps one outbound stream open and falls back to a bounded HTTP wait when an intermediary rejects WebSockets. */
+export class AgentWakeChannel {
+  private readonly ctx: AgentContext;
+  private readonly createSocket: WebSocketFactory;
+  private socket?: WebSocket;
+  private cursor = 0;
+  private pending = false;
+  private waiter?: () => void;
+
+  constructor(ctx: AgentContext, createSocket: WebSocketFactory = (url, token) => new WebSocket(url, { headers: { Authorization: `Bearer ${token}` } })) {
+    this.ctx = ctx;
+    this.createSocket = createSocket;
+  }
+
+  private notify(): void {
+    this.pending = true;
+    this.waiter?.();
+  }
+
+  private async connect(): Promise<boolean> {
+    if (this.socket?.readyState === WebSocket.OPEN) return true;
+    if (!this.ctx.token) throw new Error('TUG_AGENT_TOKEN required');
+    const url = new URL('/agent/v1/stream', this.ctx.controlUrl);
+    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+    return new Promise(resolve => {
+      let settled = false;
+      const socket = this.createSocket(url.toString(), this.ctx.token!);
+      this.socket = socket;
+      const finish = (connected: boolean) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(connected);
+      };
+      const timer = setTimeout(() => { socket.terminate(); finish(false); }, 1500);
+      socket.on('open', () => finish(true));
+      socket.on('message', data => {
+        let message: StreamMessage;
+        try { message = JSON.parse(data.toString()) as StreamMessage; } catch { return; }
+        this.cursor = Math.max(this.cursor, message.cursor);
+        if (message.type === 'work-available') this.notify();
+      });
+      socket.on('close', () => {
+        if (this.socket === socket) this.socket = undefined;
+        if (settled) this.waiter?.();
+        else finish(false);
+      });
+      socket.on('error', () => finish(false));
+    });
+  }
+
+  private async waitOnSocket(timeoutMs: number): Promise<void> {
+    if (this.pending) { this.pending = false; return; }
+    await new Promise<void>(resolve => {
+      const done = () => {
+        clearTimeout(timer);
+        if (this.waiter === done) this.waiter = undefined;
+        resolve();
+      };
+      this.waiter = done;
+      const timer = setTimeout(done, timeoutMs);
+    });
+    this.pending = false;
+  }
+
+  private async longPoll(timeoutMs: number): Promise<void> {
+    const wake = await api<WakeResponse>(this.ctx, `/agent/v1/wake?after=${this.cursor}&timeout=${Math.min(timeoutMs, 30_000)}`);
+    this.cursor = Math.max(this.cursor, wake.cursor);
+  }
+
+  async wait(timeoutMs: number): Promise<void> {
+    if (await this.connect()) return this.waitOnSocket(timeoutMs);
+    await this.longPoll(timeoutMs);
+  }
+
+  close(): void { this.socket?.close(); this.socket = undefined; }
 }
 async function writeEnv(file: string, secrets: Record<string, string>): Promise<void> {
   const body = Object.entries(secrets).map(([k,v]) => `${k}=${String(v).replace(/\n/g, '\\n')}`).join('\n') + '\n';
@@ -472,6 +553,14 @@ export async function loadOrEnroll(): Promise<Creds> {
 export async function main(): Promise<void> {
   await loadOrEnroll();
   console.log(`tug-agent node=${NODE_NAME} control=${CONTROL_URL} apply=${APPLY}`);
-  for (;;) { try { await pollOnce(); } catch (e) { console.error(errMessage(e)); } await new Promise(r => setTimeout(r, INTERVAL)); }
+  const ctx = defaultContext();
+  const wake = new AgentWakeChannel(ctx);
+  for (;;) {
+    try { await pollOnce(ctx); } catch (e) { console.error(errMessage(e)); }
+    try { await wake.wait(INTERVAL); } catch (e) {
+      console.error(`agent wake wait failed: ${errMessage(e)}`);
+      await new Promise(r => setTimeout(r, INTERVAL));
+    }
+  }
 }
 if (import.meta.url === `file://${process.argv[1]}`) main();
