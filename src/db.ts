@@ -1,9 +1,25 @@
 import sqlite3 from 'sqlite3';
 import { open } from 'sqlite';
+import type { Database } from 'sqlite';
 import path from 'node:path';
-import { ensureDir, now } from './util.js';
+import { ensureDir, now } from './util.ts';
 
-export async function openDb(filename) {
+export type Db = Database<sqlite3.Database, sqlite3.Statement>;
+
+// Row shapes for the tables the control plane and agent read back (columns mirror the DDL below).
+export interface ProjectRow { id: string; name: string; current_deployment_id: string | null; created_at: string; updated_at: string }
+export interface NodeRow { id: string; name: string; address: string | null; public_address: string | null; status: string; agent_token_hash: string | null; registry_token_hash: string | null; last_seen_at: string | null; created_at: string; updated_at: string }
+export interface EnrollTokenRow { token_hash: string; name: string | null; uses_remaining: number; expires_at: string; created_at: string }
+export interface DeploymentRow { id: string; project_id: string; version: string; state: string; created_at: string; updated_at: string; error_message: string | null }
+export interface DesiredStateRow { id: string; project_id: string; deployment_id: string; version: string; state_json: string; created_at: string }
+export interface NodeStatusRow { id: string; node_id: string; project_id: string; observed_version: string; status_json: string; health: string; updated_at: string }
+export interface SecretRow { id: string; project_id: string; name: string; encrypted_value: string; version: number; created_at: string; updated_at: string }
+export interface VolumeRow { id: string; project_id: string; name: string; type: string; driver: string | null; node_id: string | null; config_json: string; created_at: string; updated_at: string }
+export interface CommandRow { id: string; node_id: string; project_id: string | null; type: string; state: string; payload_json: string | null; result_json: string | null; attempts: number; run_after: string | null; deadline: string | null; created_at: string; updated_at: string }
+export interface LockRow { name: string; owner: string; expires_at: string; created_at: string }
+export interface AppliedStateRow { project: string; version: string; applied_at: string; service_states_json: string; secret_versions_json: string }
+
+export async function openDb(filename: string): Promise<Db> {
   await ensureDir(path.dirname(filename));
   const db = await open({ filename, driver: sqlite3.Database });
   await db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
@@ -11,7 +27,7 @@ export async function openDb(filename) {
   return db;
 }
 
-export async function openAgentDb(filename) {
+export async function openAgentDb(filename: string): Promise<Db> {
   await ensureDir(path.dirname(filename));
   const db = await open({ filename, driver: sqlite3.Database });
   await db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
@@ -27,7 +43,7 @@ CREATE TABLE IF NOT EXISTS applied_state(
   return db;
 }
 
-async function migrate(db) {
+async function migrate(db: Db): Promise<void> {
   await db.exec(`
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, name TEXT UNIQUE NOT NULL, current_deployment_id TEXT, created_at TEXT, updated_at TEXT);

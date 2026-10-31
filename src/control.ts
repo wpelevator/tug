@@ -1,15 +1,31 @@
 #!/usr/bin/env node
 import express from 'express';
+import type { NextFunction, Request, Response } from 'express';
 import multer from 'multer';
 import fs from 'node:fs/promises';
 import https from 'node:https';
 import path from 'node:path';
 import * as tar from 'tar';
-import { openDb } from './db.js';
-import { encrypt, decrypt, loadOrCreateMasterKey } from './secrets.js';
-import { buildDesiredState, validateCompose } from './compose.js';
-import { buildAndPush, unpackContext, run as runCommand } from './build.js';
-import { ensureDir, hashToken, id, now, token } from './util.js';
+import { openDb } from './db.ts';
+import type { CommandRow, DeploymentRow, DesiredStateRow, EnrollTokenRow, LockRow, NodeRow, ProjectRow, SecretRow } from './db.ts';
+import { encrypt, decrypt, loadOrCreateMasterKey } from './secrets.ts';
+import { buildDesiredState, serviceSecretNames, validateCompose } from './compose.ts';
+import { buildAndPush, unpackContext, run as runCommand } from './build.ts';
+import { ensureDir, errMessage, hashToken, id, now, token } from './util.ts';
+import { ACTIVE_DEPLOYMENT_STATES } from './protocol.ts';
+import type {
+  AgentEvent, CommandResult, CommandType, ComposeFile, DesiredState, EnrollRequest, EnrollResponse, NodeInfo,
+  RegisterResponse, SecretsResponse, StatusReport, WorkResponse
+} from './protocol.ts';
+
+declare module 'express-serve-static-core' {
+  interface Request { node?: NodeRow }
+}
+
+interface HttpError extends Error { status?: number; lock?: LockRow }
+const httpError = (status: number, message: string): HttpError => Object.assign(new Error(message), { status });
+
+const ACTIVE_STATES_SQL = ACTIVE_DEPLOYMENT_STATES.map(s => `'${s}'`).join(',');
 
 const PORT = Number(process.env.PORT || 8080);
 
@@ -23,16 +39,16 @@ export async function createApp() {
   const REGISTRY_CONTAINER = process.env.LAUNCHPAD_REGISTRY_CONTAINER || null;
 
   let htpasswdQueue = Promise.resolve();
-  function withHtpasswdLock(fn) {
+  function withHtpasswdLock<T>(fn: () => Promise<T>): Promise<T> {
     const next = htpasswdQueue.catch(() => {}).then(fn);
-    htpasswdQueue = next.catch(() => {});
+    htpasswdQueue = next.then(() => {}, () => {});
     return next;
   }
   async function reloadRegistry() {
     if (!REGISTRY_CONTAINER) return;
     await runCommand('docker', ['restart', REGISTRY_CONTAINER]).catch(e => console.error(`registry reload failed: ${e.message}`));
   }
-  async function upsertRegistryCredential(name, password) {
+  async function upsertRegistryCredential(name: string, password: string): Promise<void> {
     if (!REGISTRY_AUTH_PATH) return;
     await withHtpasswdLock(async () => {
       const { out } = await runCommand('htpasswd', ['-nbB', name, password]);
@@ -46,7 +62,7 @@ export async function createApp() {
     });
     await reloadRegistry();
   }
-  async function removeRegistryCredential(name) {
+  async function removeRegistryCredential(name: string): Promise<void> {
     if (!REGISTRY_AUTH_PATH) return;
     await withHtpasswdLock(async () => {
       let existing = '';
@@ -60,7 +76,7 @@ export async function createApp() {
 
   const db = await openDb(dbFile);
   const masterKey = await loadOrCreateMasterKey(masterKeyFile);
-  let operator = await db.get('SELECT value FROM meta WHERE key=?', 'operator_token_hash');
+  const operator = await db.get('SELECT value FROM meta WHERE key=?', 'operator_token_hash');
   if (!operator) {
     const t = process.env.LAUNCHPAD_OPERATOR_TOKEN || token('lpo');
     await db.run('INSERT INTO meta(key,value) VALUES(?,?)', 'operator_token_hash', hashToken(t));
@@ -71,41 +87,41 @@ export async function createApp() {
   const app = express();
   app.use(express.json({ limit: '20mb' }));
 
-  const authOperator = async (req, res, next) => {
+  const authOperator = async (req: Request, res: Response, next: NextFunction) => {
     const raw = (req.headers.authorization || '').replace(/^Bearer /, '');
     const row = await db.get('SELECT value FROM meta WHERE key=?', 'operator_token_hash');
     if (!raw || hashToken(raw) !== row?.value) return res.status(401).json({ error: 'unauthorized' });
     next();
   };
-  const authAgent = async (req, res, next) => {
+  const authAgent = async (req: Request, res: Response, next: NextFunction) => {
     const raw = (req.headers.authorization || '').replace(/^Bearer /, '');
-    const node = raw && await db.get('SELECT * FROM nodes WHERE agent_token_hash=?', hashToken(raw));
+    const node = raw && await db.get<NodeRow>('SELECT * FROM nodes WHERE agent_token_hash=?', hashToken(raw));
     if (!node) return res.status(401).json({ error: 'unauthorized' });
     req.node = node; next();
   };
 
-  async function updateDeploymentConvergence(projectId) {
-    const project = await db.get('SELECT * FROM projects WHERE id=?', projectId);
+  async function updateDeploymentConvergence(projectId: string): Promise<void> {
+    const project = await db.get<ProjectRow>('SELECT * FROM projects WHERE id=?', projectId);
     if (!project?.current_deployment_id) return;
-    const ds = await db.get('SELECT * FROM desired_states WHERE deployment_id=?', project.current_deployment_id);
+    const ds = await db.get<DesiredStateRow>('SELECT * FROM desired_states WHERE deployment_id=?', project.current_deployment_id);
     if (!ds) return;
-    const state = JSON.parse(ds.state_json);
-    const required = new Set();
+    const state: DesiredState = JSON.parse(ds.state_json);
+    const required = new Set<string>();
     for (const svc of Object.values(state.services || {})) for (const node of svc.placement?.nodes || []) required.add(node);
     if (!required.size) return;
-    const statuses = await db.all('SELECT node_id,observed_version,health FROM node_statuses WHERE project_id=?', projectId);
+    const statuses = await db.all<{ node_id: string; observed_version: string; health: string }[]>('SELECT node_id,observed_version,health FROM node_statuses WHERE project_id=?', projectId);
     const byNode = new Map(statuses.map(s => [s.node_id, s]));
     const failed = [...required].some(node => byNode.get(node)?.observed_version === state.version && byNode.get(node)?.health === 'failed');
     if (failed) await db.run('UPDATE deployments SET state=?,error_message=?,updated_at=? WHERE id=? AND state=?', 'failed', 'one or more assigned nodes reported failed health', now(), project.current_deployment_id, 'rolling_out');
-    const ok = [...required].every(node => byNode.get(node)?.observed_version === state.version && ['serving', 'skipped'].includes(byNode.get(node)?.health));
+    const ok = [...required].every(node => byNode.get(node)?.observed_version === state.version && ['serving', 'skipped'].includes(byNode.get(node)?.health ?? ''));
     if (ok) await db.run('UPDATE deployments SET state=?,updated_at=? WHERE id=? AND state=?', 'succeeded', now(), project.current_deployment_id, 'rolling_out');
   }
 
-  async function currentDesired(projectId) {
-    return db.get('SELECT ds.* FROM desired_states ds JOIN projects p ON p.current_deployment_id=ds.deployment_id WHERE p.id=?', projectId);
+  async function currentDesired(projectId: string): Promise<DesiredStateRow | undefined> {
+    return db.get<DesiredStateRow>('SELECT ds.* FROM desired_states ds JOIN projects p ON p.current_deployment_id=ds.deployment_id WHERE p.id=?', projectId);
   }
 
-  async function acquireProjectLock(project, operation, ttlMs = Number(process.env.LAUNCHPAD_LOCK_TTL_MS || 10 * 60 * 1000)) {
+  async function acquireProjectLock(project: string, operation: string, ttlMs = Number(process.env.LAUNCHPAD_LOCK_TTL_MS || 10 * 60 * 1000)) {
     const name = `project:${project}`;
     const ts = now();
     await db.run('DELETE FROM locks WHERE expires_at < ?', ts);
@@ -113,34 +129,34 @@ export async function createApp() {
     try {
       await db.run('INSERT INTO locks(name,owner,expires_at,created_at) VALUES(?,?,?,?)', name, owner, new Date(Date.now() + ttlMs).toISOString(), ts);
     } catch (e) {
-      if (!/UNIQUE constraint/.test(e.message)) throw e;
-      const existing = await db.get('SELECT * FROM locks WHERE name=?', name);
-      const err = new Error(`project ${project} is locked by ${existing?.owner} until ${existing?.expires_at}`);
+      if (!/UNIQUE constraint/.test(errMessage(e))) throw e;
+      const existing = await db.get<LockRow>('SELECT * FROM locks WHERE name=?', name);
+      const err: HttpError = new Error(`project ${project} is locked by ${existing?.owner} until ${existing?.expires_at}`);
       err.status = 409; err.lock = existing; throw err;
     }
     return { name, owner };
   }
-  async function releaseLock(lock) {
+  async function releaseLock(lock: { name: string; owner: string } | null | undefined): Promise<void> {
     if (lock) await db.run('DELETE FROM locks WHERE name=? AND owner=?', lock.name, lock.owner).catch(()=>{});
   }
-  function sendError(res, e) { res.status(e.status || 500).json({ error: e.message, lock: e.lock || undefined }); }
+  function sendError(res: Response, e: unknown): void { const err = e as HttpError; res.status(err.status || 500).json({ error: err.message, lock: err.lock || undefined }); }
 
   app.get('/healthz', (req, res) => res.json({ ok: true }));
 
   app.post('/api/v1/projects', authOperator, async (req, res) => {
     const name = req.body.name || 'site'; const ts = now();
     await db.run('INSERT OR IGNORE INTO projects(id,name,created_at,updated_at) VALUES(?,?,?,?)', name, name, ts, ts);
-    res.json(await db.get('SELECT * FROM projects WHERE id=?', name));
+    res.json(await db.get<ProjectRow>('SELECT * FROM projects WHERE id=?', name));
   });
   app.get('/api/v1/projects/:project', authOperator, async (req, res) => res.json(await db.get('SELECT * FROM projects WHERE id=?', req.params.project)));
 
-  async function registerNode({ name, address, publicAddress }) {
+  async function registerNode({ name, address, publicAddress }: { name: string; address?: string; publicAddress?: string }): Promise<RegisterResponse> {
     const agentToken = token('lpa'); const registryToken = token('lpr'); const ts = now();
     await db.run(`INSERT INTO nodes(id,name,address,public_address,status,agent_token_hash,registry_token_hash,created_at,updated_at)
       VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,address=excluded.address,public_address=excluded.public_address,agent_token_hash=excluded.agent_token_hash,registry_token_hash=excluded.registry_token_hash,updated_at=excluded.updated_at`,
       name, name, address || null, publicAddress || null, 'registered', hashToken(agentToken), hashToken(registryToken), ts, ts);
     await upsertRegistryCredential(name, registryToken);
-    const node = await db.get('SELECT id,name,address,public_address,status,created_at,updated_at FROM nodes WHERE id=?', name);
+    const node = (await db.get<NodeInfo>('SELECT id,name,address,public_address,status,created_at,updated_at FROM nodes WHERE id=?', name))!;
     return { node, agentToken, registryToken };
   }
   app.post('/api/v1/nodes/register', authOperator, async (req, res) => {
@@ -161,20 +177,22 @@ export async function createApp() {
     res.json({ enrollToken, name, usesRemaining: uses, expiresAt, registry: REGISTRY });
   });
   app.post('/agent/v1/enroll', async (req, res) => {
-    const raw = String(req.body.enrollToken || (req.headers.authorization || '').replace(/^Bearer /, '')).trim();
+    const body: EnrollRequest = req.body;
+    const raw = String(body.enrollToken || (req.headers.authorization || '').replace(/^Bearer /, '')).trim();
     if (!raw) return res.status(400).json({ error: 'enrollToken required' });
-    const row = await db.get('SELECT * FROM enroll_tokens WHERE token_hash=?', hashToken(raw));
+    const row = await db.get<EnrollTokenRow>('SELECT * FROM enroll_tokens WHERE token_hash=?', hashToken(raw));
     if (!row || row.uses_remaining < 1 || row.expires_at < now()) {
       if (row) await db.run('DELETE FROM enroll_tokens WHERE token_hash=?', hashToken(raw));
       return res.status(401).json({ error: 'invalid or expired enroll token' });
     }
-    const name = row.name || req.body.name;
+    const name = row.name || body.name;
     if (!name) return res.status(400).json({ error: 'node name required (bind one to the enroll token or send name)' });
-    const result = await registerNode({ name, address: req.body.address, publicAddress: req.body.publicAddress });
+    const result = await registerNode({ name, address: body.address, publicAddress: body.publicAddress });
     const remaining = row.uses_remaining - 1;
     if (remaining < 1) await db.run('DELETE FROM enroll_tokens WHERE token_hash=?', hashToken(raw));
     else await db.run('UPDATE enroll_tokens SET uses_remaining=? WHERE token_hash=?', remaining, hashToken(raw));
-    res.json({ ...result, registry: REGISTRY });
+    const enrolled: EnrollResponse = { ...result, registry: REGISTRY };
+    res.json(enrolled);
   });
   app.get('/api/v1/nodes', authOperator, async (req, res) => res.json({ nodes: await db.all('SELECT id,name,address,public_address,status,last_seen_at,created_at,updated_at FROM nodes ORDER BY name') }));
   app.post('/api/v1/nodes/:name/rotate-registry-token', authOperator, async (req, res) => {
@@ -205,7 +223,7 @@ export async function createApp() {
     let lock;
     try {
       lock = await acquireProjectLock(project, 'secret.set');
-      const old = await db.get('SELECT version FROM secrets WHERE project_id=? AND name=?', project, name); const ts = now();
+      const old = await db.get<Pick<SecretRow, 'version'>>('SELECT version FROM secrets WHERE project_id=? AND name=?', project, name); const ts = now();
       await db.run(`INSERT INTO secrets(id,project_id,name,encrypted_value,version,created_at,updated_at) VALUES(?,?,?,?,?,?,?)
         ON CONFLICT(project_id,name) DO UPDATE SET encrypted_value=excluded.encrypted_value,version=excluded.version,updated_at=excluded.updated_at`,
         id('sec'), project, name, encrypt(value, masterKey), (old?.version || 0) + 1, ts, ts);
@@ -218,9 +236,9 @@ export async function createApp() {
 
   app.post('/api/v1/deployments', authOperator, upload.single('context'), async (req, res) => {
     const body = req.file ? JSON.parse(req.body.payload) : req.body;
-    const project = body.project || 'site'; const compose = body.compose; const version = body.version || `git-${Date.now()}`;
-    const nodes = await db.all('SELECT name FROM nodes'); validateCompose(compose, nodes.map(n => n.name));
-    const active = await db.get('SELECT id,state FROM deployments WHERE project_id=? AND state IN (\'uploading\',\'building\',\'pending_dependencies\',\'rolling_out\') ORDER BY created_at DESC LIMIT 1', project);
+    const project: string = body.project || 'site'; const compose: ComposeFile = body.compose; const version = body.version || `git-${Date.now()}`;
+    const nodes = await db.all<{ name: string }[]>('SELECT name FROM nodes'); validateCompose(compose, nodes.map(n => n.name));
+    const active = await db.get<Pick<DeploymentRow, 'id' | 'state'>>(`SELECT id,state FROM deployments WHERE project_id=? AND state IN (${ACTIVE_STATES_SQL}) ORDER BY created_at DESC LIMIT 1`, project);
     if (active) return res.status(409).json({ error: `deployment ${active.id} is already ${active.state}` });
     const depId = id('dep'); const ts = now();
     let lock;
@@ -231,7 +249,7 @@ export async function createApp() {
       const desired = buildDesiredState({ project, version, compose, registry: REGISTRY, defaultNode: nodes[0]?.name || null });
       if (req.file) {
         const contextDir = path.resolve(DATA_DIR, 'build-contexts', depId); await unpackContext(req.file.path, contextDir);
-        for (const [svc, spec] of Object.entries(compose.services)) if (spec.build) await buildAndPush({ contextDir, service: svc, buildSpec: spec.build, imageRef: desired.services[svc].image, push: process.env.LAUNCHPAD_PUSH !== 'false' });
+        for (const [svc, spec] of Object.entries(compose.services)) if (spec.build) await buildAndPush({ contextDir, service: svc, buildSpec: spec.build, imageRef: desired.services[svc].image!, push: process.env.LAUNCHPAD_PUSH !== 'false' });
       }
       await db.run('INSERT INTO desired_states(id,project_id,deployment_id,version,state_json,created_at) VALUES(?,?,?,?,?,?)', id('ds'), project, depId, version, JSON.stringify(desired), ts);
       for (const [volumeName, volumeSpec] of Object.entries(compose.volumes || {})) {
@@ -246,16 +264,16 @@ export async function createApp() {
       await db.run('UPDATE deployments SET state=?,updated_at=? WHERE id=?', 'rolling_out', now(), depId);
       res.json({ deployment: { id: depId, project, version, state: 'rolling_out' }, desiredState: desired });
     } catch (e) {
-      await db.run('UPDATE deployments SET state=?,error_message=?,updated_at=? WHERE id=?', 'build_failed', e.message, now(), depId).catch(()=>{});
+      await db.run('UPDATE deployments SET state=?,error_message=?,updated_at=? WHERE id=?', 'build_failed', errMessage(e), now(), depId).catch(()=>{});
       sendError(res, e);
     } finally { await releaseLock(lock); if (req.file) await fs.rm(req.file.path, { force: true }).catch(()=>{}); }
   });
 
   app.get('/api/v1/deployments/:id', authOperator, async (req, res) => res.json(await db.get('SELECT * FROM deployments WHERE id=?', req.params.id)));
   app.post('/api/v1/deployments/:id/cancel', authOperator, async (req, res) => {
-    const row = await db.get('SELECT * FROM deployments WHERE id=?', req.params.id);
+    const row = await db.get<DeploymentRow>('SELECT * FROM deployments WHERE id=?', req.params.id);
     if (!row) return res.status(404).json({ error: 'deployment not found' });
-    if (!['uploading', 'building', 'pending_dependencies', 'rolling_out'].includes(row.state)) return res.status(409).json({ error: `deployment is ${row.state}` });
+    if (!(ACTIVE_DEPLOYMENT_STATES as readonly string[]).includes(row.state)) return res.status(409).json({ error: `deployment is ${row.state}` });
     await db.run('UPDATE deployments SET state=?,updated_at=? WHERE id=?', 'cancelled', now(), req.params.id);
     res.json({ ok: true });
   });
@@ -264,7 +282,7 @@ export async function createApp() {
     let lock;
     try {
       lock = await acquireProjectLock(project, 'rollback');
-      const active = await db.get('SELECT id,state FROM deployments WHERE project_id=? AND state IN (\'uploading\',\'building\',\'pending_dependencies\',\'rolling_out\') ORDER BY created_at DESC LIMIT 1', project);
+      const active = await db.get<Pick<DeploymentRow, 'id' | 'state'>>(`SELECT id,state FROM deployments WHERE project_id=? AND state IN (${ACTIVE_STATES_SQL}) ORDER BY created_at DESC LIMIT 1`, project);
       if (active && !req.body.force) return res.status(409).json({ error: `deployment ${active.id} is already ${active.state}; retry with force to rollback anyway` });
       const current = await db.get('SELECT current_deployment_id FROM projects WHERE id=?', project);
       const previousDs = await db.get(`SELECT ds.*, d.version AS deployment_version FROM desired_states ds JOIN deployments d ON d.id=ds.deployment_id
@@ -281,7 +299,7 @@ export async function createApp() {
   });
   app.get('/api/v1/volumes', authOperator, async (req, res) => res.json({ volumes: await db.all('SELECT * FROM volumes WHERE project_id=? ORDER BY name', req.query.project || 'site') }));
   app.delete('/api/v1/volumes/:name', authOperator, async (req, res) => {
-    const project = req.query.project || 'site'; const deleteData = String(req.query.deleteData || 'false') === 'true';
+    const project = String(req.query.project || 'site'); const deleteData = String(req.query.deleteData || 'false') === 'true';
     let lock;
     try {
       lock = deleteData ? await acquireProjectLock(project, 'volume.delete') : null;
@@ -291,7 +309,7 @@ export async function createApp() {
     if ((config.persistent || volume.type !== 'ephemeral') && !deleteData) return res.status(409).json({ error: 'refusing to delete persistent volume without deleteData=true' });
     const ds = await currentDesired(project);
     if (ds) {
-      const state = JSON.parse(ds.state_json);
+      const state: DesiredState = JSON.parse(ds.state_json);
       const inUse = Object.entries(state.compose?.services || {}).filter(([, svc]) => (svc.volumes || []).some(v => (typeof v === 'string' ? v.split(':')[0] : v.source) === req.params.name)).map(([name]) => name);
       if (inUse.length) return res.status(409).json({ error: `volume is still referenced by services: ${inUse.join(', ')}` });
     }
@@ -334,19 +352,19 @@ export async function createApp() {
     await fs.copyFile(path.join(restoreDir, 'master.key'), masterKeyFile);
     res.json({ ok: true, restored: true, restartRequired: true });
   });
-  async function commandForService({ project, service, type, payload }) {
-    if (!service) throw Object.assign(new Error('service required'), { status: 400 });
-    const ds = await currentDesired(project); if (!ds) throw Object.assign(new Error('project has no desired state'), { status: 404 });
-    const state = JSON.parse(ds.state_json); const svc = state.services?.[service]; if (!svc) throw Object.assign(new Error('service not found'), { status: 404 });
-    const nodeName = svc.placement?.nodes?.[0]; if (!nodeName) throw Object.assign(new Error('service has no explicit node placement'), { status: 400 });
-    const node = await db.get('SELECT id FROM nodes WHERE name=? OR id=?', nodeName, nodeName); if (!node) throw Object.assign(new Error('node not found'), { status: 404 });
+  async function commandForService({ project, service, type, payload }: { project: string; service?: string; type: CommandType; payload: Record<string, unknown> }) {
+    if (!service) throw httpError(400, 'service required');
+    const ds = await currentDesired(project); if (!ds) throw httpError(404, 'project has no desired state');
+    const state = JSON.parse(ds.state_json); const svc = state.services?.[service]; if (!svc) throw httpError(404, 'service not found');
+    const nodeName = svc.placement?.nodes?.[0]; if (!nodeName) throw httpError(400, 'service has no explicit node placement');
+    const node = await db.get('SELECT id FROM nodes WHERE name=? OR id=?', nodeName, nodeName); if (!node) throw httpError(404, 'node not found');
     const cmdId = id('cmd'); const ts = now();
     await db.run('INSERT INTO commands(id,node_id,project_id,type,state,payload_json,attempts,run_after,deadline,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)', cmdId, node.id, project, type, 'pending', JSON.stringify({ project, service, ...payload }), 0, ts, null, ts, ts);
     return { commandId: cmdId, nodeId: node.id };
   }
   app.post('/api/v1/restart', authOperator, async (req, res) => {
     try { res.json(await commandForService({ project: req.body.project || 'site', service: req.body.service, type: 'service.restart', payload: {} })); }
-    catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+    catch (e) { res.status((e as HttpError).status || 500).json({ error: errMessage(e) }); }
   });
   app.post('/api/v1/logs', authOperator, async (req, res) => {
     const project = req.body.project || 'site'; const service = req.body.service; const tail = Number(req.body.tail || 200);
@@ -375,10 +393,10 @@ export async function createApp() {
     res.json({ events });
   });
   app.get('/api/v1/diagnostics', authOperator, async (req, res) => {
-    const checks = [];
-    async function check(name, fn) {
+    const checks: { name: string; ok: boolean; [key: string]: unknown }[] = [];
+    async function check(name: string, fn: () => Promise<Record<string, unknown>>) {
       try { checks.push({ name, ok: true, ...(await fn()) }); }
-      catch (e) { checks.push({ name, ok: false, error: e.message }); }
+      catch (e) { checks.push({ name, ok: false, error: errMessage(e) }); }
     }
     await check('sqlite', async () => ({ value: (await db.get('SELECT COUNT(*) AS count FROM projects')).count }));
     await check('operator_token', async () => ({ configured: Boolean(await db.get('SELECT value FROM meta WHERE key=?', 'operator_token_hash')) }));
@@ -399,63 +417,46 @@ export async function createApp() {
   });
 
   app.get('/agent/v1/work', authAgent, async (req, res) => {
-    await db.run('UPDATE nodes SET last_seen_at=?,status=? WHERE id=?', now(), 'online', req.node.id);
-    const states = await db.all(`SELECT ds.* FROM desired_states ds JOIN projects p ON p.current_deployment_id=ds.deployment_id ORDER BY ds.created_at DESC`);
-    const desiredStates = states.map(s => JSON.parse(s.state_json)).filter(st => Object.values(st.services).some(svc => (svc.placement?.nodes || []).includes(req.node.name) || !(svc.placement?.nodes?.length)));
-    const commands = await db.all('SELECT * FROM commands WHERE node_id=? AND state=?', req.node.id, 'pending');
-    if (commands.length) await db.run(`UPDATE commands SET state='running',attempts=attempts+1,updated_at=? WHERE node_id=? AND state='pending'`, now(), req.node.id);
-    res.json({ serverTime: now(), nodeId: req.node.id, desiredStates, commands });
+    await db.run('UPDATE nodes SET last_seen_at=?,status=? WHERE id=?', now(), 'online', req.node!.id);
+    const states = await db.all<DesiredStateRow[]>(`SELECT ds.* FROM desired_states ds JOIN projects p ON p.current_deployment_id=ds.deployment_id ORDER BY ds.created_at DESC`);
+    const desiredStates: DesiredState[] = states.map((s): DesiredState => JSON.parse(s.state_json)).filter(st => Object.values(st.services).some(svc => (svc.placement?.nodes || []).includes(req.node!.name) || !(svc.placement?.nodes?.length)));
+    const commands = await db.all<CommandRow[]>('SELECT * FROM commands WHERE node_id=? AND state=?', req.node!.id, 'pending');
+    if (commands.length) await db.run(`UPDATE commands SET state='running',attempts=attempts+1,updated_at=? WHERE node_id=? AND state='pending'`, now(), req.node!.id);
+    const work: WorkResponse = { serverTime: now(), nodeId: req.node!.id, desiredStates, commands };
+    res.json(work);
   });
   app.post('/agent/v1/status', authAgent, async (req, res) => {
     const ts = now();
-    for (const st of req.body.projects || []) {
-      await db.run(`INSERT INTO node_statuses(id,node_id,project_id,observed_version,status_json,health,updated_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(node_id,project_id) DO UPDATE SET observed_version=excluded.observed_version,status_json=excluded.status_json,health=excluded.health,updated_at=excluded.updated_at`, id('ns'), req.node.id, st.project, st.observedVersion, JSON.stringify(st), st.health || 'unknown', ts);
+    const report: Partial<StatusReport> = req.body;
+    for (const st of report.projects || []) {
+      await db.run(`INSERT INTO node_statuses(id,node_id,project_id,observed_version,status_json,health,updated_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(node_id,project_id) DO UPDATE SET observed_version=excluded.observed_version,status_json=excluded.status_json,health=excluded.health,updated_at=excluded.updated_at`, id('ns'), req.node!.id, st.project, st.observedVersion, JSON.stringify(st), st.health || 'unknown', ts);
       await updateDeploymentConvergence(st.project);
     }
-    for (const cr of req.body.commandResults || []) {
+    for (const cr of (report.commandResults || []) as Partial<CommandResult>[]) {
       const result = cr.result || {};
-      await db.run('UPDATE commands SET state=?,result_json=?,updated_at=? WHERE id=? AND node_id=?', cr.state || 'succeeded', JSON.stringify(result), ts, cr.commandId, req.node.id);
+      await db.run('UPDATE commands SET state=?,result_json=?,updated_at=? WHERE id=? AND node_id=?', cr.state || 'succeeded', JSON.stringify(result), ts, cr.commandId, req.node!.id);
     }
-    await db.run('UPDATE nodes SET last_seen_at=?,status=? WHERE id=?', ts, 'online', req.node.id);
+    await db.run('UPDATE nodes SET last_seen_at=?,status=? WHERE id=?', ts, 'online', req.node!.id);
     res.json({ ok: true });
   });
-  app.post('/agent/v1/events', authAgent, async (req, res) => { const evs = req.body.events || [req.body]; for (const ev of evs) await db.run('INSERT INTO events(id,project_id,deployment_id,node_id,level,type,message,metadata_json,created_at) VALUES(?,?,?,?,?,?,?,?,?)', id('evt'), ev.projectId || null, ev.deploymentId || null, req.node.id, ev.level || 'info', ev.type || 'event', ev.message || '', JSON.stringify(ev.metadata || {}), now()); res.json({ ok: true }); });
-  function serviceSecretNames(compose, serviceNames) {
-    const allowed = new Set();
-    for (const serviceName of serviceNames) {
-      const env = compose?.services?.[serviceName]?.environment || {};
-      if (Array.isArray(env)) {
-        for (const entry of env) {
-          const [key, value = ''] = String(entry).split('=');
-          if (key) allowed.add(key);
-          for (const match of String(value).matchAll(/\$\{?([A-Z_][A-Z0-9_]*)[^}]*\}?/g)) allowed.add(match[1]);
-        }
-      } else {
-        for (const [key, value] of Object.entries(env)) {
-          if (typeof value === 'string' && value.match(/^\$\{?[A-Z_][A-Z0-9_]*(?::-[^}]*)?\}?$/)) {
-            const m = value.match(/^\$\{?([A-Z_][A-Z0-9_]*)/); if (m) allowed.add(m[1]);
-          } else allowed.add(key);
-        }
-      }
-    }
-    return allowed;
-  }
+  app.post('/agent/v1/events', authAgent, async (req, res) => { const evs: AgentEvent[] = req.body.events || [req.body]; for (const ev of evs) await db.run('INSERT INTO events(id,project_id,deployment_id,node_id,level,type,message,metadata_json,created_at) VALUES(?,?,?,?,?,?,?,?,?)', id('evt'), ev.projectId || null, ev.deploymentId || null, req.node!.id, ev.level || 'info', ev.type || 'event', ev.message || '', JSON.stringify(ev.metadata || {}), now()); res.json({ ok: true }); });
   app.get('/agent/v1/secrets', authAgent, async (req, res) => {
-    const project = req.query.project || 'site';
-    let rows = await db.all('SELECT name,encrypted_value,version FROM secrets WHERE project_id=?', project);
+    const project = String(req.query.project || 'site');
+    let rows = await db.all<Pick<SecretRow, 'name' | 'encrypted_value' | 'version'>[]>('SELECT name,encrypted_value,version FROM secrets WHERE project_id=?', project);
     if (req.query.services) {
       const ds = await currentDesired(project);
       const names = String(req.query.services).split(',').map(s => s.trim()).filter(Boolean);
-      const allowed = ds ? serviceSecretNames(JSON.parse(ds.state_json).compose, names) : new Set();
+      const allowed = ds ? serviceSecretNames(JSON.parse(ds.state_json).compose, names) : new Set<string>();
       rows = rows.filter(r => allowed.has(r.name));
     }
-    res.json({ secrets: Object.fromEntries(rows.map(r => [r.name, decrypt(r.encrypted_value, masterKey)])), versions: Object.fromEntries(rows.map(r => [r.name, r.version])) });
+    const secrets: SecretsResponse = { secrets: Object.fromEntries(rows.map(r => [r.name, decrypt(r.encrypted_value, masterKey)])), versions: Object.fromEntries(rows.map(r => [r.name, r.version])) };
+    res.json(secrets);
   });
 
   return app;
 }
 
-export async function listen(app, port = PORT) {
+export async function listen(app: express.Express, port = PORT): Promise<import('node:http').Server | https.Server> {
   const certFile = process.env.LAUNCHPAD_TLS_CERT_FILE;
   const keyFile = process.env.LAUNCHPAD_TLS_KEY_FILE;
   if (certFile && keyFile) {

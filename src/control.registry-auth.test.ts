@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { createApp } from './control.js';
+import { createApp } from './control.ts';
+import type { Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
 
 async function server() {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'lp-reg-'));
@@ -13,21 +15,21 @@ async function server() {
   process.env.LAUNCHPAD_REGISTRY_AUTH_PATH = path.join(dir, 'htpasswd');
   delete process.env.LAUNCHPAD_REGISTRY_CONTAINER;
   const app = await createApp();
-  const srv = await new Promise(resolve => { const s = app.listen(0, () => resolve(s)); });
+  const srv = await new Promise<Server>(resolve => { const s = app.listen(0, () => resolve(s)); });
   return {
-    base: `http://127.0.0.1:${srv.address().port}`,
+    base: `http://127.0.0.1:${(srv.address() as AddressInfo).port}`,
     htpasswdPath: process.env.LAUNCHPAD_REGISTRY_AUTH_PATH,
     close: () => new Promise(resolve => srv.close(resolve)),
   };
 }
 const headers = { Authorization: 'Bearer op-registry-token', 'content-type': 'application/json' };
-async function post(base, route, body) {
+async function post(base: string, route: string, body: unknown) {
   const res = await fetch(`${base}${route}`, { method: 'POST', headers, body: JSON.stringify(body) });
   const text = await res.text();
   assert.equal(res.status, 200, text);
   return JSON.parse(text);
 }
-async function readHtpasswd(file) {
+async function readHtpasswd(file: string) {
   try { return (await fs.readFile(file, 'utf8')).split('\n').filter(Boolean); } catch { return []; }
 }
 

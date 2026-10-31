@@ -10,7 +10,7 @@ services:
 
   control:
     build: .
-    command: node src/control.js
+    command: control
     environment:
       PORT: 8080
       LAUNCHPAD_DATA_DIR: /data
@@ -30,7 +30,8 @@ services:
 
   provisioner:
     build: .
-    command: node scripts/integration-provision.js
+    entrypoint: ["node"]
+    command: ["scripts/integration-provision.js"]
     restart: "no"
     environment:
       LAUNCHPAD_CONTROL_URL: http://control:8080

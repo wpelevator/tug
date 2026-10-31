@@ -15,7 +15,7 @@ A Node.js MVP of the Portable VPS Launch Pad described in `plan.md`.
 - Secret version tracking with targeted service recreation when only referenced secrets change.
 - SSH-based Docker bootstrap helpers with preflight checks for Docker, Compose, writable paths, control reachability, free disk space, and published-port availability.
 - `control install` publishes the control API/registry over plain HTTP; front it with your own reverse proxy/TLS termination if exposing it publicly.
-- `control.js` can also terminate TLS itself (`LAUNCHPAD_TLS_CERT_FILE` / `LAUNCHPAD_TLS_KEY_FILE`), e.g. a private network with a self-signed cert; point agents at it with `LAUNCHPAD_CONTROL_URL=https://...` and `NODE_EXTRA_CA_CERTS=<path to CA cert>` so the agent's `fetch` trusts it.
+- `control.ts` can also terminate TLS itself (`LAUNCHPAD_TLS_CERT_FILE` / `LAUNCHPAD_TLS_KEY_FILE`), e.g. a private network with a self-signed cert; point agents at it with `LAUNCHPAD_CONTROL_URL=https://...` and `NODE_EXTRA_CA_CERTS=<path to CA cert>` so the agent's `fetch` trusts it.
 - Per-node registry pull tokens are issued at registration and enforced by the registry itself via an htpasswd file that control writes; `node install --registry <host>` performs `docker login` for agents. Tokens can be rotated or revoked with `node:rotate-registry-token` / `node:revoke-registry-token`, which restarts the registry container so the change takes effect immediately.
 - Control/local/agent diagnostics via `launchpad doctor`.
 - Development `docker-compose.yml` with control API, registry, and optional agent service.
@@ -24,15 +24,30 @@ Control-plane backup/restore (SQLite + master key) exists for disaster recovery 
 
 ## Local development
 
+The source is TypeScript. Development and tests run the `.ts` files directly through Node's built-in type stripping — **there is no build step**, but it needs **Node >= 22.18** (`engines.node`). Compilation to `dist/` happens only when building the Docker image.
+
 ```bash
 npm install
-npm test
+npm test               # node --test 'src/**/*.test.ts'
+npm run typecheck      # tsc --noEmit over src/ and test/ (strict)
 npm run lint
 
-# Unit tests are collocated with source files as src/*.test.js.
+# Unit tests are collocated with source files as src/*.test.ts.
+
+npm run build          # tsc -> dist/ (JS + .d.ts) and copy src/templates -> dist/templates
+npm run test:smoke:dist  # build, then check the installers render templates from dist/
 
 docker compose up --build control registry
 ```
+
+Import specifiers in the source use the `.ts` extension (`import { x } from './util.ts'`) because Node's type stripping does not remap `.js` to `.ts`; `tsc` rewrites them to `.js` in `dist/` (`rewriteRelativeImportExtensions`). Only erasable TypeScript syntax is allowed (`erasableSyntaxOnly`: no enums or constructor parameter properties).
+
+The Docker images are multi-stage: a build stage runs `npm ci && npm run build`, and the final image ships `dist/` plus production dependencies only, with entrypoint `node dist/main.js`. `src/templates/*` are data files that `tsc` does not copy, so `npm run build` copies them next to the emitted `dist/cli.js`; the CLI resolves them relative to the running file, so `node src/cli.ts` and `node dist/cli.js` both work.
+
+### Architecture notes
+
+- **`src/protocol.ts` is the control↔agent contract.** It holds the types (and a few shared constants such as the active/terminal deployment states) for everything crossing the boundary: `DesiredState`/`ServiceSpec`/`HealthCheck`, the `/agent/v1/*` payloads (`WorkResponse`, `Command`/`CommandResult`, `StatusReport`/`ProjectStatus`, `SecretsResponse`), and enrollment (`EnrollRequest`/`EnrollResponse`, `RegisterResponse`, `JoinKey`). `control.ts`, `agent.ts`, `compose.ts` and `cli.ts` all import from it; change the wire format there first.
+- **The agent's side effects are injectable.** `reconcile`, `executeCommand`, `waitForHealth`, `containerIp` and `pollOnce` take an `AgentContext` (`{ docker, http, nodeName, stateDir, apply, controlUrl, token }`). `docker` is a `DockerRunner` (`src/runners.ts`; `createDockerRunner()` wraps `run('docker', …)` from `build.ts`) and `http` is a `fetch`-compatible client. Production code uses `defaultContext()`; `src/agent.test.ts` passes a fake docker runner to unit-test rollout ordering, secret-triggered `--force-recreate`, and the docker/tcp/http health-check branches without a Docker daemon. The privileged-Docker integration test remains the end-to-end check.
 
 The control service prints and stores the initial operator token in `./data/operator.token` when run directly on the host, or in the `launchpad-data` volume when run in Docker.
 
@@ -198,8 +213,8 @@ For host-mode development:
 ```bash
 npm run start:control
 export LAUNCHPAD_TOKEN=$(cat data/operator.token)
-node src/cli.js init --control-url http://localhost:8080 --token "$LAUNCHPAD_TOKEN"
-node src/cli.js node:register --name dev-node --address 127.0.0.1
+node src/cli.ts init --control-url http://localhost:8080 --token "$LAUNCHPAD_TOKEN"
+node src/cli.ts node:register --name dev-node --address 127.0.0.1
 ```
 
 Start an agent without applying Docker changes:
@@ -214,8 +229,8 @@ npm run start:agent
 Deploy a Compose project:
 
 ```bash
-node src/cli.js deploy -f docker-compose.launchpad.yml --no-build-upload
-node src/cli.js status
+node src/cli.ts deploy -f docker-compose.launchpad.yml --no-build-upload
+node src/cli.ts status
 ```
 
 Omit `--no-build-upload` to upload the current directory as a build context and let the control process run `docker build` for services with `build:`. In the development compose stack `LAUNCHPAD_PUSH=false` avoids pushing to the local registry; enable it when using a reachable registry. `launchpad deploy` waits for convergence by default; use `--no-wait` to return immediately after creating desired state.

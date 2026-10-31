@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildDesiredState, composeForNode, validateCompose } from './compose.js';
+import { buildDesiredState, composeForNode, validateCompose } from './compose.ts';
 
 test('builds per-node desired compose preserving service names', () => {
   const compose = { services: { web: { build: './web', environment: { A: 'B' }, volumes: ['web-data:/data'], 'x-launchpad': { placement: { nodes: ['n1'] } } }, db: { image: 'postgres:16', volumes: ['db-data:/data'], 'x-launchpad': { placement: { nodes: ['n2'] } } } }, volumes: { 'web-data': { 'x-launchpad': { placement: { nodes: ['n1'] } } }, 'db-data': { 'x-launchpad': { placement: { nodes: ['n2'] } } } } };
@@ -11,7 +11,7 @@ test('builds per-node desired compose preserving service names', () => {
   assert.equal(c.services.web.build, undefined);
   assert.equal(c.services.web['x-launchpad'], undefined);
   assert.deepEqual(c.services.web.env_file, ['.env']);
-  assert.deepEqual(Object.keys(c.volumes), ['web-data']);
+  assert.deepEqual(Object.keys(c.volumes!), ['web-data']);
 });
 
 test('rejects ambiguous multi-node services', () => {

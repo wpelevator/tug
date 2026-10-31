@@ -1,9 +1,19 @@
-FROM node:lts-alpine
+FROM node:lts-alpine AS build
 WORKDIR /app
-RUN apk add --no-cache python3 make g++ docker-cli ca-certificates apache2-utils
+RUN apk add --no-cache python3 make g++ ca-certificates
 COPY package*.json ./
-RUN npm install --omit=dev
+RUN npm ci
+COPY tsconfig*.json ./
 COPY src ./src
 COPY scripts ./scripts
-ENTRYPOINT ["node", "src/main.js"]
+RUN npm run build && npm prune --omit=dev
+
+FROM node:lts-alpine
+WORKDIR /app
+RUN apk add --no-cache docker-cli ca-certificates apache2-utils
+COPY --from=build /app/package*.json ./
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/dist ./dist
+COPY scripts ./scripts
+ENTRYPOINT ["node", "dist/main.js"]
 CMD ["control"]

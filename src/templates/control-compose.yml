@@ -2,7 +2,7 @@ services:
   control:
     image: {{IMAGE}}
     restart: unless-stopped
-    command: node src/control.js
+    command: control
     environment:
       PORT: 8080
       LAUNCHPAD_DATA_DIR: /data

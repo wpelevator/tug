@@ -3,17 +3,21 @@
   "private": true,
   "type": "module",
   "bin": {
-    "launchpad": "./src/cli.js",
-    "launchpad-node": "./src/main.js"
+    "launchpad": "./dist/cli.js",
+    "launchpad-node": "./dist/main.js"
   },
   "scripts": {
-    "start:control": "node src/main.js control",
-    "start:agent": "node src/main.js agent",
-    "test": "node --test 'src/**/*.test.js'",
+    "start:control": "node src/main.ts control",
+    "start:agent": "node src/main.ts agent",
+    "build": "tsc -p tsconfig.build.json && node scripts/copy-templates.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prepack": "npm run build",
+    "test": "node --test 'src/**/*.test.ts'",
     "lint": "eslint .",
     "format": "eslint . --fix",
     "test:integration": "bash scripts/integration-test.sh",
-    "test:integration:agent": "node --test 'test/integration/**/*.test.js'"
+    "test:integration:agent": "node --test 'test/integration/**/*.test.ts'",
+    "test:smoke:dist": "npm run build && CLI_ENTRY=dist/cli.js node --test src/cli.templates.test.ts"
   },
   "dependencies": {
     "commander": "^12.1.0",
@@ -27,7 +31,16 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@types/express": "^4.17.25",
+    "@types/js-yaml": "^4.0.9",
+    "@types/multer": "^2.3.0",
+    "@types/node": "^22.20.5",
     "eslint": "^10.5.0",
-    "globals": "^17.7.0"
+    "globals": "^17.7.0",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.72.1"
+  },
+  "engines": {
+    "node": ">=22.18"
   }
 }

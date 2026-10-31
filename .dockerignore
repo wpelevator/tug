@@ -4,3 +4,4 @@ data
 registry-data
 .launchpad.json
 *.log
+dist

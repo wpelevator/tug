@@ -5,3 +5,4 @@ registry-data/
 *.log
 .DS_Store
 plan-*.md
+dist/

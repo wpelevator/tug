@@ -3,8 +3,11 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { createApp } from './control.js';
-import { openDb } from './db.js';
+import { createApp } from './control.ts';
+import type { Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { json } from '../test/helpers.ts';
+import { openDb } from './db.ts';
 
 async function server() {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'lp-lock-'));
@@ -15,8 +18,8 @@ async function server() {
   delete process.env.LAUNCHPAD_REGISTRY_AUTH_PATH;
   delete process.env.LAUNCHPAD_REGISTRY_CONTAINER;
   const app = await createApp();
-  const srv = await new Promise(resolve => { const s = app.listen(0, () => resolve(s)); });
-  return { base: `http://127.0.0.1:${srv.address().port}`, dbFile, close: () => new Promise(resolve => srv.close(resolve)) };
+  const srv = await new Promise<Server>(resolve => { const s = app.listen(0, () => resolve(s)); });
+  return { base: `http://127.0.0.1:${(srv.address() as AddressInfo).port}`, dbFile, close: () => new Promise(resolve => srv.close(resolve)) };
 }
 const headers = { Authorization: 'Bearer op-lock-token', 'content-type': 'application/json' };
 const compose = { services: { web: { image: 'nginx:alpine', 'x-launchpad': { placement: { nodes: ['n1'] } } } } };
@@ -50,7 +53,7 @@ test('an active (non-expired) lock blocks a conflicting operation with owner/exp
 
     const res = await fetch(`${s.base}/api/v1/deployments`, { method: 'POST', headers, body: JSON.stringify({ project: 'site', version: 'v1', compose }) });
     assert.equal(res.status, 409);
-    const body = await res.json();
+    const body = await json(res);
     assert.equal(body.lock.owner, 'restore:lock_active');
     assert.equal(body.lock.expires_at, future);
     assert.match(body.error, /locked by restore:lock_active/);

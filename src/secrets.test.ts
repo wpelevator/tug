@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { encrypt, decrypt } from './secrets.js';
+import { encrypt, decrypt } from './secrets.ts';
 
 test('encrypts and decrypts secrets', () => {
   const key = 'test-master-key';

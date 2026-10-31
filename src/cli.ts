@@ -1,45 +1,59 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
 import { spawnSync } from 'node:child_process';
+import type { SpawnSyncOptions } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import * as tar from 'tar';
-import { readCompose, composeHash } from './compose.js';
-import { token, loadTemplate } from './util.js';
+import { readCompose, composeHash } from './compose.ts';
+import { errMessage, token, loadTemplate } from './util.ts';
+import { TERMINAL_DEPLOYMENT_STATES } from './protocol.ts';
+import type { DeploymentState, EnrollTokenResponse, JoinKey, RegisterResponse } from './protocol.ts';
 
-const __dirname = path.dirname(new URL(import.meta.url).pathname);
+// Templates live next to this file: src/templates in dev (`node src/cli.ts`), dist/templates in the
+// built image (`node dist/cli.js`; scripts/copy-templates.js puts them there).
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const templatesDir = path.join(__dirname, 'templates');
+
+interface Config { controlUrl?: string; operatorToken?: string; project?: string }
+interface DeploymentRecord { id: string; state: DeploymentState; error_message?: string | null }
+interface CommandRecord { state: string; result_json?: string | null }
+interface DeployResponse { deployment: DeploymentRecord; desiredState?: unknown }
+interface CommonOpts { project?: string }
+interface WaitOpts { wait: boolean; timeout: string }
+interface InstallOpts { transferImage: boolean; image: string }
 
 const program = new Command();
 program.name('launchpad').description('Portable VPS Launch Pad').version('0.1.0');
 const cfgPath = () => process.env.LAUNCHPAD_CONFIG || path.join(process.cwd(), '.launchpad.json');
-async function loadCfg() { try { return JSON.parse(await fs.readFile(cfgPath(), 'utf8')); } catch { return {}; } }
-async function saveCfg(c) { await fs.writeFile(cfgPath(), JSON.stringify(c, null, 2)); }
-async function request(method, route, body, multipart = false) {
+async function loadCfg(): Promise<Config> { try { return JSON.parse(await fs.readFile(cfgPath(), 'utf8')); } catch { return {}; } }
+async function saveCfg(c: Config): Promise<void> { await fs.writeFile(cfgPath(), JSON.stringify(c, null, 2)); }
+async function request<T = any>(method: string, route: string, body?: unknown, multipart = false): Promise<T> { // eslint-disable-line @typescript-eslint/no-explicit-any
   const c = await loadCfg(); const base = process.env.LAUNCHPAD_CONTROL_URL || c.controlUrl || 'http://localhost:8080'; const tok = process.env.LAUNCHPAD_TOKEN || c.operatorToken;
-  const headers = tok ? { Authorization: `Bearer ${tok}` } : {};
+  const headers: Record<string, string> = tok ? { Authorization: `Bearer ${tok}` } : {};
   if (!multipart) headers['content-type'] = 'application/json';
-  const res = await fetch(`${base}${route}`, { method, headers, body: multipart ? body : body ? JSON.stringify(body) : undefined });
+  const res = await fetch(`${base}${route}`, { method, headers, body: multipart ? body as FormData : body ? JSON.stringify(body) : undefined });
   if (!res.ok) throw new Error(`${method} ${route}: ${res.status} ${await res.text()}`);
-  return res.json();
+  return res.json() as Promise<T>;
 }
-function sh(value) { return `'${String(value).replace(/'/g, `'\\''`)}'`; }
-function runLocal(cmd, args, opts = {}) {
+function sh(value: unknown): string { return `'${String(value).replace(/'/g, `'\\''`)}'`; }
+function runLocal(cmd: string, args: string[], opts: SpawnSyncOptions = {}): void {
   const result = spawnSync(cmd, args, { stdio: 'inherit', ...opts });
   if (result.status !== 0) throw new Error(`${cmd} ${args.join(' ')} failed`);
 }
-function runCapture(cmd, args, opts = {}) {
+function runCapture(cmd: string, args: string[], opts: SpawnSyncOptions = {}): string {
   const result = spawnSync(cmd, args, { encoding: 'utf8', ...opts });
   if (result.status !== 0) throw new Error(`${cmd} ${args.join(' ')} failed\n${result.stderr || ''}`);
-  return result.stdout;
+  return String(result.stdout);
 }
-function remoteHost(sshTarget) { return sshTarget.replace(/^[^@]+@/, '').split(':')[0]; }
-function assertHttps(url, allowHttp) {
+function remoteHost(sshTarget: string): string { return sshTarget.replace(/^[^@]+@/, '').split(':')[0]; }
+function assertHttps(url: string, allowHttp?: boolean): void {
   if (!allowHttp && !String(url).startsWith('https://')) throw new Error(`${url} must use https:// outside local development (pass --http-only-dev to override)`);
 }
-function preflightRemote(target, { controlUrl, ports = [], minDiskMb = 1024 } = {}) {
-  const checks = [
+function preflightRemote(target: string, { controlUrl, ports = [], minDiskMb = 1024 }: { controlUrl?: string; ports?: number[]; minDiskMb?: number } = {}): void {
+  const checks: [string, string, string][] = [
     ['docker.version', 'docker version >/dev/null', 'Install Docker Engine and ensure the SSH user can access it.'],
     ['docker.compose.version', 'docker compose version >/dev/null', 'Install Docker Compose v2.'],
     ['paths', 'mkdir -p /opt/launchpad-preflight /var/lib/launchpad-preflight /etc/launchpad && test -w /opt/launchpad-preflight && test -w /var/lib/launchpad-preflight && test -w /etc/launchpad', 'Ensure /opt, /var/lib, and /etc/launchpad are writable by the installer.'],
@@ -54,7 +68,7 @@ ${checks.map(([name, cmd, fix]) => `echo "preflight: ${name}"; (${cmd}) || { ech
 `;
   runLocal('ssh', [target, script]);
 }
-async function transferLaunchpadImage(target, imageTag) {
+async function transferLaunchpadImage(target: string, imageTag: string): Promise<void> {
   const archive = path.join(os.tmpdir(), `launchpad-image-${Date.now()}.tar.gz`);
   runLocal('docker', ['build', '-t', imageTag, '.']);
   runLocal('bash', ['-lc', `docker save ${sh(imageTag)} | gzip > ${sh(archive)}`]);
@@ -62,11 +76,11 @@ async function transferLaunchpadImage(target, imageTag) {
   runLocal('ssh', [target, 'gzip -dc /tmp/launchpad-image.tar.gz | docker load && rm -f /tmp/launchpad-image.tar.gz']);
   await fs.rm(archive, { force: true });
 }
-async function waitForDeployment(deploymentId, timeoutSeconds = 300) {
+async function waitForDeployment(deploymentId: string, timeoutSeconds = 300): Promise<DeploymentRecord> {
   const deadline = Date.now() + timeoutSeconds * 1000;
   while (Date.now() < deadline) {
-    const deployment = await request('GET', `/api/v1/deployments/${encodeURIComponent(deploymentId)}`);
-    if (['succeeded', 'failed', 'build_failed', 'cancelled'].includes(deployment.state)) {
+    const deployment = await request<DeploymentRecord>('GET', `/api/v1/deployments/${encodeURIComponent(deploymentId)}`);
+    if ((TERMINAL_DEPLOYMENT_STATES as readonly string[]).includes(deployment.state)) {
       if (deployment.state !== 'succeeded') throw new Error(`deployment ${deploymentId} ${deployment.state}${deployment.error_message ? `: ${deployment.error_message}` : ''}`);
       return deployment;
     }
@@ -75,20 +89,20 @@ async function waitForDeployment(deploymentId, timeoutSeconds = 300) {
   throw new Error(`timed out waiting for deployment ${deploymentId}`);
 }
 
-program.command('init').option('--control-url <url>', 'control API URL', 'http://localhost:8080').option('--token <token>', 'operator token').option('--project <name>', 'project name', 'site').action(async (o) => {
+program.command('init').option('--control-url <url>', 'control API URL', 'http://localhost:8080').option('--token <token>', 'operator token').option('--project <name>', 'project name', 'site').action(async (o: { controlUrl: string; token?: string; project: string }) => {
   const operatorToken = o.token || process.env.LAUNCHPAD_TOKEN || token('lpo');
   await saveCfg({ controlUrl: o.controlUrl, operatorToken, project: o.project });
   console.log(`wrote ${cfgPath()}`);
 });
 
-program.command('node:register').description('register a node with the control plane').requiredOption('--name <name>').option('--address <addr>').option('--public-address <addr>').action(async (o) => {
+program.command('node:register').description('register a node with the control plane').requiredOption('--name <name>').option('--address <addr>').option('--public-address <addr>').action(async (o: { name: string; address?: string; publicAddress?: string }) => {
   const r = await request('POST', '/api/v1/nodes/register', { name: o.name, address: o.address, publicAddress: o.publicAddress });
   console.log(JSON.stringify(r, null, 2));
 });
-program.command('node:rotate-registry-token <name>').description('issue a new registry pull token for a node, invalidating the old one').action(async (name) => {
+program.command('node:rotate-registry-token <name>').description('issue a new registry pull token for a node, invalidating the old one').action(async (name: string) => {
   console.log(JSON.stringify(await request('POST', `/api/v1/nodes/${encodeURIComponent(name)}/rotate-registry-token`, {}), null, 2));
 });
-program.command('node:revoke-registry-token <name>').description('revoke a node\'s registry pull token, blocking future pulls until rotated').action(async (name) => {
+program.command('node:revoke-registry-token <name>').description('revoke a node\'s registry pull token, blocking future pulls until rotated').action(async (name: string) => {
   console.log(JSON.stringify(await request('POST', `/api/v1/nodes/${encodeURIComponent(name)}/revoke-registry-token`, {}), null, 2));
 });
 
@@ -104,7 +118,7 @@ control.command('install <sshTarget>')
   .option('--registry-auth-path <path>', 'container path to an htpasswd file launchpad-control should manage credentials in, if your registry uses one')
   .option('--registry-container <name>', 'docker container name to restart when a node\'s registry credentials change, if your registry uses an htpasswd file')
   .option('--no-transfer-image', 'skip docker build/save/scp/load')
-  .action(async (sshTarget, o) => {
+  .action(async (sshTarget: string, o: InstallOpts & { token?: string; port: string; registry: string; registryAuthPath?: string; registryContainer?: string }) => {
     const operatorToken = o.token || process.env.LAUNCHPAD_TOKEN || token('lpo');
     preflightRemote(sshTarget, { ports: [Number(o.port)], minDiskMb: 2048 });
     if (o.transferImage) await transferLaunchpadImage(sshTarget, o.image);
@@ -132,12 +146,12 @@ node.command('install <sshTarget>')
   .option('--http-only-dev', 'allow plaintext HTTP control URL for local/private development')
   .option('--image <tag>', 'local/remote image tag', 'launchpad:local')
   .option('--no-transfer-image', 'skip docker build/save/scp/load')
-  .action(async (sshTarget, o) => {
+  .action(async (sshTarget: string, o: InstallOpts & { name: string; address?: string; publicAddress?: string; controlUrl?: string; registry?: string; httpOnlyDev?: boolean }) => {
     const cfg = await loadCfg();
     const controlUrl = o.controlUrl || cfg.controlUrl || process.env.LAUNCHPAD_CONTROL_URL || 'http://localhost:8080';
     assertHttps(controlUrl, o.httpOnlyDev);
     preflightRemote(sshTarget, { controlUrl });
-    const registered = await request('POST', '/api/v1/nodes/register', { name: o.name, address: o.address, publicAddress: o.publicAddress });
+    const registered = await request<RegisterResponse>('POST', '/api/v1/nodes/register', { name: o.name, address: o.address, publicAddress: o.publicAddress });
     if (o.transferImage) await transferLaunchpadImage(sshTarget, o.image);
     const env = await loadTemplate(templatesDir, 'agent.env', {
       CONTROL_URL: controlUrl, NODE_NAME: o.name, AGENT_TOKEN: registered.agentToken
@@ -150,7 +164,7 @@ node.command('install <sshTarget>')
     console.log(JSON.stringify({ ok: true, node: registered.node, registryToken: registered.registryToken }, null, 2));
   });
 
-function dockerRunSnippet(image, joinKey) {
+function dockerRunSnippet(image: string, joinKey: string): string {
   return `docker run -d --name launchpad-agent --restart unless-stopped \\
   -v /var/run/docker.sock:/var/run/docker.sock \\
   -v launchpad-agent:/var/lib/launchpad \\
@@ -167,12 +181,12 @@ node.command('enroll')
   .option('--http-only-dev', 'allow a plaintext HTTP control URL for local/private development')
   .option('--image <tag>', 'agent image used in the printed docker run', 'launchpad:local')
   .option('--json', 'print machine-readable JSON instead of the docker run snippet')
-  .action(async (o) => {
+  .action(async (o: { name?: string; controlUrl?: string; ttl: string; uses: string; ca?: string; httpOnlyDev?: boolean; image: string; json?: boolean }) => {
     const cfg = await loadCfg();
     const controlUrl = o.controlUrl || cfg.controlUrl || process.env.LAUNCHPAD_CONTROL_URL || 'http://localhost:8080';
     assertHttps(controlUrl, o.httpOnlyDev);
-    const minted = await request('POST', '/api/v1/nodes/enroll-token', { name: o.name || null, ttlSeconds: Number(o.ttl), uses: Number(o.uses) });
-    const keyPayload = { v: 1, controlUrl, enrollToken: minted.enrollToken };
+    const minted = await request<EnrollTokenResponse>('POST', '/api/v1/nodes/enroll-token', { name: o.name || null, ttlSeconds: Number(o.ttl), uses: Number(o.uses) });
+    const keyPayload: JoinKey = { v: 1, controlUrl, enrollToken: minted.enrollToken };
     if (o.ca) keyPayload.ca = await fs.readFile(o.ca, 'utf8');
     const joinKey = Buffer.from(JSON.stringify(keyPayload)).toString('base64url');
     if (o.json) { console.log(JSON.stringify({ ...minted, controlUrl, joinKey }, null, 2)); return; }
@@ -180,83 +194,83 @@ node.command('enroll')
     console.log(dockerRunSnippet(o.image, joinKey));
   });
 
-program.command('secret:set <name>').option('--project <name>').option('--value <value>').action(async (name, o) => {
-  const value = o.value ?? await new Promise(resolve => { process.stdout.write(`${name}: `); process.stdin.once('data', d => resolve(String(d).trim())); });
+program.command('secret:set <name>').option('--project <name>').option('--value <value>').action(async (name: string, o: CommonOpts & { value?: string }) => {
+  const value = o.value ?? await new Promise<string>(resolve => { process.stdout.write(`${name}: `); process.stdin.once('data', d => resolve(String(d).trim())); });
   console.log(await request('POST', '/api/v1/secrets', { project: o.project || (await loadCfg()).project || 'site', name, value }));
 });
-program.command('secret:list').option('--project <name>').action(async (o) => console.log(JSON.stringify(await request('GET', `/api/v1/secrets?project=${encodeURIComponent(o.project || (await loadCfg()).project || 'site')}`), null, 2)));
-program.command('secret:rm <name>').option('--project <name>').action(async (name, o) => console.log(await request('DELETE', `/api/v1/secrets/${encodeURIComponent(name)}?project=${encodeURIComponent(o.project || (await loadCfg()).project || 'site')}`)));
+program.command('secret:list').option('--project <name>').action(async (o: CommonOpts) => console.log(JSON.stringify(await request('GET', `/api/v1/secrets?project=${encodeURIComponent(o.project || (await loadCfg()).project || 'site')}`), null, 2)));
+program.command('secret:rm <name>').option('--project <name>').action(async (name: string, o: CommonOpts) => console.log(await request('DELETE', `/api/v1/secrets/${encodeURIComponent(name)}?project=${encodeURIComponent(o.project || (await loadCfg()).project || 'site')}`)));
 
-async function makeContext() {
+async function makeContext(): Promise<string> {
   const tmp = path.join(os.tmpdir(), `launchpad-${Date.now()}.tgz`);
   const ignores = new Set(['.git', 'node_modules', 'data', 'registry-data']);
   try { (await fs.readFile('.dockerignore','utf8')).split(/\r?\n/).map(l=>l.trim()).filter(Boolean).forEach(l=>ignores.add(l)); } catch {}
-  await tar.c({ gzip: true, file: tmp, cwd: process.cwd(), filter: p => ![...ignores].some(i => p === i || p.startsWith(`${i}/`)) }, ['.']);
+  await tar.c({ gzip: true, file: tmp, cwd: process.cwd(), filter: (p: string) => ![...ignores].some(i => p === i || p.startsWith(`${i}/`)) }, ['.']);
   return tmp;
 }
-program.command('deploy').option('-f, --file <file>', 'compose file', 'docker-compose.yml').option('--project <name>').option('--version <version>').option('--no-build-upload', 'do not upload source tarball/build context').option('--no-wait', 'return after desired state is created').option('--timeout <seconds>', 'wait timeout', '300').action(async (o) => {
+program.command('deploy').option('-f, --file <file>', 'compose file', 'docker-compose.yml').option('--project <name>').option('--version <version>').option('--no-build-upload', 'do not upload source tarball/build context').option('--no-wait', 'return after desired state is created').option('--timeout <seconds>', 'wait timeout', '300').action(async (o: CommonOpts & WaitOpts & { file: string; version?: string; buildUpload: boolean }) => {
   const cfg = await loadCfg(); const compose = await readCompose(o.file); const project = o.project || cfg.project || 'site'; const version = o.version || `git-${composeHash(compose)}`;
-  let response;
+  let response: DeployResponse;
   if (o.buildUpload) {
     const form = new FormData(); form.append('payload', JSON.stringify({ project, version, compose }));
     const tarball = await makeContext(); form.append('context', new Blob([await fs.readFile(tarball)]), 'context.tgz');
-    response = await request('POST', '/api/v1/deployments', form, true); await fs.rm(tarball, { force: true });
-  } else response = await request('POST', '/api/v1/deployments', { project, version, compose });
+    response = await request<DeployResponse>('POST', '/api/v1/deployments', form, true); await fs.rm(tarball, { force: true });
+  } else response = await request<DeployResponse>('POST', '/api/v1/deployments', { project, version, compose });
   if (o.wait) response.deployment = await waitForDeployment(response.deployment.id, Number(o.timeout));
   console.log(JSON.stringify(response, null, 2));
 });
 program.command('status').action(async () => console.log(JSON.stringify(await request('GET', '/api/v1/status'), null, 2)));
-program.command('events').option('--project <name>').option('--limit <n>', 'number of events', '100').action(async (o) => {
+program.command('events').option('--project <name>').option('--limit <n>', 'number of events', '100').action(async (o: CommonOpts & { limit: string }) => {
   const cfg = await loadCfg(); const project = o.project || cfg.project;
   const query = `limit=${encodeURIComponent(o.limit)}${project ? `&project=${encodeURIComponent(project)}` : ''}`;
   console.log(JSON.stringify(await request('GET', `/api/v1/events?${query}`), null, 2));
 });
-program.command('doctor').description('run local and control-plane diagnostics').option('--nodes', 'also queue diagnostics on registered agents').option('--node <name>', 'specific node for agent diagnostics').action(async (o) => {
-  const local = [];
-  for (const [name, cmd, args] of [['node', 'node', ['--version']], ['docker', 'docker', ['version', '--format', '{{.Server.Version}}']], ['docker_compose', 'docker', ['compose', 'version']]]) {
+program.command('doctor').description('run local and control-plane diagnostics').option('--nodes', 'also queue diagnostics on registered agents').option('--node <name>', 'specific node for agent diagnostics').action(async (o: { nodes?: boolean; node?: string }) => {
+  const local: { name: string; ok: boolean; output?: string; error?: string }[] = [];
+  for (const [name, cmd, args] of [['node', 'node', ['--version']], ['docker', 'docker', ['version', '--format', '{{.Server.Version}}']], ['docker_compose', 'docker', ['compose', 'version']]] as [string, string, string[]][]) {
     try { local.push({ name, ok: true, output: runCapture(cmd, args).trim() }); }
-    catch (e) { local.push({ name, ok: false, error: e.message }); }
+    catch (e) { local.push({ name, ok: false, error: errMessage(e) }); }
   }
   const controlDiagnostics = await request('GET', '/api/v1/diagnostics');
-  const output = { ok: local.every(c => c.ok) && controlDiagnostics.ok, local, control: controlDiagnostics };
+  const output: { ok: boolean; local: typeof local; control: unknown; nodeDiagnostics?: unknown } = { ok: local.every(c => c.ok) && controlDiagnostics.ok, local, control: controlDiagnostics };
   if (o.nodes || o.node) output.nodeDiagnostics = await request('POST', '/api/v1/diagnostics/nodes', { node: o.node || null });
   console.log(JSON.stringify(output, null, 2));
 });
-program.command('rollback').option('--project <name>').option('--force').option('--no-wait', 'return immediately after activating rollback').option('--timeout <seconds>', 'wait timeout', '300').action(async (o) => {
+program.command('rollback').option('--project <name>').option('--force').option('--no-wait', 'return immediately after activating rollback').option('--timeout <seconds>', 'wait timeout', '300').action(async (o: CommonOpts & WaitOpts & { force?: boolean }) => {
   const cfg = await loadCfg();
-  const response = await request('POST', '/api/v1/rollback', { project: o.project || cfg.project || 'site', force: Boolean(o.force) });
+  const response = await request<DeployResponse>('POST', '/api/v1/rollback', { project: o.project || cfg.project || 'site', force: Boolean(o.force) });
   if (o.wait) response.deployment = await waitForDeployment(response.deployment.id, Number(o.timeout));
   console.log(JSON.stringify(response, null, 2));
 });
-program.command('deploy:cancel <id>').action(async (id) => console.log(JSON.stringify(await request('POST', `/api/v1/deployments/${encodeURIComponent(id)}/cancel`, {}), null, 2)));
-program.command('volume:list').option('--project <name>').action(async (o) => {
+program.command('deploy:cancel <id>').action(async (id: string) => console.log(JSON.stringify(await request('POST', `/api/v1/deployments/${encodeURIComponent(id)}/cancel`, {}), null, 2)));
+program.command('volume:list').option('--project <name>').action(async (o: CommonOpts) => {
   const cfg = await loadCfg();
   console.log(JSON.stringify(await request('GET', `/api/v1/volumes?project=${encodeURIComponent(o.project || cfg.project || 'site')}`), null, 2));
 });
-program.command('volume:rm <name>').option('--project <name>').option('--delete-data', 'delete underlying Docker volume data').action(async (name, o) => {
+program.command('volume:rm <name>').option('--project <name>').option('--delete-data', 'delete underlying Docker volume data').action(async (name: string, o: CommonOpts & { deleteData?: boolean }) => {
   const cfg = await loadCfg(); const project = o.project || cfg.project || 'site';
   console.log(JSON.stringify(await request('DELETE', `/api/v1/volumes/${encodeURIComponent(name)}?project=${encodeURIComponent(project)}&deleteData=${Boolean(o.deleteData)}`), null, 2));
 });
 const controlBackup = program.command('control-backup');
 controlBackup.command('run').description('create a control-plane SQLite/master-key backup').action(async () => console.log(JSON.stringify(await request('POST', '/api/v1/control/backups/run', {}), null, 2)));
-controlBackup.command('restore <artifactRef>').description('restore a control-plane backup; requires control restart').option('--confirm').action(async (artifactRef, o) => console.log(JSON.stringify(await request('POST', '/api/v1/control/restore', { artifactRef, confirm: Boolean(o.confirm) }), null, 2)));
-async function waitForCommand(commandId, timeoutSeconds = 60) {
+controlBackup.command('restore <artifactRef>').description('restore a control-plane backup; requires control restart').option('--confirm').action(async (artifactRef: string, o: { confirm?: boolean }) => console.log(JSON.stringify(await request('POST', '/api/v1/control/restore', { artifactRef, confirm: Boolean(o.confirm) }), null, 2)));
+async function waitForCommand(commandId: string, timeoutSeconds = 60): Promise<CommandRecord> {
   const deadline = Date.now() + timeoutSeconds * 1000;
   while (Date.now() < deadline) {
-    const cmd = await request('GET', `/api/v1/commands/${commandId}`);
+    const cmd = await request<CommandRecord | null>('GET', `/api/v1/commands/${commandId}`);
     if (cmd?.state === 'succeeded' || cmd?.state === 'failed') return cmd;
     await new Promise(r => setTimeout(r, 1000));
   }
   throw new Error(`timed out waiting for command ${commandId}`);
 }
-program.command('restart <service>').option('--project <name>').option('--timeout <seconds>', 'wait timeout', '60').action(async (svc, o) => {
+program.command('restart <service>').option('--project <name>').option('--timeout <seconds>', 'wait timeout', '60').action(async (svc: string, o: CommonOpts & { timeout: string }) => {
   const cfg = await loadCfg(); const project = o.project || cfg.project || 'site';
   const created = await request('POST', '/api/v1/restart', { project, service: svc });
   const cmd = await waitForCommand(created.commandId, Number(o.timeout));
   if (cmd.state === 'failed') throw new Error(JSON.parse(cmd.result_json || '{}').error || 'restart failed');
   console.log(JSON.stringify(cmd, null, 2));
 });
-program.command('logs <service>').description('fetch logs from the assigned node agent').option('--project <name>').option('--tail <n>', 'number of lines', '200').action(async (svc, o) => {
+program.command('logs <service>').description('fetch logs from the assigned node agent').option('--project <name>').option('--tail <n>', 'number of lines', '200').action(async (svc: string, o: CommonOpts & { tail: string }) => {
   const cfg = await loadCfg(); const project = o.project || cfg.project || 'site';
   const created = await request('POST', '/api/v1/logs', { project, service: svc, tail: Number(o.tail) });
   const cmd = await waitForCommand(created.commandId, 60);
@@ -266,4 +280,4 @@ program.command('logs <service>').description('fetch logs from the assigned node
   if (result.error) throw new Error(result.error);
 });
 
-program.parseAsync().catch(e => { console.error(e.message); process.exit(1); });
+program.parseAsync().catch((e: unknown) => { console.error(errMessage(e)); process.exit(1); });
