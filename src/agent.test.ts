@@ -107,6 +107,45 @@ test('reconcile rolls out pull -> up -> health in order and reports serving', as
   assert.match(compose, /image: nginx/);
 });
 
+test('registry images are pulled once per desired version, not on every poll', async () => {
+  const d = fakeDocker();
+  const ctx = await makeCtx({ docker: d.docker });
+  await reconcile(desired(twoServices), ctx);
+  assert.ok(
+    d.commands().includes('compose -p proj pull'),
+    'the first apply of a version pulls its images',
+  );
+
+  d.calls.length = 0;
+  await reconcile(desired(twoServices), ctx);
+  assert.deepEqual(
+    d.commands(),
+    ['compose -p proj up -d --remove-orphans'],
+    'reapplying the same version must not pull, so a tag that moved upstream is not deployed without a deploy',
+  );
+
+  d.calls.length = 0;
+  await reconcile(desired(twoServices, 'v2'), ctx);
+  assert.ok(d.commands().includes('compose -p proj pull'), 'a new desired version pulls again');
+});
+
+test('a failed apply pulls again on the retry', async () => {
+  let failUp = true;
+  const d = fakeDocker((args) => {
+    if (args.includes('up') && failUp) throw new Error('up failed');
+  });
+  const ctx = await makeCtx({ docker: d.docker });
+  await assert.rejects(reconcile(desired(twoServices), ctx));
+
+  d.calls.length = 0;
+  failUp = false;
+  await reconcile(desired(twoServices), ctx);
+  assert.ok(
+    d.commands().includes('compose -p proj pull'),
+    'a version that never applied successfully must be pulled again on retry',
+  );
+});
+
 test('reconcile skips projects with no services for this node', async () => {
   const d = fakeDocker();
   const ctx = await makeCtx({ docker: d.docker, nodeName: 'elsewhere' });
@@ -145,11 +184,14 @@ test('a changed secret force-recreates only the services that reference it, only
   d.calls.length = 0;
   versions = { API_KEY: 2 };
   await reconcile(desired(twoServices), ctx);
-  assert.deepEqual(d.commands(), [
-    'compose -p proj pull',
-    'compose -p proj up -d --remove-orphans',
-    'compose -p proj up -d --no-deps --force-recreate web',
-  ]);
+  assert.deepEqual(
+    d.commands(),
+    [
+      'compose -p proj up -d --remove-orphans',
+      'compose -p proj up -d --no-deps --force-recreate web',
+    ],
+    'a secret change on the same version recreates the service without pulling',
+  );
   assert.ok(
     control.events.some(
       (e) => e.type === 'service.secret_recreate' && e.metadata.service === 'web',
