@@ -93,6 +93,8 @@ Rough parity with uncloud after M2 + M3 + M4 + M5. M3's automatic rollback and M
 - [x] M4 `deploy --build-local` uploads the saved image to control
 - [ ] M4 later, if transfer size matters: control serves the read-only registry API for layer reuse
 - [x] M4 opt-in Docker install for `node-install`/`control-install`, verified on fresh Ubuntu 24.04 hosts
+- [x] M4 `--install-docker` selects apt or dnf by `/etc/os-release` (unit-tested detection)
+- [ ] M4 dnf bootstrap verified on real Fedora and Rocky/AlmaLinux hosts (not yet run outside detection tests)
 - [ ] M4 `node-enroll --install-docker` cloud-init verified on a real cloud-init host (the output is unit-tested only)
 - [ ] M5 spec written (`plan-agent-stream.md`)
 - [ ] M5 agent-initiated persistent channel (WebSocket, long-poll fallback), dial-out only
