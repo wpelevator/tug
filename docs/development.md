@@ -15,7 +15,7 @@ npm run test:smoke:dist
 
 Import specifiers in the source use the `.ts` extension (`import { x } from './util.ts'`) because Node's type stripping does not remap `.js` to `.ts`; `tsc` rewrites them to `.js` in `dist/` (`rewriteRelativeImportExtensions`). Only erasable TypeScript syntax is allowed (`erasableSyntaxOnly`: no enums or constructor parameter properties).
 
-Unit tests sit next to the source files as `src/*.test.ts`. The agent integration test lives in `tests/integration/`.
+Unit tests sit next to the source files as `src/*.test.ts`. The agent integration test lives in `tests/integration/`. [Testing](testing.md) explains how the test layers fit together and what each one is expected to catch.
 
 ## Docker image
 
