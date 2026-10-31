@@ -524,16 +524,16 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
     if (!dsRow) throw httpError(404, `project ${project} has no desired state`);
     const state: DesiredState = JSON.parse(dsRow.state_json);
     if (!state.services?.[service]) throw httpError(404, `service ${service} not found in project ${project}`);
-    const nodeRows = await db.all<NodeRow[]>('SELECT name,labels_json,created_at FROM nodes ORDER BY created_at,name');
-    const nodeInfos = nodeRows.map(row => ({ name: row.name, labels: row.labels_json ? JSON.parse(row.labels_json) as string[] : [] }));
+    const nodeRows = await db.all<NodeRow[]>("SELECT name,labels_json,last_seen_at FROM nodes ORDER BY created_at,name");
+    const nodeInfos = nodeRows.filter(row => !isStale(row)).map(row => ({ name: row.name, labels: row.labels_json ? JSON.parse(row.labels_json) as string[] : [] }));
     const composeSvc = state.compose?.services?.[service] || {};
     const ext = composeSvc['x-tug'] || {};
     const placement = ext.placement || {};
     const global = ext.global === true || placement.global === true;
     const labels = Array.isArray(placement.labels) ? placement.labels : [];
     const matched = nodeInfos.filter(node => labels.every(label => node.labels.includes(label)));
-    const pool = matched.length ? matched : nodeInfos;
-    if (!pool.length) throw httpError(400, 'no nodes available for scaling');
+    const pool = labels.length ? matched : nodeInfos;
+    if (!pool.length) throw httpError(400, labels.length ? 'no healthy nodes match the service placement labels' : 'no nodes available for scaling');
     const selected = global ? pool : pool.slice(0, Math.min(replicas, pool.length));
     state.services[service].placement = { ...(state.services[service].placement || {}), nodes: selected.map(node => node.name) };
     state.services[service].replicas = selected.length;
@@ -551,6 +551,8 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
   });
   api('get', '/api/v1/projects/:project', req => req.params.project, async (req, res) => res.json(await db.get('SELECT * FROM projects WHERE id=?', req.params.project)));
 
+  /** A node whose agent has been seen before but not within TUG_STALE_SECONDS; never-seen (just registered) nodes stay schedulable. */
+  const isStale = (row: { last_seen_at: string | null }) => !!row.last_seen_at && Date.parse(row.last_seen_at) < Date.now() - Number(process.env.TUG_STALE_SECONDS || 60) * 1000;
   const NODE_INFO_SQL = 'SELECT id,name,address,public_address,overlay_ip,labels_json,status,created_at,updated_at FROM nodes WHERE id=?';
 
   /** Allocates the node's stable overlay IP on first registration (retrying if a concurrent register took it). */
@@ -777,8 +779,9 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
       assertProject(req.actor!, project);
       if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(project) || typeof version !== 'string' || !version.length) throw httpError(400, 'invalid project or version');
       if (version.startsWith(ROLLBACK_VERSION_PREFIX)) throw httpError(400, `version cannot start with "${ROLLBACK_VERSION_PREFIX}" (reserved for rollback deployments)`);
-      const nodeRows = await db.all<NodeRow[]>('SELECT name,labels_json,created_at FROM nodes ORDER BY created_at,name');
-      const nodeInfos = nodeRows.map(row => ({ name: row.name, labels: row.labels_json ? JSON.parse(row.labels_json) as string[] : [], created_at: row.created_at }));
+      const nodeRows = await db.all<NodeRow[]>('SELECT name,labels_json,last_seen_at,created_at FROM nodes ORDER BY created_at,name');
+      // Stale nodes (agent not seen recently) are not scheduled onto, so a dead host cannot hold a rollout open.
+      const nodeInfos = nodeRows.filter(row => !isStale(row)).map(row => ({ name: row.name, labels: row.labels_json ? JSON.parse(row.labels_json) as string[] : [], created_at: row.created_at }));
       // Resolve label-based and global placement into concrete node lists before validation.
       for (const svc of Object.values(compose.services || {})) {
         const ext = (svc['x-tug'] ||= {}) as { placement?: { nodes?: string[]; labels?: string[]; global?: boolean }; replicas?: number; global?: boolean };

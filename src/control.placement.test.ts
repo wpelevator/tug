@@ -46,3 +46,21 @@ test('label placement spreads replicas, scale resizes them and NFS volumes get t
     assert.equal(down.replicas, 1, 'scaling down should reduce replicas');
   } finally { await s.close(); }
 });
+
+test('stale nodes are skipped by label placement and scale, and scale never falls back to non-matching nodes', async () => {
+  process.env.TUG_STALE_SECONDS = '1';
+  const s = await makeServer();
+  try {
+    const live = await post(s.base, '/api/v1/nodes/register', { name: 'live', labels: ['app'] });
+    const dead = await post(s.base, '/api/v1/nodes/register', { name: 'dead', labels: ['app'] });
+    await post(s.base, '/api/v1/nodes/register', { name: 'other', labels: ['db'] });
+    for (const node of [live, dead]) await fetch(`${s.base}/agent/v1/status`, { method: 'POST', headers: { Authorization: `Bearer ${node.agentToken}`, 'content-type': 'application/json' }, body: JSON.stringify({ projects: [] }) });
+    await new Promise(resolve => setTimeout(resolve, 1300));
+    await fetch(`${s.base}/agent/v1/status`, { method: 'POST', headers: { Authorization: `Bearer ${live.agentToken}`, 'content-type': 'application/json' }, body: JSON.stringify({ projects: [] }) });
+    const compose = { services: { web: { image: 'nginx', 'x-tug': { global: true, placement: { labels: ['app'] } } } } };
+    const dep = await post(s.base, '/api/v1/deployments', { project: 'site', version: 'v1', compose });
+    assert.deepEqual(dep.desiredState.services.web.placement.nodes, ['live'], 'a node not seen within the stale window should not receive new replicas');
+    const scaled = await post(s.base, '/api/v1/scale', { project: 'site', service: 'web', replicas: 3 });
+    assert.deepEqual(scaled.nodes, ['live'], 'scale should stay within healthy nodes carrying the labels');
+  } finally { delete process.env.TUG_STALE_SECONDS; await s.close(); }
+});

@@ -119,3 +119,29 @@ The pages disagree with the path that works.
 5. Say in the README that the plan.md WordPress stack is not deployable yet, and point at the example that is.
 
 I would not treat this run as evidence for rolling deploys, image build, or rollback. Those were not on this path. I would treat it as evidence that a person can get two real sites up, and that the first failure still requires SSH.
+
+
+## M6, M7 and enrollment on fresh hosts
+
+31 October 2026, on the same two Ubuntu 24.04 droplets (1 vCPU, 1 GB, amd64, a shared VPC), after wiping both: containers, volumes, images, `wg0` and all Tug state. Control ran on 142.93.140.20 with `TUG_MESH=true`. The Tug image was built for amd64 from the branch and loaded with `docker save`.
+
+| Check | Result |
+|---|---|
+| `node-install --mesh --label ...` on two hosts (`a`: `app`,`storage`; `b`: `app`) | Both online with labels; WireGuard mesh up |
+| `global: true` + `placement.labels: [app]` | One `web` replica on each labelled node |
+| `replicas: 1` + labels | One `worker`, on the alphabetically first matching node |
+| `tug scale worker 2` / `1` | Second replica started on `b`, then removed; `0` and unknown services rejected |
+| NFS volume (`x-tug.type: nfs`, exporter `a`) | `b` mounted `10.210.0.1:/srv/tug/shared` over the WireGuard overlay (NFSv3); a file written on `b` appeared on `a`; the exporter bind-mounted the directory |
+| `ps`, `inspect`, `exec`, `logs -f` against real nodes | Worked |
+| `node-enroll --install-docker --mesh` cloud-config on a host with Docker purged | Docker Engine and Compose installed, agent started, node enrolled with its label |
+| Enrolled node with no public address behind `ufw` deny-incoming | WireGuard handshake and overlay ping to `a` worked; NFS mount worked |
+
+What this does not prove: the cloud-config was applied by re-running cloud-init (`cloud-init clean`, then its stages) with the config in `cloud.cfg.d`, not from first-boot user data, and the agent image came through an SSH-tunnelled throwaway registry. The firewalled node has a public IP, so this is not NAT. Debian, Fedora and Rocky bootstraps, arm64, and certificate renewal were not run.
+
+### Findings
+
+- **Fixed: dead nodes held rollouts open.** After `b`'s host was repurposed as `c`, the old `b` stayed registered with its labels. The next deploy placed `global` replicas on `b`, which never answered, and the deployment stayed `rolling_out` until cancelled. Label and `global` placement, and `tug scale`, now skip nodes not seen within `TUG_STALE_SECONDS`. `scale` also no longer spreads a labelled service onto nodes that do not match its labels when none match.
+- **Open: there is no way to remove a node.** There is no `node-remove` or `node-revoke`, so a retired node keeps its labels and shows as `stale` forever, and an explicit `placement.nodes` entry for it still waits.
+- **Open: `control-install` cannot enable the mesh.** `TUG_MESH` had to be added to the generated `/opt/tug-control/docker-compose.yml` by hand.
+- **Open: NFS needs host preparation Tug does not do.** The exporter needs an NFS server and `/etc/exports`; consumers need `nfs-common`.
+- **Open: `cloud-init clean` regenerates SSH host keys.** Expected, but it makes the next SSH to the host fail strict checking.
