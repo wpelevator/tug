@@ -26,6 +26,8 @@ Today the agent runs `docker compose up -d`, which recreates containers in place
 
 Automatic rollback: convergence in `control.ts` already detects a node reporting `failed` health; add an opt-in `x-tug.rollback: auto` (or a project setting) that creates the rollback desired state automatically, reusing the existing `/api/v1/rollback` path. uncloud still lists this as upcoming.
 
+The numbers M3 is held to (failed requests, switchover gap, revisions started per deployment) are defined in [Testing](testing.md#metrics).
+
 ### M4 — Setup friction: images without a registry, bare-host install
 
 Registry: a registry is only needed for services with `build:` (published images are pulled from their own source), but `control-install` requires `--registry` today. Make it optional: when no registry is configured, control keeps each built image as a compressed `docker save` file recorded in the `builds` table, and agents download it from a new agent endpoint (for example `GET /agent/v1/images/:buildId`, served only to nodes that run the service) and `docker load` it when it is missing locally, with `pull_policy: never` on those services in the generated Compose file. Bring-your-own registry stays supported for teams that already run one.
@@ -80,6 +82,8 @@ M3 depends on M2's ingress and needs a design decision about reaching old and ne
 
 Rough parity with uncloud after M2 + M3 + M4 + M5. M3's automatic rollback and M8 are where Tug pulls ahead.
 
+The test layers, the metrics milestones are held to and the backlog of mocked tests are in [Testing](testing.md).
+
 ## Checklist
 
 - [x] M1 TypeScript adoption merged
@@ -108,5 +112,6 @@ Rough parity with uncloud after M2 + M3 + M4 + M5. M3's automatic rollback and M
 - [x] M8 named multi-operator tokens in the audit trail
 - [ ] M8 read-only web dashboard
 - [ ] Later: standalone CLI binary and Homebrew tap ([Standalone binary](standalone-binary.md))
+- [ ] Mocked tests from the [Testing](testing.md#backlog-of-mocked-tests-proposed) backlog: revisions started per deployment, WireGuard key re-report, old-schema database, preflight remedies
 - [ ] Re-check uncloud releases at the start of each milestone and update the baseline above
 - [ ] Each milestone: tests added, README.md and docs updated, its own plan file folded into docs and deleted when done

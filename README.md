@@ -46,6 +46,7 @@ The CLI installs the matching `ghcr.io/wpelevator/tug:<version>` image on your h
 - [CLI reference](docs/cli.md): every `tug` command and option.
 - [Configuration](docs/configuration.md): CLI, control and agent environment variables.
 - [Development](docs/development.md): local setup, CI, Compose stack, host mode and the integration test.
+- [Testing](docs/testing.md): test layers, the numbers rollouts are held to, and the backlog of mocked tests.
 - [Releases](docs/releases.md): changesets, npm and Docker image publishing.
 - [Standalone binary](docs/standalone-binary.md): proposed Bun-compiled CLI binaries and Homebrew distribution.
 - [Roadmap](docs/roadmap.md): planned milestones toward parity with and beyond uncloud.
