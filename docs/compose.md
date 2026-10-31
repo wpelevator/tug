@@ -116,7 +116,7 @@ Volumes with `x-tug.type: nfs` share a directory exported by their placement nod
 
 ## Secrets in services
 
-Reference secrets with `${NAME}` anywhere Compose interpolates, usually `environment`. `tug deploy` sets every project secret as a variable during `docker compose config`, so a secret wins over a local variable of the same name and `environment: [DB_PASSWORD]` passes it through. Only secrets a service references are released to its node, and a changed secret recreates exactly the services that use it. Secrets are substituted into the container environment; keep them out of `command` unless you accept them showing in `docker inspect`. Deploying a Compose file that references a secret the project does not have is rejected.
+Secrets are referenced by variable name and resolved by control at deploy time; the `@@tug:secret:NAME@@` placeholder you may see in a normalized file is internal and never written by hand. Reference secrets with `${NAME}` anywhere Compose interpolates, usually `environment`. `tug deploy` sets every project secret as a variable during `docker compose config`, so a secret wins over a local variable of the same name and `environment: [DB_PASSWORD]` passes it through. Only secrets a service references are released to its node, and a changed secret recreates exactly the services that use it. Secrets are substituted into the container environment; keep them out of `command` unless you accept them showing in `docker inspect`. Deploying a Compose file that references a secret the project does not have is rejected.
 
 ## A database on the same node
 
