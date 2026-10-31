@@ -1,304 +1,46 @@
 # Pad Launch / Launchpad
 
-A Node.js MVP of the Portable VPS Launch Pad described in `plan.md`.
+Deploy Docker Compose projects to one or more ordinary Linux VPSes through a small self-hosted control plane and a pull-based agent on each node, without Kubernetes or a hosted PaaS. The original specification is in [plan.md](plan.md).
 
-## Implemented MVP
+## Features
 
 - Control API with bearer-token auth and SQLite metadata.
-- Node registration with per-node agent and registry tokens, via SSH push (`node install`) or self-service pull enrollment (`node enroll` + a single `docker run` on the host).
-- Agent pull reconciliation via `/agent/v1/work` and status reporting.
-- Compose parsing with `x-launchpad.placement`, build-to-immutable-image desired state, and generated per-node Compose files.
-- Optional remote Docker builds on the control host when `launchpad deploy` uploads a source tarball.
-- Encrypted-at-rest secrets using an install-time master key, scoped to services assigned to each agent.
-- TCP/HTTP/Docker health checks executed by agents after Compose apply.
-- Deployment convergence to `succeeded`, project operation locks, cancellation, rollback via a new rollback desired-state record, per-service rollout status/events, and agent-mediated log fetch.
-- Secret version tracking with targeted service recreation when only referenced secrets change.
-- SSH-based Docker bootstrap helpers with preflight checks for Docker, Compose, writable paths, control reachability, free disk space, and published-port availability.
-- `control install` publishes the control API/registry over plain HTTP; front it with your own reverse proxy/TLS termination if exposing it publicly.
-- `control.ts` can also terminate TLS itself (`LAUNCHPAD_TLS_CERT_FILE` / `LAUNCHPAD_TLS_KEY_FILE`), e.g. a private network with a self-signed cert; point agents at it with `LAUNCHPAD_CONTROL_URL=https://...` and `NODE_EXTRA_CA_CERTS=<path to CA cert>` so the agent's `fetch` trusts it.
-- Per-node registry pull tokens are issued at registration and enforced by the registry itself via an htpasswd file that control writes; `node install --registry <host>` performs `docker login` for agents. Tokens can be rotated or revoked with `node:rotate-registry-token` / `node:revoke-registry-token`, which restarts the registry container so the change takes effect immediately.
-- Control/local/agent diagnostics via `launchpad doctor`.
-- Development `docker-compose.yml` with control API, registry, and optional agent service.
+- Nodes join over SSH (`node install`) or enroll themselves with a single `docker run` (`node enroll`), with per-node agent and registry tokens. Agents only dial out, so nodes behind NAT work.
+- Agents pull desired state from control, apply a generated per-node Compose file, run TCP/HTTP/Docker health checks and report status.
+- `x-launchpad` placement of services and volumes on nodes, with immutable desired-state records per deployment.
+- Optional remote Docker builds on the control host from an uploaded source tarball.
+- Secrets encrypted at rest, released only to the nodes whose services reference them, with targeted service recreation when only a secret changes.
+- Deployment convergence, per-project operation locks, cancellation, rollback, per-service rollout events and log fetching through the agents.
+- Per-node registry pull tokens enforced by an htpasswd-backed registry you provide, with rotation and revocation.
+- Control-plane backup and restore, and `launchpad doctor` diagnostics.
 
-Control-plane backup/restore (SQLite + master key) exists for disaster recovery of the control host itself; per-project data backup/restore is left to the operator (e.g. via their own volume/database tooling).
+## Quick start
 
-## Local development
+1. Install the control plane on a Docker host, pointing it at a registry you already run: `launchpad control install root@control.example.com --registry registry.example.com`.
+2. Point the CLI at it: `launchpad init --control-url https://control.example.com --token "$LAUNCHPAD_TOKEN"`.
+3. Set the secrets your services need: `launchpad secret:set DB_PASSWORD`.
+4. Add nodes, either `launchpad node install root@app1.example.com --name app1 --control-url https://control.example.com --registry registry.example.com`, or `launchpad node enroll --name app1` and run the printed `docker run` on the host.
+5. Deploy: `launchpad deploy -f docker-compose.yml`. It waits until every node reports the new version healthy.
+6. Operate with `launchpad status`, `events`, `logs`, `restart`, `rollback` and `doctor`.
 
-The source is TypeScript. Development and tests run the `.ts` files directly through Node's built-in type stripping — **there is no build step**, but it needs **Node >= 22.18** (`engines.node`). Compilation to `dist/` happens only when building the Docker image.
+## Documentation
+
+- [Architecture](docs/architecture.md): components, reconciliation, workflow diagrams, secrets and runtime paths.
+- [Compose extensions](docs/compose.md): `x-launchpad` placement, health checks, volumes and limitations.
+- [Control plane](docs/control-plane.md): install, TLS, registry credentials, backup and restore.
+- [Nodes](docs/nodes.md): SSH install, self-service enrollment, registration and status.
+- [CLI reference](docs/cli.md): every `launchpad` command and option.
+- [Configuration](docs/configuration.md): CLI, control and agent environment variables.
+- [Development](docs/development.md): local setup, Compose stack, host mode and the integration test.
+- [Roadmap](docs/roadmap.md): planned milestones toward parity with and beyond uncloud.
+
+## Development
 
 ```bash
 npm install
-npm test               # node --test 'src/**/*.test.ts'
-npm run typecheck      # tsc --noEmit over src/ and test/ (strict)
+npm test
 npm run lint
-
-# Unit tests are collocated with source files as src/*.test.ts.
-
-npm run build          # tsc -> dist/ (JS + .d.ts) and copy src/templates -> dist/templates
-npm run test:smoke:dist  # build, then check the installers render templates from dist/
-
-docker compose up --build control registry
-```
-
-Import specifiers in the source use the `.ts` extension (`import { x } from './util.ts'`) because Node's type stripping does not remap `.js` to `.ts`; `tsc` rewrites them to `.js` in `dist/` (`rewriteRelativeImportExtensions`). Only erasable TypeScript syntax is allowed (`erasableSyntaxOnly`: no enums or constructor parameter properties).
-
-The Docker images are multi-stage: a build stage runs `npm ci && npm run build`, and the final image ships `dist/` plus production dependencies only, with entrypoint `node dist/main.js`. `src/templates/*` are data files that `tsc` does not copy, so `npm run build` copies them next to the emitted `dist/cli.js`; the CLI resolves them relative to the running file, so `node src/cli.ts` and `node dist/cli.js` both work.
-
-### Architecture notes
-
-- **`src/protocol.ts` is the control↔agent contract.** It holds the types (and a few shared constants such as the active/terminal deployment states) for everything crossing the boundary: `DesiredState`/`ServiceSpec`/`HealthCheck`, the `/agent/v1/*` payloads (`WorkResponse`, `Command`/`CommandResult`, `StatusReport`/`ProjectStatus`, `SecretsResponse`), and enrollment (`EnrollRequest`/`EnrollResponse`, `RegisterResponse`, `JoinKey`). `control.ts`, `agent.ts`, `compose.ts` and `cli.ts` all import from it; change the wire format there first.
-- **The agent's side effects are injectable.** `reconcile`, `executeCommand`, `waitForHealth`, `containerIp` and `pollOnce` take an `AgentContext` (`{ docker, http, nodeName, stateDir, apply, controlUrl, token }`). `docker` is a `DockerRunner` (`src/runners.ts`; `createDockerRunner()` wraps `run('docker', …)` from `build.ts`) and `http` is a `fetch`-compatible client. Production code uses `defaultContext()`; `src/agent.test.ts` passes a fake docker runner to unit-test rollout ordering, secret-triggered `--force-recreate`, and the docker/tcp/http health-check branches without a Docker daemon. The privileged-Docker integration test remains the end-to-end check.
-
-The control service prints and stores the initial operator token in `./data/operator.token` when run directly on the host, or in the `launchpad-data` volume when run in Docker.
-
-## Setup steps
-
-1. **Install the control plane** on a Docker-capable host: `launchpad control install root@control.example.com --token "$LAUNCHPAD_TOKEN" --registry registry.example.com ...`. This builds/ships the Launchpad image over SSH, starts the `control` container, and prints the operator token and control URL. Launchpad does not provision a registry itself — `--registry <host>` is required and must point at a registry you already run. If that registry uses htpasswd auth and you want Launchpad to manage per-node credentials for it, also pass `--registry-auth-path` (the htpasswd file path, mounted into the control container) and `--registry-container` (the registry's container name, restarted whenever credentials change).
-2. **Point the CLI at the control plane**: `launchpad init --control-url https://control.example.com --token "$LAUNCHPAD_TOKEN"`. This writes `.launchpad.json` locally so subsequent commands don't need `--control-url`/`--token` repeated.
-3. **Set any secrets your services need**: `launchpad secret:set NAME --value ...`. Secrets are encrypted at rest and only released to agents for services that reference them.
-4. **Bootstrap each node**, either way:
-   - **Push (you have SSH to the host):** `launchpad node install root@app1.example.com --name app1 --control-url https://control.example.com --registry registry.example.com`. This registers the node with the control plane (issuing an agent token and a registry pull token), ships the agent container over SSH, writes `/etc/launchpad/agent.env`, runs `docker login` against the registry, and starts the agent container polling the control plane.
-   - **Pull (the host enrolls itself, no SSH):** `launchpad node enroll --name app1` mints a short-lived, single-use enrollment key and prints a ready-to-paste `docker run`. Run that one command on the freshly provisioned host (or drop it into cloud-init/user-data) and the agent exchanges the key for its durable agent + registry tokens on first boot. See [Self-service node enrollment](#self-service-node-enrollment-launchpad-node-enroll).
-5. **Deploy a Compose project**: `launchpad deploy -f docker-compose.yml`. The control plane validates placement, optionally builds/pushes images from an uploaded source tarball, and creates a desired-state record.
-6. **Wait for convergence**: `launchpad deploy` waits by default (or run `launchpad status` / `launchpad events`) until each agent pulls, applies, and health-checks its services and reports back, at which point the deployment is marked `succeeded`.
-7. **Operate**: use `launchpad rollback`, `launchpad restart <service>`, `launchpad logs <service>`, and `launchpad doctor [--nodes]` for day-to-day operations.
-
-## Workflows
-
-### Node bootstrap (`launchpad node install`)
-
-```mermaid
-sequenceDiagram
-    participant Op as Operator
-    participant CLI as launchpad CLI
-    participant Ctrl as Control plane
-    participant DB as SQLite
-    participant Host as Remote host (SSH)
-    participant Agent as Agent container
-
-    Op->>CLI: node install root@host --name app1
-    CLI->>Host: SSH preflight (docker, compose, paths, disk, control reachable)
-    CLI->>Ctrl: POST /api/v1/nodes/register
-    Ctrl->>DB: insert node, generate agentToken + registryToken
-    Ctrl->>Ctrl: write htpasswd entry, restart registry container
-    Ctrl-->>CLI: { node, agentToken, registryToken }
-    CLI->>Host: docker save | scp | docker load (image transfer)
-    CLI->>Host: ssh node-install.sh (writes /etc/launchpad/agent.env, docker login, docker run agent)
-    Host->>Agent: start container
-    loop every LAUNCHPAD_POLL_INTERVAL_MS
-        Agent->>Ctrl: GET /agent/v1/work (Bearer agentToken)
-        Ctrl->>DB: update last_seen_at, status=online
-    end
-    CLI-->>Op: { ok, node, registryToken }
-```
-
-### Self-service node enrollment (`launchpad node enroll`)
-
-A pull-based alternative to `node install`, modeled on how Portainer Edge agents join: the operator never needs SSH to the host. You mint an enrollment key on the control plane first, then run a single self-contained `docker run` on the freshly provisioned host (DigitalOcean droplet, etc.) — or paste it into cloud-init/user-data so the host enrolls itself on first boot. The agent reaches *out* to control, so this works behind NAT/firewalls.
-
-The enrollment key (`LAUNCHPAD_JOIN_KEY`) is base64url-encoded JSON bundling the control URL, a short-lived single-use `enrollToken`, and (optionally, via `--ca`) the control plane's CA certificate. The **durable** agent token is minted by control during enrollment and persisted to the agent's state volume (`/var/lib/launchpad/agent.json`) — it never appears on the `docker run` command line or in `docker inspect`. On container restart the agent loads the persisted token and skips enrollment; on a fresh volume it re-enrolls. A leaked join key is therefore spent on first use and expires on its own.
-
-```bash
-# On the operator's machine:
-launchpad node enroll --name app1
-# prints, e.g.:
-#   docker run -d --name launchpad-agent --restart unless-stopped \
-#     -v /var/run/docker.sock:/var/run/docker.sock \
-#     -v launchpad-agent:/var/lib/launchpad \
-#     -e LAUNCHPAD_JOIN_KEY=<key> \
-#     ghcr.io/you/launchpad-agent agent
-```
-
-Useful flags: `--uses <n>` to let one key enroll several hosts (each self-names from its hostname when `--name` is omitted), `--ttl <seconds>` for the key lifetime (default 1h), `--ca <ca.pem>` to embed a self-signed/private control CA (removes the need to ship `NODE_EXTRA_CA_CERTS` separately), and `--json` for scripting. To keep the key out of shell history / `docker inspect`, mount it and set `LAUNCHPAD_JOIN_KEY_FILE=/path/to/key` instead of `LAUNCHPAD_JOIN_KEY`.
-
-```mermaid
-sequenceDiagram
-    participant Op as Operator
-    participant CLI as launchpad CLI
-    participant Ctrl as Control plane
-    participant DB as SQLite
-    participant Host as Fresh host
-    participant Agent as Agent container
-
-    Op->>CLI: node enroll --name app1
-    CLI->>Ctrl: POST /api/v1/nodes/enroll-token { name, ttl, uses }
-    Ctrl->>DB: insert enroll_token (hash, name, uses, expiry)
-    Ctrl-->>CLI: { enrollToken, expiresAt }
-    CLI-->>Op: docker run ... -e LAUNCHPAD_JOIN_KEY=<key> ... agent
-    Op->>Host: paste docker run (or cloud-init)
-    Host->>Agent: start container
-    Agent->>Agent: no token on volume -> decode join key
-    Agent->>Ctrl: POST /agent/v1/enroll (enrollToken + hostname/ip)
-    Ctrl->>DB: validate & consume enroll_token, insert node, mint agentToken + registryToken
-    Ctrl->>Ctrl: write htpasswd entry, restart registry container
-    Ctrl-->>Agent: { node, agentToken, registryToken, registry }
-    Agent->>Agent: persist creds to volume, docker login registry
-    loop every LAUNCHPAD_POLL_INTERVAL_MS
-        Agent->>Ctrl: GET /agent/v1/work (Bearer agentToken)
-        Ctrl->>DB: update last_seen_at, status=online
-    end
-```
-
-### Deploy (`launchpad deploy`)
-
-```mermaid
-sequenceDiagram
-    participant Op as Operator
-    participant CLI as launchpad CLI
-    participant Ctrl as Control plane
-    participant DB as SQLite
-    participant Agent as Agent (per node)
-
-    Op->>CLI: deploy -f docker-compose.yml
-    CLI->>CLI: read & hash compose, tar build context
-    CLI->>Ctrl: POST /api/v1/deployments (compose + context)
-    Ctrl->>DB: lock project, insert deployment (state=building)
-    Ctrl->>Ctrl: build & push images for services with build:
-    Ctrl->>DB: insert desired_state, set current_deployment_id, state=rolling_out
-    Ctrl-->>CLI: { deployment, desiredState }
-    loop poll interval
-        Agent->>Ctrl: GET /agent/v1/work
-        Ctrl-->>Agent: matching desiredStates for this node
-        Agent->>Agent: fetch secrets, write compose+.env, pull, up -d, health checks
-        Agent->>Ctrl: POST /agent/v1/status (observedVersion, health)
-        Ctrl->>DB: upsert node_statuses, check convergence
-    end
-    Ctrl->>DB: all nodes serving desired version -> deployment state=succeeded
-    CLI->>Ctrl: GET /api/v1/deployments/:id (poll until terminal state)
-    CLI-->>Op: deployment result
-```
-
-### Rollback (`launchpad rollback`)
-
-```mermaid
-sequenceDiagram
-    participant Op as Operator
-    participant CLI as launchpad CLI
-    participant Ctrl as Control plane
-    participant DB as SQLite
-    participant Agent as Agent (per node)
-
-    Op->>CLI: rollback [--force]
-    CLI->>Ctrl: POST /api/v1/rollback { project, force }
-    Ctrl->>DB: lock project, reject 409 if active deployment & not --force
-    Ctrl->>DB: find most recent prior succeeded/rolling_out desired_state
-    Ctrl->>DB: insert new deployment (version=rollback-...), insert desired_state copy, set current_deployment_id
-    Ctrl-->>CLI: { deployment, desiredState: previousState }
-    loop poll interval
-        Agent->>Ctrl: GET /agent/v1/work
-        Ctrl-->>Agent: previous desiredState
-        Agent->>Agent: reconcile (pull/apply prior images, health checks)
-        Agent->>Ctrl: POST /agent/v1/status (observedVersion=previousState.version)
-        Ctrl->>DB: convergence check -> deployment state=succeeded
-    end
-    CLI-->>Op: rollback deployment result
-```
-
-## SSH bootstrap
-
-The CLI includes pragmatic SSH installers for Docker-capable Linux hosts. They build the local Launchpad image, transfer it with `docker save`/`scp`, and start containers remotely.
-
-```bash
-launchpad control install root@control.example.com --token "$LAUNCHPAD_TOKEN" \
-  --domain control.example.com --registry-domain registry.example.com --email ops@example.com
-launchpad init --control-url https://control.example.com --token "$LAUNCHPAD_TOKEN"
-launchpad node install root@app1.example.com --name app1 --address 10.0.0.11 \
-  --control-url https://control.example.com --registry registry.example.com
-```
-
-These installers assume SSH access and fail early if Docker, Docker Compose, writable Launchpad paths, or node-to-control connectivity are missing. For local/private development only, add `--http-only-dev` to `control install` and `node install` to use HTTP.
-
-For host-mode development:
-
-```bash
-npm run start:control
-export LAUNCHPAD_TOKEN=$(cat data/operator.token)
-node src/cli.ts init --control-url http://localhost:8080 --token "$LAUNCHPAD_TOKEN"
-node src/cli.ts node:register --name dev-node --address 127.0.0.1
-```
-
-Start an agent without applying Docker changes:
-
-```bash
-export LAUNCHPAD_AGENT_TOKEN=<token from node:register>
-export LAUNCHPAD_NODE_NAME=dev-node
-export LAUNCHPAD_APPLY=false
-npm run start:agent
-```
-
-Deploy a Compose project:
-
-```bash
-node src/cli.ts deploy -f docker-compose.launchpad.yml --no-build-upload
-node src/cli.ts status
-```
-
-Omit `--no-build-upload` to upload the current directory as a build context and let the control process run `docker build` for services with `build:`. In the development compose stack `LAUNCHPAD_PUSH=false` avoids pushing to the local registry; enable it when using a reachable registry. `launchpad deploy` waits for convergence by default; use `--no-wait` to return immediately after creating desired state.
-
-## Docker Compose toolchain
-
-`docker-compose.yml` defines:
-
-- `registry`: local Docker Registry on port `5000`, built from `services/registry` with htpasswd auth enabled (`auth.htpasswd` in `services/registry/config/config.yml`).
-- `control`: Launchpad control API on port `8080`, with SQLite/master-key data in a named volume. It also mounts the `registry-auth` volume (`LAUNCHPAD_REGISTRY_AUTH_PATH`) and the host Docker socket so it can write per-node htpasswd entries and restart the registry container (`LAUNCHPAD_REGISTRY_CONTAINER`) whenever a node's registry token is issued, rotated, or revoked.
-- `agent`: optional profile service. Run it with `--profile agent` after setting `LAUNCHPAD_AGENT_TOKEN`.
-
-```bash
-docker compose up --build control registry
-# after registering a node and obtaining the token:
-LAUNCHPAD_AGENT_TOKEN=... docker compose --profile agent up agent
-```
-
-## Sample app and integration test
-
-`docker-compose.sample.yml` is a three-service sample app using explicit placement:
-
-- `web` on `vps-a`
-- `worker` on `vps-b`
-- `cache` on `vps-c`
-
-`docker-compose.integration.yml` brings up a local control plane plus three fake VPSes. On macOS/Docker Desktop these fake VPSes are privileged Linux containers, each running its own Docker daemon and Launchpad agent, so the agents apply Compose into isolated Docker environments rather than the host daemon.
-
-Run the full integration test:
-
-```bash
 npm run test:integration
 ```
 
-The test provisions `vps-a`, `vps-b`, and `vps-c`, sets a sample secret, deploys `docker-compose.sample.yml`, waits for all three agents to report the desired version, verifies registry pull-auth (a rotated token authenticates, a wrong password is rejected, and a revoked token is rejected) via `scripts/integration-verify-registry-auth.js`, and then tears the stack down. Set `KEEP_INTEGRATION_STACK=true` to keep containers and volumes for inspection. The integration compose file uses subnet `10.89.240.0/24`; change it if that overlaps with local Docker/VPN networks.
-
-## CLI commands
-
-- `launchpad init`
-- `launchpad control install root@host --domain <control-domain> --registry-domain <registry-domain> --email <acme-email>`
-- `launchpad node install root@host --name <node> [--address <ip>] --control-url https://control.example.com [--registry registry.example.com]`
-- `launchpad node enroll [--name <node>] [--ttl <seconds>] [--uses <n>] [--ca <ca.pem>] [--image <tag>] [--json]`
-- `launchpad node:register --name <node> [--address <ip>]`
-- `launchpad node:rotate-registry-token <node>`
-- `launchpad node:revoke-registry-token <node>`
-- `launchpad deploy [-f docker-compose.yml] [--no-build-upload]`
-- `launchpad status`
-- `launchpad events [--project name]`
-- `launchpad doctor [--nodes]`
-- `launchpad rollback [--force] [--no-wait] [--timeout 300]`
-- `launchpad deploy:cancel DEPLOYMENT_ID`
-- `launchpad restart SERVICE`
-- `launchpad logs SERVICE [--tail 200]`
-- `launchpad secret:set NAME [--value value]`
-- `launchpad secret:list`
-- `launchpad secret:rm NAME`
-
-## Runtime paths
-
-Agents write generated state under:
-
-```text
-/var/lib/launchpad/agent.json                                # durable creds persisted after self-service enrollment
-/var/lib/launchpad/projects/<project>/docker-compose.yml
-/var/lib/launchpad/projects/<project>/.env
-/var/lib/launchpad/projects/<project>/last-applied.json
-```
-
-When agents enroll via `node enroll`, mount the state directory as a named volume (`-v launchpad-agent:/var/lib/launchpad`) so `agent.json` survives container recreation and the agent does not need to re-enroll after an image update or reboot.
-
-Set `LAUNCHPAD_STATE_DIR` to change this path during development.
+See [Development](docs/development.md) for details.
