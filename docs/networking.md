@@ -24,6 +24,8 @@ A peer's `Endpoint` is the node's `public_address` (the WireGuard port is append
 
 Containers reach other nodes through the host: traffic leaves the container, is routed by the host over `wg0` to the peer's overlay IP and is masqueraded by Docker, so the target sees the source node's overlay address. This is the host-routed model. Routable container networks (advertising per-project subnets in `AllowedIPs`) are deferred.
 
+`control-install --mesh` sets `TUG_MESH=true` on control. Retire a node with `tug node-remove`, which drops its overlay peer so the others stop dialing it.
+
 **Running the agent.** The agent needs `wg` and `ip` (both are in the Tug image), `NET_ADMIN`, and the host network namespace so that `wg0` exists on the host. `node-install --mesh` and `node-enroll --mesh` generate the right `docker run` (`--network host --cap-add NET_ADMIN -e TUG_MESH=true`). The host needs WireGuard support in the kernel (built in since Linux 5.6; older kernels need the `wireguard` module or DKMS package).
 
 **Key rotation.** `tug node-rotate-wg-key <node>` queues a `wg.rotate-key` command. The agent generates a new keypair, reports the public key and returns it in the command result; every other node picks up the new key on its next poll, and the node itself resyncs `wg0` with the new private key. Expect a few seconds of lost traffic to that node. A rotation that fails after the key was replaced is retried by the normal key report on the next poll.

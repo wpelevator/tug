@@ -666,6 +666,26 @@ export async function createApp(options: { images?: Partial<ControlImageOperatio
     if (!node) return res.status(404).json({ error: 'node not found' });
     res.json({ commandId: await queueCommand(node.id, null, 'wg.rotate-key'), nodeId: node.id });
   });
+  // Removes a retired node: its token, WireGuard peer, statuses and queued commands. Refused while a current deployment still places
+  // something on it (redeploy without it first) or while its agent is still reporting, unless force=true.
+  api('delete', '/api/v1/nodes/:name', null, async (req, res) => {
+    const node = await db.get<Pick<NodeRow, 'id' | 'name' | 'last_seen_at'>>('SELECT id,name,last_seen_at FROM nodes WHERE name=? OR id=?', req.params.name, req.params.name);
+    if (!node) return res.status(404).json({ error: 'node not found' });
+    const referenced: string[] = [];
+    for (const state of await currentDesiredStates()) {
+      for (const [name, svc] of Object.entries(state.services || {})) if (svc.placement?.nodes?.includes(node.name)) referenced.push(`${state.project}/${name}`);
+      for (const [name, vol] of Object.entries(state.compose?.volumes || {})) if (vol?.['x-tug']?.placement?.nodes?.includes(node.name)) referenced.push(`${state.project}/volume ${name}`);
+    }
+    if (referenced.length) return res.status(409).json({ error: `node ${node.name} is still placed in current deployments: ${referenced.join(', ')}; deploy without it first` });
+    if (node.last_seen_at && !isStale(node) && String(req.query.force) !== 'true') return res.status(409).json({ error: `node ${node.name} is still reporting; stop its agent first or pass force=true` });
+    await db.run('DELETE FROM commands WHERE node_id=?', node.id);
+    await db.run('DELETE FROM node_statuses WHERE node_id=?', node.id);
+    await db.run('DELETE FROM wg_peers WHERE node_id=?', node.id);
+    await db.run('DELETE FROM nodes WHERE id=?', node.id);
+    await audit(req.actor!, { type: 'node.removed', message: `node ${node.name} removed`, metadata: { node: node.name } });
+    await wakeAll();
+    res.json({ ok: true, node: node.name });
+  });
   api('post', '/api/v1/nodes/:name/ingress', null, async (req, res) => {
     const node = await findNode(req.params.name);
     if (!node) return res.status(404).json({ error: 'node not found' });

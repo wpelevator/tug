@@ -49,6 +49,7 @@ export const ROUTE_ROLES: Record<string, RouteRole> = {
   'POST /api/v1/nodes/:name/revoke-registry-token': 'admin',
   'POST /api/v1/nodes/:name/rotate-wg-key': 'admin',
   'POST /api/v1/nodes/:name/ingress': 'admin',
+  'DELETE /api/v1/nodes/:name': 'admin',
   'POST /api/v1/control/backups/run': 'admin',
   'POST /api/v1/control/restore': 'admin',
   'GET /api/v1/diagnostics': 'admin',

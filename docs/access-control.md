@@ -52,6 +52,7 @@ The project column says how a scoped token's allowed projects are checked: the p
 | `POST /api/v1/nodes/:name/revoke-registry-token` | `admin` | Control-wide |
 | `POST /api/v1/nodes/:name/rotate-wg-key` | `admin` | Control-wide |
 | `POST /api/v1/nodes/:name/ingress` | `admin` | Control-wide |
+| `DELETE /api/v1/nodes/:name` | `admin` | Control-wide |
 | `POST /api/v1/control/backups/run` | `admin` | Control-wide |
 | `POST /api/v1/control/restore` | `admin` | Control-wide |
 | `GET /api/v1/diagnostics` | `admin` | Control-wide |

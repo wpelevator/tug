@@ -133,6 +133,9 @@ program.command('node-rotate-wg-key <name>').description('generate a new WireGua
   if (cmd.state === 'failed') throw new Error(JSON.parse(cmd.result_json || '{}').error || 'key rotation failed');
   console.log(JSON.stringify({ ok: true, node: name, ...JSON.parse(cmd.result_json || '{}') }, null, 2));
 });
+program.command('node-remove <name>').description('remove a retired node from control (its agent token, WireGuard peer and queued commands)').option('--force', 'remove even if the agent is still reporting').action(async (name: string, o: { force?: boolean }) => {
+  console.log(JSON.stringify(await request('DELETE', `/api/v1/nodes/${encodeURIComponent(name)}${o.force ? '?force=true' : ''}`), null, 2));
+});
 program.command('node-ingress <name>').description('mark a node as an ingress node (managed Caddy on ports 80/443), or remove the role with --disable').option('--disable', 'stop acting as an ingress node').action(async (name: string, o: { disable?: boolean }) => {
   console.log(JSON.stringify(await request('POST', `/api/v1/nodes/${encodeURIComponent(name)}/ingress`, { enabled: !o.disable }), null, 2));
 });
@@ -154,10 +157,11 @@ program.command('control-install <sshTarget>')
   .option('--build-local-image', 'build the image from the current checkout and copy it to the host over SSH (tags it tug:local unless --image is set); for development')
   .option('--token <token>', 'operator token')
   .option('--port <port>', 'published API port', '8080')
+  .option('--mesh', 'enable the WireGuard mesh on control (TUG_MESH=true); install nodes with --mesh too')
   .option('--registry <host>', 'registry host used in desired images; bring your own registry, Tug does not provision one')
   .option('--registry-auth-path <path>', 'container path to an htpasswd file tug-control should manage credentials in, if your registry uses one')
   .option('--registry-container <name>', 'docker container name to restart when a node\'s registry credentials change, if your registry uses an htpasswd file')
-  .action(async (sshTarget: string, o: InstallOpts & { token?: string; port: string; registry?: string; registryAuthPath?: string; registryContainer?: string }) => {
+  .action(async (sshTarget: string, o: InstallOpts & { token?: string; port: string; mesh?: boolean; registry?: string; registryAuthPath?: string; registryContainer?: string }) => {
     const operatorToken = o.token || process.env.TUG_TOKEN || token('tug_op');
     if (o.installDocker) await bootstrapDocker(sshTarget);
     preflightRemote(sshTarget, { ports: [Number(o.port)], minDiskMb: 2048 });
@@ -166,7 +170,7 @@ program.command('control-install <sshTarget>')
     const registryHost = o.registry || '';
     const yamlValue = (value: string) => JSON.stringify(value);
     const compose = await loadTemplate(templatesDir, 'control-compose.yml', {
-      IMAGE: yamlValue(image), OPERATOR_TOKEN: yamlValue(operatorToken), REGISTRY_HOST: yamlValue(registryHost), PORT: o.port,
+      IMAGE: yamlValue(image), OPERATOR_TOKEN: yamlValue(operatorToken), REGISTRY_HOST: yamlValue(registryHost), PORT: o.port, MESH: yamlValue(o.mesh ? 'true' : 'false'),
       REGISTRY_AUTH_PATH: yamlValue(o.registryAuthPath || ''),
       REGISTRY_CONTAINER: yamlValue(o.registryContainer || '')
     });

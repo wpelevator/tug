@@ -64,3 +64,28 @@ test('stale nodes are skipped by label placement and scale, and scale never fall
     assert.deepEqual(scaled.nodes, ['live'], 'scale should stay within healthy nodes carrying the labels');
   } finally { delete process.env.TUG_STALE_SECONDS; await s.close(); }
 });
+
+test('node-remove deletes a retired node but refuses placed or still-reporting nodes unless forced', async () => {
+  process.env.TUG_STALE_SECONDS = '1';
+  const s = await makeServer();
+  const del = (name: string, query = '') => fetch(`${s.base}/api/v1/nodes/${name}${query}`, { method: 'DELETE', headers: op });
+  try {
+    const keep = await post(s.base, '/api/v1/nodes/register', { name: 'keep' });
+    const old = await post(s.base, '/api/v1/nodes/register', { name: 'old' });
+    await post(s.base, '/api/v1/nodes/register', { name: 'idle' });
+    const first = await post(s.base, '/api/v1/deployments', { project: 'site', version: 'v1', compose: { services: { web: { image: 'nginx', 'x-tug': { placement: { nodes: ['old'] } } }, api: { image: 'nginx', 'x-tug': { placement: { nodes: ['keep'] } } } } } });
+    for (const node of [keep, old]) await fetch(`${s.base}/agent/v1/status`, { method: 'POST', headers: { Authorization: `Bearer ${node.agentToken}`, 'content-type': 'application/json' }, body: JSON.stringify({ projects: [] }) });
+    assert.equal((await del('ghost')).status, 404, 'removing an unknown node should be 404');
+    const placed = await del('old');
+    assert.equal(placed.status, 409, 'a node a current deployment places services on should not be removable');
+    assert.match(((await placed.json()) as { error: string }).error, /site\/web/, 'the refusal should name the service placed on the node');
+    assert.equal((await del('keep')).status, 409, 'a placed node must stay');
+    assert.equal((await del('idle')).status, 200, 'a never-seen node with no placement should be removable');
+    await post(s.base, `/api/v1/deployments/${first.deployment?.id || first.id}/cancel`, {});
+    await post(s.base, '/api/v1/deployments', { project: 'site', version: 'v2', compose: { services: { api: { image: 'nginx', 'x-tug': { placement: { nodes: ['keep'] } } } } } });
+    assert.equal((await del('old')).status, 409, 'a node whose agent is still reporting should need force');
+    assert.equal((await del('old', '?force=true')).status, 200, 'force should remove a node that is still reporting');
+    const nodes = await (await fetch(`${s.base}/api/v1/nodes`, { headers: op })).json() as { nodes: Array<{ name: string }> };
+    assert.deepEqual(nodes.nodes.map(n => n.name), ['keep'], 'removed nodes should disappear from the node list');
+  } finally { delete process.env.TUG_STALE_SECONDS; await s.close(); }
+});

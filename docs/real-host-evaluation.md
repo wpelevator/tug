@@ -141,7 +141,7 @@ What this does not prove: the cloud-config was applied by re-running cloud-init 
 ### Findings
 
 - **Fixed: dead nodes held rollouts open.** After `b`'s host was repurposed as `c`, the old `b` stayed registered with its labels. The next deploy placed `global` replicas on `b`, which never answered, and the deployment stayed `rolling_out` until cancelled. Label and `global` placement, and `tug scale`, now skip nodes not seen within `TUG_STALE_SECONDS`. `scale` also no longer spreads a labelled service onto nodes that do not match its labels when none match.
-- **Open: there is no way to remove a node.** There is no `node-remove` or `node-revoke`, so a retired node keeps its labels and shows as `stale` forever, and an explicit `placement.nodes` entry for it still waits.
-- **Open: `control-install` cannot enable the mesh.** `TUG_MESH` had to be added to the generated `/opt/tug-control/docker-compose.yml` by hand.
+- **Fixed: there was no way to remove a node.** `tug node-remove <node>` now deletes it (refused while a current deployment places something on it, or while its agent still reports, unless `--force`). Run on the hosts: removing the dead `b` succeeded and `a`'s WireGuard peer for it was dropped, while removing `a` was refused with the services placed on it.
+- **Fixed: `control-install` could not enable the mesh.** `TUG_MESH` had to be added to the generated compose file by hand; `control-install --mesh` now does it (unit-tested only).
 - **Open: NFS needs host preparation Tug does not do.** The exporter needs an NFS server and `/etc/exports`; consumers need `nfs-common`.
 - **Open: `cloud-init clean` regenerates SSH host keys.** Expected, but it makes the next SSH to the host fail strict checking.

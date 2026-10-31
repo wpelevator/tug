@@ -111,6 +111,7 @@ const SAMPLES: Record<string, { path: string; body?: unknown }> = {
   'POST /api/v1/secrets': { path: '/api/v1/secrets', body: { project: 'site' } },
   'DELETE /api/v1/secrets/:name': { path: '/api/v1/secrets/X' },
   'DELETE /api/v1/volumes/:name': { path: '/api/v1/volumes/x' },
+  'DELETE /api/v1/nodes/:name': { path: '/api/v1/nodes/ghost' },
   'GET /api/v1/nodes': { path: '/api/v1/nodes' },
   'POST /api/v1/nodes/register': { path: '/api/v1/nodes/register', body: {} },
   'POST /api/v1/nodes/enroll-token': { path: '/api/v1/nodes/enroll-token', body: {} },
