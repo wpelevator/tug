@@ -7,7 +7,7 @@ import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from './control.ts';
 import { generateWgKeyPair } from './mesh.ts';
-import { json } from '../test/helpers.ts';
+import { json } from '../tests/helpers.ts';
 
 const NETWORK_ENV = ['TUG_MESH', 'TUG_MESH_CIDR', 'TUG_SERVICE_DNS', 'TUG_WG_PORT', 'TUG_ACME_EMAIL'];
 

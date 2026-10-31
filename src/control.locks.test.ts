@@ -6,7 +6,7 @@ import path from 'node:path';
 import { createApp } from './control.ts';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { json } from '../test/helpers.ts';
+import { json } from '../tests/helpers.ts';
 import { openDb } from './db.ts';
 
 async function server() {

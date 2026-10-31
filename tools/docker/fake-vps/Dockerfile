@@ -11,6 +11,6 @@ RUN apt-get update \
 COPY package*.json ./
 RUN npm install --omit=dev
 COPY src ./src
-COPY integration/fake-vps-entrypoint.sh /usr/local/bin/fake-vps-entrypoint.sh
+COPY tools/docker/fake-vps/entrypoint.sh /usr/local/bin/fake-vps-entrypoint.sh
 RUN chmod +x /usr/local/bin/fake-vps-entrypoint.sh
 ENTRYPOINT ["/usr/local/bin/fake-vps-entrypoint.sh"]

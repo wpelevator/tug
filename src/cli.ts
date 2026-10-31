@@ -14,7 +14,7 @@ import { TERMINAL_DEPLOYMENT_STATES } from './protocol.ts';
 import type { DeploymentState, EnrollTokenResponse, JoinKey, RegisterResponse } from './protocol.ts';
 
 // Templates live next to this file: src/templates in dev (`node src/cli.ts`), dist/templates in the
-// built image (`node dist/cli.js`; scripts/copy-templates.js puts them there).
+// built image (`node dist/cli.js`; tools/scripts/copy-templates.js puts them there).
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const templatesDir = path.join(__dirname, 'templates');
 

@@ -1,5 +1,5 @@
 # Override for docker-compose.integration.yml that turns on the WireGuard mesh, service DNS and a
-# Caddy ingress node (vps-c). Used by scripts/integration-network-test.sh.
+# Caddy ingress node (vps-c). Used by tools/scripts/integration-network-test.sh.
 services:
   control:
     environment:

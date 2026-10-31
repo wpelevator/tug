@@ -11,11 +11,11 @@ npm run build
 npm run test:smoke:dist
 ```
 
-`npm test` runs `node --test 'src/**/*.test.ts'`. `npm run typecheck` runs `tsc --noEmit` over `src/` and `test/` with `strict` on. `npm run build` compiles `src/` to `dist/` (JavaScript plus `.d.ts`) and copies `src/templates` to `dist/templates`. `npm run test:smoke:dist` builds and checks that `control install` and `node install` render their templates from `dist/`.
+`npm test` runs `node --test 'src/**/*.test.ts'`. `npm run typecheck` runs `tsc --noEmit` over `src/` and `tests/` with `strict` on. `npm run build` compiles `src/` to `dist/` (JavaScript plus `.d.ts`) and copies `src/templates` to `dist/templates`. `npm run test:smoke:dist` builds and checks that `control install` and `node install` render their templates from `dist/`.
 
 Import specifiers in the source use the `.ts` extension (`import { x } from './util.ts'`) because Node's type stripping does not remap `.js` to `.ts`; `tsc` rewrites them to `.js` in `dist/` (`rewriteRelativeImportExtensions`). Only erasable TypeScript syntax is allowed (`erasableSyntaxOnly`: no enums or constructor parameter properties).
 
-Unit tests sit next to the source files as `src/*.test.ts`. The agent integration test lives in `test/integration/`.
+Unit tests sit next to the source files as `src/*.test.ts`. The agent integration test lives in `tests/integration/`.
 
 ## Docker image
 
@@ -31,7 +31,7 @@ Published images are `ghcr.io/wpelevator/tug`. To test an unreleased CLI against
 
 `docker-compose.yml` defines:
 
-- `registry`: a local Docker Registry on port `5000`, built from `services/registry` with htpasswd auth enabled (`auth.htpasswd` in `services/registry/config/config.yml`).
+- `registry`: a local Docker Registry on port `5000`, built from `tools/docker/registry` with htpasswd auth enabled (`auth.htpasswd` in `tools/docker/registry/config/config.yml`).
 - `control`: the control API on port `8080`, with SQLite and master key data in a named volume. It mounts the `registry-auth` volume (`TUG_REGISTRY_AUTH_PATH`) and the Docker socket, so it can write per-node htpasswd entries and restart the registry container (`TUG_REGISTRY_CONTAINER`) when a node's registry token is issued, rotated or revoked.
 - `agent`: an optional profile service; run it with `--profile agent` after setting `TUG_AGENT_TOKEN`.
 
@@ -80,7 +80,7 @@ Omit `--no-build-upload` to upload the current directory and let control run `do
 npm run test:integration
 ```
 
-The test provisions `vps-a`, `vps-b` and `vps-c`, sets a sample secret, deploys `docker-compose.sample.yml`, waits for all three agents to report the desired version, verifies registry pull auth with `scripts/integration-verify-registry-auth.js` (a rotated token authenticates, a wrong password and a revoked token are rejected), and tears the stack down. Set `KEEP_INTEGRATION_STACK=true` to keep containers and volumes for inspection. The integration network uses subnet `10.89.240.0/24`; change it if that overlaps with local Docker or VPN networks.
+The test provisions `vps-a`, `vps-b` and `vps-c`, sets a sample secret, deploys `docker-compose.sample.yml`, waits for all three agents to report the desired version, verifies registry pull auth with `tools/scripts/integration-verify-registry-auth.js` (a rotated token authenticates, a wrong password and a revoked token are rejected), and tears the stack down. Set `KEEP_INTEGRATION_STACK=true` to keep containers and volumes for inspection. The integration network uses subnet `10.89.240.0/24`; change it if that overlaps with local Docker or VPN networks.
 
 ## Test VPS with Lima
 
@@ -96,4 +96,4 @@ limactl start --name=vps template-vps.yml
 npm run test:integration:network
 ```
 
-Layers `docker-compose.integration-network.yml` over the same stack with `TUG_MESH=true` on control and all agents and `vps-c` marked as an ingress node, deploys `docker-compose.network-sample.yml` (`web` on `vps-a`, `client` on `vps-b`) and runs `scripts/integration-verify-network.js`: node-to-node pings and a WireGuard handshake over the overlay, a container on `vps-b` fetching `http://web:8080` by name, Caddy on `vps-c` serving `Host: app.test` from `vps-a`, and mesh connectivity again after `node:rotate-wg-key`. It uses the compose project `tug-it-net` and the same ports as the plain integration test, so run them one at a time. The Docker host's kernel must support WireGuard (Linux 5.6+, Docker Desktop's VM included).
+Layers `docker-compose.integration-network.yml` over the same stack with `TUG_MESH=true` on control and all agents and `vps-c` marked as an ingress node, deploys `docker-compose.network-sample.yml` (`web` on `vps-a`, `client` on `vps-b`) and runs `tools/scripts/integration-verify-network.js`: node-to-node pings and a WireGuard handshake over the overlay, a container on `vps-b` fetching `http://web:8080` by name, Caddy on `vps-c` serving `Host: app.test` from `vps-a`, and mesh connectivity again after `node:rotate-wg-key`. It uses the compose project `tug-it-net` and the same ports as the plain integration test, so run them one at a time. The Docker host's kernel must support WireGuard (Linux 5.6+, Docker Desktop's VM included).
