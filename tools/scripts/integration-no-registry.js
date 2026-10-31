@@ -74,15 +74,14 @@ async function wait(check, message, timeout = 180000) {
 const cli = (...args) =>
   run(process.execPath, [path.join(root, 'src/cli.ts'), ...args], { cwd: directory });
 const onNode = (...args) => run('docker', ['exec', nodeContainer, ...args]);
-const appCompose = (...args) =>
+// Runs a command in a service container of the deployed project, found by its Tug labels.
+const appCompose = (_exec, ...args) =>
   onNode(
-    'docker',
-    'compose',
-    '-f',
-    '/var/lib/tug/projects/imagedemo/docker-compose.yml',
-    '-p',
-    'imagedemo',
-    ...args,
+    'sh',
+    '-c',
+    'docker exec "$(docker ps -q --filter label=tug.project=imagedemo --filter label=tug.service=web | head -1)" "$@"',
+    'sh',
+    ...args.filter((arg) => arg !== '-T' && arg !== 'web'),
   );
 async function expectContents(expected) {
   await wait(
