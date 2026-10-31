@@ -64,7 +64,8 @@ async function deploy(content, ...options) {
 
 try {
   console.log('Starting control and an isolated Docker node without a registry…');
-  await compose('up', '-d', '--build');
+  // CI prebuilds the images with a layer cache and sets TUG_COMPOSE_BUILD="" to skip the rebuild.
+  await compose('up', '-d', ...(process.env.TUG_COMPOSE_BUILD ?? '--build').split(' ').filter(Boolean));
   await wait(() => fetch(`${control}/healthz`).then(r => r.ok), 'Control must become reachable');
   await wait(async () => (await request('/api/v1/status')).nodes.some(node => node.id === 'image-node' && node.status === 'online'), 'The isolated node must register and poll');
   nodeContainer = await compose('ps', '-q', 'node');

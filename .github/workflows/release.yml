@@ -29,13 +29,9 @@ jobs:
       version: ${{ steps.published-version.outputs.version }}
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
-        with:
-          node-version: 24
-          cache: npm
+      - uses: ./.github/actions/setup
       # Trusted publishing needs npm >= 11.5.1; the npm bundled with Node 24 can be older.
       - run: npm install -g npm@^11.5.1
-      - run: npm ci
       - id: changesets
         uses: changesets/action@v1
         with:
@@ -95,8 +91,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Read-only: edge exports the same scope from every push to main (see the build-images action).
+          cache-from: type=gha,scope=runtime
 
   # Rolling image of main, for trying unreleased changes.
   edge:
@@ -127,5 +123,5 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=runtime
+          cache-to: type=gha,scope=runtime,mode=max
