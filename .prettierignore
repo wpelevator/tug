@@ -1,0 +1,12 @@
+node_modules/
+dist/
+data/
+registry-data/
+build-contexts/
+.claude/
+.changeset/
+package-lock.json
+CHANGELOG.md
+*.md
+*.yml
+src/templates/

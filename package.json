@@ -1,67 +1,69 @@
 {
-  "name": "@wpelevator/tug",
-  "version": "0.2.1",
-  "description": "Portable VPS deployments with Docker Compose",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/wpelevator/tug.git"
-  },
-  "type": "module",
-  "bin": {
-    "tug": "./dist/cli.js",
-    "tug-node": "./dist/main.js"
-  },
-  "files": [
-    "dist"
-  ],
-  "publishConfig": {
-    "access": "public"
-  },
-  "scripts": {
-    "start:control": "node src/main.ts control",
-    "start:agent": "node src/main.ts agent",
-    "build": "tsc -p tsconfig.build.json && node tools/scripts/copy-templates.js",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "prepack": "npm run build",
-    "test": "node --test 'src/**/*.test.ts'",
-    "lint": "eslint .",
-    "format": "eslint . --fix",
-    "test:integration": "bash tools/scripts/integration-test.sh",
-    "test:integration:network": "bash tools/scripts/integration-network-test.sh",
-    "test:integration:agent": "node --test 'tests/integration/**/*.test.ts'",
-    "test:smoke:dist": "npm run build && CLI_ENTRY=dist/cli.js node --test src/cli.templates.test.ts",
-    "changeset": "changeset",
-    "version-packages": "changeset version && npm install --package-lock-only --ignore-scripts",
-    "release": "changeset publish",
-    "test:integration:rollout": "node tools/scripts/integration-rollout.js",
-    "test:integration:no-registry": "node tools/scripts/integration-no-registry.js",
-    "test:smoke:image": "node tools/scripts/smoke-runtime-image.js"
-  },
-  "dependencies": {
-    "commander": "^12.1.0",
-    "dotenv": "^16.4.7",
-    "express": "^4.21.2",
-    "js-yaml": "^4.1.0",
-    "multer": "^2.2.0",
-    "sqlite": "^5.1.1",
-    "sqlite3": "^5.1.7",
-    "tar": "^7.4.3",
-    "ws": "^8.22.1"
-  },
-  "devDependencies": {
-    "@changesets/cli": "^3.0.3",
-    "@eslint/js": "^10.0.1",
-    "@types/express": "^4.17.25",
-    "@types/js-yaml": "^4.0.9",
-    "@types/multer": "^2.3.0",
-    "@types/node": "^22.20.5",
-    "@types/ws": "^8.18.2",
-    "eslint": "^10.5.0",
-    "globals": "^17.7.0",
-    "typescript": "^6.0.3",
-    "typescript-eslint": "^8.72.1"
-  },
-  "engines": {
-    "node": ">=22.18"
-  }
+    "name": "@wpelevator/tug",
+    "version": "0.2.1",
+    "description": "Portable VPS deployments with Docker Compose",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/wpelevator/tug.git"
+    },
+    "type": "module",
+    "bin": {
+        "tug": "./dist/cli.js",
+        "tug-node": "./dist/main.js"
+    },
+    "files": [
+        "dist"
+    ],
+    "publishConfig": {
+        "access": "public"
+    },
+    "scripts": {
+        "start:control": "node src/main.ts control",
+        "start:agent": "node src/main.ts agent",
+        "build": "tsc -p tsconfig.build.json && node tools/scripts/copy-templates.js",
+        "typecheck": "tsc -p tsconfig.json --noEmit",
+        "prepack": "npm run build",
+        "test": "node --test 'src/**/*.test.ts'",
+        "lint": "eslint . && prettier --check .",
+        "format": "prettier --write . && eslint . --fix",
+        "test:integration": "bash tools/scripts/integration-test.sh",
+        "test:integration:network": "bash tools/scripts/integration-network-test.sh",
+        "test:integration:agent": "node --test 'tests/integration/**/*.test.ts'",
+        "test:smoke:dist": "npm run build && CLI_ENTRY=dist/cli.js node --test src/cli.templates.test.ts",
+        "changeset": "changeset",
+        "version-packages": "changeset version && npm install --package-lock-only --ignore-scripts",
+        "release": "changeset publish",
+        "test:integration:rollout": "node tools/scripts/integration-rollout.js",
+        "test:integration:no-registry": "node tools/scripts/integration-no-registry.js",
+        "test:smoke:image": "node tools/scripts/smoke-runtime-image.js"
+    },
+    "dependencies": {
+        "commander": "^12.1.0",
+        "dotenv": "^16.4.7",
+        "express": "^4.21.2",
+        "js-yaml": "^4.1.0",
+        "multer": "^2.2.0",
+        "sqlite": "^5.1.1",
+        "sqlite3": "^5.1.7",
+        "tar": "^7.4.3",
+        "ws": "^8.22.1"
+    },
+    "devDependencies": {
+        "@changesets/cli": "^3.0.3",
+        "@eslint/js": "^10.0.1",
+        "@types/express": "^4.17.25",
+        "@types/js-yaml": "^4.0.9",
+        "@types/multer": "^2.3.0",
+        "@types/node": "^22.20.5",
+        "@types/ws": "^8.18.2",
+        "eslint": "^10.5.0",
+        "eslint-config-prettier": "^10.1.8",
+        "globals": "^17.7.0",
+        "prettier": "^3.9.10",
+        "typescript": "^6.0.3",
+        "typescript-eslint": "^8.72.1"
+    },
+    "engines": {
+        "node": ">=22.18"
+    }
 }

@@ -7,9 +7,12 @@ npm install
 npm test
 npm run typecheck
 npm run lint
+npm run format
 npm run build
 npm run test:smoke:dist
 ```
+
+Code style is enforced by Prettier (`.prettierrc.json`: 100 columns, single quotes, trailing commas; indentation comes from `.editorconfig`). `npm run lint` runs ESLint and then `prettier --check .`, and CI runs it, so an unformatted file fails the build. `npm run format` rewrites files with Prettier and then applies ESLint's autofixes. `eslint-config-prettier` switches off the ESLint rules that would fight the formatter, so ESLint only reports correctness problems. Prettier covers TypeScript, JavaScript and JSON; Markdown, YAML, the install templates and generated files are listed in `.prettierignore`. Prettier moves a trailing `// eslint-disable-line` comment when it rewraps a statement, so put suppressions on their own line above the code they cover (`// eslint-disable-next-line`).
 
 `npm test` runs `node --test 'src/**/*.test.ts'`. `npm run typecheck` runs `tsc --noEmit` over `src/` and `tests/` with `strict` on. `npm run build` compiles `src/` to `dist/` (JavaScript plus `.d.ts`) and copies `src/templates` to `dist/templates`. `npm run test:smoke:dist` builds and checks that `control-install` and `node-install` render their templates from `dist/`.
 
