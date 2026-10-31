@@ -69,9 +69,9 @@ What a single control plane makes easy (the events worth sending as webhooks, an
 
 ### M9 — Observability
 
-Make the system's behavior visible without adding required services: event hygiene, structured logs, a Prometheus `/metrics` endpoint on control that also carries node and service stats reported by agents, a readiness endpoint, sample alert rules and webhooks. The design, the proposed metric list and what exists today are in [Observability](observability.md); most of it is proposed, not built.
+Make the system's behavior visible without adding required services: event hygiene, structured logs, a Prometheus `/metrics` endpoint on control that also carries node and service stats reported by agents, a readiness endpoint, sample alert rules and webhooks. The design, the proposed metric list and what exists today are in [Observability](observability.md); event hygiene is built and the rest is proposed, not built.
 
-Sequencing: it complements M5 (live `logs -f`, `ps`, `inspect`) and M8 (webhooks, dashboard) and its first steps depend on neither. Event hygiene goes first, then logs and `/metrics`, then agent-reported stats, then alerts and webhooks.
+Sequencing: it complements M5 (live `logs -f`, `ps`, `inspect`) and M8 (webhooks, dashboard) and its first steps depend on neither. Event hygiene came first and is done, then logs and `/metrics`, then agent-reported stats, then alerts and webhooks.
 
 ### Later / only if needed
 
@@ -117,7 +117,7 @@ The test layers, the metrics milestones are held to and the backlog of mocked te
 - [ ] M8 outbound webhooks
 - [x] M8 named multi-operator tokens in the audit trail
 - [ ] M8 read-only web dashboard
-- [ ] M9 event hygiene: lifecycle events only on change, retention by age and row count (implemented in [PR #13](https://github.com/wpelevator/tug/pull/13), in review)
+- [x] M9 event hygiene: lifecycle events only on change, retention by age and row count ([Architecture](architecture.md#events))
 - [ ] M9 structured logs (`TUG_LOG_FORMAT`, `TUG_LOG_LEVEL`)
 - [ ] M9 `GET /metrics` on control (Prometheus text, `read` token)
 - [ ] M9 agent-reported node and service stats exposed on `/metrics`
