@@ -10,6 +10,7 @@ import * as tar from 'tar';
 import { resolveCliConfig, integerOption } from './cli-config.ts';
 import { createSourceArchive, prepareLocalImages } from './cli-build.ts';
 import {
+  controlPortCheck,
   dockerPlatform,
   dockerRunSnippet,
   enrollmentCloudInit,
@@ -365,6 +366,43 @@ test('local image builds target the host architecture, not the build machine', (
     ['build', '--platform', 'linux/amd64', '-t', 'tug:local', '.'],
     'docker build receives the target platform',
   );
+});
+
+test('the control port check passes for a free port or the control container, and fails for another listener', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-portcheck-'));
+  const bin = path.join(dir, 'bin');
+  await fs.mkdir(bin);
+  const stub = async (name: string, body: string) =>
+    fs.writeFile(path.join(bin, name), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+  const run = async (listening: boolean, controlOwnsIt: boolean) => {
+    await stub(
+      'ss',
+      listening
+        ? 'echo "LISTEN 0 4096 0.0.0.0:8080 0.0.0.0:*"'
+        : 'echo "State Recv-Q Send-Q Local"',
+    );
+    await stub('docker', controlOwnsIt ? 'echo abc123' : 'true');
+    try {
+      await exec('sh', ['-c', controlPortCheck(8080)], {
+        env: { PATH: `${bin}${path.delimiter}/usr/bin${path.delimiter}/bin` },
+      });
+      return 0;
+    } catch (e) {
+      return (e as { code: number }).code;
+    }
+  };
+  assert.equal(await run(false, false), 0, 'a free port passes the preflight');
+  assert.equal(
+    await run(true, true),
+    0,
+    'the port held by the existing control container passes, so control-install can upgrade in place',
+  );
+  assert.notEqual(
+    await run(true, false),
+    0,
+    'a port held by anything else still fails the preflight',
+  );
+  await fs.rm(dir, { recursive: true, force: true });
 });
 
 test('the agent docker run shares the host network without NET_ADMIN unless the mesh is on', () => {

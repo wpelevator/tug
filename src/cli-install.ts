@@ -43,6 +43,19 @@ export function enrollmentCloudInit(bootstrap: string, command: string): string 
   );
 }
 
+/** Name of the container `control-install` creates (Compose project `tug-control`, service `control`). */
+export const CONTROL_CONTAINER = 'tug-control-control-1';
+
+/** A TCP port is free, or is held by the control container this install would replace, so installing again upgrades in place. */
+export function controlPortCheck(port: number): string {
+  if (!Number.isInteger(port) || port < 1 || port > 65535)
+    throw new Error('port must be an integer from 1 to 65535');
+  return `command -v ss >/dev/null 2>&1 || exit 0
+ss -ltn | awk '{print $4}' | grep -qE '[.:]${port}$' || exit 0
+[ -n "$(docker ps -q --filter 'name=^/${CONTROL_CONTAINER}$' --filter 'publish=${port}' 2>/dev/null)" ]
+`;
+}
+
 /** An occupied mesh port is reusable only when the installed Tug agent owns the live key. */
 export function meshPortCheck(port: number): string {
   if (!Number.isInteger(port) || port < 1 || port > 65535)
