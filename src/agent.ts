@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import fs from 'node:fs/promises';
 import { imageLocation } from './registry.ts';
-import { createReadStream, createWriteStream } from 'node:fs';
+import { createReadStream, createWriteStream, existsSync, readFileSync } from 'node:fs';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { validateImageArchive, verifyDownload } from './artifacts.ts';
@@ -597,6 +597,29 @@ function tcpCheck(host: string, port: number | string, timeoutMs = 2000): Promis
   });
 }
 
+let containerized: boolean | undefined;
+/** True when this process runs inside a container: Docker, containerd, Podman or Kubernetes. */
+export function runsInContainer(): boolean {
+  containerized ??= (() => {
+    if (process.env.container || existsSync('/.dockerenv')) return true;
+    try {
+      return /docker|containerd|kubepods|libpod/.test(readFileSync('/proc/1/cgroup', 'utf8'));
+    } catch {
+      return false;
+    }
+  })();
+  return containerized;
+}
+
+/**
+ * Health checks dial the container's address on the project network. An agent that runs as a plain host process
+ * cannot reach it on a machine where Docker lives in a VM (macOS, Windows), and the bare timeout does not say why.
+ */
+export function outsideContainerHint(health: HealthCheck, inContainer = runsInContainer()): string {
+  if (inContainer || health.type === 'docker') return '';
+  return '; this agent is not running in a container, so it may be unable to reach container addresses (a host process on macOS cannot); run it with `docker run` as `tug node-install` does';
+}
+
 export async function waitForHealth(
   ctx: AgentContext,
   project: string,
@@ -635,7 +658,7 @@ export async function waitForHealth(
     }
   }
   throw new Error(
-    `${service}: ${describeHealthCheck(health)} failed after ${retries} attempt${retries === 1 ? '' : 's'}: ${describeError(last)}`,
+    `${service}: ${describeHealthCheck(health)} failed after ${retries} attempt${retries === 1 ? '' : 's'}: ${describeError(last)}${outsideContainerHint(health)}`,
   );
 }
 

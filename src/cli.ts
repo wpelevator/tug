@@ -30,6 +30,7 @@ import { fileURLToPath } from 'node:url';
 import { composeHash } from './compose.ts';
 import { normalizeCompose } from './normalize.ts';
 import { errMessage, token, loadTemplate } from './util.ts';
+import { backupCheckProblems } from './backup-check.ts';
 import { PROJECT_NAME_PATTERN, ROLES, TOKEN_NAME_PATTERN } from './tokens.ts';
 import { packageVersion, resolveImage } from './image.ts';
 import { TERMINAL_DEPLOYMENT_STATES } from './protocol.ts';
@@ -667,6 +668,7 @@ interface BackupListing {
     nextRunAt: string;
     lastSuccessAt: string | null;
     lastStatus: string | null;
+    problem: string | null;
   }[];
   runs: BackupRunRecord[];
 }
@@ -729,7 +731,11 @@ program
   .command('backup-list')
   .description('show each backup target with its last success and next run, then recent runs')
   .option('--limit <n>', 'number of recent runs to show', '20')
-  .action(async (o: { limit: string }) => {
+  .option(
+    '--check',
+    'exit nonzero when a target is stale, or its last run failed or was missed, or there is no destination; for cron and monitors',
+  )
+  .action(async (o: { limit: string; check?: boolean }) => {
     const project = (await loadCfg()).project || 'site';
     const listing = await request<BackupListing>(
       'GET',
@@ -747,6 +753,11 @@ program
       console.log(
         `${r.finished_at ?? r.queued_at}\t${r.target}\t${r.trigger}\t${r.state}\t${r.snapshot_id?.slice(0, 8) ?? '-'}\t${formatBytes(r.size_bytes)}${r.error ? `\t${r.error}` : ''}`,
       );
+    if (o.check) {
+      const problems = backupCheckProblems(listing);
+      for (const problem of problems) console.error(`PROBLEM ${problem}`);
+      if (problems.length) process.exitCode = 1;
+    }
   });
 interface RestorePlanView {
   target: string;
@@ -847,6 +858,7 @@ program
         );
         const restore = restores.find((item) => item.id === result.restoreId);
         if (restore?.state === 'succeeded') {
+          if (restore.error) console.error(`warning: ${restore.error}`);
           console.log(
             `restore ${restore.id} completed${restore.scratch_volume ? `; files are in volume ${restore.scratch_volume}` : ''}`,
           );

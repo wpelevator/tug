@@ -56,6 +56,8 @@ export interface BackupSpec {
   jitter?: number;
   /** Hard limit for one run, such as `30m` or `2h`. */
   timeout?: string | number;
+  /** Memory limit of the restic helper container, such as `256m` (default `512m`). */
+  memory?: string;
   /** Services only: run in the service's container; its standard output is the backup. A string runs through `sh -c`. */
   command?: string | string[];
   /** Services only: run in the service container to restore; the stored file arrives on its standard input. */

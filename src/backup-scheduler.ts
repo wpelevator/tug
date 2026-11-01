@@ -56,6 +56,31 @@ export interface TargetStatus {
   lastRunAt: string | null;
   lastSuccessAt: string | null;
   lastStatus: string | null;
+  /** Why this target needs attention (stale, last run failed or missed), or null when it is healthy. */
+  problem: string | null;
+}
+
+/** A target that has not succeeded for two periods is stale, even when every run failed alike. */
+export function isStale(
+  schedule: Pick<BackupScheduleRow, 'schedule' | 'last_success_at' | 'created_at'>,
+  at: Date,
+): boolean {
+  const period = cronPeriodMs(schedule.schedule, at);
+  if (!period) return false;
+  const since = new Date(
+    schedule.last_success_at ?? schedule.created_at ?? at.toISOString(),
+  ).getTime();
+  return at.getTime() - since > 2 * period + 10 * MINUTE;
+}
+
+/** What a monitor should know about a target: null when it is healthy or switched off. */
+export function backupProblem(row: BackupScheduleRow, at: Date): string | null {
+  if (!row.enabled) return null;
+  if (isStale(row, at))
+    return `no successful backup since ${row.last_success_at ?? 'it was configured'}`;
+  if (row.last_status === 'failed' || row.last_status === 'missed')
+    return `the last run ${row.last_status}`;
+  return null;
 }
 
 function parse<T>(json: string | null | undefined, fallback: T): T {
@@ -232,7 +257,7 @@ export function createBackupService(deps: BackupServiceDeps) {
         `trigger:${trigger}`,
       ],
       retention: config.retention,
-      limits: { memory: DEFAULT_MEMORY, timeoutSec: config.timeoutSec },
+      limits: { memory: config.memory ?? DEFAULT_MEMORY, timeoutSec: config.timeoutSec },
     };
     if (config.kind === 'service') {
       payload.command = {
@@ -527,10 +552,7 @@ export function createBackupService(deps: BackupServiceDeps) {
     for (const schedule of db.all<BackupScheduleRow>(
       'SELECT * FROM backup_schedules WHERE enabled=1',
     )) {
-      const period = cronPeriodMs(schedule.schedule, at);
-      if (!period) continue;
-      const since = new Date(schedule.last_success_at ?? schedule.created_at ?? iso).getTime();
-      if (at.getTime() - since <= 2 * period + 10 * MINUTE) continue;
+      if (!isStale(schedule, at)) continue;
       if (
         schedule.stale_notified_at &&
         at.getTime() - new Date(schedule.stale_notified_at).getTime() < STALE_REPEAT_MS
@@ -678,6 +700,7 @@ export function createBackupService(deps: BackupServiceDeps) {
         lastRunAt: row.last_run_at,
         lastSuccessAt: row.last_success_at,
         lastStatus: row.last_status,
+        problem: backupProblem(row, clock()),
       }));
     const runs = db.all<BackupRunRow>(
       'SELECT * FROM backup_runs WHERE project_id=? ORDER BY COALESCE(finished_at,queued_at) DESC LIMIT ?',

@@ -149,6 +149,14 @@ test('a restore locks the project, holds the writers through the work response, 
       ],
     });
 
+    const restoreState = async () =>
+      (await json(await call(s.base, 'GET', '/api/v1/restores?project=site'))).restores[0].state;
+    assert.equal(
+      await restoreState(),
+      'verifying',
+      'the restore waits for WordPress to serve again',
+    );
+    await report({ projects: [serving('serving')], commandResults: [] });
     const done = (await json(await call(s.base, 'GET', '/api/v1/restores?project=site')))
       .restores[0];
     assert.equal(done.state, 'succeeded');

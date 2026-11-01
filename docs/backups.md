@@ -79,7 +79,7 @@ tug restore uploads --scratch --confirm   # files into a new volume, touching no
 
 Restores are as generic as backups. A service is restored by running its `x-tug.backup.restore` command in the running container with the stored file on standard input (`restic dump` piped in), so a MariaDB service uses `restore: sh -c 'mariadb -uroot -p"$MARIADB_ROOT_PASSWORD"'`. A volume is emptied and filled from the snapshot, or restored into a new volume with `--scratch`. A service without a `restore` command is refused rather than guessed at.
 
-An in-place restore is deliberately careful:
+`tug restore` returns when the data is back and the services it stopped report serving again, or after five minutes with a warning if they do not, so a script can probe the site as soon as it returns. An in-place restore is deliberately careful:
 
 1. It **locks the project**, so a deploy, rollback or secret change gets a clear refusal while it runs.
 2. It **stops the writers**: the `writers` you named, or discovered from `depends_on` (for a service) or volume mounts (for a volume), including everything that depends on them. If none are found it refuses unless you pass `--writers` or `--no-writers`, because an app that reaches the database without `depends_on` is the hole in discovery and the plan makes you look.
@@ -118,8 +118,7 @@ To rehearse a database restore without touching the live one, copy the project i
 - Live volumes are crash-consistent, not application-consistent. Use a command backup for anything with its own consistency (databases).
 - A volume is backed up from the one node that holds it. A volume you mount from a file server with `driver_opts` is read through that node's mount; back up the file server's own disk where you can.
 - Repository maintenance (`restic check`, a read-verify of the data) and SFTP destinations are not built yet.
-- `tug restore` finishes when the writers are released, not when they are healthy again. WordPress needed several more seconds before it answered, so a script that restores and then probes the site should wait for the service to serve (`tug status`) rather than assume. Making `restore` wait for the writers to be serving, or say that it does not, is open.
 - A scratch restore leaves its volume (`<project>_restore-<id>`) behind, and the safety snapshot of every in-place restore is kept for ever. There is no command to list or remove either yet: remove scratch volumes with `docker volume rm` on the node, and safety snapshots with `restic forget` using the repository from `tug backup-key`.
-- The restic helper container has a fixed 512 MB memory limit. On a 1 GB host that is half the machine, and it cannot be changed from `x-tug.backup`.
-- Failures are only visible in `tug events` and `tug backup-list`. There is no way for cron or a monitor to ask "is anything stale or failing?" with an exit code yet.
+- The restic helper container defaults to a 512 MB memory limit, which is half of a 1 GB host; lower it with `memory` under `x-tug.backup`. Restic needs more memory for larger repositories, so test the limit against your data.
+- Failures are not pushed anywhere until webhooks exist. Run `tug backup-list --check` from cron or a monitor: it exits nonzero when a target is stale, failed or missed.
 - Cancelling `tug exec` does not stop the remote process.

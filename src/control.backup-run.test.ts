@@ -177,6 +177,7 @@ test('a manual backup flows from the API through the agent protocol to the catal
     );
     assert.ok(listing.targets[0].lastSuccessAt, 'the target shows its last success');
     assert.equal(listing.targets[0].node, 'n1');
+    assert.equal(listing.targets[0].problem, null, 'a freshly backed up target has no problem');
 
     const events = await json(await call(s.base, 'GET', '/api/v1/events?project=site'));
     assert.ok(

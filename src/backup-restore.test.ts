@@ -281,10 +281,47 @@ test('an in-place restore locks, holds writers, takes a safety backup, restores,
 
   f.finish(job.id, 'succeeded');
   f.restores.advance();
-  assert.equal(f.state(id).state, 'succeeded');
+  assert.equal(
+    f.state(id).state,
+    'verifying',
+    'the data is back but the site is not known to be up',
+  );
   assert.deepEqual(f.holds(), [], 'the writers are released');
   assert.equal(f.lock(), undefined, 'the project is unlocked');
+  f.restores.advance();
+  assert.equal(f.lock(), undefined, 'waiting for the writers does not take the project lock again');
+  assert.equal(
+    f.events('restore.completed').length,
+    0,
+    'not complete while the writers are still held',
+  );
+
+  f.reportHeld(false);
+  f.restores.advance();
+  assert.equal(f.state(id).state, 'succeeded', 'complete once the writers serve again');
   assert.equal(f.events('restore.completed').length, 1);
+});
+
+test('a restore whose writers never serve again still finishes, with a warning', async () => {
+  const f = await fixture();
+  f.catalog('service:db', 'snap1', '2026-11-01T09:00:00Z');
+  const plan = f.restores.plan(request({ safetyBackup: false }));
+  assert.ok(!('error' in plan));
+  const id = (f.restores.start(request({ safetyBackup: false }), plan) as { restoreId: string })
+    .restoreId;
+  f.reportHeld(true);
+  f.restores.advance();
+  f.finish(f.queued.at(-1)!.id, 'succeeded');
+  f.restores.advance();
+  assert.equal(f.state(id).state, 'verifying');
+  f.set('2026-11-01T10:06:00Z');
+  f.restores.advance();
+  assert.equal(f.state(id).state, 'succeeded', 'the data was restored, so the restore did succeed');
+  assert.match(f.state(id).error!, /web did not report serving within 5 minutes/);
+  const [completed] = f.db.all<{ level: string }>(
+    "SELECT level FROM events WHERE type='restore.completed'",
+  );
+  assert.equal(completed.level, 'warn', 'the warning is visible in the event stream');
 });
 
 test('a second restore or deploy is refused while a restore holds the project lock', async () => {
@@ -384,7 +421,11 @@ test('a scratch restore of a volume takes no lock and holds nothing', async () =
   assert.equal(job.payload.restore?.scratchVolume, plan.scratchVolume);
   f.finish(job.id, 'succeeded');
   f.restores.advance();
-  assert.equal(f.state(started.restoreId).state, 'succeeded');
+  assert.equal(
+    f.state(started.restoreId).state,
+    'succeeded',
+    'a scratch restore has no writers to wait for',
+  );
   const service = f.restores.plan(request({ scratch: true }));
   assert.ok(
     'error' in service && /only available for volumes/.test(service.error),

@@ -21,6 +21,8 @@ export interface ResolvedBackup {
   retention: BackupRetention;
   jitterSeconds: number;
   timeoutSec: number;
+  /** Memory limit of the restic helper container. */
+  memory: string;
   /** Service targets: the command run in the service's container, and the snapshot file it is stored as. */
   command?: string[];
   /** Run in the service container to restore; the stored file arrives on its standard input. */
@@ -37,11 +39,15 @@ export interface ResolvedBackup {
 
 export const DEFAULT_RETENTION: BackupRetention = { daily: 7, weekly: 4, monthly: 6 };
 export const DEFAULT_BACKUP_TIMEOUT_SEC = 2 * 3600;
+export const DEFAULT_BACKUP_MEMORY = '512m';
+/** Below this restic runs out of memory on any repository worth backing up. */
+const MIN_MEMORY_BYTES = 128 * 1024 ** 2;
+const MAX_MEMORY_BYTES = 16 * 1024 ** 3;
 const MIN_TIMEOUT_SEC = 60;
 const MAX_TIMEOUT_SEC = 24 * 3600;
 const MAX_JITTER_SEC = 3600;
 const RETENTION_KEYS = ['last', 'hourly', 'daily', 'weekly', 'monthly', 'yearly'] as const;
-const COMMON_KEYS = ['schedule', 'retention', 'jitter', 'timeout', 'writers'];
+const COMMON_KEYS = ['schedule', 'retention', 'jitter', 'timeout', 'memory', 'writers'];
 const SERVICE_KEYS = [...COMMON_KEYS, 'command', 'restore', 'filename', 'verify'];
 const VOLUME_KEYS = [...COMMON_KEYS, 'exclude'];
 const FILENAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
@@ -55,6 +61,16 @@ export function parseBackupTimeout(value: unknown): number | null {
   const match = typeof value === 'string' ? value.match(/^(\d+)(s|m|h)$/) : null;
   if (!match) return null;
   return Number(match[1]) * { s: 1, m: 60, h: 3600 }[match[2] as 's' | 'm' | 'h'];
+}
+
+/** Bytes in a Docker-style memory size (`256m`, `1g`, `1048576`), or null when it is not one. */
+export function parseMemorySize(value: unknown): number | null {
+  const match = typeof value === 'string' ? /^(\d+)([kmg]?)$/i.exec(value.trim()) : null;
+  if (!match) return null;
+  return (
+    Number(match[1]) *
+    { '': 1, k: 1024, m: 1024 ** 2, g: 1024 ** 3 }[match[2].toLowerCase() as '' | 'k' | 'm' | 'g']
+  );
 }
 
 /** Deterministic delay in `[0, 900)` seconds so many sites on one node do not start together. */
@@ -180,7 +196,10 @@ export function resolveBackups(compose: ComposeFile, project = ''): Resolved {
     kind: 'service' | 'volume',
     name: string,
     spec: BackupSpec,
-  ): Pick<ResolvedBackup, 'schedule' | 'retention' | 'jitterSeconds' | 'timeoutSec'> | null => {
+  ): Pick<
+    ResolvedBackup,
+    'schedule' | 'retention' | 'jitterSeconds' | 'timeoutSec' | 'memory'
+  > | null => {
     const allowed = kind === 'service' ? SERVICE_KEYS : VOLUME_KEYS;
     for (const key of Object.keys(spec))
       if (!allowed.includes(key))
@@ -221,6 +240,13 @@ export function resolveBackups(compose: ComposeFile, project = ''): Resolved {
         errors.push(`${label}.timeout must be a duration from 1m to 24h such as 30m or 2h`);
       else timeoutSec = parsed;
     }
+    let memory = DEFAULT_BACKUP_MEMORY;
+    if (spec.memory !== undefined) {
+      const bytes = parseMemorySize(spec.memory);
+      if (bytes === null || bytes < MIN_MEMORY_BYTES || bytes > MAX_MEMORY_BYTES)
+        errors.push(`${label}.memory must be a size from 128m to 16g such as 256m or 1g`);
+      else memory = String(spec.memory).trim().toLowerCase();
+    }
     if (spec.writers !== undefined) {
       if (!Array.isArray(spec.writers) || spec.writers.some((w) => typeof w !== 'string'))
         errors.push(`${label}.writers must be a list of service names`);
@@ -230,7 +256,7 @@ export function resolveBackups(compose: ComposeFile, project = ''): Resolved {
             errors.push(`${label}.writers: ${writer} is not a service`);
     }
     if (errors.length > before || !schedule || !retention) return null;
-    return { schedule, retention, jitterSeconds, timeoutSec };
+    return { schedule, retention, jitterSeconds, timeoutSec, memory };
   };
 
   for (const [name, svc] of Object.entries(compose.services)) {
