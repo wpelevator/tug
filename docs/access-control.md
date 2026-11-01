@@ -42,6 +42,8 @@ The project column says how a scoped token's allowed projects are checked: the p
 | `POST /api/v1/logs` | `deploy` | Body |
 | `GET /api/v1/live` | `deploy` | First WebSocket frame |
 | `GET /api/v1/commands/:id` | `deploy` | Command's project; commands without a project (diagnostics, key rotation) need `admin` |
+| `POST /api/v1/backups/run` | `deploy` | Body `project` |
+| `GET /api/v1/backups` | `read` | Query `project` |
 | `GET /api/v1/backup/destination` | `admin` | Control-wide; URL and variable names, never values |
 | `POST /api/v1/backup/destination` | `admin` | Control-wide |
 | `DELETE /api/v1/backup/destination` | `admin` | Control-wide |

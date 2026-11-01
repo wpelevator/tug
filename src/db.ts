@@ -88,6 +88,51 @@ export interface NodeStatusRow {
   health: string;
   updated_at: string;
 }
+export interface BackupScheduleRow {
+  id: string;
+  project_id: string;
+  target: string;
+  type: string;
+  node_id: string | null;
+  config_json: string;
+  schedule: string;
+  jitter_seconds: number;
+  next_run_at: string;
+  last_run_at: string | null;
+  last_success_at: string | null;
+  last_status: string | null;
+  stale_notified_at: string | null;
+  deployment_id: string | null;
+  enabled: number;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface BackupRunRow {
+  id: string;
+  schedule_id: string | null;
+  project_id: string;
+  target: string;
+  type: string;
+  node_id: string | null;
+  command_id: string | null;
+  trigger: string;
+  state: string;
+  scheduled_for: string | null;
+  queued_at: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  snapshot_id: string | null;
+  size_bytes: number | null;
+  added_bytes: number | null;
+  duration_ms: number | null;
+  restic_version: string | null;
+  error: string | null;
+  actor: string | null;
+  deployment_version: string | null;
+  metadata_json: string | null;
+}
+
 export interface BackupDestinationRow {
   id: 'default';
   url: string;

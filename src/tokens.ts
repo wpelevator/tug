@@ -49,6 +49,8 @@ export const ROUTE_ROLES: Record<string, RouteRole> = {
   'POST /api/v1/nodes/:name/rotate-wg-key': 'admin',
   'POST /api/v1/nodes/:name/ingress': 'admin',
   'DELETE /api/v1/nodes/:name': 'admin',
+  'POST /api/v1/backups/run': 'deploy',
+  'GET /api/v1/backups': 'read',
   'GET /api/v1/backup/destination': 'admin',
   'POST /api/v1/backup/destination': 'admin',
   'DELETE /api/v1/backup/destination': 'admin',

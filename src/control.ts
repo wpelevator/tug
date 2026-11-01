@@ -70,7 +70,9 @@ import {
   parseBackupDestination,
   projectRepository,
   repositoryPassword,
+  redactSecrets,
 } from './backup-destination.ts';
+import { createBackupService } from './backup-scheduler.ts';
 import {
   AUTO_ROLLBACK_ACTOR,
   ROUTE_ROLES,
@@ -1345,6 +1347,7 @@ export async function createApp(
     projectId: string | null,
     type: CommandType,
     payload: Record<string, unknown> = {},
+    deadline: string | null = null,
   ): string {
     const commandId = id('cmd');
     const ts = now();
@@ -1358,7 +1361,7 @@ export async function createApp(
       JSON.stringify(payload),
       0,
       ts,
-      null,
+      deadline,
       ts,
       ts,
     );
@@ -1478,6 +1481,54 @@ export async function createApp(
     }
     return env;
   };
+  const backups = createBackupService({
+    db,
+    queueCommand,
+    resticImage: process.env.TUG_RESTIC_IMAGE,
+    // Defensive: the agent already redacts, but a stored error must never carry a destination credential.
+    redact: (text) => redactSecrets(text, Object.values(backupEnv())),
+  });
+  app.locals.backups = backups;
+  const backupTickMs = Number(process.env.TUG_BACKUP_TICK_MS) || 30_000;
+  const backupTimer = setInterval(() => {
+    try {
+      backups.tick();
+    } catch (e) {
+      console.error(`backup scheduler failed: ${errMessage(e)}`);
+    }
+  }, backupTickMs);
+  backupTimer.unref();
+  try {
+    backups.tick(); // catch up on slots missed while control was down
+  } catch (e) {
+    console.error(`backup scheduler failed: ${errMessage(e)}`);
+  }
+  api('post', '/api/v1/backups/run', bodyProject, async (req, res) => {
+    const project = String(req.body.project || 'site');
+    const targets = req.body.targets;
+    if (
+      targets !== undefined &&
+      (!Array.isArray(targets) || targets.some((t) => typeof t !== 'string'))
+    )
+      return res.status(400).json({ error: 'targets must be a list of service or volume names' });
+    if (!db.get('SELECT 1 FROM projects WHERE id=?', project))
+      return res.status(404).json({ error: `project ${project} not found` });
+    const result = backups.runNow(project, targets, req.actor!.name);
+    if (!result.runs.length)
+      return res.status(result.errors.length ? 409 : 404).json({
+        error: result.errors.join('; ') || `project ${project} has no backup targets`,
+      });
+    res.json(result);
+  });
+  api('get', '/api/v1/backups', queryProject, async (req, res) => {
+    const project = String(req.query.project || 'site');
+    const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 500);
+    res.json({
+      project,
+      destinationConfigured: Boolean(backupDestination()),
+      ...backups.list(project, limit),
+    });
+  });
   api('get', '/api/v1/backup/destination', null, async (_req, res) => {
     const row = backupDestination();
     res.json(
@@ -2639,6 +2690,13 @@ export async function createApp(
         (svc) => (svc.placement?.nodes || []).includes(node.name) || !svc.placement?.nodes?.length,
       ),
     );
+    // A command past its deadline is never delivered late; the backup scheduler turns it into a missed run.
+    db.run(
+      "UPDATE commands SET state='expired',updated_at=? WHERE node_id=? AND state='pending' AND deadline IS NOT NULL AND deadline<?",
+      now(),
+      node.id,
+      now(),
+    );
     const commands = db.all<CommandRow>(
       'SELECT * FROM commands WHERE node_id=? AND state=?',
       node.id,
@@ -2698,8 +2756,11 @@ export async function createApp(
       );
       updateDeploymentConvergence(st.project);
     }
+    if (report.jobs?.length) backups.onHeartbeat(report.jobs);
     for (const cr of (report.commandResults || []) as Partial<CommandResult>[]) {
       const result = cr.result || {};
+      if (cr.commandId && cr.state)
+        backups.onResult(cr.commandId, cr.state, result as CommandResult['result']);
       db.run(
         'UPDATE commands SET state=?,result_json=?,updated_at=? WHERE id=? AND node_id=?',
         cr.state || 'succeeded',
