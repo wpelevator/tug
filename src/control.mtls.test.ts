@@ -16,7 +16,7 @@ import { testImageResolver } from '../tests/helpers.ts';
 async function start() {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-mtls-'));
   process.env.TUG_DATA_DIR = dir;
-  process.env.TUG_PUBLIC_URL = 'https://localhost:8443';
+  process.env.TUG_ADVERTISE_URL = 'https://localhost:8443';
   process.env.TUG_RENEW_MIN_INTERVAL_MS = '0';
   const app = await createApp({ images: { resolve: testImageResolver } });
   const server: Server = await listen(app, 0);
@@ -541,6 +541,25 @@ test('control restore answers its caller, then closes every session', async () =
       (await s.call(s.root, 'GET', '/api/v1/nodes')).status,
       0,
       'sessions are closed after the restore',
+    );
+  } finally {
+    await s.close();
+  }
+});
+
+test('credentials keep working when the address in them is wrong, because control is verified by its generated name', async () => {
+  const s = await start();
+  try {
+    const moved = { ...s.root, url: 'https://control-moved.example:9999' };
+    assert.equal(
+      (await s.call(moved, 'GET', '/api/v1/nodes')).status,
+      200,
+      'only the connect target matters',
+    );
+    assert.equal(
+      new URL(s.root.url).hostname,
+      'localhost',
+      'the stored URL is just the default connect address',
     );
   } finally {
     await s.close();

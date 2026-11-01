@@ -22,7 +22,7 @@ Small hosts: a 1 GB VPS is enough for one site (a database and WordPress togethe
 
 Preflight checks fail early, with a fix hint, unless the host has Docker Engine (no Compose plugin needed) accessible to the SSH user, writable `/opt`, `/var/lib` and `/etc/tug` paths, at least 1024 MB free under `/var/lib`, and can open a TCP connection to the control port. Preflight checks reachability only and copies no operator credential to the host; real TLS authorization happens when the agent first connects.
 
-The global `--control-url` changes only where the operator CLI connects; the certificate is still verified against the credential's public URL. When agents must dial a different address, pass `--agent-control-url`; it is written to the agent environment as `TUG_CONTROL_URL` and is likewise a connect target only. For a local SSH tunnel to control and a private endpoint for nodes: `tug --control-url https://127.0.0.1:18082 node-install root@app1.example.com --name app1 --agent-control-url https://10.110.0.3:8443`. Both overrides must be `https://`.
+The global `--control-url` changes only where the operator CLI connects; the server is still verified by its generated control name. When agents must dial a different address, pass `--agent-control-url`; it is written to the agent environment as `TUG_CONTROL_URL` and is likewise a connect target only. For a local SSH tunnel to control and a private endpoint for nodes: `tug --control-url https://127.0.0.1:18082 node-install root@app1.example.com --name app1 --agent-control-url https://10.110.0.3:8443`. Both overrides must be `https://`.
 
 ### Certificates, renewal and recovery
 
@@ -77,7 +77,7 @@ Join keys are single-use, name-bound and short-lived (default one hour). There i
 Options:
 
 - `--name <node>` (required) binds the node name.
-- `--agent-control-url <url>` sets `connectUrl`, a connect-only target; the credential's public URL is still the verified name.
+- `--agent-control-url <url>` sets `connectUrl`, a connect-only target; verification still uses the control name from the pinned CA.
 - `--ttl <seconds>` sets the key lifetime (default `3600`).
 - `--label <label>` sets node labels (repeatable).
 - `--image <tag>` sets the image in the printed command (default `ghcr.io/wpelevator/tug:<CLI version>`).

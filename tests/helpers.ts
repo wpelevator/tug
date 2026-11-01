@@ -20,7 +20,7 @@ export const json = (res: Response): Promise<any> => res.json();
 /** Unrelated control tests keep their display image fixtures without network access. Pinning is covered separately. */
 export const testImageResolver = async (image: string): Promise<string> => image;
 
-process.env.TUG_PUBLIC_URL ||= 'https://127.0.0.1:8443';
+process.env.TUG_ADVERTISE_URL ||= 'https://127.0.0.1:8443';
 
 /**
  * In-process stand-in for the TLS peer certificate, so HTTP-level tests can skip TLS. Real certificates, key hashes and
@@ -142,7 +142,7 @@ export async function startMtlsControl(
   options: { eventPruneIntervalMs?: number } = {},
 ) {
   process.env.TUG_DATA_DIR = dir;
-  process.env.TUG_PUBLIC_URL = 'https://localhost:8443';
+  process.env.TUG_ADVERTISE_URL = 'https://localhost:8443';
   const { createApp, listen } = await import('../src/control.ts');
   const { issueHostCredential } = await import('../src/control-credential.ts');
   const { createTransport } = await import('../src/agent-credential.ts');

@@ -4,10 +4,10 @@
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import https from 'node:https';
-import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import tls from 'node:tls';
+import crypto from 'node:crypto';
 
 export function parseCredential(raw) {
   const text = raw.trim();
@@ -24,7 +24,12 @@ export function loadCredential(env = process.env) {
 
 /** Issues a request and returns a minimal fetch-like response. */
 export function mtlsFetch(credential, connectUrl, route, init = {}) {
-  const publicHost = new URL(credential.url).hostname;
+  // The server is verified by the name derived from the pinned CA, not by the address being dialed.
+  const spki = new crypto.X509Certificate(credential.ca).publicKey.export({
+    type: 'spki',
+    format: 'der',
+  });
+  const controlName = `control-${crypto.createHash('sha256').update(spki).digest('hex').slice(0, 12)}.tug`;
   const target = new URL(route, connectUrl);
   return new Promise((resolve, reject) => {
     const req = https.request(
@@ -38,8 +43,8 @@ export function mtlsFetch(credential, connectUrl, route, init = {}) {
         cert: credential.cert,
         key: credential.key,
         minVersion: 'TLSv1.3',
-        ...(net.isIP(publicHost) ? {} : { servername: publicHost }),
-        checkServerIdentity: (_host, cert) => tls.checkServerIdentity(publicHost, cert),
+        servername: controlName,
+        checkServerIdentity: (_host, cert) => tls.checkServerIdentity(controlName, cert),
         agent: false,
       },
       (res) => {

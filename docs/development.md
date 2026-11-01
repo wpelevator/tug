@@ -42,11 +42,11 @@ Published images are `ghcr.io/wpelevator/tug`. To test an unreleased CLI against
 
 `docker-compose.yml` defines:
 
-- `control`: the control plane on its single mTLS port `8443`, with SQLite, the master key, the private CA and saved image archives in a named volume, plus the Docker socket for builds. It requires `TUG_PUBLIC_URL`, the HTTPS origin clients connect to.
+- `control`: the control plane on its single mTLS port `8443`, with SQLite, the master key, the private CA and saved image archives in a named volume, plus the Docker socket for builds. It requires `TUG_ADVERTISE_URL`, the HTTPS origin clients connect to.
 - `agent`: an optional profile service (applying nothing, `TUG_APPLY=false`); run it with `--profile agent` once you have an enrollment credential for it.
 
 ```bash
-export TUG_PUBLIC_URL=https://localhost:8443
+export TUG_ADVERTISE_URL=https://localhost:8443
 docker compose up --build control
 # issue the root operator credential on the control-plane host (fresh state only):
 docker compose exec control node dist/main.js control issue-credential --name root --role admin > tug-root.credential.json
@@ -61,7 +61,7 @@ Control does not print or store a credential on startup; `issue-credential` writ
 ## Host mode
 
 ```bash
-export TUG_PUBLIC_URL=https://localhost:8443
+export TUG_ADVERTISE_URL=https://localhost:8443
 npm run start:control
 node src/main.ts control issue-credential --name root --role admin > tug-root.credential.json
 node src/cli.ts init tug-root.credential.json

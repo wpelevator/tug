@@ -10,7 +10,7 @@ async function readStdin(): Promise<string> {
 }
 
 const usage = `Usage: tug-runtime <control|agent> [command]
-  control                          run the control plane (needs TUG_PUBLIC_URL)
+  control                          run the control plane (needs TUG_ADVERTISE_URL)
   control issue-credential         issue an operator credential on the control-plane host (--name, --role, --replace)
   agent                            run the node agent
   agent identity                   print the CSR for this node's pending key

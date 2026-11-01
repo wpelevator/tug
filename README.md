@@ -56,19 +56,19 @@ Install the CLI (Node >= 22.18), or run it without installing through `npx @wpel
 
 ```bash
 npm install -g @wpelevator/tug
+tug control-install root@203.0.113.5 --advertise-url https://203.0.113.5:8443 --install-docker
+tug init tug-root.credential.json
+tug node-install root@198.51.100.7 --name app1 --install-docker
+tug deploy -f docker-compose.yml
 ```
 
-The CLI installs the matching `ghcr.io/wpelevator/tug:<version>` image on your hosts.
+The CLI installs the matching `ghcr.io/wpelevator/tug:<version>` image on your hosts. Control serves mutual TLS directly on its port (`8443`): every operator, CI job and node authenticates with a certificate from a private CA created at install, and clients verify a name generated from that CA, so the address can be a bare IP and can change later. Do not terminate TLS in front of it.
 
-1. Install the control plane: `tug control-install root@control.example.com --public-url https://control.example.com:8443 --install-docker`. The flag installs missing Docker Engine and the Compose plugin that runs the control container on supported Debian, Ubuntu, Fedora and RHEL-compatible hosts; omit it when Docker is ready. Control serves mutual TLS directly on its published port (`8443`); do not terminate TLS in front of it ([Control plane](docs/control-plane.md#authentication-and-pki)).
-2. Point the CLI at it: `tug init tug-root.credential.json` (the file `control-install` wrote). It writes `tug.yml` (commit it, and list your servers in it), copies the credential to a `0600` file in `~/.config/tug/credentials/` and points the git-ignored `tug.local.yml` at it; see [CLI reference](docs/cli.md#config-file).
-3. Set the secrets your services need: `tug secret-set DB_PASSWORD`.
-4. Add nodes with `tug node-install root@app1.example.com --name app1 --install-docker`, or run `tug node-prepare-enrollment --name app1` and then the printed Docker command on the host. Nodes need Docker Engine only. For a bare cloud host, `tug node-prepare-enrollment --name app1 --install-docker` prints cloud-init user-data.
-5. Deploy: `tug deploy -f docker-compose.yml`. It waits until every node reports the new desired-state revision healthy.
-6. Operate with `tug status`, `events`, `exec`, `run`, `logs`, `ps`, `inspect`, `restart`, `rollback`, `backup-run`, `restore` and `doctor`. Create more operator credentials for CI and teammates with `tug credential-create`.
+The full walkthrough, including nodes you cannot SSH to (`tug node-prepare-enrollment`), CI credentials (`tug credential-create`), moving the control plane and recovery, is in [Getting started](docs/getting-started.md).
 
 ## Documentation
 
+- [Getting started](docs/getting-started.md): install control, add nodes, deploy, give CI a credential, move control, recover.
 - [Terminology](docs/terminology.md): core concepts, the naming review (which recommendations are implemented), industry comparisons and the remaining proposed interface improvements.
 - [Architecture](docs/architecture.md): components, reconciliation, workflow diagrams, secrets and runtime paths.
 - [Compose extensions](docs/compose.md): `x-tug` placement, health checks, volumes and limitations.
