@@ -338,10 +338,10 @@ test('live upgrades enforce roles and project scope before resolving desired sta
   let operator: Awaited<ReturnType<typeof socket>> | undefined;
   try {
     const read = await json(
-      await s.call('POST', '/api/v1/tokens', { name: 'reader-live', role: 'read' }),
+      await s.call('POST', '/api/v1/credentials', { name: 'reader-live', role: 'read' }),
     );
     const scoped = await json(
-      await s.call('POST', '/api/v1/tokens', {
+      await s.call('POST', '/api/v1/credentials', {
         name: 'scoped-live',
         role: 'deploy',
         projects: ['own'],

@@ -71,7 +71,7 @@ export function projectRepository(destinationUrl: string, project: string): stri
 /**
  * The repository password of a project, derived from the control master key so nothing extra is stored and
  * a node only ever holds the passwords of projects it runs backups for. Losing the master key loses every
- * repository, which is why `tug backup-key` exists for offline escrow.
+ * repository, which is why `tug backup-repository-password` exists for offline escrow.
  */
 export function repositoryPassword(masterKey: string, project: string): string {
   return createHmac('sha256', masterKey).update(`tug-restic:${project}`).digest('hex');

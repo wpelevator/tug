@@ -166,18 +166,18 @@ test('a failed renewal response never overwrites the identity', async () => {
   );
 });
 
-test('corrupt state produces a diagnostic that points to node-repair', async () => {
+test('corrupt state produces a diagnostic that points to node-repair-identity', async () => {
   const s = await setup();
   await fs.writeFile(agentFile(s.dir), '{not json');
   await assert.rejects(
     loadAgentDocument(s.dir),
-    /node-repair/,
+    /node-repair-identity/,
     'corrupt agent.json is never silently replaced',
   );
   await fs.writeFile(agentFile(s.dir), JSON.stringify({ v: 1 }));
   await assert.rejects(
     loadAgentDocument(s.dir),
-    /node-repair/,
+    /node-repair-identity/,
     'an incomplete document is reported, not ignored',
   );
 });

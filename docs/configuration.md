@@ -32,7 +32,7 @@ CLI options override environment variables, which override the config files and 
 | `TUG_MESH` | `false` | Set `true` to allocate overlay IPs, store WireGuard peers and send `network` blocks. See [Networking](networking.md). |
 | `TUG_MESH_CIDR` | `10.210.0.0/16` | IPv4 overlay range (prefix `/8` to `/29`). |
 | `TUG_WG_PORT` | `51820` | WireGuard UDP port nodes listen on, and the port appended to public addresses without one. |
-| `TUG_SERVICE_DNS` | same as `TUG_MESH` | Publish health-aware `serviceEndpoints` so agents inject cross-node `extra_hosts`. Set `true` without the mesh to use plain node addresses. |
+| `TUG_SERVICE_NAMES` | same as `TUG_MESH` | Publish health-aware `serviceEndpoints` so agents inject cross-node `extra_hosts`. Set `true` without the mesh to use plain node addresses. |
 | `TUG_ACME_EMAIL` | unset | Email for ACME registration in rendered Caddy configs. |
 
 ## Agent

@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { openDb } from './db.ts';
 import { Pki, encodeCredential } from './pki.ts';
-import { ROLES, createToken, isRole, parseTokenRequest } from './tokens.ts';
+import { ROLES, createCredential, isRole, parseCredentialRequest } from './credentials.ts';
 
 export interface IssueArgs {
   name: string;
@@ -32,10 +32,10 @@ export async function issueHostCredential(args: IssueArgs): Promise<string> {
   if (!publicUrl) throw new Error('TUG_PUBLIC_URL is required');
   const db = await openDb(path.join(dataDir, 'tug.db'));
   try {
-    const fresh = !db.get('SELECT 1 FROM api_tokens') && !db.get('SELECT 1 FROM nodes');
+    const fresh = !db.get('SELECT 1 FROM operator_credentials') && !db.get('SELECT 1 FROM nodes');
     const pki = await Pki.load(path.join(dataDir, 'pki'), fresh);
-    const request = parseTokenRequest({ name: args.name, role: args.role });
-    const created = await createToken(db, pki, new URL(publicUrl).origin, request, 'host', {
+    const request = parseCredentialRequest({ name: args.name, role: args.role });
+    const created = await createCredential(db, pki, new URL(publicUrl).origin, request, 'host', {
       replace: args.replace,
     });
     if (args.replace)
@@ -43,7 +43,7 @@ export async function issueHostCredential(args: IssueArgs): Promise<string> {
         'INSERT INTO events(id,level,type,message,metadata_json,created_at,actor) VALUES(?,?,?,?,?,?,?)',
         `evt_${Date.now().toString(36)}`,
         'info',
-        'token.recover',
+        'credential.recover',
         `credential ${args.name} replaced on the control host`,
         '{}',
         new Date().toISOString(),

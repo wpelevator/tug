@@ -14,7 +14,7 @@ import { json } from '../tests/helpers.ts';
 const NETWORK_ENV = [
   'TUG_MESH',
   'TUG_MESH_CIDR',
-  'TUG_SERVICE_DNS',
+  'TUG_SERVICE_NAMES',
   'TUG_WG_PORT',
   'TUG_ACME_EMAIL',
 ];
@@ -220,7 +220,7 @@ test('mesh allocates stable overlay IPs and each node receives every other node 
 test('enroll accepts the agent public key and rejects malformed ones', async () => {
   const s = await server({ TUG_MESH: 'true' });
   try {
-    const minted = await json(await s.post('/api/v1/nodes/enroll-token', { name: 'x' }));
+    const minted = await json(await s.post('/api/v1/nodes/enrollment-credential', { name: 'x' }));
     const bootstrap = {
       'x-tug-test-credential': encodeCredential(minted.credential),
       'content-type': 'application/json',

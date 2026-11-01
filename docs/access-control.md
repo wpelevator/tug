@@ -15,7 +15,7 @@ A principal outside its class gets `403`. Authorization follows the **public key
 Operator credentials come in two kinds, both with a unique name, a role and optionally allowed projects:
 
 - **`root`** is an ordinary named admin issued on the control host by `tug control-install` (`control issue-credential --name root --role admin`). Upgrades never reissue it; `tug control-install --recover-root` replaces only root's key without the API.
-- **Named credentials** are for CI systems, teammates and automation. Create them with `tug token-create` (control generates the key and returns the credential once; it keeps no private-key copy) and revoke them with `tug token-revoke`. They last one year at most.
+- **Named credentials** are for CI systems, teammates and automation. Create them with `tug credential-create` (control generates the key and returns the credential once; it keeps no private-key copy) and revoke them with `tug credential-revoke`. They last one year at most.
 
 Replace a credential by creating a new name, verifying it, updating consumers and then revoking the old name. Keep at least one verified admin throughout.
 
@@ -35,7 +35,7 @@ Project scope limits API access to project records; it does not isolate hosts or
 
 ## Endpoint table
 
-This table is the contract. It mirrors `ROUTE_ROLES` in `src/tokens.ts`, `createApp` refuses to register a `/api/v1` route that is not listed there, and a test compares the table with the live router and with this page, so a new route cannot ship without a declared role.
+This table is the contract. It mirrors `ROUTE_ROLES` in `src/credentials.ts`, `createApp` refuses to register a `/api/v1` route that is not listed there, and a test compares the table with the live router and with this page, so a new route cannot ship without a declared role.
 
 The project column says how a scoped token's allowed projects are checked: the project comes from the request body, the query string (default `site`), the path, or the stored record for the given ID. Admin-only routes are control-wide.
 
@@ -65,14 +65,14 @@ The project column says how a scoped token's allowed projects are checked: the p
 | `GET /api/v1/backup/destination` | `admin` | Control-wide; URL and variable names, never values |
 | `POST /api/v1/backup/destination` | `admin` | Control-wide |
 | `DELETE /api/v1/backup/destination` | `admin` | Control-wide |
-| `GET /api/v1/backup/key` | `admin` | Query `project`; prints the repository password |
+| `GET /api/v1/backup/repository-password` | `admin` | Query `project`; prints the repository password |
 | `POST /api/v1/secrets` | `admin` | Control-wide |
 | `DELETE /api/v1/secrets/:name` | `admin` | Control-wide |
 | `DELETE /api/v1/volumes/:name` | `admin` | Control-wide |
 | `GET /api/v1/nodes` | `admin` | Control-wide |
 | `POST /api/v1/nodes/:name/identity` | `admin` | Control-wide |
 | `POST /api/v1/nodes/:name/disable` | `admin` | Control-wide |
-| `POST /api/v1/nodes/enroll-token` | `admin` | Control-wide |
+| `POST /api/v1/nodes/enrollment-credential` | `admin` | Control-wide |
 | `POST /api/v1/nodes/:name/rotate-wg-key` | `admin` | Control-wide |
 | `POST /api/v1/nodes/:name/ingress` | `admin` | Control-wide |
 | `DELETE /api/v1/nodes/:name` | `admin` | Control-wide |
@@ -80,9 +80,9 @@ The project column says how a scoped token's allowed projects are checked: the p
 | `POST /api/v1/control/restore` | `admin` | Control-wide |
 | `GET /api/v1/diagnostics` | `admin` | Control-wide |
 | `POST /api/v1/diagnostics/nodes` | `admin` | Control-wide |
-| `POST /api/v1/tokens` | `admin` | Control-wide |
-| `GET /api/v1/tokens` | `admin` | Control-wide |
-| `DELETE /api/v1/tokens/:name` | `admin` | Control-wide |
+| `POST /api/v1/credentials` | `admin` | Control-wide |
+| `GET /api/v1/credentials` | `admin` | Control-wide |
+| `DELETE /api/v1/credentials/:name` | `admin` | Control-wide |
 
 ## Failures
 
@@ -95,21 +95,21 @@ A `read` or `deploy` token created with `--project` may only act on those projec
 
 ## Audit trail
 
-Every deployment and every control event records the acting token name, `root` for the root credential. `tug events` and `GET /api/v1/events` return it as `actor`, and deployment records (`GET /api/v1/deployments/:id`, `tug status`) carry it as `actor`. Control actions write events of these types: `deploy`, `rollback`, `cancel`, `restart`, `secret.set`, `secret.delete`, `token.create` and `token.revoke`. Events never contain secret values or token secrets. Rollbacks that control starts by itself (`x-tug: { rollback: auto }`, see [Compose extensions](compose.md#automatic-rollback)) and their `deployment.auto_rollback` events are attributed to the reserved actor `system:auto-rollback`; token names cannot contain a colon, so no token can use it. Events written by agents have no `actor`. Control events that belong to no project (token changes) show up in `tug events --all`.
+Every deployment and every control event records the acting token name, `root` for the root credential. `tug events` and `GET /api/v1/events` return it as `actor`, and deployment records (`GET /api/v1/deployments/:id`, `tug status`) carry it as `actor`. Control actions write events of these types: `deploy`, `rollback`, `cancel`, `restart`, `secret.set`, `secret.delete`, `credential.create` and `credential.revoke`. Events never contain secret values or token secrets. Rollbacks that control starts by itself (`x-tug: { rollback: auto }`, see [Compose extensions](compose.md#automatic-rollback)) and their `deployment.auto_rollback` events are attributed to the reserved actor `system:auto-rollback`; token names cannot contain a colon, so no token can use it. Events written by agents have no `actor`. Control events that belong to no project (token changes) show up in `tug events --all`.
 
 ## Managing tokens
 
 ```bash
-tug token-create ci-site --role deploy --project site
-tug token-create ci-site --role deploy --project site --project blog --expires-in-days 90
-tug token-create alice --role read
-tug token-list
-tug token-revoke ci-site
+tug credential-create ci-site --role deploy --project site
+tug credential-create ci-site --role deploy --project site --project blog --expires-in-days 90
+tug credential-create alice --role read
+tug credential-list
+tug credential-revoke ci-site
 ```
 
 - Names are 1 to 64 letters, numbers, dots, underscores or hyphens. A revoked credential keeps its name so audit entries stay unambiguous; choose a new name to replace it.
-- `token-create` prints the credential once, on stdout; a note on stderr reminds you to store it. Only the key hash is stored, so a lost credential cannot be recovered, only replaced.
-- `token-list` shows name, role, projects, creator, creation, last use, expiry and revocation time, never secrets.
+- `credential-create` prints the credential once, on stdout; a note on stderr reminds you to store it. Only the key hash is stored, so a lost credential cannot be recovered, only replaced.
+- `credential-list` shows name, role, projects, creator, creation, last use, expiry and revocation time, never secrets.
 - Revocation applies to the next request. Expired tokens are refused with `401` the same way. `last_used_at` is refreshed at most once a minute in the background, so it is approximate and bookkeeping never delays or fails a request.
 - Tokens live in the control database, so they are part of `tug control-backup` and come back with `tug control-restore`; a restore returns the token set (including revocations) to the backup's state.
 - `root` is listed like any other admin credential. Use `--recover-root` if its credential is lost; prefer day-to-day use of named admin credentials.
@@ -119,7 +119,7 @@ tug token-revoke ci-site
 Create a project-scoped `deploy` token and store it with the control URL as repository secrets:
 
 ```bash
-tug token-create github-site --role deploy --project site
+tug credential-create github-site --role deploy --project site
 ```
 
 Add `TUG_CREDENTIAL` (the printed credential) under the repository's Settings, Secrets and variables, Actions. A workflow:

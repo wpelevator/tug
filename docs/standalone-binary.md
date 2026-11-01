@@ -4,7 +4,7 @@ Status: proposed, not implemented. This document is the design for shipping the 
 
 ## Scope
 
-Only the `tug` CLI (`src/cli.ts`) becomes a binary. The control plane and agent (`tug-node`, `src/main.ts`) use SQLite metadata and server-only packages (`express`, `multer`) and already ship in the multi-arch Docker image, so they stay there. The npm package and the image are unchanged.
+Only the `tug` CLI (`src/cli.ts`) becomes a binary. The control plane and agent (`tug-runtime`, `src/main.ts`) use SQLite metadata and server-only packages (`express`, `multer`) and already ship in the multi-arch Docker image, so they stay there. The npm package and the image are unchanged.
 
 SQLite in control and agents uses an isolated `node:sqlite` adapter; a future Bun bundle of those processes could supply `bun:sqlite` through the same contract, as described in [Architecture](architecture.md#sqlite-storage). That is outside this CLI-only proposal, whose import graph does not include the database.
 

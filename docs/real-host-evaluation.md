@@ -133,7 +133,7 @@ I would not treat this run as evidence for rolling deploys, image build, or roll
 | `tug scale worker 2` / `1` | Second replica started on `b`, then removed; `0` and unknown services rejected |
 | NFS volume (`x-tug.type: nfs`, exporter `a`; the volume type has since been removed) | `b` mounted `10.210.0.1:/srv/tug/shared` over the WireGuard overlay (NFSv3); a file written on `b` appeared on `a`; the exporter bind-mounted the directory |
 | `ps`, `inspect`, `exec`, `logs -f` against real nodes | Worked |
-| `node-enroll --install-docker --mesh` cloud-config on a host with Docker purged | Docker Engine and Compose installed, agent started, node enrolled with its label |
+| `node-prepare-enrollment --install-docker --mesh` cloud-config on a host with Docker purged | Docker Engine and Compose installed, agent started, node enrolled with its label |
 | Enrolled node with no public address behind `ufw` deny-incoming | WireGuard handshake and overlay ping to `a` worked; NFS mount worked |
 
 What this does not prove: the cloud-config was applied by re-running cloud-init (`cloud-init clean`, then its stages) with the config in `cloud.cfg.d`, not from first-boot user data, and the agent image came through an SSH-tunnelled throwaway registry. The firewalled node has a public IP, so this is not NAT. Debian, Fedora and Rocky bootstraps, arm64, and certificate renewal were not run.
@@ -171,7 +171,7 @@ The store was RustFS in a container on the second node with random credentials, 
 
 ### Findings
 
-- **Fixed: health checks cannot reach containers from a bridge-networked agent.** `node-install` starts the agent on the default bridge. On Docker 29.9.2 it cannot dial the container IPs of a project's Compose network, so every TCP or HTTP health check timed out (`tcp timeout 172.19.0.2:3306`) while MariaDB was ready, and the first deploy failed. Restarting the agent with `--network host` (what mesh mode already does) fixed it. Earlier runs on older Docker did not hit this. `node-install` and `node-enroll` now start the agent with `--network host` always, not only with `--mesh`.
+- **Fixed: health checks cannot reach containers from a bridge-networked agent.** `node-install` starts the agent on the default bridge. On Docker 29.9.2 it cannot dial the container IPs of a project's Compose network, so every TCP or HTTP health check timed out (`tcp timeout 172.19.0.2:3306`) while MariaDB was ready, and the first deploy failed. Restarting the agent with `--network host` (what mesh mode already does) fixed it. Earlier runs on older Docker did not hit this. `node-install` and `node-prepare-enrollment` now start the agent with `--network host` always, not only with `--mesh`.
 - **Open: `--build-local-image` builds for the CLI machine's architecture.** On an arm64 Mac it produced an arm64 image that the amd64 host could not run (`exec format error`). It should build for the target's architecture.
 - **Open: a deploy that fails health leaves the project half-up.** The containers kept running after the failed deployment, which hid the real cause until the agent's view was checked.
 

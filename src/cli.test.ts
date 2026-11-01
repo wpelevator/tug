@@ -147,7 +147,7 @@ test('CLI exposes flat commands and rejects malformed invocations before side ef
     const { stdout } = await exec(process.execPath, [entry, '--help'], { env, cwd: dir });
     for (const name of [
       'control-install',
-      'node-enroll',
+      'node-prepare-enrollment',
       'node-register',
       'secret-set',
       'volume-remove',
@@ -172,7 +172,7 @@ test('CLI exposes flat commands and rejects malformed invocations before side ef
       ['node-revoke-registry-token', 'n1'],
       ['deploy', '--timeout', '0'],
       ['control-install', 'root@host', '--port', '65536'],
-      ['node-enroll', '--uses', 'NaN'],
+      ['node-prepare-enrollment', '--uses', 'NaN'],
       ['events', '--limit', '501'],
       ['control-restore', '/backup.tgz'],
     ]) {

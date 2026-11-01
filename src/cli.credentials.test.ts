@@ -20,26 +20,26 @@ test('token commands reject malformed invocations before contacting control', as
   };
   try {
     const help = (await exec(process.execPath, [entry, '--help'], { env, cwd: dir })).stdout;
-    for (const name of ['token-create', 'token-list', 'token-revoke'])
+    for (const name of ['credential-create', 'credential-list', 'credential-revoke'])
       assert.ok(help.includes(name), `help should list flat command ${name}`);
     const createHelp = (
-      await exec(process.execPath, [entry, 'token-create', '--help'], { env, cwd: dir })
+      await exec(process.execPath, [entry, 'credential-create', '--help'], { env, cwd: dir })
     ).stdout;
-    assert.match(createHelp, /--role/, 'token-create help should document --role');
-    assert.match(createHelp, /--expires-in-days/, 'token-create help should document expiry');
+    assert.match(createHelp, /--role/, 'credential-create help should document --role');
+    assert.match(createHelp, /--expires-in-days/, 'credential-create help should document expiry');
     for (const args of [
-      ['token-create', 'ci'],
-      ['token-create', 'ci', '--role', 'owner'],
-      ['token-create', 'bad name', '--role', 'read'],
-      ['token-create', 'operator-x/y', '--role', 'read'],
-      ['token-create', 'ci', '--role', 'deploy', '--project', 'bad/name'],
-      ['token-create', 'ci', '--role', 'admin', '--project', 'site'],
-      ['token-create', 'ci', '--role', 'read', '--expires-in-days', '0'],
-      ['token-create', 'ci', '--role', 'read', '--expires-in-days', 'soon'],
-      ['token-create', 'ci', '--role', 'read', 'extra'],
-      ['token-list', 'extra'],
-      ['token-revoke'],
-      ['token-revoke', 'a', 'b'],
+      ['credential-create', 'ci'],
+      ['credential-create', 'ci', '--role', 'owner'],
+      ['credential-create', 'bad name', '--role', 'read'],
+      ['credential-create', 'operator-x/y', '--role', 'read'],
+      ['credential-create', 'ci', '--role', 'deploy', '--project', 'bad/name'],
+      ['credential-create', 'ci', '--role', 'admin', '--project', 'site'],
+      ['credential-create', 'ci', '--role', 'read', '--expires-in-days', '0'],
+      ['credential-create', 'ci', '--role', 'read', '--expires-in-days', 'soon'],
+      ['credential-create', 'ci', '--role', 'read', 'extra'],
+      ['credential-list', 'extra'],
+      ['credential-revoke'],
+      ['credential-revoke', 'a', 'b'],
       ['events', '--all', '--project', 'site'],
     ]) {
       await assert.rejects(
@@ -61,7 +61,7 @@ test('token commands reject malformed invocations before contacting control', as
   }
 });
 
-test('token-create, token-list and token-revoke work against control and a scoped token works as TUG_TOKEN', async () => {
+test('credential-create, credential-list and credential-revoke work against control and a scoped credential works as TUG_TOKEN', async () => {
   const data = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-cli-tokens-'));
   const control = await startMtlsControl(data);
   const tug = (credential: string, ...args: string[]) =>
@@ -76,7 +76,7 @@ test('token-create, token-list and token-revoke work against control and a scope
   try {
     const created = await tug(
       OPERATOR,
-      'token-create',
+      'credential-create',
       'ci-deploy',
       '--role',
       'deploy',
@@ -91,59 +91,60 @@ test('token-create, token-list and token-revoke work against control and a scope
     assert.match(
       body.credential,
       /^[A-Za-z0-9_-]{200,}$/,
-      'token-create should print the new credential once on stdout',
+      'credential-create should print the new credential once on stdout',
     );
     assert.deepEqual(
       body.projects,
       ['blog', 'site'],
-      'token-create should send every repeated --project',
+      'credential-create should send every repeated --project',
     );
-    assert.ok(body.expiresAt, 'token-create should send the expiry');
+    assert.ok(body.expiresAt, 'credential-create should send the expiry');
     assert.match(
       created.stderr,
       /not shown again/,
-      'token-create should warn on stderr that the secret is shown once',
+      'credential-create should warn on stderr that the secret is shown once',
     );
 
-    const listed = await tug(OPERATOR, 'token-list');
+    const listed = await tug(OPERATOR, 'credential-list');
     assert.ok(
       !listed.stdout.includes(body.credential) && !listed.stdout.includes('token_hash'),
-      'token-list must never print secrets or hashes',
+      'credential-list must never print secrets or hashes',
     );
     assert.equal(
-      JSON.parse(listed.stdout).tokens.find((t: { name: string }) => t.name === 'ci-deploy').name,
+      JSON.parse(listed.stdout).credentials.find((t: { name: string }) => t.name === 'ci-deploy')
+        .name,
       'ci-deploy',
-      'token-list should show the token by name',
+      'credential-list should show the credential by name',
     );
 
     const status = await tug(body.credential, 'status');
     assert.ok(
       Array.isArray(JSON.parse(status.stdout).projects),
-      'a scoped token should work anywhere TUG_TOKEN does',
+      'a scoped credential should work anywhere TUG_TOKEN does',
     );
     await assert.rejects(
-      tug(body.credential, 'token-list'),
+      tug(body.credential, 'credential-list'),
       /403/,
-      'a deploy token cannot list tokens',
+      'a deploy credential cannot list tokens',
     );
     await assert.rejects(
       tug(body.credential, 'events', '--project', 'other'),
       /403/,
-      'a scoped token is refused other projects',
+      'a scoped credential is refused other projects',
     );
 
     const events = JSON.parse((await tug(OPERATOR, 'events', '--all')).stdout).events;
     assert.equal(
       events[0].type,
-      'token.create',
+      'credential.create',
       'tug events --all should include control audit events',
     );
     assert.equal(events[0].actor, 'root', 'tug events should show who acted');
 
     assert.equal(
-      JSON.parse((await tug(OPERATOR, 'token-revoke', 'ci-deploy')).stdout).ok,
+      JSON.parse((await tug(OPERATOR, 'credential-revoke', 'ci-deploy')).stdout).ok,
       true,
-      'token-revoke should confirm',
+      'credential-revoke should confirm',
     );
     await assert.rejects(
       tug(body.credential, 'status'),
@@ -151,7 +152,7 @@ test('token-create, token-list and token-revoke work against control and a scope
       'the revoked credential should stop working: the connection gate refuses it',
     );
     await assert.rejects(
-      tug(OPERATOR, 'token-revoke', 'ghost'),
+      tug(OPERATOR, 'credential-revoke', 'ghost'),
       /404/,
       'revoking an unknown token should fail',
     );
@@ -169,7 +170,7 @@ test('backup commands are listed in help', async () => {
     'backup-run',
     'backup-list',
     'backup-destination-set',
-    'backup-key',
+    'backup-repository-password',
     'restore',
     'restore-list',
     'restore-resume',

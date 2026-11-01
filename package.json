@@ -9,7 +9,7 @@
   "type": "module",
   "bin": {
     "tug": "./dist/cli.js",
-    "tug-node": "./dist/main.js"
+    "tug-runtime": "./dist/main.js"
   },
   "files": [
     "dist"

@@ -20,7 +20,7 @@ tug backup-run
 tug backup-list
 ```
 
-Print the project's repository password and keep it somewhere safe, apart from the server: `tug backup-key`. Losing control's master key without it loses every backup.
+Print the project's repository password and keep it somewhere safe, apart from the server: `tug backup-repository-password`. Losing control's master key without it loses every backup.
 
 ## What gets backed up
 

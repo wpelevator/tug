@@ -51,7 +51,7 @@ export const testIdentity = (
   const enroll = h['x-tug-test-enroll'];
   if (typeof enroll === 'string') {
     const row = db.get<{ key_hash: string }>(
-      'SELECT key_hash FROM enroll_tokens WHERE id=?',
+      'SELECT key_hash FROM enrollment_credentials WHERE id=?',
       enroll,
     );
     return { uri: `tug:enroll:${enroll}`, keyHash: row?.key_hash ?? 'unknown' };
@@ -59,9 +59,9 @@ export const testIdentity = (
   const operator = h['x-tug-test-operator'];
   if (typeof operator === 'string') {
     const tokenId = `tok_test_${operator}`;
-    if (!db.get('SELECT 1 FROM api_tokens WHERE id=?', tokenId))
+    if (!db.get('SELECT 1 FROM operator_credentials WHERE id=?', tokenId))
       db.run(
-        "INSERT INTO api_tokens(id,name,key_hash,role,created_at,created_by) VALUES(?,?,?,'admin',?,'test')",
+        "INSERT INTO operator_credentials(id,name,key_hash,role,created_at,created_by) VALUES(?,?,?,'admin',?,'test')",
         tokenId,
         operator,
         `test-${operator}`,

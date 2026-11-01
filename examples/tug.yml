@@ -14,7 +14,7 @@ nodeDefaults:
   # image: ghcr.io/wpelevator/tug:0.5.0
   # mesh: true
 
-# Read only by node-install, node-register and node-enroll, as if typed on the command line:
+# Read only by node-install, node-register and node-prepare-enrollment, as if typed on the command line:
 #   tug node-install --name app1
 nodes:
   app1:

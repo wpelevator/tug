@@ -5,7 +5,7 @@ Three independent, opt-in layers let services on different hosts find each other
 | Layer | What it adds | Turned on by |
 |---|---|---|
 | A. WireGuard mesh | Every node gets an overlay IP and a `wg0` tunnel to every other node | `TUG_MESH=true` on control and on each agent |
-| B. Service DNS | Services on other nodes resolve by name to their node's overlay IP, only while healthy | on by default with the mesh; `TUG_SERVICE_DNS` on control overrides |
+| B. Service DNS | Services on other nodes resolve by name to their node's overlay IP, only while healthy | on by default with the mesh; `TUG_SERVICE_NAMES` on control overrides |
 | C. Ingress and TLS | A managed Caddy on an ingress node routes hostnames to services anywhere, with automatic HTTPS | `tug node-ingress <node>` plus `x-tug.ingress` on a service |
 
 Independently of the layers, [published ports are private by default](#published-ports-private-by-default): Tug binds them to the address other nodes and the ingress use, never to every interface unless you wrote that.
@@ -28,7 +28,7 @@ Containers reach other nodes through the host: traffic leaves the container, is 
 
 `control-install --mesh` sets `TUG_MESH=true` on control. Retire a node with `tug node-remove`, which drops its overlay peer so the others stop dialing it.
 
-**Running the agent.** The agent needs `wg` and `ip` (both are in the Tug image), `NET_ADMIN`, and the host network namespace so that `wg0` exists on the host. `node-install --mesh` and `node-enroll --mesh` generate the right `docker run` (`--network host --cap-add NET_ADMIN -e TUG_MESH=true`). The host needs WireGuard support in the kernel (built in since Linux 5.6; older kernels need the `wireguard` module or DKMS package).
+**Running the agent.** The agent needs `wg` and `ip` (both are in the Tug image), `NET_ADMIN`, and the host network namespace so that `wg0` exists on the host. `node-install --mesh` and `node-prepare-enrollment --mesh` generate the right `docker run` (`--network host --cap-add NET_ADMIN -e TUG_MESH=true`). The host needs WireGuard support in the kernel (built in since Linux 5.6; older kernels need the `wireguard` module or DKMS package).
 
 **Key rotation.** `tug node-rotate-wg-key <node>` queues a `wg.rotate-key` command. The agent generates a new keypair, reports the public key and returns it in the command result; every other node picks up the new key on its next poll, and the node itself resyncs `wg0` with the new private key. Expect a few seconds of lost traffic to that node. A rotation that fails after the key was replaced is retried by the normal key report on the next poll.
 
@@ -38,7 +38,7 @@ Containers reach other nodes through the host: traffic leaves the container, is 
 
 Decision: `extra_hosts` injection, not a DNS service. It adds no long-running process, needs nothing new on the nodes and degrades gracefully; the cost is that records only change when the agent re-renders the project, which already happens on every poll.
 
-When service DNS is on (default with the mesh; force with `TUG_SERVICE_DNS=true|false`), the work response carries `serviceEndpoints`: for each project on the node, each service to the list of `{ node, address }` where
+When service DNS is on (default with the mesh; force with `TUG_SERVICE_NAMES=true|false`), the work response carries `serviceEndpoints`: for each project on the node, each service to the list of `{ node, address }` where
 
 - the service is placed on that node,
 - the node has polled within `TUG_STALE_SECONDS`, and

@@ -55,7 +55,7 @@ Token values, join keys, secret values and `Authorization` headers are never log
 
 Status: proposed.
 
-Control would serve `GET /metrics` in the Prometheus text format. It needs the `read` role from [Access control](access-control.md#roles), so Prometheus authenticates with `authorization: Bearer <read token>`; a token limited to projects would see only those projects' series. Adding the route means adding it to `ROUTE_ROLES` in `src/tokens.ts` and to the endpoint table, which the existing test already requires.
+Control would serve `GET /metrics` in the Prometheus text format. It needs the `read` role from [Access control](access-control.md#roles), so Prometheus authenticates with `authorization: Bearer <read token>`; a token limited to projects would see only those projects' series. Adding the route means adding it to `ROUTE_ROLES` in `src/credentials.ts` and to the endpoint table, which the existing test already requires.
 
 Naming follows the Prometheus conventions: a `tug_` prefix, base units (`_seconds`, `_bytes`), `_total` for counters. Labels are bounded: project, node and service names are operator-defined and few; route labels use the route pattern (`/api/v1/deployments/:id`), never the raw path; deployment IDs, command IDs, versions and error messages are never labels.
 

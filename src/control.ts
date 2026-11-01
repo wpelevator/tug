@@ -28,7 +28,7 @@ import type {
   CommandRow,
   DeploymentRow,
   DesiredStateRow,
-  EnrollTokenRow,
+  EnrollmentCredentialRow,
   LockRow,
   NodeRow,
   ProjectRow,
@@ -101,14 +101,14 @@ import {
   assertProject,
   bodyProject,
   createGuard,
-  createToken,
-  listTokens,
-  parseTokenRequest,
+  createCredential,
+  listCredentials,
+  parseCredentialRequest,
   queryProject,
   recordEvent,
-  revokeToken,
-} from './tokens.ts';
-import type { Actor, Identity, ProjectResolver, RouteRole } from './tokens.ts';
+  revokeCredential,
+} from './credentials.ts';
+import type { Actor, Identity, ProjectResolver, RouteRole } from './credentials.ts';
 import type {
   BackupCredentialsResponse,
   LiveRequest,
@@ -126,7 +126,7 @@ import type {
   NetworkConfig,
   NodeInfo,
   PortBinding,
-  EnrollTokenResponse,
+  EnrollmentCredentialResponse,
   IdentityRequest,
   IdentityResponse,
   RenewResponse,
@@ -612,7 +612,7 @@ export async function createApp(
   const MESH = process.env.TUG_MESH === 'true';
   const MESH_CIDR = process.env.TUG_MESH_CIDR || DEFAULT_MESH_CIDR;
   const WG_PORT = Number(process.env.TUG_WG_PORT || DEFAULT_WG_PORT);
-  const SERVICE_DNS = (process.env.TUG_SERVICE_DNS ?? String(MESH)) === 'true';
+  const SERVICE_DNS = (process.env.TUG_SERVICE_NAMES ?? String(MESH)) === 'true';
   const ACME_EMAIL = process.env.TUG_ACME_EMAIL || undefined;
   if (MESH) parseCidr(MESH_CIDR);
 
@@ -663,7 +663,7 @@ export async function createApp(
   // A CA is created only for a fresh installation; existing state with missing or mismatched CA material is a startup error.
   const pki = await Pki.load(
     path.join(DATA_DIR, 'pki'),
-    !db.get('SELECT 1 FROM api_tokens') && !db.get('SELECT 1 FROM nodes'),
+    !db.get('SELECT 1 FROM operator_credentials') && !db.get('SELECT 1 FROM nodes'),
   );
   const publicUrl = () => {
     const url = options.publicUrl ?? process.env.TUG_PUBLIC_URL;
@@ -688,7 +688,10 @@ export async function createApp(
       const actor = authenticate(db, parsed.id, keyHash);
       return actor ? { klass: 'operator', actor, tokenId: parsed.id } : null;
     }
-    const row = db.get<EnrollTokenRow>('SELECT * FROM enroll_tokens WHERE id=?', parsed.id);
+    const row = db.get<EnrollmentCredentialRow>(
+      'SELECT * FROM enrollment_credentials WHERE id=?',
+      parsed.id,
+    );
     return row && row.key_hash === keyHash && !row.revoked_at && row.expires_at > now()
       ? { klass: 'enroll', row }
       : null;
@@ -801,7 +804,7 @@ export async function createApp(
   const get = (url: string, ...handlers: RequestHandler[]) => route('get', url, handlers);
   const post = (url: string, ...handlers: RequestHandler[]) => route('post', url, handlers);
 
-  // Operator-facing routes go through api(): the role table in tokens.ts is the only place a route's access is declared.
+  // Operator-facing routes go through api(): the role table in credentials.ts is the only place a route's access is declared.
   const guard = createGuard();
   const apiRoutes = new Map<string, RouteRole>();
   app.locals.apiRoutes = apiRoutes;
@@ -1413,7 +1416,7 @@ export async function createApp(
         if (existing) {
           if (existing.key_hash !== signed.keyHash)
             return res.status(409).json({
-              error: `node ${name} already exists; use node-replace to install a new key`,
+              error: `node ${name} already exists; use node-replace-identity to install a new key`,
             });
         } else {
           insertNode({
@@ -1448,7 +1451,7 @@ export async function createApp(
   });
 
   // Self-enrollment: an admin mints a short-lived, single-use, name-bound bootstrap certificate that reaches one route.
-  api('post', '/api/v1/nodes/enroll-token', null, async (req, res) => {
+  api('post', '/api/v1/nodes/enrollment-credential', null, async (req, res) => {
     const name = req.body?.name;
     if (typeof name !== 'string' || !NODE_NAME.test(name))
       return res
@@ -1469,17 +1472,17 @@ export async function createApp(
     );
     const expiresAt = issued.notAfter.toISOString();
     db.run(
-      'DELETE FROM enroll_tokens WHERE expires_at < ?',
+      'DELETE FROM enrollment_credentials WHERE expires_at < ?',
       new Date(Date.now() - 86_400_000).toISOString(),
     );
     // Minting again for a name revokes its previous unconsumed key.
     db.run(
-      'UPDATE enroll_tokens SET revoked_at=? WHERE name=? AND node_id IS NULL AND revoked_at IS NULL',
+      'UPDATE enrollment_credentials SET revoked_at=? WHERE name=? AND node_id IS NULL AND revoked_at IS NULL',
       now(),
       name,
     );
     db.run(
-      'INSERT INTO enroll_tokens(id,key_hash,name,labels_json,expires_at,created_at) VALUES(?,?,?,?,?,?)',
+      'INSERT INTO enrollment_credentials(id,key_hash,name,labels_json,expires_at,created_at) VALUES(?,?,?,?,?,?)',
       rowId,
       issued.keyHash,
       name,
@@ -1488,7 +1491,7 @@ export async function createApp(
       now(),
     );
     reconcileSockets();
-    const out: EnrollTokenResponse = {
+    const out: EnrollmentCredentialResponse = {
       credential: issued.credential,
       name,
       labels: labels ?? [],
@@ -1507,7 +1510,10 @@ export async function createApp(
         NODE_LIFETIME_MS,
       );
       // Re-read the row: the checks and writes below are synchronous, so concurrent enrollments cannot both create a node.
-      const fresh = db.get<EnrollTokenRow>('SELECT * FROM enroll_tokens WHERE id=?', row.id);
+      const fresh = db.get<EnrollmentCredentialRow>(
+        'SELECT * FROM enrollment_credentials WHERE id=?',
+        row.id,
+      );
       if (!fresh || fresh.revoked_at || fresh.expires_at <= now())
         return res.status(401).json({ error: 'join key is expired or revoked' });
       if (fresh.node_id) {
@@ -1528,7 +1534,7 @@ export async function createApp(
           labels: fresh.labels_json ? (JSON.parse(fresh.labels_json) as string[]) : [],
         });
         db.run(
-          'UPDATE enroll_tokens SET node_id=?,node_key_hash=? WHERE id=?',
+          'UPDATE enrollment_credentials SET node_id=?,node_key_hash=? WHERE id=?',
           fresh.name,
           signed.keyHash,
           fresh.id,
@@ -1556,7 +1562,8 @@ export async function createApp(
       );
       if (signed.keyHash !== node.key_hash)
         return res.status(403).json({
-          error: 'renewal requires a CSR for the node key; use node-replace to change keys',
+          error:
+            'renewal requires a CSR for the node key; use node-replace-identity to change keys',
         });
       const last = node.last_renewed_at ? Date.parse(node.last_renewed_at) : 0;
       if (Date.now() - last < NODE_RENEW_MIN_INTERVAL_MS())
@@ -1573,7 +1580,7 @@ export async function createApp(
       sendError(res, e);
     }
   });
-  // Blocks a node's key without deleting its metadata or changing placement. It returns only through node-replace.
+  // Blocks a node's key without deleting its metadata or changing placement. It returns only through node-replace-identity.
   api('post', '/api/v1/nodes/:name/disable', null, async (req, res) => {
     const node = findNode(req.params.name);
     if (!node) return res.status(404).json({ error: 'node not found' });
@@ -1677,7 +1684,7 @@ export async function createApp(
     db.run('DELETE FROM wg_peers WHERE node_id=?', node.id);
     db.run('DELETE FROM nodes WHERE id=?', node.id);
     db.run(
-      'UPDATE enroll_tokens SET revoked_at=COALESCE(revoked_at,?) WHERE name=? AND node_id IS NULL',
+      'UPDATE enrollment_credentials SET revoked_at=COALESCE(revoked_at,?) WHERE name=? AND node_id IS NULL',
       now(),
       node.name,
     );
@@ -1714,11 +1721,11 @@ export async function createApp(
       );
     }
   });
-  api('post', '/api/v1/tokens', null, async (req, res) => {
-    const request = parseTokenRequest(req.body);
-    const created = await createToken(db, pki, publicUrl(), request, req.actor!.name);
+  api('post', '/api/v1/credentials', null, async (req, res) => {
+    const request = parseCredentialRequest(req.body);
+    const created = await createCredential(db, pki, publicUrl(), request, req.actor!.name);
     audit(req.actor!, {
-      type: 'token.create',
+      type: 'credential.create',
       message: `token ${created.name} (${created.role}${created.projects ? `, projects: ${created.projects.join(', ')}` : ''}) created by ${req.actor!.name}`,
       metadata: {
         name: created.name,
@@ -1729,13 +1736,15 @@ export async function createApp(
     });
     res.json({ ...created, credential: encodeCredential(created.credential) });
   });
-  api('get', '/api/v1/tokens', null, async (_req, res) => res.json({ tokens: listTokens(db) }));
-  api('delete', '/api/v1/tokens/:name', null, async (req, res) => {
-    if (!revokeToken(db, req.params.name))
+  api('get', '/api/v1/credentials', null, async (_req, res) =>
+    res.json({ credentials: listCredentials(db) }),
+  );
+  api('delete', '/api/v1/credentials/:name', null, async (req, res) => {
+    if (!revokeCredential(db, req.params.name))
       return res.status(404).json({ error: 'token not found' });
     reconcileSockets();
     audit(req.actor!, {
-      type: 'token.revoke',
+      type: 'credential.revoke',
       message: `token ${req.params.name} revoked by ${req.actor!.name}`,
       metadata: { name: req.params.name },
     });
@@ -1920,7 +1929,7 @@ export async function createApp(
       });
     res.json({ ok: true, removed: removed.changes > 0 });
   });
-  api('get', '/api/v1/backup/key', null, async (req, res) => {
+  api('get', '/api/v1/backup/repository-password', null, async (req, res) => {
     const project = String(req.query.project || '');
     if (!PROJECT_NAME_PATTERN.test(project) || isReservedProject(project))
       return res.status(400).json({ error: 'project is required' });
@@ -2837,7 +2846,7 @@ export async function createApp(
     const project = req.query.project ? String(req.query.project) : null;
     if (project) assertProject(req.actor!, project);
     const limit = Math.min(Number(req.query.limit || 100), 500);
-    const scope = projectScope(req.actor!, 'project_id'); // scoped tokens never see node-level or other projects' events
+    const scope = projectScope(req.actor!, 'project_id'); // scoped credentials never see node-level or other projects' events
     const events = project
       ? db.all(
           'SELECT * FROM events WHERE project_id=? ORDER BY created_at DESC LIMIT ?',

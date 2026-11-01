@@ -111,14 +111,14 @@ test('destination and key endpoints are admin only', async () => {
   const s = await server();
   try {
     const created = await json(
-      await call(s.base, 'POST', '/api/v1/tokens', { name: 'ci', role: 'deploy' }),
+      await call(s.base, 'POST', '/api/v1/credentials', { name: 'ci', role: 'deploy' }),
     );
     const ci = { 'x-tug-test-credential': created.credential, 'content-type': 'application/json' };
     for (const [method, route] of [
       ['GET', '/api/v1/backup/destination'],
       ['POST', '/api/v1/backup/destination'],
       ['DELETE', '/api/v1/backup/destination'],
-      ['GET', '/api/v1/backup/key?project=site'],
+      ['GET', '/api/v1/backup/repository-password?project=site'],
     ])
       assert.equal(
         (await call(s.base, method, route, method === 'POST' ? destination : undefined, ci)).status,
@@ -134,13 +134,15 @@ test('the project repository password is derived from the master key and audited
   const s = await server();
   try {
     assert.equal(
-      (await call(s.base, 'GET', '/api/v1/backup/key?project=ghost')).status,
+      (await call(s.base, 'GET', '/api/v1/backup/repository-password?project=ghost')).status,
       404,
       'an unknown project has no key',
     );
     await call(s.base, 'POST', '/api/v1/projects', { name: 'site' });
     await call(s.base, 'POST', '/api/v1/backup/destination', destination);
-    const body = await json(await call(s.base, 'GET', '/api/v1/backup/key?project=site'));
+    const body = await json(
+      await call(s.base, 'GET', '/api/v1/backup/repository-password?project=site'),
+    );
     const key = (await fs.readFile(s.keyFile, 'utf8')).trim();
     assert.equal(body.password, repositoryPassword(key, 'site'), 'the password is derived');
     assert.equal(

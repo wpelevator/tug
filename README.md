@@ -7,7 +7,7 @@ Deploy Docker Compose projects to one or more ordinary Linux VPSes through a sma
 ## Features
 
 - Control API with bearer-token auth, scoped `read`/`deploy`/`admin` API tokens for CI and teammates, an audit trail naming who acted, and SQLite metadata through Node's built-in driver.
-- Nodes join over SSH (`node-install`) or enroll themselves with a single `docker run` (`node-enroll`), with a per-node certificate for the one mTLS port control listens on. Agents only dial out, so nodes behind NAT work.
+- Nodes join over SSH (`node-install`) or enroll themselves with a single `docker run` (`node-prepare-enrollment`), with a per-node certificate for the one mTLS port control listens on. Agents only dial out, so nodes behind NAT work.
 - Agents pull desired state from control, reconcile containers through the Docker Engine API, run TCP/HTTP/Docker health checks and report status. An outbound WebSocket wakes them as soon as control queues work and carries live `exec`, followed logs, `ps` and `inspect` sessions, with long-poll and periodic-poll fallbacks for ordinary work.
 - `x-tug` placement of services and volumes on nodes, with immutable desired-state records per deployment.
 - Build application images on control from uploaded source, or locally with `deploy --build-local`. Agents download saved images directly from control. Published images are pinned to registry digests at deployment creation.
@@ -63,7 +63,7 @@ The CLI installs the matching `ghcr.io/wpelevator/tug:<version>` image on your h
 1. Install the control plane: `tug control-install root@control.example.com --install-docker`. The flag installs missing Docker Engine and Compose on supported Debian, Ubuntu, Fedora and RHEL-compatible hosts; omit it when Docker is ready. Put HTTPS in front of the control API as described in [Control plane](docs/control-plane.md).
 2. Point the CLI at it: `tug init tug-root.credential.json` (the file `control-install` wrote). It writes `tug.yml` (commit it, and list your servers in it), copies the credential to a `0600` file in `~/.config/tug/credentials/` and points the git-ignored `tug.local.yml` at it; see [CLI reference](docs/cli.md#config-file).
 3. Set the secrets your services need: `tug secret-set DB_PASSWORD`.
-4. Add nodes with `tug node-install root@app1.example.com --name app1 --install-docker`, or `tug node-enroll --name app1` and run the printed Docker command. For a bare cloud host, `tug node-enroll --name app1 --install-docker` prints cloud-init user-data.
+4. Add nodes with `tug node-install root@app1.example.com --name app1 --install-docker`, or `tug node-prepare-enrollment --name app1` and run the printed Docker command. For a bare cloud host, `tug node-prepare-enrollment --name app1 --install-docker` prints cloud-init user-data.
 5. Deploy: `tug deploy -f docker-compose.yml`. It waits until every node reports the new version healthy.
 6. Operate with `tug status`, `events`, `exec`, `run`, `logs`, `ps`, `inspect`, `restart`, `rollback`, `backup-run`, `restore` and `doctor`.
 

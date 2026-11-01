@@ -7,7 +7,7 @@ Tug deploys Docker Compose projects to one or more Docker hosts through a small 
 The [README](../README.md#how-it-fits-together) has an overview diagram of how these fit together.
 
 - **Control plane** (`src/control.ts`): an Express API backed by SQLite (`tug.db`) and an install-time master key (`master.key`) in `TUG_DATA_DIR`. It stores nodes, projects, deployments, desired states, encrypted secrets, volumes, queued commands, events, hashed API tokens and locks, and builds images from uploaded source tarballs or imports operator-built archives. It always stores and serves built images as compressed artifacts and resolves published image tags to immutable registry digests before publication.
-- **Access control** (`src/tokens.ts`): every operator route is declared once in a role table (`read`, `deploy`, `admin`) and passes through one guard that authenticates the bearer (the root operator token or a named API token, both by hash lookup), checks the role and the token's allowed projects, and attaches the acting token name that deployments and audit events record. Agents authenticate separately with per-node tokens. See [Access control](access-control.md).
+- **Access control** (`src/credentials.ts`): every operator route is declared once in a role table (`read`, `deploy`, `admin`) and passes through one guard that authenticates the bearer (the root operator token or a named API token, both by hash lookup), checks the role and the token's allowed projects, and attaches the acting token name that deployments and audit events record. Agents authenticate separately with per-node tokens. See [Access control](access-control.md).
 - **Agent** (`src/agent.ts`): runs on every node, fetches authoritative work from `GET /agent/v1/work` and reconciles containers through the Docker Engine API (`src/docker-api.ts`) over the local socket. It builds one container definition per placed service (`src/container-spec.ts`), substitutes released secrets into the container environment, verifies/downloads/loads artifact-backed images, pulls published images by their pinned registry digest when the desired revision is new to the node, executes health checks, and reports status. Nodes need only the Docker Engine, not the Compose plugin.
 - **Reconciler** (`src/reconciler.ts`): one loop for every service. Containers carry `tug.project`, `tug.service`, `tug.revision` and `tug.config-hash` labels; the hash covers the resolved definition, the image identity and the versions of the secrets the service uses, and a container whose hash differs is replaced. `recreate` stops the old container and starts the new one; `rolling` (`x-tug.rollout.strategy: rolling`) starts the new one on a free host port beside the old one, health-checks it, lets the ingress switch and removes the old one after a drain. Tug names its own network `tug_<project>`, volumes `tug_<project>_<volume>` and containers `tug-<project>-<service>-<hash8>`; service names are network aliases. Reconciliation never removes volumes; `volume.delete` is the only way one goes away.
 - **Compose normalization** (`src/normalize.ts`): `tug deploy` runs `docker compose config` on the operator machine, which does interpolation, `extends`, profiles and `env_file`. Control secrets are interpolated as `@@tug:secret:NAME@@` sentinels that the agent replaces with released values. The CLI reads Compose's YAML rendering because its JSON rendering drops service-level `x-tug`. Control validates the result against an allowlist of keys ([Compose](compose.md#supported-keys)); agents never parse Compose YAML.
@@ -83,7 +83,7 @@ sequenceDiagram
     CLI-->>Op: { ok, node }
 ```
 
-## Self-service enrollment (`tug node-enroll`)
+## Self-service enrollment (`tug node-prepare-enrollment`)
 
 ```mermaid
 sequenceDiagram
@@ -94,8 +94,8 @@ sequenceDiagram
     participant Host as Fresh host
     participant Agent as Agent container
 
-    Op->>CLI: node-enroll --name app1
-    CLI->>Ctrl: POST /api/v1/nodes/enroll-token { name, ttl, uses }
+    Op->>CLI: node-prepare-enrollment --name app1
+    CLI->>Ctrl: POST /api/v1/nodes/enrollment-credential { name, ttl, uses }
     Ctrl->>DB: insert enroll_token (hash, name, uses, expiry)
     Ctrl-->>CLI: { enrollToken, expiresAt }
     CLI-->>Op: docker run ... -e TUG_JOIN_KEY=<key> ... agent
@@ -237,4 +237,4 @@ Agents write generated state under `TUG_STATE_DIR` (default `/var/lib/tug`):
 /var/lib/tug/projects/<project>/rollout.json               # rolling services: active/candidate/draining revisions and the last rejected one
 ```
 
-When agents enroll via `node-enroll`, mount the state directory as a named volume (`-v tug-agent:/var/lib/tug`) so `agent.json` survives container recreation and the agent does not re-enroll after an image update or reboot.
+When agents enroll via `node-prepare-enrollment`, mount the state directory as a named volume (`-v tug-agent:/var/lib/tug`) so `agent.json` survives container recreation and the agent does not re-enroll after an image update or reboot.

@@ -161,7 +161,7 @@ test('install commands render the shipped templates (src in dev, dist in the ima
     const privateEnroll = JSON.parse(
       (
         await cli(
-          'node-enroll',
+          'node-prepare-enrollment',
           '--name',
           'n-private-enroll',
           '--agent-control-url',
@@ -203,19 +203,19 @@ test('install commands render the shipped templates (src in dev, dist in the ima
     );
     assert.doesNotMatch(script, unrenderedVariable, 'no unrendered template variables');
 
-    const enroll = await cli('node-enroll', '--name', 'n-enr', '--mesh');
+    const enroll = await cli('node-prepare-enrollment', '--name', 'n-enr', '--mesh');
     assert.ok(
       enroll.stdout.includes(`'${defaultImage()}' agent`),
-      'node-enroll prints a docker run with the published image for the CLI version',
+      'node-prepare-enrollment prints a docker run with the published image for the CLI version',
     );
     assert.match(
       enroll.stdout,
       /--network host --cap-add NET_ADMIN -e TUG_MESH=true/,
-      'node-enroll --mesh prints a mesh-capable docker run',
+      'node-prepare-enrollment --mesh prints a mesh-capable docker run',
     );
 
     const cloud = await cli(
-      'node-enroll',
+      'node-prepare-enrollment',
       '--name',
       'n-cloud',
       '--install-docker',

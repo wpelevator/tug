@@ -1,6 +1,6 @@
 # Releases
 
-Tug is published as the npm package [`@wpelevator/tug`](https://www.npmjs.com/package/@wpelevator/tug) (bins `tug` and `tug-node`) and as the multi-arch (`linux/amd64`, `linux/arm64`) Docker image `ghcr.io/wpelevator/tug`. The package and image always share one version, and the CLI's install commands default to the image with the CLI's own version.
+Tug is published as the npm package [`@wpelevator/tug`](https://www.npmjs.com/package/@wpelevator/tug) (bins `tug` and `tug-runtime`) and as the multi-arch (`linux/amd64`, `linux/arm64`) Docker image `ghcr.io/wpelevator/tug`. The package and image always share one version, and the CLI's install commands default to the image with the CLI's own version.
 
 ## Changesets
 

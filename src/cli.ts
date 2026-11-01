@@ -34,12 +34,12 @@ import { errMessage, loadTemplate } from './util.ts';
 import { createTransport } from './agent-credential.ts';
 import { decodeCredential, writeFileDurable } from './pki.ts';
 import { backupCheckProblems } from './backup-check.ts';
-import { PROJECT_NAME_PATTERN, ROLES, TOKEN_NAME_PATTERN } from './tokens.ts';
+import { PROJECT_NAME_PATTERN, ROLES, CREDENTIAL_NAME_PATTERN } from './credentials.ts';
 import { packageVersion, resolveImage } from './image.ts';
 import { TERMINAL_DEPLOYMENT_STATES } from './protocol.ts';
 import type {
   DeploymentState,
-  EnrollTokenResponse,
+  EnrollmentCredentialResponse,
   JoinKey,
   IdentityResponse,
 } from './protocol.ts';
@@ -337,7 +337,7 @@ program
 program
   .command('node-disable <name>')
   .description(
-    "block a node's key immediately without deleting its metadata or placement (no SSH needed); bring it back with node-replace",
+    "block a node's key immediately without deleting its metadata or placement (no SSH needed); bring it back with node-replace-identity",
   )
   .action(async (name: string) =>
     console.log(
@@ -625,7 +625,11 @@ async function runNodeIdentity(
   repair = false,
 ): Promise<void> {
   const cfg = await loadCfg();
-  const verb = repair ? 'node-repair' : mode === 'create' ? 'node-install' : 'node-replace';
+  const verb = repair
+    ? 'node-repair-identity'
+    : mode === 'create'
+      ? 'node-install'
+      : 'node-replace-identity';
   if (o.all) {
     const results: { node: string; ok: boolean; error?: string }[] = [];
     for (const [name, settings] of Object.entries(cfg.nodes)) {
@@ -665,13 +669,13 @@ for (const [verb, description, mode, repair] of [
     false,
   ],
   [
-    'node-replace',
+    'node-replace-identity',
     'install a new key on an existing node over SSH: for an expired, lost or suspected key, a disabled node, a CA loss or an older restore',
     'replace',
     false,
   ],
   [
-    'node-repair',
+    'node-repair-identity',
     'move aside corrupt agent credential documents on the node (never service volumes) and replace its identity',
     'replace',
     true,
@@ -690,7 +694,7 @@ for (const [verb, description, mode, repair] of [
 }
 
 program
-  .command('node-enroll')
+  .command('node-prepare-enrollment')
   .description(
     'mint a single-use, name-bound join key so a host you cannot SSH to can self-join with one docker run; a saved cloud-init document contains a credential',
   )
@@ -720,11 +724,15 @@ program
       installDocker?: boolean;
     }) => {
       const connectUrl = o.agentControlUrl ? normalizeControlUrl(o.agentControlUrl) : undefined;
-      const minted = await request<EnrollTokenResponse>('POST', '/api/v1/nodes/enroll-token', {
-        name: o.name,
-        ttlSeconds: Number(o.ttl),
-        labels: o.label.length ? o.label : undefined,
-      });
+      const minted = await request<EnrollmentCredentialResponse>(
+        'POST',
+        '/api/v1/nodes/enrollment-credential',
+        {
+          name: o.name,
+          ttlSeconds: Number(o.ttl),
+          labels: o.label.length ? o.label : undefined,
+        },
+      );
       const keyPayload: JoinKey = {
         v: 2,
         credential: minted.credential,
@@ -1117,7 +1125,7 @@ program
     console.log(JSON.stringify(await request('DELETE', '/api/v1/backup/destination'))),
   );
 program
-  .command('backup-key')
+  .command('backup-repository-password')
   .description(
     "print the project's repository and its password for offline escrow; anyone holding the password and destination credentials can read the project's backups",
   )
@@ -1126,7 +1134,10 @@ program
     const project = c.project || 'site';
     console.log(
       JSON.stringify(
-        await request('GET', `/api/v1/backup/key?project=${encodeURIComponent(project)}`),
+        await request(
+          'GET',
+          `/api/v1/backup/repository-password?project=${encodeURIComponent(project)}`,
+        ),
         null,
         2,
       ),
@@ -1134,7 +1145,7 @@ program
   });
 
 program
-  .command('token-create <name>')
+  .command('credential-create <name>')
   .description(
     'create a named operator credential for CI or a teammate; it is printed once, control keeps no copy of its private key, and it expires after one year at most',
   )
@@ -1159,7 +1170,7 @@ program
     'expire the credential after this many days (default and maximum: 365)',
   )
   .action(async (name: string, o: { role: string; project: string[]; expiresInDays?: string }) => {
-    const created = await request('POST', '/api/v1/tokens', {
+    const created = await request('POST', '/api/v1/credentials', {
       name,
       role: o.role,
       projects: o.project.length ? o.project : undefined,
@@ -1171,16 +1182,22 @@ program
     console.log(JSON.stringify(created, null, 2));
   });
 program
-  .command('token-list')
-  .description('list API tokens with role, projects, expiry and last use; secrets are never shown')
-  .action(async () => console.log(JSON.stringify(await request('GET', '/api/v1/tokens'), null, 2)));
+  .command('credential-list')
+  .description(
+    'list operator credentials with role, projects, expiry and last use; secrets are never shown',
+  )
+  .action(async () =>
+    console.log(JSON.stringify(await request('GET', '/api/v1/credentials'), null, 2)),
+  );
 program
-  .command('token-revoke <name>')
-  .description('revoke an API token immediately; its name stays reserved for the audit trail')
+  .command('credential-revoke <name>')
+  .description(
+    'revoke an operator credential immediately; its name stays reserved for the audit trail',
+  )
   .action(async (name: string) =>
     console.log(
       JSON.stringify(
-        await request('DELETE', `/api/v1/tokens/${encodeURIComponent(name)}`),
+        await request('DELETE', `/api/v1/credentials/${encodeURIComponent(name)}`),
         null,
         2,
       ),
@@ -1266,10 +1283,13 @@ program
 program
   .command('events')
   .description(
-    'list recent events with the token that caused each control action; defaults to the resolved project',
+    'list recent events with the credential that caused each control action; defaults to the resolved project',
   )
   .option('--limit <n>', 'number of events', '100')
-  .option('--all', 'list events across all projects (limited to your projects for scoped tokens)')
+  .option(
+    '--all',
+    'list events across all projects (limited to your projects for scoped credentials)',
+  )
   .action(async (o: CommonOpts & { limit: string; all?: boolean }) => {
     if (o.all && o.project) throw new Error('--all and --project cannot be combined');
     const cfg = await loadCfg();
@@ -1535,11 +1555,11 @@ program.hook('preAction', async (_root, command) => {
   if (options.name && !/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(options.name))
     throw new Error('--name must contain only letters, numbers, dots, underscores or hyphens');
   const connection = command.optsWithGlobals();
-  if (command.name() === 'token-create') {
-    // --project is repeatable here and scopes the new token, so it must not also select the connection project.
-    if (!TOKEN_NAME_PATTERN.test(command.args[0]))
+  if (command.name() === 'credential-create') {
+    // --project is repeatable here and scopes the new credential, so it must not also select the connection project.
+    if (!CREDENTIAL_NAME_PATTERN.test(command.args[0]))
       throw new Error(
-        'token name must be 1-64 letters, numbers, dots, underscores or hyphens, starting with a letter or number',
+        'credential name must be 1-64 letters, numbers, dots, underscores or hyphens, starting with a letter or number',
       );
     for (const project of options.project as string[])
       if (!PROJECT_NAME_PATTERN.test(project))
@@ -1548,7 +1568,7 @@ program.hook('preAction', async (_root, command) => {
         );
     if (options.role === 'admin' && options.project.length)
       throw new Error(
-        'admin tokens cannot be limited to projects; use --role read or --role deploy with --project',
+        'admin credentials cannot be limited to projects; use --role read or --role deploy with --project',
       );
     connection.project = undefined;
   }
@@ -1563,7 +1583,12 @@ program.hook('preAction', async (_root, command) => {
   const nodeName =
     command.name() === 'node-register'
       ? command.args[0]
-      : ['node-install', 'node-replace', 'node-repair', 'node-enroll'].includes(command.name())
+      : [
+            'node-install',
+            'node-replace-identity',
+            'node-repair-identity',
+            'node-prepare-enrollment',
+          ].includes(command.name())
         ? (options.name as string | undefined)
         : undefined;
   applyConfigDefaults(command, options, {

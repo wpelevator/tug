@@ -36,7 +36,7 @@ Deployment boundaries: TCP passthrough works. TLS termination ahead of control d
 
 ### Backups and authorization history
 
-`control-backup` includes `pki/` (except the regenerable server certificate) and the key bindings. Restore validates the CA before changing live state, closes live sessions and requires a restart. Because authorization follows keys, a snapshot older than a certificate renewal does not lock a node out. An older snapshot still forgets nodes and operators created after it, restores keys that were replaced afterwards, and revives principals disabled or revoked afterwards. After an older restore: recover root on the host if needed (`--recover-root`), reapply revocations and disables, run `tug node-replace` for nodes whose key changed and `tug node-install` for nodes created after the snapshot (`tug node-replace --all` after a CA loss).
+`control-backup` includes `pki/` (except the regenerable server certificate) and the key bindings. Restore validates the CA before changing live state, closes live sessions and requires a restart. Because authorization follows keys, a snapshot older than a certificate renewal does not lock a node out. An older snapshot still forgets nodes and operators created after it, restores keys that were replaced afterwards, and revives principals disabled or revoked afterwards. After an older restore: recover root on the host if needed (`--recover-root`), reapply revocations and disables, run `tug node-replace-identity` for nodes whose key changed and `tug node-install` for nodes created after the snapshot (`tug node-replace-identity --all` after a CA loss).
 
 ## Image delivery without a registry
 

@@ -28,7 +28,7 @@ export const agentFile = (stateDir: string) => path.join(stateDir, 'agent.json')
 export const pendingFile = (stateDir: string) => path.join(stateDir, 'agent-pending.json');
 
 const NO_AGENT_IDENTITY =
-  'this node has no identity: run `tug node-install`, `tug node-enroll` or `tug node-repair` from an operator machine';
+  'this node has no identity: run `tug node-install`, `tug node-prepare-enrollment` or `tug node-repair-identity` from an operator machine';
 
 async function readJson(file: string): Promise<unknown | null> {
   let text: string;
@@ -41,9 +41,12 @@ async function readJson(file: string): Promise<unknown | null> {
   try {
     return JSON.parse(text);
   } catch (e) {
-    throw new Error(`${file} is corrupt; run \`tug node-repair\` to replace this node's identity`, {
-      cause: e,
-    });
+    throw new Error(
+      `${file} is corrupt; run \`tug node-repair-identity\` to replace this node's identity`,
+      {
+        cause: e,
+      },
+    );
   }
 }
 
@@ -58,7 +61,7 @@ export async function loadAgentDocument(stateDir: string): Promise<AgentDocument
     return { ...credential, nodeId, nodeName };
   } catch (e) {
     throw new Error(
-      `${agentFile(stateDir)} is invalid (${e instanceof Error ? e.message : String(e)}); run \`tug node-repair\``,
+      `${agentFile(stateDir)} is invalid (${e instanceof Error ? e.message : String(e)}); run \`tug node-repair-identity\``,
       { cause: e },
     );
   }

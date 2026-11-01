@@ -25,7 +25,7 @@ There are ten findings: one critical, seven high and two medium. Severity assume
 
 ### SEC-01: Project scopes do not confine deployment privileges
 
-**Evidence:** `src/tokens.ts:35` grants deployment creation to `deploy`; `src/control.ts:2086` onward uses the shared node inventory without a per-actor node allowlist. `src/compose.ts:297` accepts any absolute bind source. `src/container-spec.ts:247` copies it into Engine `HostConfig.Binds`. External volumes, local-volume `driver_opts` and `cap_add` provide additional privileged surfaces.
+**Evidence:** `src/credentials.ts:35` grants deployment creation to `deploy`; `src/control.ts:2086` onward uses the shared node inventory without a per-actor node allowlist. `src/compose.ts:297` accepts any absolute bind source. `src/container-spec.ts:247` copies it into Engine `HostConfig.Binds`. External volumes, local-volume `driver_opts` and `cap_add` provide additional privileged surfaces.
 
 **Reproduction:** An operator credential limited to project `alpha` successfully submitted a deployment placed on `n2` with `volumes: [{ type: "bind", source: "/var/run/docker.sock", target: "/var/run/docker.sock" }]`. The resulting container plan retained `/var/run/docker.sock:/var/run/docker.sock` unchanged. No real host socket was mounted during the audit.
 

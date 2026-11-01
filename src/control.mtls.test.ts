@@ -101,7 +101,9 @@ test('route classes: operators, nodes and bootstrap keys each reach only their o
       403,
       'node certificates must not use the enrollment route',
     );
-    const minted = await s.call(s.root, 'POST', '/api/v1/nodes/enroll-token', { name: 'n2' });
+    const minted = await s.call(s.root, 'POST', '/api/v1/nodes/enrollment-credential', {
+      name: 'n2',
+    });
     assert.equal(minted.status, 200, 'admins mint join keys');
     for (const [method, route] of [
       ['GET', '/api/v1/nodes'],
@@ -268,7 +270,7 @@ test('disable blocks the node key without deleting it; replace brings the node b
 test('self-enrollment is single-use, name-bound, create-only and retried by key', async () => {
   const s = await start();
   try {
-    const minted = await s.call(s.root, 'POST', '/api/v1/nodes/enroll-token', {
+    const minted = await s.call(s.root, 'POST', '/api/v1/nodes/enrollment-credential', {
       name: 'e1',
       labels: ['app'],
     });
@@ -303,13 +305,15 @@ test('self-enrollment is single-use, name-bound, create-only and retried by key'
       200,
       'the enrolled node authenticates',
     );
-    const again = await s.call(s.root, 'POST', '/api/v1/nodes/enroll-token', { name: 'e1' });
+    const again = await s.call(s.root, 'POST', '/api/v1/nodes/enrollment-credential', {
+      name: 'e1',
+    });
     const replace = await s.call(again.body.credential, 'POST', '/agent/v1/enroll', {
       csr: await createCsr(stranger.privateKeyPem),
     });
     assert.equal(replace.status, 409, 'a join key can never replace an existing node');
-    const m1 = await s.call(s.root, 'POST', '/api/v1/nodes/enroll-token', { name: 'e2' });
-    await s.call(s.root, 'POST', '/api/v1/nodes/enroll-token', { name: 'e2' });
+    const m1 = await s.call(s.root, 'POST', '/api/v1/nodes/enrollment-credential', { name: 'e2' });
+    await s.call(s.root, 'POST', '/api/v1/nodes/enrollment-credential', { name: 'e2' });
     const revoked = await s.call(m1.body.credential, 'POST', '/agent/v1/enroll', { csr });
     assert.equal(revoked.status, 0, 're-minting for a name revokes its previous unconsumed key');
   } finally {
@@ -320,7 +324,10 @@ test('self-enrollment is single-use, name-bound, create-only and retried by key'
 test('operator credentials: scoped, revocable, and revocation closes access immediately', async () => {
   const s = await start();
   try {
-    const created = await s.call(s.root, 'POST', '/api/v1/tokens', { name: 'ci', role: 'read' });
+    const created = await s.call(s.root, 'POST', '/api/v1/credentials', {
+      name: 'ci',
+      role: 'read',
+    });
     assert.equal(created.status, 200, 'admins create operator credentials');
     const ci = decodeCredential(created.body.credential);
     assert.equal(
@@ -334,7 +341,7 @@ test('operator credentials: scoped, revocable, and revocation closes access imme
       'a read credential cannot administer',
     );
     assert.equal(
-      (await s.call(s.root, 'DELETE', '/api/v1/tokens/ci')).status,
+      (await s.call(s.root, 'DELETE', '/api/v1/credentials/ci')).status,
       200,
       'admins revoke',
     );
@@ -344,11 +351,11 @@ test('operator credentials: scoped, revocable, and revocation closes access imme
       'a revoked credential is refused',
     );
     assert.equal(
-      (await s.call(s.root, 'DELETE', '/api/v1/tokens/ci')).status,
+      (await s.call(s.root, 'DELETE', '/api/v1/credentials/ci')).status,
       200,
       'revocation is idempotent',
     );
-    const stillRoot = await s.call(s.root, 'GET', '/api/v1/tokens');
+    const stillRoot = await s.call(s.root, 'GET', '/api/v1/credentials');
     assert.equal(stillRoot.status, 200, 'the verified admin keeps working throughout replacement');
   } finally {
     await s.close();
@@ -358,7 +365,7 @@ test('operator credentials: scoped, revocable, and revocation closes access imme
 test('root recovery replaces only root and closes its old sessions within a second', async () => {
   const s = await start();
   try {
-    const other = await s.call(s.root, 'POST', '/api/v1/tokens', {
+    const other = await s.call(s.root, 'POST', '/api/v1/credentials', {
       name: 'second-admin',
       role: 'admin',
     });
@@ -372,17 +379,17 @@ test('root recovery replaces only root and closes its old sessions within a seco
       await issueHostCredential({ name: 'root', role: 'admin', replace: true }),
     );
     assert.equal(
-      (await s.call(recovered, 'GET', '/api/v1/tokens')).status,
+      (await s.call(recovered, 'GET', '/api/v1/credentials')).status,
       200,
       'the recovered root works',
     );
     assert.equal(
-      (await s.call(s.root, 'GET', '/api/v1/tokens')).status,
+      (await s.call(s.root, 'GET', '/api/v1/credentials')).status,
       0,
       'the old root key is refused',
     );
     assert.equal(
-      (await s.call(second, 'GET', '/api/v1/tokens')).status,
+      (await s.call(second, 'GET', '/api/v1/credentials')).status,
       200,
       'other admins are unaffected',
     );
@@ -402,7 +409,9 @@ test('renewal: a node cannot renew with another node key, and expired or bootstr
       403,
       "a CSR for another node's key must not be signed for this node",
     );
-    const minted = await s.call(s.root, 'POST', '/api/v1/nodes/enroll-token', { name: 'c' });
+    const minted = await s.call(s.root, 'POST', '/api/v1/nodes/enrollment-credential', {
+      name: 'c',
+    });
     assert.equal(
       (await s.call(minted.body.credential, 'POST', '/agent/v1/renew', { csr: a.csr })).status,
       403,

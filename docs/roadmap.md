@@ -76,7 +76,7 @@ Rolling rollouts for ingress-fronted services (start the new revision on its own
 
 ### M4 — Images without a registry, bare-host install (done)
 
-Control stores built images as saved image files and agents download them with their own token, so no registry or daemon change is needed. `deploy --build-local` uploads an image built on the operator's machine. `--install-docker` bootstraps Docker on apt and dnf hosts and in `node-enroll` cloud-init. See [Architecture](architecture.md#image-artifacts). Each deploy transfers the whole image; layer reuse is in [Later](#later--only-if-needed).
+Control stores built images as saved image files and agents download them with their own token, so no registry or daemon change is needed. `deploy --build-local` uploads an image built on the operator's machine. `--install-docker` bootstraps Docker on apt and dnf hosts and in `node-prepare-enrollment` cloud-init. See [Architecture](architecture.md#image-artifacts). Each deploy transfers the whole image; layer reuse is in [Later](#later--only-if-needed).
 
 ### M5 — Streaming channel between agent and control (mostly done)
 
@@ -187,7 +187,7 @@ The test layers, the metrics milestones are held to and the backlog of mocked te
 - [x] M2 networking, DNS, ingress/TLS: WireGuard mesh, `node-rotate-wg-key`, service DNS, `x-tug.ingress`, managed Caddy with `auto`/`custom`/`off` TLS ([Networking](networking.md))
 - [x] M3 rolling deploys with ingress upstream switching, `x-tug.rollout` (`strategy`, `drain`; `maxSurge` not implemented), opt-in automatic rollback, run on real hosts through the public ingress
 - [x] M4 images stored on control, retention tied to rollback history, agent image pruning, `deploy --build-local`; M13 makes this the only built-image delivery path
-- [x] M4 opt-in Docker install for `node-install`/`control-install` (verified on Ubuntu 24.04) and `node-enroll --install-docker` cloud-init (verified on a cloud-init host)
+- [x] M4 opt-in Docker install for `node-install`/`control-install` (verified on Ubuntu 24.04) and `node-prepare-enrollment --install-docker` cloud-init (verified on a cloud-init host)
 - [ ] M4 dnf bootstrap verified on real Fedora and Rocky/AlmaLinux hosts
 - [x] M5 wake channel, faster convergence, non-TTY `exec` with stdin, `logs -f`, `ps`, `inspect`
 - [ ] M5 agent/daemon log streams

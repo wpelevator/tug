@@ -15,7 +15,7 @@ A positional argument names the primary target: the SSH host for `node-install`,
 
 Global options can appear before or after a command. Explicit options take precedence over environment variables, then the overlay, then the tracked config, then defaults. Relative `--config` paths resolve from the working directory. A missing default config is allowed; an explicitly selected missing file, invalid YAML or JSON, an unknown key or an invalid value is an error. `init` can create a new selected file. `--project` applies only to project-scoped operations; status and node operations retain their control-wide scope.
 
-Most commands print the API result as JSON. `init` prints the written config path, `exec` and `logs` write container output to stdout/stderr, and enrollment prints a runnable command or cloud-init document. `ps` and `inspect` print live Docker data as JSON. `node-enroll --json` returns JSON with `command`, and also `cloudInit` with `--install-docker`; its stdout contains no explanatory prose. There is no global `--json` flag. Install preflight and image-transfer tools may also print progress. Errors go to stderr and exit nonzero.
+Most commands print the API result as JSON. `init` prints the written config path, `exec` and `logs` write container output to stdout/stderr, and enrollment prints a runnable command or cloud-init document. `ps` and `inspect` print live Docker data as JSON. `node-prepare-enrollment --json` returns JSON with `command`, and also `cloudInit` with `--install-docker`; its stdout contains no explanatory prose. There is no global `--json` flag. Install preflight and image-transfer tools may also print progress. Errors go to stderr and exit nonzero.
 
 Credentials are never command-line arguments, since arguments can appear in process listings and shell history; use `TUG_CREDENTIAL`, `TUG_CREDENTIAL_FILE` or `tug init`. `secret-set --value` has the same exposure; omit it to read the value from stdin. The credential path belongs in the untracked overlay (see below), never in the tracked config.
 
@@ -42,25 +42,25 @@ Each key is the camelCase of the long flag it supplies a default for, with the s
 | `nodes.<name>.ssh` | `<ssh-target>` | `node-install` |
 | `nodes.<name>.address` | `--address` | `node-install`, `node-register` |
 | `nodes.<name>.publicAddress` | `--public-address` | `node-install`, `node-register` |
-| `label` | `--label` | `node-install`, `node-register`, `node-enroll` |
-| `mesh` | `--mesh` | `node-install`, `node-enroll` |
+| `label` | `--label` | `node-install`, `node-register`, `node-prepare-enrollment` |
+| `mesh` | `--mesh` | `node-install`, `node-prepare-enrollment` |
 | `wgPort` | `--wg-port` | `node-install` |
-| `installDocker` | `--install-docker` | `node-install`, `node-enroll` |
-| `image` | `--image` | `node-install`, `node-enroll` |
-| `agentControlUrl` | `--agent-control-url` | `node-install`, `node-enroll` |
+| `installDocker` | `--install-docker` | `node-install`, `node-prepare-enrollment` |
+| `image` | `--image` | `node-install`, `node-prepare-enrollment` |
+| `agentControlUrl` | `--agent-control-url` | `node-install`, `node-prepare-enrollment` |
 
 The rows from `label` down are node keys: set them under `nodes.<name>`, or once for every node under `nodeDefaults` (everything except `ssh`, `address` and `publicAddress`). Secrets and per-invocation choices have no key: `--value`, `--force`, `--confirm`, `--version`, `--ttl`, `--timeout`, `--build-local-image` and the like.
 
-The file is not desired state and Tug never reconciles against it. Only `node-install`, `node-register` and `node-enroll` read `nodes`, as defaults for flags; every other command asks the control plane. See [Nodes](nodes.md#declaring-nodes-in-the-config-file).
+The file is not desired state and Tug never reconciles against it. Only `node-install`, `node-register` and `node-prepare-enrollment` read `nodes`, as defaults for flags; every other command asks the control plane. See [Nodes](nodes.md#declaring-nodes-in-the-config-file).
 
 ## Setup
 
 - `tug init [<credential-file>|-]` creates the config file with the resolved control URL and project when it is missing, imports the credential (a file, or `-` for stdin) into a `0600` file under `~/.config/tug/credentials/` and points the git-ignored overlay next to the config at it; see [Config file](#config-file). Use global `--control-url`, `--project` or `--config` to select them.
 - `tug control-install <ssh-target> --public-url <https-origin> [--extra-san <name>]... [--mesh] [--install-docker] [--port <port>] [--image <tag>] [--build-local-image] [--credential-out <file>] [--recover-root]` installs control over SSH and, on a fresh install, issues the root credential straight into a `0600` local file. The mTLS port defaults to `8443`. `--recover-root` replaces only root's key from the control host. See [Control plane](control-plane.md).
-- `tug node-disable <node>` blocks a node's key immediately without SSH, deleting or changing placement; `node-replace` brings it back.
-- `tug node-install|node-replace|node-repair [<ssh-target>] --name <node> [--all] [--agent-control-url <url>] [--install-docker] [--address <ip>] [--public-address <ip>] [--label <label>]... [--mesh] [--wg-port <port>] [--image <tag>] [--build-local-image] [--no-wait]` runs the SSH-assisted identity flow (`create`, or `replace` for the latter two; `node-repair` first moves corrupt agent credential documents aside). Without `<ssh-target>` the target is `nodes.<node>.ssh` from the [config file](#config-file); `--all` walks every node with an `ssh` entry, continues after failures and prints per-node results. `--mesh` enables host networking and `NET_ADMIN` and adds WireGuard kernel and UDP-port checks; `--wg-port` defaults to `51820`. See [Nodes](nodes.md).
+- `tug node-disable <node>` blocks a node's key immediately without SSH, deleting or changing placement; `node-replace-identity` brings it back.
+- `tug node-install|node-replace-identity|node-repair-identity [<ssh-target>] --name <node> [--all] [--agent-control-url <url>] [--install-docker] [--address <ip>] [--public-address <ip>] [--label <label>]... [--mesh] [--wg-port <port>] [--image <tag>] [--build-local-image] [--no-wait]` runs the SSH-assisted identity flow (`create`, or `replace` for the latter two; `node-repair-identity` first moves corrupt agent credential documents aside). Without `<ssh-target>` the target is `nodes.<node>.ssh` from the [config file](#config-file); `--all` walks every node with an `ssh` entry, continues after failures and prints per-node results. `--mesh` enables host networking and `NET_ADMIN` and adds WireGuard kernel and UDP-port checks; `--wg-port` defaults to `51820`. See [Nodes](nodes.md).
 - `tug node-register <node> --csr <file> [--mode create|replace]` signs a node-generated CSR and prints the identity response.
-- `tug node-enroll --name <node> [--agent-control-url <url>] [--install-docker] [--label <label>]... [--ttl <seconds>] [--image <tag>] [--mesh] [--json]` mints a single-use, name-bound join key and prints a Docker command, or cloud-init with `--install-docker`. TTL defaults to `3600` seconds. A saved cloud-init document contains a credential. The printed image must be pullable by the new host; a development `tug:local` override must already be loaded there.
+- `tug node-prepare-enrollment --name <node> [--agent-control-url <url>] [--install-docker] [--label <label>]... [--ttl <seconds>] [--image <tag>] [--mesh] [--json]` mints a single-use, name-bound join key and prints a Docker command, or cloud-init with `--install-docker`. TTL defaults to `3600` seconds. A saved cloud-init document contains a credential. The printed image must be pullable by the new host; a development `tug:local` override must already be loaded there.
 - `tug node-remove <node> [--force]` removes a retired node: its agent token, WireGuard peer, statuses and queued commands. It is refused while a current deployment still places a service or volume on the node (deploy without it first) and while its agent is still reporting, unless `--force`. Stop the agent and remove its containers on the host yourself.
 - `tug node-register <node> [--address <ip>] [--public-address <ip>] [--label <label>]...` registers a node and prints its tokens without installing it.
 - `tug node-rotate-wg-key <node> [--timeout <seconds>]` requests a new WireGuard keypair and waits for the result; timeout defaults to `60` seconds.
@@ -87,7 +87,7 @@ Backup commands are flat like the rest of the CLI, and need an admin token.
 - `tug restore-list` shows recent restores; `tug restore-resume <id>` runs an interrupted one again; `tug restore-release <id>` starts the services it stopped and unlocks the project.
 - `tug backup-destination-show` prints the URL and the variable names, never values.
 - `tug backup-destination-remove` removes the destination and its credentials. Existing backups stay in the repository.
-- `tug backup-key` prints the project's repository and its password. Each project has its own restic repository at `<destination>/<project>` with a password derived from control's master key, so keep the printed password with the destination credentials: losing the master key loses every repository.
+- `tug backup-repository-password` prints the project's repository and its password. Each project has its own restic repository at `<destination>/<project>` with a password derived from control's master key, so keep the printed password with the destination credentials: losing the master key loses every repository.
 
 These operations use the resolved project.
 
@@ -107,9 +107,9 @@ Local builds use generated temporary image tags and remove those tags after savi
 
 Scoped credentials for CI and teammates; see [Access control](access-control.md) for roles, scoping and a GitHub Actions example. All three commands need an admin credential.
 
-- `tug token-create <name> --role read|deploy|admin [--project <name> ...] [--expires-in-days <n>]` creates a token and prints it once on stdout. Repeat `--project` to allow several projects; without it the token covers all projects (admin tokens cannot be limited). Here `--project` selects the token's scope rather than the connection project. Names are 1 to 64 letters, numbers, dots, underscores or hyphens, and cannot be reused after revocation. Expiry is at most `3650` days and defaults to never.
-- `tug token-list` lists tokens with role, projects, creator, last use, expiry and revocation, never secrets.
-- `tug token-revoke <name>` revokes a token immediately.
+- `tug credential-create <name> --role read|deploy|admin [--project <name> ...] [--expires-in-days <n>]` creates a token and prints it once on stdout. Repeat `--project` to allow several projects; without it the token covers all projects (admin tokens cannot be limited). Here `--project` selects the token's scope rather than the connection project. Names are 1 to 64 letters, numbers, dots, underscores or hyphens, and cannot be reused after revocation. Expiry is at most `3650` days and defaults to never.
+- `tug credential-list` lists tokens with role, projects, creator, last use, expiry and revocation, never secrets.
+- `tug credential-revoke <name>` revokes a token immediately.
 
 Use a created credential anywhere a credential works, for example `TUG_CREDENTIAL=<credential> tug deploy`.
 

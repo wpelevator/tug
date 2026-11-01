@@ -12,7 +12,7 @@ import type { ComposeFile } from './protocol.ts';
 
 async function server() {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-rollout-'));
-  for (const key of ['TUG_MESH', 'TUG_SERVICE_DNS']) delete process.env[key];
+  for (const key of ['TUG_MESH', 'TUG_SERVICE_NAMES']) delete process.env[key];
   Object.assign(process.env, {
     TUG_DATA_DIR: dir,
   });

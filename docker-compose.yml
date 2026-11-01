@@ -20,7 +20,7 @@ services:
       # Connect-only override; the agent's identity (agent.json) carries the verified public URL.
       TUG_CONTROL_URL: https://control:8443
       TUG_NODE_NAME: dev-node
-      # First boot: create an identity with `tug node-enroll` and pass the join key (or mount a 0600 file).
+      # First boot: create an identity with `tug node-prepare-enrollment` and pass the join key (or mount a 0600 file).
       TUG_JOIN_KEY: ${TUG_JOIN_KEY:-}
       TUG_STATE_DIR: /var/lib/tug
       TUG_APPLY: "false"

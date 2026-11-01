@@ -611,8 +611,8 @@ export interface RenewResponse {
   certificate: string;
 }
 
-/** Response of `POST /api/v1/nodes/enroll-token`: the bootstrap credential, usable once for `POST /agent/v1/enroll`. */
-export interface EnrollTokenResponse {
+/** Response of `POST /api/v1/nodes/enrollment-credential`: the bootstrap credential, usable once for `POST /agent/v1/enroll`. */
+export interface EnrollmentCredentialResponse {
   credential: { v: 1; url: string; ca: string; cert: string; key: string };
   name: string;
   labels: string[];
