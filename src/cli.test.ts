@@ -667,3 +667,30 @@ test('source upload applies Docker ignore semantics and never includes credentia
     await fs.rm(archive, { force: true });
   }
 });
+
+test('source archive excludes a custom credential file and honours character-class ignores', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-classes-'));
+  const archive = path.join(os.tmpdir(), `tug-classes-${Date.now()}.tgz`);
+  try {
+    await fs.mkdir(path.join(dir, 'secrets'));
+    for (const file of ['admin.json', 'secrets/a.pem', 'secrets/b.pem', 'secrets/c.pem', 'app.txt'])
+      await fs.writeFile(path.join(dir, file), 'x');
+    await fs.writeFile(path.join(dir, '.dockerignore'), 'secrets/[ab].pem\nsecrets/[!c].key\n');
+    await createSourceArchive(dir, archive, [path.join(dir, 'admin.json')]);
+    const entries: string[] = [];
+    await tar.t({
+      file: archive,
+      onReadEntry: (entry) => {
+        entries.push(entry.path.replace(/^\.\//, ''));
+      },
+    });
+    assert.deepEqual(
+      entries.filter((entry) => entry && !entry.endsWith('/')).sort(),
+      ['.dockerignore', 'app.txt', 'secrets/c.pem'],
+      'a character class excludes a.pem and b.pem, and a credential file with a custom name is never uploaded',
+    );
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+    await fs.rm(archive, { force: true });
+  }
+});

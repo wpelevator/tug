@@ -37,6 +37,7 @@ test('agent secret fetch is scoped to requested assigned services', async () => 
   const s = await makeServer();
   try {
     const node = await post(s.base, '/api/v1/nodes/register', { name: 'n1' });
+    await post(s.base, '/api/v1/nodes/register', { name: 'n2' });
     await post(s.base, '/api/v1/secrets', { project: 'site', name: 'WEB_SECRET', value: 'web' });
     await post(s.base, '/api/v1/secrets', { project: 'site', name: 'DB_PASSWORD', value: 'db' });
     await post(s.base, '/api/v1/secrets', { project: 'site', name: 'UNUSED', value: 'unused' });

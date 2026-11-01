@@ -18,6 +18,12 @@ async function server() {
   const srv = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));
   });
+  const base = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`;
+  await fetch(`${base}/api/v1/nodes/register`, {
+    method: 'POST',
+    headers: { 'x-tug-test-operator': 'operator', 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'n1' }),
+  });
   return {
     base: `http://127.0.0.1:${(srv.address() as AddressInfo).port}`,
     dbFile,

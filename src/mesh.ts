@@ -2,6 +2,7 @@
 // and the idempotent `wg0` reconcile (agent). All shell-outs go through an injectable HostRunner.
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
+import { isIP } from 'node:net';
 import path from 'node:path';
 import { ensureDir, errMessage } from './util.ts';
 import type { NetworkConfig, WgPeer } from './protocol.ts';
@@ -116,6 +117,24 @@ export function allocateOverlayIp(cidr: string, used: Iterable<string>): string 
   }
   throw new Error(`mesh CIDR ${cidr} has no free overlay addresses`);
 }
+
+const HOST_LABEL = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/i;
+
+/** An IP literal or DNS hostname with no port, brackets, whitespace or other syntax that could reach generated configuration. */
+export const isNodeHost = (value: unknown): value is string =>
+  typeof value === 'string' &&
+  value.length <= 253 &&
+  (isIP(value) !== 0 || value.split('.').every((label) => HOST_LABEL.test(label)));
+
+/** A node host with an optional port: `host`, `host:port` or `[ipv6]:port`. */
+export const isNodeEndpoint = (value: unknown): value is string => {
+  if (typeof value !== 'string') return false;
+  const bracketed = /^\[([^\]]+)\](?::(\d{1,5}))?$/.exec(value);
+  const parts = bracketed ?? (isIP(value) ? null : /^([^:]+)(?::(\d{1,5}))?$/.exec(value));
+  const [host, port] = parts ? [parts[1], parts[2]] : [value, undefined];
+  if (bracketed ? isIP(host) !== 6 : !isNodeHost(host)) return false;
+  return port === undefined || (Number(port) >= 1 && Number(port) <= 65535);
+};
 
 /** `host:port`, adding the WireGuard port when the public address has none. IPv6 literals are bracketed. */
 export function wgEndpoint(

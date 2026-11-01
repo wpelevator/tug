@@ -12,7 +12,17 @@ export interface RunResult {
 export interface RunOptions {
   cwd?: string;
   env?: NodeJS.ProcessEnv;
+  /** Kills the process after this long; defaults to {@link RUN_TIMEOUT_MS}. */
+  timeoutMs?: number;
 }
+
+/** Longest a child process may run before it is killed, so a stalled build cannot hold the control writer forever. */
+export const RUN_TIMEOUT_MS = 30 * 60 * 1000;
+/** Per-stream cap on retained output; the tail is kept because failures are reported last. */
+export const RUN_OUTPUT_LIMIT = 1024 * 1024;
+
+const tail = (text: string, chunk: string) =>
+  (text + chunk).length > RUN_OUTPUT_LIMIT ? (text + chunk).slice(-RUN_OUTPUT_LIMIT) : text + chunk;
 export interface BuildSpec {
   context?: string;
   dockerfile?: string;
@@ -20,17 +30,30 @@ export interface BuildSpec {
 
 export function run(cmd: string, args: string[], opts: RunOptions = {}): Promise<RunResult> {
   return new Promise((resolve, reject) => {
-    const p = spawn(cmd, args, { ...opts, stdio: ['ignore', 'pipe', 'pipe'] });
+    const { timeoutMs = RUN_TIMEOUT_MS, ...spawnOptions } = opts;
+    const p = spawn(cmd, args, { ...spawnOptions, stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '',
       err = '';
-    p.stdout.on('data', (d) => (out += d));
-    p.stderr.on('data', (d) => (err += d));
-    p.on('error', reject);
-    p.on('close', (code) =>
-      code === 0
-        ? resolve({ out, err })
-        : reject(new Error(`${cmd} ${args.join(' ')} failed (${code})\n${out}\n${err}`)),
-    );
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      p.kill('SIGKILL');
+    }, timeoutMs);
+    p.stdout.on('data', (d) => (out = tail(out, String(d))));
+    p.stderr.on('data', (d) => (err = tail(err, String(d))));
+    p.on('error', (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    p.on('close', (code) => {
+      clearTimeout(timer);
+      if (timedOut)
+        reject(
+          new Error(`${cmd} ${args.join(' ')} timed out after ${timeoutMs} ms\n${out}\n${err}`),
+        );
+      else if (code === 0) resolve({ out, err });
+      else reject(new Error(`${cmd} ${args.join(' ')} failed (${code})\n${out}\n${err}`));
+    });
   });
 }
 

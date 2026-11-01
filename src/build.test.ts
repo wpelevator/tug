@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import * as tar from 'tar';
-import { buildImage, run, unpackContext } from './build.ts';
+import { RUN_OUTPUT_LIMIT, buildImage, run, unpackContext } from './build.ts';
 
 test('source extraction accepts regular files and rejects symlinks before extraction', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-source-'));
@@ -70,4 +70,18 @@ test('missing executable errors reject the runner rather than hanging', async ()
     /ENOENT/,
     'a missing Docker/build executable must reject with its actionable spawn error',
   );
+});
+
+test('run kills a stalled process at its deadline and keeps only a bounded output tail', async () => {
+  await assert.rejects(
+    run(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { timeoutMs: 200 }),
+    /timed out after 200 ms/,
+    'a process that never exits must be killed so it cannot hold the control writer',
+  );
+  const { out } = await run(process.execPath, [
+    '-e',
+    "process.stdout.write('x'.repeat(3 * 1024 * 1024) + 'END')",
+  ]);
+  assert.ok(out.length <= RUN_OUTPUT_LIMIT, 'retained output must not exceed the cap');
+  assert.ok(out.endsWith('END'), 'the tail of the output is the part that is kept');
 });
