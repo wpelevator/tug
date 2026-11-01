@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { meshPortCheck } from './cli-install.ts';
+import { defaultAdvertiseUrl, meshPortCheck } from './cli-install.ts';
 
 const PORT = 51820;
 
@@ -144,4 +144,29 @@ test('mesh port check refuses ports outside the valid range', () => {
       /mesh port must be an integer from 1 to 65535/,
       `port ${port} should be rejected before a script is built`,
     );
+});
+
+test('defaultAdvertiseUrl derives the control address from the SSH target', () => {
+  for (const [target, expected] of [
+    ['root@165.232.92.174', 'https://165.232.92.174:8443'],
+    ['control.example.com', 'https://control.example.com:8443'],
+    ['deploy@control.example.com', 'https://control.example.com:8443'],
+    ['ssh://root@10.0.0.3:2222', 'https://10.0.0.3:8443'],
+    ['root@[2001:db8::1]', 'https://[2001:db8::1]:8443'],
+  ] as const)
+    assert.equal(
+      defaultAdvertiseUrl(target, 8443),
+      expected,
+      `${target} should map to ${expected}`,
+    );
+  assert.equal(
+    defaultAdvertiseUrl('root@host', 9099),
+    'https://host:9099',
+    'the published port is part of the default',
+  );
+  assert.throws(
+    () => defaultAdvertiseUrl('root@', 8443),
+    /cannot derive/,
+    'an empty host is rejected',
+  );
 });

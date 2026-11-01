@@ -3,10 +3,10 @@
 ## Install over SSH
 
 ```bash
-tug control-install root@control.example.com --advertise-url https://control.example.com:8443
+tug control-install root@control.example.com
 ```
 
-`control-install` runs SSH preflight checks on the host (Docker, Docker Compose, writable Tug paths, at least 2048 MB free under `/var/lib`, the mTLS port free), then starts the `control` container from `src/templates/control-compose.yml`, publishing one port (default `8443`). Add `--install-docker` to install Docker Engine and Compose first on a supported Debian, Ubuntu, Fedora and RHEL-compatible host.
+The address clients use by default is the SSH target's host plus the published port (`https://control.example.com:8443`); `control-install` prints it. Pass `--advertise-url` to override it, for example when you install through an SSH alias or a private address but clients reach control elsewhere. It is only an address: clients verify the generated control name, not this URL. `control-install` runs SSH preflight checks on the host (Docker, Docker Compose, writable Tug paths, at least 2048 MB free under `/var/lib`, the mTLS port free), then starts the `control` container from `src/templates/control-compose.yml`, publishing one port (default `8443`). Add `--install-docker` to install Docker Engine and Compose first on a supported Debian, Ubuntu, Fedora and RHEL-compatible host.
 
 On a fresh install it then issues the **root** credential on the host (`docker exec ... control issue-credential --name root --role admin` over SSH) and writes it straight to a local `0600` file (`--credential-out`, default `tug-root.credential.json`); it never lands in container logs or a permanent file on control. Upgrading by running `control-install` again preserves credentials and never reissues root. If the root credential is lost, `tug control-install <ssh-target> --advertise-url ... --recover-root` replaces only root's key without the API, closes its sessions within a second and audits the recovery; other admins are unaffected.
 

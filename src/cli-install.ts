@@ -77,3 +77,22 @@ test "$live_key" = "$(wg pubkey < /var/lib/tug/wireguard/private.key)"
 test "$live_key" = "$(cat /var/lib/tug/wireguard/reported.pub)"`)}
 `;
 }
+
+/**
+ * The default `--advertise-url` for `control-install`: the SSH target's host and the published port. Accepts
+ * `host`, `user@host`, `ssh://user@host:2222` and bracketed IPv6. An SSH alias from ~/.ssh/config is used as written,
+ * so pass `--advertise-url` when the alias is not a name or address clients can reach.
+ */
+export function defaultAdvertiseUrl(sshTarget: string, port: number | string): string {
+  let host = sshTarget
+    .trim()
+    .replace(/^ssh:\/\//, '')
+    .replace(/\/.*$/, '');
+  host = host.replace(/^[^@]*@/, '');
+  const bracketed = /^\[([^\]]+)\]/.exec(host);
+  if (bracketed) host = bracketed[1];
+  else if (host.split(':').length === 2) host = host.split(':')[0];
+  if (!host || /[\s'"]/.test(host))
+    throw new Error(`cannot derive a host from SSH target ${sshTarget}`);
+  return `https://${host.includes(':') ? `[${host}]` : host}:${port}`;
+}

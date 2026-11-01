@@ -79,12 +79,14 @@ test('install commands render the shipped templates (src in dev, dist in the ima
       'control-install',
       'root@bare.test',
       '--install-docker',
-      '--advertise-url',
-      'https://bare.test:8443',
       '--credential-out',
       path.join(dir, 'root.out.json'),
     );
     script = await fs.readFile(ssh.log, 'utf8');
+    assert.ok(
+      script.includes('TUG_ADVERTISE_URL: "https://bare.test:8443"'),
+      'without --advertise-url the SSH target host and the default port are advertised',
+    );
     assert.doesNotMatch(
       script,
       /TUG_REGISTRY|registry-auth/,

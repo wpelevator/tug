@@ -16,6 +16,7 @@ import {
   HOST_NETWORK_FLAG,
   MESH_RUN_FLAGS,
   CONTROL_CONTAINER,
+  defaultAdvertiseUrl,
   controlPortCheck,
   localImageBuildArgs,
   meshPortCheck,
@@ -429,9 +430,9 @@ program
   .description(
     'install the control plane on a Docker-capable host over SSH and issue the root credential into a local 0600 file; it listens for mTLS only, so front it with TCP passthrough rather than a terminating proxy',
   )
-  .requiredOption(
+  .option(
     '--advertise-url <url>',
-    'credential-free https origin clients use, including the published port',
+    "credential-free https origin clients use by default, including the port (default: the SSH target's host and --port). It is an address, not the identity: clients verify a name generated from the CA",
   )
   .option(
     '--extra-san <name>',
@@ -469,7 +470,7 @@ program
     async (
       sshTarget: string,
       o: InstallOpts & {
-        advertiseUrl: string;
+        advertiseUrl?: string;
         extraSan: string[];
         port: string;
         credentialOut: string;
@@ -477,7 +478,13 @@ program
         mesh?: boolean;
       },
     ) => {
-      const advertiseUrl = normalizeControlUrl(o.advertiseUrl);
+      const advertiseUrl = normalizeControlUrl(
+        o.advertiseUrl ?? defaultAdvertiseUrl(sshTarget, o.port),
+      );
+      if (!o.advertiseUrl)
+        console.error(
+          `advertise URL defaulted to ${advertiseUrl}; pass --advertise-url if clients reach control at another address`,
+        );
       if (o.installDocker) await bootstrapDocker(sshTarget, true);
       preflightRemote(sshTarget, { ports: [Number(o.port)], minDiskMb: 2048, compose: true });
       const image = resolveImage(o.image, o.buildLocalImage);

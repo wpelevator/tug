@@ -56,7 +56,7 @@ Install the CLI (Node >= 22.18), or run it without installing through `npx @wpel
 
 ```bash
 npm install -g @wpelevator/tug
-tug control-install root@203.0.113.5 --advertise-url https://203.0.113.5:8443 --install-docker
+tug control-install root@203.0.113.5 --install-docker
 tug init tug-root.credential.json
 tug node-install root@198.51.100.7 --name app1 --install-docker
 tug deploy -f docker-compose.yml
