@@ -352,7 +352,7 @@ test('the route table matches the live router, so a new /api/v1 route without a 
     interface Layer {
       route?: { path: string; methods: Record<string, boolean> };
     }
-    const stack = (s.app as unknown as { _router: { stack: Layer[] } })._router.stack;
+    const stack = (s.app as unknown as { router: { stack: Layer[] } }).router.stack;
     const live = stack
       .flatMap((layer) =>
         layer.route && layer.route.path.startsWith('/api/v1')

@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runLoad, summarize } from './load.mjs';
 import { cases } from './cases.mjs';
-import yaml from 'js-yaml';
+import * as yaml from 'js-yaml';
 
 test('summary reports nearest-rank percentiles and successful throughput', () => {
   const result = summarize([5, 1, 4, 2, 3], 2000, 2, 1);

@@ -822,12 +822,14 @@ export async function createApp(
     route(method, url, [guard(role, resolve ?? undefined), ...handlers]);
   };
   const deploymentProject: ProjectResolver = (req) =>
-    db.get<{ project_id: string }>('SELECT project_id FROM deployments WHERE id=?', req.params.id)
-      ?.project_id;
+    db.get<{ project_id: string }>(
+      'SELECT project_id FROM deployments WHERE id=?',
+      String(req.params.id),
+    )?.project_id;
   const commandProject: ProjectResolver = (req) => {
     const row = db.get<{ project_id: string | null }>(
       'SELECT project_id FROM commands WHERE id=?',
-      req.params.id,
+      String(req.params.id),
     );
     return row ? row.project_id : undefined;
   };
@@ -1289,8 +1291,9 @@ export async function createApp(
   api(
     'get',
     '/api/v1/projects/:project',
-    (req) => req.params.project,
-    async (req, res) => res.json(db.get('SELECT * FROM projects WHERE id=?', req.params.project)),
+    (req) => String(req.params.project),
+    async (req, res) =>
+      res.json(db.get('SELECT * FROM projects WHERE id=?', String(req.params.project))),
   );
 
   /** A node whose agent has been seen before but not within TUG_STALE_SECONDS; never-seen (just registered) nodes stay schedulable. */
@@ -1404,7 +1407,7 @@ export async function createApp(
   // The node generates its key and CSR; an admin posts the CSR here. The private key is never transmitted.
   api('post', '/api/v1/nodes/:name/identity', null, async (req, res) => {
     const body: Partial<IdentityRequest> = req.body ?? {};
-    const name = req.params.name;
+    const name = String(req.params.name);
     if (body.mode !== 'create' && body.mode !== 'replace')
       return res.status(400).json({ error: "mode must be 'create' or 'replace'" });
     const url = publicUrl();
@@ -1582,7 +1585,7 @@ export async function createApp(
   });
   // Blocks a node's key without deleting its metadata or changing placement. It returns only through node-replace-identity.
   api('post', '/api/v1/nodes/:name/disable', null, async (req, res) => {
-    const node = findNode(req.params.name);
+    const node = findNode(String(req.params.name));
     if (!node) return res.status(404).json({ error: 'node not found' });
     db.run(
       "UPDATE nodes SET disabled_at=COALESCE(disabled_at,?),status='disabled',updated_at=? WHERE id=?",
@@ -1650,7 +1653,7 @@ export async function createApp(
   api('post', '/api/v1/nodes/:name/rotate-wg-key', null, async (req, res) => {
     if (!MESH)
       return res.status(409).json({ error: 'the WireGuard mesh is not enabled (TUG_MESH=true)' });
-    const node = findNode(req.params.name);
+    const node = findNode(String(req.params.name));
     if (!node) return res.status(404).json({ error: 'node not found' });
     res.json({ commandId: queueCommand(node.id, null, 'wg.rotate-key'), nodeId: node.id });
   });
@@ -1659,8 +1662,8 @@ export async function createApp(
   api('delete', '/api/v1/nodes/:name', null, async (req, res) => {
     const node = db.get<Pick<NodeRow, 'id' | 'name' | 'last_seen_at'>>(
       'SELECT id,name,last_seen_at FROM nodes WHERE name=? OR id=?',
-      req.params.name,
-      req.params.name,
+      String(req.params.name),
+      String(req.params.name),
     );
     if (!node) return res.status(404).json({ error: 'node not found' });
     const referenced: string[] = [];
@@ -1698,7 +1701,7 @@ export async function createApp(
     res.json({ ok: true, node: node.name });
   });
   api('post', '/api/v1/nodes/:name/ingress', null, async (req, res) => {
-    const node = findNode(req.params.name);
+    const node = findNode(String(req.params.name));
     if (!node) return res.status(404).json({ error: 'node not found' });
     const enabled = req.body.enabled !== false;
     db.run('UPDATE nodes SET ingress=?,updated_at=? WHERE id=?', enabled ? 1 : 0, now(), node.id);
@@ -1740,15 +1743,15 @@ export async function createApp(
     res.json({ credentials: listCredentials(db) }),
   );
   api('delete', '/api/v1/credentials/:name', null, async (req, res) => {
-    if (!revokeCredential(db, req.params.name))
+    if (!revokeCredential(db, String(req.params.name)))
       return res.status(404).json({ error: 'token not found' });
     reconcileSockets();
     audit(req.actor!, {
       type: 'credential.revoke',
-      message: `token ${req.params.name} revoked by ${req.actor!.name}`,
-      metadata: { name: req.params.name },
+      message: `token ${String(req.params.name)} revoked by ${req.actor!.name}`,
+      metadata: { name: String(req.params.name) },
     });
-    res.json({ ok: true, name: req.params.name });
+    res.json({ ok: true, name: String(req.params.name) });
   });
 
   const backupDestination = () =>
@@ -1845,12 +1848,12 @@ export async function createApp(
     res.json({ restores: restores.list(String(req.query.project || 'site')) }),
   );
   api('post', '/api/v1/restores/:id/release', null, async (req, res) => {
-    const result = restores.releaseInterrupted(req.params.id);
+    const result = restores.releaseInterrupted(String(req.params.id));
     if ('error' in result) return res.status(result.status).json({ error: result.error });
     res.json(result);
   });
   api('post', '/api/v1/restores/:id/resume', null, async (req, res) => {
-    const result = restores.resume(req.params.id);
+    const result = restores.resume(String(req.params.id));
     if ('error' in result) return res.status(result.status).json({ error: result.error });
     res.json(result);
   });
@@ -2004,15 +2007,15 @@ export async function createApp(
     const removed = db.run(
       'DELETE FROM secrets WHERE project_id=? AND name=?',
       project,
-      req.params.name,
+      String(req.params.name),
     );
     if (removed.changes) {
       wakeAll(project);
       audit(req.actor!, {
         type: 'secret.delete',
         project,
-        message: `secret ${req.params.name} deleted by ${req.actor!.name}`,
-        metadata: { name: req.params.name },
+        message: `secret ${String(req.params.name)} deleted by ${req.actor!.name}`,
+        metadata: { name: String(req.params.name) },
       });
     }
     res.json({ ok: true });
@@ -2476,14 +2479,14 @@ export async function createApp(
     const allowed = states.some((state) =>
       Object.values(state.services).some(
         (service) =>
-          service.artifact?.buildId === req.params.buildId &&
+          service.artifact?.buildId === String(req.params.buildId) &&
           (!service.placement.nodes?.length || service.placement.nodes.includes(req.node!.name)),
       ),
     );
     if (!allowed) return res.status(404).json({ error: 'image not found' });
     const row = db.get<BuildRow>(
       'SELECT * FROM builds WHERE id=? AND state=?',
-      req.params.buildId,
+      String(req.params.buildId),
       'complete',
     );
     if (!row?.artifact_path) return res.status(404).json({ error: 'image not found' });
@@ -2502,11 +2505,14 @@ export async function createApp(
   });
 
   api('get', '/api/v1/deployments/:id', deploymentProject, async (req, res) =>
-    res.json(db.get('SELECT * FROM deployments WHERE id=?', req.params.id)),
+    res.json(db.get('SELECT * FROM deployments WHERE id=?', String(req.params.id))),
   );
   api('post', '/api/v1/deployments/:id/cancel', deploymentProject, async (req, res) =>
     withPublication(() => {
-      const row = db.get<DeploymentRow>('SELECT * FROM deployments WHERE id=?', req.params.id);
+      const row = db.get<DeploymentRow>(
+        'SELECT * FROM deployments WHERE id=?',
+        String(req.params.id),
+      );
       if (!row) return res.status(404).json({ error: 'deployment not found' });
       if (!(ACTIVE_DEPLOYMENT_STATES as readonly string[]).includes(row.state))
         return res.status(409).json({ error: `deployment is ${row.state}` });
@@ -2514,7 +2520,7 @@ export async function createApp(
         `UPDATE deployments SET state=?,updated_at=? WHERE id=? AND state IN (${ACTIVE_STATES_SQL})`,
         'cancelled',
         now(),
-        req.params.id,
+        String(req.params.id),
       );
       if (result.changes !== 1)
         return res.status(409).json({ error: 'deployment is no longer active' });
@@ -2565,7 +2571,7 @@ export async function createApp(
       const volume = db.get<VolumeRow>(
         'SELECT * FROM volumes WHERE project_id=? AND name=?',
         project,
-        req.params.name,
+        String(req.params.name),
       );
       if (!volume) return res.status(404).json({ error: 'volume not found' });
       const config = JSON.parse(volume.config_json || '{}');
@@ -2579,7 +2585,8 @@ export async function createApp(
         const inUse = Object.entries(state.compose?.services || {})
           .filter(([, svc]) =>
             (svc.volumes || []).some(
-              (v) => (typeof v === 'string' ? v.split(':')[0] : v.source) === req.params.name,
+              (v) =>
+                (typeof v === 'string' ? v.split(':')[0] : v.source) === String(req.params.name),
             ),
           )
           .map(([name]) => name);
@@ -2592,10 +2599,10 @@ export async function createApp(
       if (deleteData && volume.node_id) {
         commandId = queueCommand(volume.node_id, project, 'volume.delete', {
           project,
-          volume: req.params.name,
+          volume: String(req.params.name),
         });
       }
-      db.run('DELETE FROM volumes WHERE project_id=? AND name=?', project, req.params.name);
+      db.run('DELETE FROM volumes WHERE project_id=? AND name=?', project, String(req.params.name));
       res.json({ ok: true, commandId, deletedMetadata: true, deleteData });
     } catch (e) {
       sendError(res, e);
@@ -2819,7 +2826,7 @@ export async function createApp(
     res.json({ commandId: cmdId, nodeId: node.id });
   });
   api('get', '/api/v1/commands/:id', commandProject, async (req, res) =>
-    res.json(db.get('SELECT * FROM commands WHERE id=?', req.params.id)),
+    res.json(db.get('SELECT * FROM commands WHERE id=?', String(req.params.id))),
   );
   api('get', '/api/v1/status', null, async (req, res) => {
     const staleSeconds = Number(process.env.TUG_STALE_SECONDS || 60);

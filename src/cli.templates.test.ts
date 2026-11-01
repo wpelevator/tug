@@ -8,7 +8,7 @@ import { promisify } from 'node:util';
 import { startMtlsControl } from '../tests/helpers.ts';
 import { createCsr, generateKeyPair } from './pki.ts';
 import { defaultImage } from './image.ts';
-import yaml from 'js-yaml';
+import * as yaml from 'js-yaml';
 
 const execFileAsync = promisify(execFile);
 // `src/cli.ts` in dev; `CLI_ENTRY=dist/cli.js npm run test:smoke:dist` checks the built output.

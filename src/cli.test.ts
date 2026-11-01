@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import yaml from 'js-yaml';
+import * as yaml from 'js-yaml';
 import * as tar from 'tar';
 import { writeCredentialFile } from '../tests/helpers.ts';
 import { resolveCliConfig, integerOption } from './cli-config.ts';

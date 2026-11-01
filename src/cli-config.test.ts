@@ -57,7 +57,7 @@ test('a YAML config and the same content as JSON resolve to the same settings, a
     await fs.writeFile(path.join(dir, 'tug.yml'), YAML);
     const fromYaml = await resolveCliConfig({}, {}, dir);
     const json = path.join(dir, 'other.json');
-    const body = (await import('js-yaml')).default.load(YAML);
+    const body = (await import('js-yaml')).load(YAML);
     await fs.writeFile(json, JSON.stringify(body));
     const fromJson = await resolveCliConfig({ config: json }, {}, dir);
     assert.deepEqual(

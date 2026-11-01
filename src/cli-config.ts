@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import yaml from 'js-yaml';
+import * as yaml from 'js-yaml';
 import { decodeCredential } from './pki.ts';
 import type { Credential } from './pki.ts';
 import { errMessage } from './util.ts';

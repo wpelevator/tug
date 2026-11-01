@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import yaml from 'js-yaml';
+import * as yaml from 'js-yaml';
 import { resolveBackups } from './backup-config.ts';
 import { buildDesiredState, validateCompose } from './compose.ts';
 import type { ComposeFile } from './protocol.ts';
