@@ -1,6 +1,6 @@
 {
   "name": "@wpelevator/tug",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Portable VPS deployments with Docker Compose",
   "repository": {
     "type": "git",
