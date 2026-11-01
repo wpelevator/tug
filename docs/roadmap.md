@@ -203,7 +203,7 @@ The test layers, the metrics milestones are held to and the backlog of mocked te
 - [ ] M9 `/readyz`, sample alert rules, and the metrics documentation test gate
 - [x] M10 published ports bound to the overlay, loopback or node address by default; `doctor` reports public listeners
 - [x] M11 spec written
-- [x] M11 `x-tug.backup` (generic: a command in a service, or a volume's files), scheduled backups to S3-compatible storage with restic, catalog, `backup-run`, `backup-list`, `restore` (verified against real Docker; not yet on real hosts or a real bucket)
+- [x] M11 `x-tug.backup` (generic: a command in a service, or a volume's files), scheduled backups to S3-compatible storage with restic, catalog, `backup-run`, `backup-list`, `restore` (verified against real Docker and on two real hosts with an S3-compatible server and a scheduled run: [Real-host evaluation](real-host-evaluation.md#generic-backups-restore-and-tug-run-on-fresh-hosts-1-november-2026); not yet against AWS S3)
 - [x] M11 `tug run` one-off containers
 - [ ] M11 `x-tug.release` run-once hooks
 - [ ] M11 weekly maintenance (`restic check`, prune), restore drill, `backup-destination-test`, SFTP
