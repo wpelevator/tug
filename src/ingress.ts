@@ -1,6 +1,6 @@
-// Service endpoints (health-aware DNS source), ingress route resolution and Caddyfile rendering
+// Service endpoints (the source of cross-node service names), ingress route resolution and Caddyfile rendering
 // on the control side; the managed Caddy container reconcile on the agent side. Docker access goes
-// through the injectable DockerRunner.
+// through the injectable DockerApi.
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';

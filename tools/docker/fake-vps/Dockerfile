@@ -1,13 +1,8 @@
 FROM node:24-bookworm-slim
 WORKDIR /app
-ARG DOCKER_COMPOSE_VERSION=2.32.4
+# A fake VPS is a node: Docker Engine only. Agents use the Engine API, so there is no Compose plugin.
 RUN apt-get update \
   && apt-get install -y --no-install-recommends docker.io ca-certificates iptables bash curl wireguard-tools iproute2 iputils-ping \
-  && arch="$(dpkg --print-architecture)" \
-  && case "$arch" in amd64) compose_arch=x86_64 ;; arm64) compose_arch=aarch64 ;; *) echo "unsupported arch $arch" >&2; exit 1 ;; esac \
-  && mkdir -p /usr/local/lib/docker/cli-plugins \
-  && curl -fsSL "https://github.com/docker/compose/releases/download/v${DOCKER_COMPOSE_VERSION}/docker-compose-linux-${compose_arch}" -o /usr/local/lib/docker/cli-plugins/docker-compose \
-  && chmod +x /usr/local/lib/docker/cli-plugins/docker-compose \
   && rm -rf /var/lib/apt/lists/*
 COPY package*.json ./
 RUN npm install --omit=dev

@@ -108,7 +108,7 @@ export function loopbackIngressServices(
     .sort();
 }
 
-/** Where `composeForNode` binds published ports that name no host IP. */
+/** Where the agent's container definitions bind published ports that name no host IP. */
 export interface PortBind {
   address: string;
   loopback?: ReadonlySet<string>;
