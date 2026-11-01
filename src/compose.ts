@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { resolveBackups, validateBackupDefaults } from './backup-config.ts';
 import { isDuration } from './util.ts';
 import { sentinelNames } from './normalize.ts';
 import type {
@@ -215,9 +216,11 @@ function validateProjectExtension(compose: ComposeFile, errors: string[]): void 
     return;
   }
   for (const key of Object.keys(ext))
-    if (key !== 'rollback') errors.push(`x-tug.${key} is not supported (supported: rollback)`);
+    if (key !== 'rollback' && key !== 'backup')
+      errors.push(`x-tug.${key} is not supported (supported: rollback, backup)`);
   if (ext.rollback !== undefined && !['auto', 'manual'].includes(ext.rollback))
     errors.push('x-tug.rollback must be auto or manual');
+  validateBackupDefaults(ext.backup, errors);
 }
 
 /** Service keys the agent can create a container from; anything else is rejected with its name. */
@@ -364,6 +367,7 @@ export function validateCompose(
   }
   validateTopLevel(compose, errors);
   validateProjectExtension(compose, errors);
+  errors.push(...resolveBackups(compose).errors);
   if (errors.length) throw new Error(errors.join('; '));
 }
 
