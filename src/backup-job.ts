@@ -1,6 +1,6 @@
 import { Transform } from 'node:stream';
 import { redactSecrets } from './backup-destination.ts';
-import { LABEL_PROJECT, LABEL_SERVICE } from './container-spec.ts';
+import { LABEL_JOB, LABEL_PROJECT, LABEL_SERVICE } from './container-spec.ts';
 import type { AttachedProcess, CreateContainerBody, DockerApi } from './docker-api.ts';
 import type {
   BackupCredentialsResponse,
@@ -12,7 +12,6 @@ import type {
 
 /** Docker volume holding restic's cache across jobs, so repeated runs do not re-read the repository index. */
 export const RESTIC_CACHE_VOLUME = 'tug_restic_cache';
-export const LABEL_JOB = 'tug.job';
 const TAIL_BYTES = 4096;
 const OUTPUT_LIMIT = 64 * 1024;
 

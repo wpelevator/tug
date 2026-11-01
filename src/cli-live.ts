@@ -10,6 +10,8 @@ export interface LiveInput {
   node?: string;
   command?: string[];
   interactive?: boolean;
+  /** `tug run`: a one-off container instead of the running one. */
+  oneOff?: boolean;
   tty?: boolean;
   tail?: string | number;
 }
@@ -49,6 +51,7 @@ export function parseLiveRequest(
     command,
     interactive: input.interactive ?? false,
     tty: input.tty ?? false,
+    ...(input.oneOff ? { oneOff: true } : {}),
   };
 }
 

@@ -108,10 +108,10 @@ Working plan: `plan-backups.md`.
 
 The stateful half of principle 5, and something a central control plane does better than a mesh: one schedule, one catalog, retention and restore.
 
-- `x-tug.backup` on services and volumes: `type` (`mariadb`/`mysql`, `postgres`, `volume`), `schedule`, `retention`. Control schedules backups as agent commands on the placement node; the agent runs `mariadb-dump` or `pg_dump` in a helper container, or archives the volume, and uploads with restic to a destination configured on control (S3-compatible first, SFTP second, control disk for development only), encrypted before leaving the node.
-- A backup catalog in the control database, `tug backup run|list` and `tug restore SERVICE|VOLUME [--from ID]`, with restores taking the project lock and stopping writers first.
-- Failed or missed backups emit events and, with M8, webhooks.
-- Run-once jobs: `tug run SERVICE -- cmd` runs a one-off container from the service's current image on one of its nodes with its secrets and networks, and `x-tug.release` declares a command (for example `wp core update-db`) that runs once per deployment before or after rollout, with its output and exit code recorded on the deployment and a failure stopping the rollout.
+- **Done: generic backups.** `x-tug.backup` marks a service or a volume. Tug has no database support of its own: a service backup is a `command` run in the running container whose output is stored (database recipes are documentation), a volume backup archives its files. Control schedules them as agent commands on the placement node; the agent streams into restic in a helper container, uploading to a destination configured on control (S3-compatible, encrypted before leaving the node), one repository per project. Retention, a catalog, `backup-run` and `backup-list`, and `backup.*` events for completed, failed, missed and stale runs. See [Backups](backups.md).
+- **Done: restore.** `tug restore` locks the project, stops the services that write to the target, takes a safety backup, restores through the service's own `restore` command or the volume's files, and starts them again; an interrupted restore keeps the writers stopped until resumed or released. A scratch restore of a volume touches nothing live.
+- **Done: `tug run`.** `tug run SERVICE -- cmd` runs a one-off container with the service's image, environment, secrets, network and mounts, returns the exit code and is audited.
+- Not done: `x-tug.release` (a command that runs once per deployment before or after rollout, recorded on the deployment, a failure stopping the rollout), SFTP and postgres-free extras such as a weekly `restic check`/prune, a restore drill, `destination test`, and failed or missed backups as webhooks (M8).
 - Moving a stateful service to another node (`tug move SERVICE --to NODE`) as backup, stop, restore and re-place, since the pieces are the same.
 
 ### M12 — Container networking over the mesh
@@ -202,9 +202,11 @@ The test layers, the metrics milestones are held to and the backlog of mocked te
 - [ ] M9 `GET /metrics` on control (Prometheus text, `read` token), with agent-reported node and service stats
 - [ ] M9 `/readyz`, sample alert rules, and the metrics documentation test gate
 - [x] M10 published ports bound to the overlay, loopback or node address by default; `doctor` reports public listeners
-- [ ] M11 spec written
-- [ ] M11 `x-tug.backup`, scheduled backups to S3-compatible storage with restic, catalog, `backup run|list`, `restore`
-- [ ] M11 `tug run` and `x-tug.release` run-once jobs
+- [x] M11 spec written
+- [x] M11 `x-tug.backup` (generic: a command in a service, or a volume's files), scheduled backups to S3-compatible storage with restic, catalog, `backup-run`, `backup-list`, `restore` (verified against real Docker; not yet on real hosts or a real bucket)
+- [x] M11 `tug run` one-off containers
+- [ ] M11 `x-tug.release` run-once hooks
+- [ ] M11 weekly maintenance (`restic check`, prune), restore drill, `backup-destination-test`, SFTP
 - [ ] M11 `tug move` for stateful services
 - [ ] M12 spec written (subnets, resolver, rollout changes, MTU, IPv6, network recreation)
 - [ ] M12 per-node container subnets over WireGuard and per-node service DNS, mesh stays opt-in

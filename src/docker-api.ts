@@ -36,7 +36,14 @@ export interface ContainerInspect {
   Id: string;
   Name: string;
   Image?: string;
-  Config?: { Image?: string; Labels?: Record<string, string>; Env?: string[] };
+  Config?: {
+    Image?: string;
+    Labels?: Record<string, string>;
+    Env?: string[];
+    User?: string;
+    WorkingDir?: string;
+  };
+  HostConfig?: { NetworkMode?: string; Binds?: string[]; Mounts?: unknown[] };
   State?: {
     Status?: string;
     Running?: boolean;

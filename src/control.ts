@@ -233,7 +233,18 @@ function parseLiveRequest(value: unknown): LiveRequest {
     return value as unknown as LiveRequest;
   if (
     value.operation === 'exec' &&
-    frameKeys(value, [...common, 'service', 'command', 'interactive', 'tty', 'columns', 'rows']) &&
+    frameKeys(value, [
+      ...common,
+      'service',
+      'command',
+      'interactive',
+      'tty',
+      'columns',
+      'rows',
+      'oneOff',
+    ]) &&
+    (value.oneOff === undefined || value.oneOff === true) &&
+    (value.oneOff !== true || (value.interactive === false && value.tty === false)) &&
     Array.isArray(value.command) &&
     value.command.length > 0 &&
     value.command.length <= 256 &&
@@ -990,6 +1001,17 @@ export async function createApp(
       throw httpError(400, 'operation requires --node because placement is ambiguous');
     const node = nodes.find((node) => node.name === (request.node || [...eligible][0]));
     if (!node) throw httpError(404, 'no eligible node for this operation');
+    if (request.operation === 'exec' && request.oneOff)
+      audit(actor, {
+        type: 'job.run',
+        project: request.project,
+        message: `${actor.name} ran a one-off ${request.service} container on ${node.name}: ${request.command.join(' ').slice(0, 200)}`,
+        metadata: {
+          service: request.service,
+          node: node.name,
+          command: request.command.slice(0, 64),
+        },
+      });
     return node;
   }, options.liveStartTimeoutMs);
   streamRuntimes.set(app, {

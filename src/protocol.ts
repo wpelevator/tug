@@ -350,6 +350,8 @@ export type LiveRequest =
       tty: boolean;
       columns?: number;
       rows?: number;
+      /** Run the command in a new container cloned from the service's, instead of in the running one. */
+      oneOff?: boolean;
     }
   | {
       operation: 'logs';

@@ -167,6 +167,7 @@ test('backup commands are listed in help', async () => {
     'restore-list',
     'restore-resume',
     'restore-release',
+    'run',
   ])
     assert.ok(help.includes(name), `help should list ${name}`);
 });

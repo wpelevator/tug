@@ -1276,6 +1276,17 @@ program
     },
   );
 program
+  .command('run <service> [command...]')
+  .description(
+    "run a one-off command in a new container from the service: same image, environment, secrets, network and mounts, removed afterwards (for example: tug run web -- wp core update-db). Exits with the command's exit code",
+  )
+  .option('--node <name>', 'select the node when a service has multiple placements')
+  .action(async (service: string, command: string[], o: { node?: string }) => {
+    if (!command.length)
+      throw new Error('run needs a command, such as: tug run web -- wp core update-db');
+    await runLive('exec', { service, command, node: o.node, oneOff: true });
+  });
+program
   .command('ps')
   .description('print per-container state as JSON')
   .option('--node <name>', 'select one node')

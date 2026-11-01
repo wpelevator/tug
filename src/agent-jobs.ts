@@ -90,6 +90,11 @@ export class JobRunner {
     return this.ready;
   }
 
+  /** Starts cleanup of a previous process's leftovers; safe to call more than once. */
+  warm(): Promise<void> {
+    return this.init();
+  }
+
   /** Queues a job; the command is acknowledged immediately and its result arrives later. */
   async start(command: Command): Promise<void> {
     await this.init();

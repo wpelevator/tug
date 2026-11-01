@@ -137,6 +137,8 @@ function jobRunnerFor(ctx: AgentContext): JobRunner {
         ),
     });
     jobRunners.set(ctx.stateDir, runner);
+    // Clear helper containers a previous agent process left behind, before any live session can start one.
+    void runner.warm();
   }
   return runner;
 }
@@ -550,6 +552,7 @@ export class AgentLiveOperations {
           container,
           command: request.command,
           interactive: request.interactive,
+          oneOff: (request as { oneOff?: boolean }).oneOff,
           tty: request.tty,
           columns: request.columns,
           rows: request.rows,
