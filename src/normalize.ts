@@ -52,6 +52,21 @@ export function composeConfigArgs(file: string, project?: string): string[] {
 }
 
 /**
+ * `docker compose config` writes every literal `$` as `$$` so its output can be fed back to Compose. Tug does not
+ * interpolate again, so a command like `sh -c 'echo $$HOME'` would reach the container with the doubled dollar,
+ * where a shell reads `$$` as its own process ID. Undoing the escaping is exact: output never contains a bare `$`.
+ */
+export function unescapeDollars<T>(value: T): T {
+  if (typeof value === 'string') return value.replaceAll('$$', '$') as T;
+  if (Array.isArray(value)) return value.map(unescapeDollars) as T;
+  if (value && typeof value === 'object')
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, unescapeDollars(item)]),
+    ) as T;
+  return value;
+}
+
+/**
  * Renders `file` with Compose and returns the canonical definition. Every name in `secretNames` is set to
  * its sentinel in the environment, so it wins over a same-named local variable.
  */
@@ -85,5 +100,5 @@ export async function normalizeCompose(
   }
   if (!parsed || typeof parsed !== 'object' || !parsed.services)
     throw new Error(`${file} defines no services`);
-  return parsed;
+  return unescapeDollars(parsed);
 }

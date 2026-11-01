@@ -1,0 +1,75 @@
+# WordPress + MariaDB on one node, with scheduled, restorable backups and nothing else to run.
+#
+# Deploy from this directory:  tug deploy -f docker-compose.yml
+# Secrets (tug secret-set NAME): DB_PASSWORD, DB_ROOT_PASSWORD
+# Backups also need a destination, set once per control plane: tug backup-destination-set (see README.md).
+# Replace the node name "app" and the host "blog.example.com".
+
+x-tug:
+  rollback: auto
+  # Defaults for every backup target below; they enable nothing by themselves.
+  backup:
+    schedule: "0 3 * * *" # 03:00 UTC daily
+    retention: { daily: 7, weekly: 4, monthly: 6 }
+
+services:
+  db:
+    image: mariadb:11.4.8
+    mem_limit: 384m
+    command: ["--innodb-buffer-pool-size=96M"]
+    environment:
+      MARIADB_DATABASE: wordpress
+      MARIADB_USER: wordpress
+      MARIADB_PASSWORD: ${DB_PASSWORD}
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+    volumes:
+      - db-data:/var/lib/mysql
+    x-tug:
+      placement:
+        nodes: [app]
+      health:
+        type: tcp
+        port: 3306
+      # Tug has no database support of its own: a service backup is a command run inside the container,
+      # and whatever it prints is stored. The command reads the password from the container's environment.
+      backup:
+        command: mariadb-dump -uroot -p"$$MARIADB_ROOT_PASSWORD" --single-transaction --quick --routines --events --triggers --add-drop-database --databases wordpress
+        filename: wordpress.sql
+        verify: "-- Dump completed" # a dump cut short never becomes the latest good backup
+        # Run inside the container with the stored dump on stdin when you `tug restore db`.
+        restore: mariadb -uroot -p"$$MARIADB_ROOT_PASSWORD"
+
+  wordpress:
+    image: wordpress:6.8.3-apache
+    mem_limit: 384m
+    depends_on: [db]
+    ports:
+      - "8080:80"
+    environment:
+      WORDPRESS_DB_HOST: db
+      WORDPRESS_DB_NAME: wordpress
+      WORDPRESS_DB_USER: wordpress
+      WORDPRESS_DB_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - wp-content:/var/www/html/wp-content
+    x-tug:
+      placement:
+        nodes: [app]
+      health:
+        type: http
+        port: 80
+        path: /wp-includes/version.php
+      ingress:
+        host: blog.example.com
+        port: 80
+        tls: auto
+
+volumes:
+  db-data: {}
+  wp-content:
+    x-tug:
+      placement:
+        nodes: [app]
+      # Uploads, themes and plugins are archived as files, read-only, on the node that holds the volume.
+      backup:
+        exclude: ["cache/"]

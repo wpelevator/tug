@@ -117,7 +117,7 @@ async function fixture(options: { writers?: boolean } = {}) {
       ts,
     );
   /** A successful catalog entry for `target`, as a finished backup run would leave. */
-  const catalog = (target: string, snapshot: string, finished: string) =>
+  const catalog = (target: string, snapshot: string, finished: string, trigger = 'manual') =>
     db.run(
       'INSERT INTO backup_runs(id,project_id,target,type,node_id,trigger,state,snapshot_id,finished_at,queued_at) VALUES(?,?,?,?,?,?,?,?,?,?)',
       `bkr_${snapshot}`,
@@ -125,7 +125,7 @@ async function fixture(options: { writers?: boolean } = {}) {
       target,
       'command',
       'n1',
-      'manual',
+      trigger,
       'succeeded',
       snapshot,
       finished,
@@ -174,6 +174,24 @@ test('writers are the services depending on a service, or mounting a volume and 
   ) as DesiredState;
   assert.deepEqual(discoverWriters(state.compose, 'service:db'), ['web'], 'web depends on db');
   assert.deepEqual(discoverWriters(state.compose, 'volume:uploads'), ['web'], 'web mounts uploads');
+});
+
+test('latest never resolves to a safety snapshot taken before a restore', async () => {
+  const f = await fixture();
+  f.catalog('service:db', 'snapGOOD', '2026-11-01T08:00:00Z');
+  f.catalog('service:db', 'snapSAFETY', '2026-11-01T09:00:00Z', 'pre-restore');
+  const plan = f.restores.plan(request());
+  assert.ok(!('error' in plan));
+  assert.equal(
+    plan.snapshotId,
+    'snapGOOD',
+    'the safety snapshot holds the state just before the last restore, which may be the damage',
+  );
+  const undo = f.restores.plan(request({ from: 'bkr_snapSAFETY' }));
+  assert.ok(
+    !('error' in undo) && undo.snapshotId === 'snapSAFETY',
+    'a safety snapshot can still be named to undo a restore',
+  );
 });
 
 test('a plan names the snapshot, node and writers, and resolves latest from the catalog', async () => {

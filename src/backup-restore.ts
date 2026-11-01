@@ -129,9 +129,10 @@ export function createRestoreService(deps: RestoreDeps) {
     const latest = !from || from === 'latest';
     if (!latest && !from.startsWith('bkr_')) return { snapshotId: from, time: null };
     const run = latest
-      ? db.get<BackupRunRow>(
+      ? // A safety snapshot records the state just before a restore, often a damaged one, so it is never "the latest backup".
+        db.get<BackupRunRow>(
           `SELECT * FROM backup_runs WHERE project_id=? AND target=? AND state='succeeded' AND snapshot_id IS NOT NULL
-           ORDER BY finished_at DESC LIMIT 1`,
+           AND trigger != 'pre-restore' ORDER BY finished_at DESC LIMIT 1`,
           project,
           target,
         )

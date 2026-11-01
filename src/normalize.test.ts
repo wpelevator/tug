@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   composeConfigArgs,
   normalizeCompose,
+  unescapeDollars,
   sentinelNames,
   substituteSentinels,
 } from './normalize.ts';
@@ -37,6 +38,43 @@ test('normalizeCompose renders with Compose, sets each secret to its sentinel an
   );
   assert.equal(seen?.env.API_KEY, '@@tug:secret:API_KEY@@');
   assert.equal(compose.services.web['x-tug']?.health?.type, 'tcp');
+});
+
+test('literal dollars that Compose escapes in its output reach the container as written', async () => {
+  const rendered = [
+    'services:',
+    '  db:',
+    '    image: mariadb',
+    '    command: sh -c "echo $$HOME $$$$"',
+    '    environment:',
+    '      PRICE: cost $$5',
+    '    x-tug:',
+    '      backup:',
+    '        command: mariadb-dump -p"$$MARIADB_ROOT_PASSWORD"',
+    '        restore: [sh, -c, "mariadb -p$$PW"]',
+  ].join('\n');
+  const normalized = await normalizeCompose('docker-compose.yml', [], {
+    runner: async () => ({ out: rendered, err: '', code: 0 }),
+  });
+  const db = normalized.services.db as Record<string, any>;
+  assert.equal(
+    db.command,
+    'sh -c "echo $HOME $$"',
+    'a doubled dollar becomes one, and $$$$ becomes $$',
+  );
+  assert.equal(db.environment.PRICE, 'cost $5');
+  assert.equal(
+    db['x-tug'].backup.command,
+    'mariadb-dump -p"$MARIADB_ROOT_PASSWORD"',
+    'backup commands are shell text run in the container, so they need the real variable reference',
+  );
+  assert.deepEqual(db['x-tug'].backup.restore, ['sh', '-c', 'mariadb -p$PW']);
+  assert.deepEqual(unescapeDollars({ n: 1, ok: true, none: null, list: ['$$a', 2] }), {
+    n: 1,
+    ok: true,
+    none: null,
+    list: ['$a', 2],
+  });
 });
 
 test('normalizeCompose explains a missing Compose plugin and rejects empty files', async () => {
