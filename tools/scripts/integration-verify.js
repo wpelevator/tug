@@ -2,10 +2,11 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { loadCredential, mtlsFetch } from './mtls-fetch.js';
 
 const exec = promisify(execFile);
-const control = process.env.TUG_CONTROL_URL || 'http://localhost:8080';
-const token = process.env.TUG_TOKEN || 'integration-token';
+const control = process.env.TUG_CONTROL_URL || 'https://127.0.0.1:18080';
+const credential = loadCredential();
 const project = process.env.TUG_PROJECT || 'sample';
 const nodes = (process.env.TUG_NODES || 'vps-a,vps-b,vps-c')
   .split(',')
@@ -14,9 +15,7 @@ const nodes = (process.env.TUG_NODES || 'vps-a,vps-b,vps-c')
 const timeoutMs = Number(process.env.TUG_VERIFY_TIMEOUT_MS || 120000);
 
 async function status() {
-  const res = await fetch(`${control}/api/v1/status`, {
-    headers: { authorization: `Bearer ${token}` },
-  });
+  const res = await mtlsFetch(credential, control, '/api/v1/status');
   if (!res.ok) throw new Error(`status: ${res.status} ${await res.text()}`);
   return res.json();
 }

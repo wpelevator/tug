@@ -3,15 +3,11 @@ services:
     build: .
     command: ["control"]
     environment:
-      PORT: 8080
+      PORT: 8443
+      TUG_PUBLIC_URL: ${TUG_PUBLIC_URL:?set TUG_PUBLIC_URL to the https origin clients use, e.g. https://localhost:8443}
       TUG_DATA_DIR: /data
-      # Set both to terminate TLS directly in control.ts instead of relying on Caddy/ACME
-      # (e.g. private networks without a public domain). Use a self-signed cert and point
-      # agents at it with TUG_CONTROL_URL=https://... plus NODE_EXTRA_CA_CERTS=<ca.pem>.
-      # TUG_TLS_CERT_FILE: /data/tls/cert.pem
-      # TUG_TLS_KEY_FILE: /data/tls/key.pem
     ports:
-      - "8080:8080"
+      - "8443:8443"
     volumes:
       - tug-data:/data
       - /var/run/docker.sock:/var/run/docker.sock
@@ -21,9 +17,11 @@ services:
     command: ["agent"]
     profiles: ["agent"]
     environment:
-      TUG_CONTROL_URL: http://control:8080
+      # Connect-only override; the agent's identity (agent.json) carries the verified public URL.
+      TUG_CONTROL_URL: https://control:8443
       TUG_NODE_NAME: dev-node
-      TUG_AGENT_TOKEN: ${TUG_AGENT_TOKEN:-}
+      # First boot: create an identity with `tug node-enroll` and pass the join key (or mount a 0600 file).
+      TUG_JOIN_KEY: ${TUG_JOIN_KEY:-}
       TUG_STATE_DIR: /var/lib/tug
       TUG_APPLY: "false"
       TUG_POLL_INTERVAL_MS: 5000

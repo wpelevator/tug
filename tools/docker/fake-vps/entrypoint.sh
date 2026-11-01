@@ -2,7 +2,6 @@
 set -euo pipefail
 
 : "${TUG_NODE_NAME:?TUG_NODE_NAME is required}"
-: "${TUG_CONTROL_URL:=http://control:8080}"
 : "${TUG_STATE_DIR:=/var/lib/tug}"
 : "${TUG_APPLY:=true}"
 : "${TUG_POLL_INTERVAL_MS:=2000}"
@@ -25,21 +24,19 @@ for i in $(seq 1 60); do
   sleep 1
 done
 
-echo "[$TUG_NODE_NAME] waiting for provisioned token"
-TOKEN_FILE="/tokens/${TUG_NODE_NAME}.env"
-for i in $(seq 1 120); do
-  if [ -s "$TOKEN_FILE" ]; then
-    # shellcheck disable=SC1090
-    source "$TOKEN_FILE"
-    break
+echo "[$TUG_NODE_NAME] waiting for provisioned identity"
+IDENTITY_DIR="/tokens/${TUG_NODE_NAME}"
+if [ ! -s "$TUG_STATE_DIR/agent.json" ]; then
+  for i in $(seq 1 120); do
+    [ -s "$IDENTITY_DIR/agent.json" ] && break
+    sleep 1
+  done
+  if [ ! -s "$IDENTITY_DIR/agent.json" ]; then
+    echo "missing identity $IDENTITY_DIR/agent.json" >&2
+    exit 1
   fi
-  sleep 1
-done
-
-if [ -z "${TUG_AGENT_TOKEN:-}" ]; then
-  echo "missing token file $TOKEN_FILE" >&2
-  exit 1
+  install -m 0600 "$IDENTITY_DIR/agent.json" "$TUG_STATE_DIR/agent.json"
 fi
 
-export TUG_CONTROL_URL TUG_NODE_NAME TUG_AGENT_TOKEN TUG_STATE_DIR TUG_APPLY TUG_POLL_INTERVAL_MS
+export TUG_NODE_NAME TUG_STATE_DIR TUG_APPLY TUG_POLL_INTERVAL_MS
 exec node /app/src/main.ts agent

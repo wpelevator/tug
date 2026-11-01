@@ -4,11 +4,11 @@ services:
     build: .
     command: control
     environment:
-      PORT: 8080
+      PORT: 8443
       TUG_DATA_DIR: /data
-      TUG_OPERATOR_TOKEN: integration-token
+      TUG_PUBLIC_URL: https://control:8443
     ports:
-      - "127.0.0.1:${TUG_IMAGE_TEST_PORT:-18081}:8080"
+      - "127.0.0.1:${TUG_IMAGE_TEST_PORT:-18081}:8443"
     volumes:
       - control-data:/data
       - /var/run/docker.sock:/var/run/docker.sock
@@ -19,12 +19,14 @@ services:
     entrypoint: ["node"]
     command: ["tools/scripts/integration-provision.js"]
     environment:
-      TUG_CONTROL_URL: http://control:8080
-      TUG_TOKEN: integration-token
+      TUG_CONTROL_URL: https://control:8443
+      TUG_PUBLIC_URL: https://control:8443
+      TUG_DATA_DIR: /data
       TUG_TOKEN_DIR: /tokens
       TUG_NODES: image-node
     volumes:
       - node-tokens:/tokens
+      - control-data:/data
     depends_on:
       - control
 
@@ -38,7 +40,6 @@ services:
       - /run
     environment:
       TUG_NODE_NAME: image-node
-      TUG_CONTROL_URL: http://control:8080
       TUG_APPLY: "true"
       TUG_POLL_INTERVAL_MS: 500
     volumes:

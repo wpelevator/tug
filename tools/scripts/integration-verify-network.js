@@ -2,11 +2,12 @@
 // Verifies, from the host, that the fake VPSes reached each other over WireGuard, that a service
 // resolves by name across nodes, that ingress routes to a service on another node, and that a key
 // rotation heals the mesh. Everything runs through `docker compose exec` into the fake VPSes.
+import { api as mtlsApi, loadCredential } from './mtls-fetch.js';
 import { spawnSync } from 'node:child_process';
 
 const project = process.env.COMPOSE_PROJECT_NAME || 'tug-it-net';
-const control = process.env.TUG_CONTROL_URL || 'http://localhost:18080';
-const token = process.env.TUG_TOKEN || 'integration-token';
+const control = process.env.TUG_CONTROL_URL || 'https://127.0.0.1:18080';
+const credential = loadCredential();
 const files = [
   '-f',
   'docker-compose.integration.yml',
@@ -37,15 +38,7 @@ async function until(label, fn, timeoutMs = 120000) {
   console.error(`FAILED: ${label}\n${last}`);
   process.exit(1);
 }
-async function api(route, body) {
-  const res = await fetch(`${control}${route}`, {
-    method: body ? 'POST' : 'GET',
-    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  if (!res.ok) throw new Error(`${route}: ${res.status} ${await res.text()}`);
-  return res.json();
-}
+const api = (route, body) => mtlsApi(credential, control, route, body);
 
 const nodes = (await api('/api/v1/nodes')).nodes;
 const ip = Object.fromEntries(nodes.map((n) => [n.name, n.overlay_ip]));

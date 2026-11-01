@@ -6,19 +6,20 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import yaml from 'js-yaml';
+import { api, fetchRootCredential } from './mtls-fetch.js';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
 const project = process.env.COMPOSE_PROJECT_NAME || `tug-images-${process.pid}`;
 const file = path.join(root, 'docker-compose.integration-no-registry.yml');
-const control = `http://127.0.0.1:${process.env.TUG_IMAGE_TEST_PORT || 18081}`;
-const token = 'integration-token';
+const control = `https://127.0.0.1:${process.env.TUG_IMAGE_TEST_PORT || 18081}`;
+let credential;
+let credentialFile;
 const composeArgs = ['compose', '-p', project, '-f', file];
 const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-no-registry-'));
 const env = {
   ...process.env,
   TUG_CONFIG: path.join(directory, '.tug.json'),
   TUG_CONTROL_URL: control,
-  TUG_TOKEN: token,
 };
 const imageRefs = new Set();
 let nodeContainer;
@@ -48,15 +49,7 @@ async function run(command, args, options = {}) {
   });
 }
 const compose = (...args) => run('docker', [...composeArgs, ...args]);
-async function request(route, body, bearer = token) {
-  const response = await fetch(`${control}${route}`, {
-    method: body ? 'POST' : 'GET',
-    headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json' },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  if (!response.ok) throw new Error(`${route}: ${response.status} ${await response.text()}`);
-  return response.json();
-}
+const request = (route, body) => api(credential, control, route, body);
 async function wait(check, message, timeout = 180000) {
   const start = Date.now();
   let last;
@@ -132,7 +125,9 @@ try {
     '-d',
     ...(process.env.TUG_COMPOSE_BUILD ?? '--build').split(' ').filter(Boolean),
   );
-  await wait(() => fetch(`${control}/healthz`).then((r) => r.ok), 'Control must become reachable');
+  ({ credential, file: credentialFile } = await fetchRootCredential(composeArgs, root));
+  env.TUG_CREDENTIAL_FILE = credentialFile;
+  await wait(() => request('/api/v1/status').then(() => true), 'Control must become reachable');
   await wait(
     async () =>
       (await request('/api/v1/status')).nodes.some(
@@ -156,7 +151,6 @@ try {
     ),
     'The isolated Docker daemon must not require insecure registry configuration',
   );
-  await cli('init', '--control-url', control, '--token', token, '--project', 'imagedemo');
   await fs.writeFile(
     path.join(directory, 'Dockerfile'),
     'FROM busybox:1.36\nCOPY index.html /www/index.html\nCMD ["httpd", "-f", "-p", "8080", "-h", "/www"]\n',
@@ -216,7 +210,7 @@ try {
   await request('/api/v1/control/restore', { artifactRef: backup.artifactRef, confirm: true });
   await compose('restart', 'control');
   await wait(
-    () => fetch(`${control}/healthz`).then((r) => r.ok),
+    () => request('/api/v1/status').then(() => true),
     'Restored control must become reachable',
   );
   await run('docker', ['kill', '--signal', 'CONT', nodeContainer]);
