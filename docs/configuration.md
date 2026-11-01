@@ -2,7 +2,7 @@
 
 ## CLI
 
-CLI options override environment variables, which override the config files and documented fallback. The config is a YAML or JSON file that is safe to commit: it holds the control URL, default project, defaults for a few command options and the servers you install. The operator token is never read from it. See [Config file](cli.md#config-file) for the keys and how they map to flags, and [Nodes](nodes.md#declaring-nodes-in-the-config-file) for the `nodes` section.
+CLI options override environment variables, which override the config files and documented fallback. The config is a YAML or JSON file that is safe to commit: it holds the control URL, default project, defaults for a few command options and the servers you install. The operator credential is never read from it. See [Config file](cli.md#config-file) for the keys and how they map to flags, and [Nodes](nodes.md#declaring-nodes-in-the-config-file) for the `nodes` section.
 
 | Variable | Purpose |
 |---|---|

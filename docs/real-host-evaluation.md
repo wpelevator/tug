@@ -6,6 +6,8 @@ Two WordPress sites on the existing test hosts, using the current CLI against th
 
 Both sites are installed and serving over public HTTPS.
 
+**Version context.** The trial ran on the earlier runtime. Its control API was plain HTTP on port 8080 with bearer tokens, `/healthz` was unauthenticated, agents applied each project by running `docker compose up` on the node, and cross-node names were called service DNS. The current implementation differs: control serves a single mutual-TLS port (`8443`) with certificates from its own CA and no unauthenticated route, agents use the Docker Engine API with no Compose plugin on nodes, and the feature is called cross-node service names (hosts-file entries). Statements below about HTTP, port 8080, tokens, Compose behavior and `/healthz` describe the trial hosts, not the current product; [Control plane](control-plane.md), [Nodes](nodes.md) and [Architecture](architecture.md) describe the current one. Findings are kept as evidence, not rewritten.
+
 This document preserves what the installed `m4-amd64` hosts did during the trial. Since then, current `main` has made `tug deploy` include the node's apply error, made `doctor --node` wait for its queued result, kept lifecycle events quiet after the first change, and added an outbound agent wake channel so deployments and queued commands do not normally wait for the next periodic poll. The remaining findings are still open unless a paragraph says otherwise.
 
 | Site | URL | Node | Host | Cert |
@@ -76,7 +78,7 @@ The tunnel config's `project` is `realcheck`. `tug logs wordpress`, without `--p
 
 Caddy dials `127.0.0.1` for a service on the ingress node and the overlay address for any other node (`src/ingress.ts`). A published port of `8080:80` listens on `0.0.0.0`, so the app is also on the public IP, next to Caddy, with no TLS. Binding the overlay IP on the app node and `127.0.0.1` on the edge node is what makes the ingress work without that exposure. The networking doc says the edge uses the published host port. It does not say which address that port has to be on, or that the overlay IP is something you have to look up and paste into the compose file. If the node is re-registered and gets a new overlay address, the compose file is wrong and nothing in `tug deploy` will say so before Compose tries the bind.
 
-### Service DNS does not get you a remote database
+### Cross-node service names (then called service DNS) do not get you a remote database
 
 Names injected with `extra_hosts` point at the node address, and the client must use the published host port. A MariaDB that is not published is reachable only on the Compose network, which means the same node. Publishing `3306` so WordPress on the other node can use the name puts the database on an address the mesh can route to. Binding it to the overlay IP only is the same undocumented trick as the app port. The generated `wp2` compose file had no `extra_hosts`, which is correct: both of its services are on `edge`.
 

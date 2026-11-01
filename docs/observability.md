@@ -1,6 +1,6 @@
 # Observability
 
-**Status: mostly proposed.** Tug today has an audit trail, a few read commands and a liveness endpoint, and nothing that measures CPU, memory, requests or latency. Sections marked **Proposed** describe a setup that is not built; the milestone is [M9](roadmap.md#m9--observability). Nothing marked proposed works yet, and none of the names, flags or environment variables in those sections exist in the code.
+**Status: mostly proposed.** Tug today has an audit trail, a few read commands and a certificate and connectivity check, and nothing that measures CPU, memory, requests or latency. Sections marked **Proposed** describe a setup that is not built; the milestone is [M9](roadmap.md#m9--observability). Nothing marked proposed works yet, and none of the names, flags or environment variables in those sections exist in the code.
 
 The aim is the smallest setup that answers the day-to-day questions: is every node reporting, did the last deployment succeed, did an automatic rollback happen, will a certificate expire, is the control database growing. It follows the shape of the rest of Tug: one central control plane, agents that only dial out, and no required extra services.
 
@@ -10,12 +10,12 @@ Verified against the code on `main`.
 
 | Capability | What it does | Limits |
 | --- | --- | --- |
-| Audit trail | Deployments and events record the acting token, and `system:auto-rollback` for automatic rollbacks. See [Access control](access-control.md). | Answers who acted, not how the system behaves |
+| Audit trail | Deployments and events record the acting credential, and `system:auto-rollback` for automatic rollbacks. See [Access control](access-control.md). | Answers who acted, not how the system behaves |
 | `tug status` | Prints `GET /api/v1/status` as JSON: projects, the 20 latest deployments, nodes with `status` and `last_seen_at`, and per-node project status including health, rollout state, port and rollout error. | Raw JSON. A node is marked `stale` only when this endpoint is called, using `TUG_STALE_SECONDS` (default 60) |
 | `tug events` | Lists events from `GET /api/v1/events`, newest first, at most 500 per call, 100 by default. | Agents report on change only, see [Events](#events) |
-| `tug doctor` | Local checks, control checks (SQLite, operator token, master key, Docker, Compose, mesh keys, ingress state) and, with `--nodes` or `--node`, agent diagnostics. It waits for those results. | A point-in-time check, not a time series |
+| `tug doctor` | Local checks (Node.js, Docker, the Compose plugin `deploy` needs), control checks (SQLite, CA and server certificate expiry, each node's certificate expiry and connectivity, each online node's observed clock skew, master key, Docker, mesh keys, ingress state) and, with `--nodes` or `--node`, host diagnostics through each agent. It waits for those results. Clock skew is unknown, not zero, for a node that is offline. | A point-in-time check, not a time series |
 | `tug logs <service>` | Queues a `logs.fetch` command on the service's node and prints the tail. | A tail through the poll-based command queue; no follow mode |
-| `GET /healthz` | Returns `{"ok":true}` without authentication. | Checks nothing: it answers even if the database or the writer queue is stuck |
+| Reachability | Control has no unauthenticated route, not even a health check: every request needs a client certificate. Monitor TCP reachability of the mTLS port for liveness, and use an authenticated read (`tug doctor`, `tug status`) for readiness. | A TCP check proves the listener accepts connections, not that the database works |
 | Process logs | Control and agent write plain `console.log` and `console.error` text. | No timestamps, levels, structure or request ids |
 
 What does not exist: a `/metrics` endpoint, CPU, memory, disk or restart data, request, build or poll metrics, structured or leveled logs, alerting, outbound webhooks (M8, unchecked) and a dashboard (M8, unchecked). The managed Caddy ingress does not enable Caddy's metrics: the generated Caddyfile has no global options beyond the optional ACME email.
@@ -49,13 +49,13 @@ Status: proposed.
 
 Control and agent would write one JSON object per line with `time`, `level`, `component`, `msg` and context fields where they apply: `requestId`, `node`, `project`, `service`, `deploymentId`. Two environment variables would select the output: `TUG_LOG_FORMAT=json|text` and `TUG_LOG_LEVEL` (`debug`, `info`, `warn`, `error`). Text would stay the default so existing installs read the same, and JSON is meant for `docker logs` piped to whatever the operator already uses.
 
-Token values, join keys, secret values and `Authorization` headers are never logged, and the logger would redact known field names as a second line of defence. The CLI keeps its human-readable output; only the long-running processes change. Every existing `console.log` and `console.error` in `src/control.ts` and `src/agent.ts` would move to the logger.
+Credential private keys, join keys and secret values are never logged, and the logger would redact known field names as a second line of defence. The CLI keeps its human-readable output; only the long-running processes change. Every existing `console.log` and `console.error` in `src/control.ts` and `src/agent.ts` would move to the logger.
 
 ### Metrics on control
 
 Status: proposed.
 
-Control would serve `GET /metrics` in the Prometheus text format. It needs the `read` role from [Access control](access-control.md#roles), so Prometheus authenticates with `authorization: Bearer <read token>`; a token limited to projects would see only those projects' series. Adding the route means adding it to `ROUTE_ROLES` in `src/credentials.ts` and to the endpoint table, which the existing test already requires.
+Control would serve `GET /metrics` in the Prometheus text format. It needs the `read` role from [Access control](access-control.md#roles), so Prometheus would present the client certificate and key of a `read` operator credential (`tls_config` with `cert_file`, `key_file` and `ca_file` extracted from the credential file); a credential limited to projects would see only those projects' series. Adding the route means adding it to `ROUTE_ROLES` in `src/credentials.ts` and to the endpoint table, which the existing test already requires.
 
 Naming follows the Prometheus conventions: a `tug_` prefix, base units (`_seconds`, `_bytes`), `_total` for counters. Labels are bounded: project, node and service names are operator-defined and few; route labels use the route pattern (`/api/v1/deployments/:id`), never the raw path; deployment IDs, command IDs, versions and error messages are never labels.
 
@@ -96,7 +96,7 @@ Agents already send a status report on every poll. The proposal adds a `stats` b
 
 The agent would read these from `docker stats --no-stream` and `docker inspect`, and control would drop series for services that no longer exist. A node that stops reporting keeps its last values, so alerts use `tug_node_poll_age_seconds` to tell fresh data from stale data.
 
-Why report through control: agents sit behind NAT and only dial out, so Prometheus often cannot reach them. Reporting through the existing authenticated channel needs no inbound port, no extra token and no firewall change, and adds one scrape target regardless of node count. The cost is resolution: values are as fresh as the poll interval (`TUG_POLL_INTERVAL_MS`), and the status report grows with the number of services.
+Why report through control: agents sit behind NAT and only dial out, so Prometheus often cannot reach them. Reporting through the existing authenticated channel needs no inbound port, no extra credential and no firewall change, and adds one scrape target regardless of node count. The cost is resolution: values are as fresh as the poll interval (`TUG_POLL_INTERVAL_MS`), and the status report grows with the number of services.
 
 The alternative is scraping an exporter on each agent directly over the WireGuard mesh from [Networking](networking.md). It gives finer resolution and keeps control out of the data path, but it requires the mesh, a listener on every node, a firewall rule on the mesh interface and a service-discovery list for Prometheus, and it does not work for nodes without the mesh or behind NAT. If both are ever wanted, the metric names above can be reused so dashboards do not change.
 
@@ -104,7 +104,7 @@ The alternative is scraping an exporter on each agent directly over the WireGuar
 
 Status: proposed.
 
-`GET /healthz` stays as it is: liveness, unauthenticated, always `{"ok":true}` while the process answers. A new unauthenticated `GET /readyz` would return 200 only when control can do its job: it can read the database, and the writer queue is not stuck (the operation at the head of the queue has not been running longer than a limit). Otherwise it returns 503 with the names of the failing checks and nothing more. Use `/healthz` for the container restart policy and `/readyz` for an external uptime check.
+Control has no unauthenticated route (there is no `/healthz`), so liveness is TCP reachability of the mTLS port and the container restart policy. An authenticated `GET /api/v1/readyz` with the `read` role would return 200 only when control can do its job: it can read the database, and the writer queue is not stuck (the operation at the head of the queue has not been running longer than a limit). Otherwise it returns 503 with the names of the failing checks and nothing more. An external uptime check would present a `read` credential.
 
 ### Ingress metrics
 
@@ -129,9 +129,10 @@ scrape_configs:
   - job_name: tug
     metrics_path: /metrics
     scheme: https
-    authorization:
-      type: Bearer
-      credentials_file: /etc/prometheus/tug-read-token
+    tls_config:
+      ca_file: /etc/prometheus/tug-ca.pem
+      cert_file: /etc/prometheus/tug-read.crt
+      key_file: /etc/prometheus/tug-read.key
     static_configs:
       - targets: ['control.example.com']
 ```
@@ -184,8 +185,8 @@ For Tug the equivalent check would assert:
 
 - every metric registered in code appears in this page's metric tables with the same name, type and label set, and every row in the tables is registered in code;
 - every label name is on an allow-list, and none is `id`, `version`, `error`, `path` or `message`, so cardinality stays bounded;
-- `GET /metrics` without a token returns 401 and with a `read` token returns 200, and `ROUTE_ROLES` lists the route;
-- a scrape after a token is created and used contains no token value, join key or secret value;
+- `GET /metrics` with a certificate for an unknown key returns 401 and with a `read` credential returns 200, and `ROUTE_ROLES` lists the route;
+- a scrape after a credential is created and used contains no credential private key, join key or secret value;
 - with the no-op default, the existing control and agent tests behave unchanged.
 
 ## Rollout order
@@ -203,7 +204,7 @@ Open questions:
 
 - Where the first dashboard JSON would live: in this repository (for example a `dashboards/` directory) or published separately, and whether the M8 read-only web dashboard makes it unnecessary.
 - Whether agents should send stats on every poll or on a slower interval of their own.
-- Whether `/metrics` should accept the operator token as well as named `read` tokens (the operator token passes every role check today).
+- Whether `/metrics` should accept the `root` admin credential as well as named `read` credentials (an admin passes every role check today).
 - How the ingress metrics reach control (see [Ingress metrics](#ingress-metrics)).
 - Whether control should keep a short history of stats for `tug top` and a dashboard without Prometheus.
 

@@ -11,7 +11,7 @@ The working example is [`examples/wordpress`](../examples/wordpress/README.md): 
 | Database | `db-data` volume, MariaDB | `x-tug.backup.command` on the `db` service: a logical dump (`mariadb-dump --single-transaction`) streamed into restic. Never copy `/var/lib/mysql` of a running server. |
 | Uploads, plugins, themes | `wp-content` volume | `x-tug.backup` on the volume: mounted read-only and archived by restic. |
 | Secrets | Tug control database | `tug control-backup` (below). Print each project's repository password with `tug backup-repository-password` and keep it in your password manager too: without it, and without control's master key, a repository cannot be decrypted. |
-| Control plane | Control host | `tug control-backup`: database, API tokens, master key, built images. It does not contain project data. |
+| Control plane | Control-plane host | `tug control-backup` (a control-plane backup, separate from the workload backups above): database, operator credential records, the private CA and master key, built images. It does not contain workload data. |
 | Compose file | Your Git repository | Already versioned. |
 
 `wp-config.php` is rebuilt from environment variables on every start, so it is not backed up. If you set fixed `WORDPRESS_AUTH_KEY` and the other salts as secrets they survive a rebuild; otherwise users are logged out after a restore.
@@ -92,13 +92,13 @@ A scratch restore of a volume is also the restore drill: it proves a backup can 
 
 ## Control plane backup
 
-`tug control-backup` covers the control host only. Take it from a machine that holds an `admin` token, on the control host, and copy the archive off the host. The archive holds the master key and every secret, so treat it like a password vault and store it encrypted. Example `/etc/cron.d/tug-control-backup` on the control host (the runtime image runs the CLI; adjust to how you invoke `tug` there):
+`tug control-backup` covers the control plane only, not workload data. Take it with an `admin` operator credential and copy the archive off the control-plane host. The archive holds the master key, every secret and the private CA key (which can issue credentials for the whole installation), so treat it like a password vault and store it encrypted. Create a dedicated credential for the job: `tug credential-create backup --role admin` and store it at `/etc/tug/backup.credential.json` (mode `0600`). Example `/etc/cron.d/tug-control-backup` on the control-plane host (the runtime image runs the CLI; adjust to how you invoke `tug` there):
 
 ```cron
-15 2 * * * root TUG_CONTROL_URL=http://127.0.0.1:8080 TUG_TOKEN=$(cat /etc/tug/admin.token) tug control-backup > /var/log/tug-control-backup.json 2>&1 && restic -r s3:https://s3.eu-central-1.amazonaws.com/acme-backups/control backup /var/lib/tug/control-backups --password-file /etc/tug/restic.pass
+15 2 * * * root TUG_CONTROL_URL=https://127.0.0.1:8443 TUG_CREDENTIAL_FILE=/etc/tug/backup.credential.json tug control-backup > /var/log/tug-control-backup.json 2>&1 && restic -r s3:https://s3.eu-central-1.amazonaws.com/acme-backups/control backup /var/lib/tug/control-backups --password-file /etc/tug/restic.pass
 ```
 
-Put the S3 credentials in the crontab environment or a `restic.env` file with mode `0600`. Archives accumulate in `TUG_CONTROL_BACKUP_DIR`; prune old files with `find ... -mtime +14 -delete`. The cron line has not been run on a real control host; verify that `tug` is on the cron `PATH` and that the data directory matches your install (`TUG_CONTROL_BACKUP_DIR`, see [Configuration](configuration.md)). Restore with `tug control-restore <path> --confirm` and restart control ([Control plane](control-plane.md#backup-and-restore)).
+Put the S3 credentials in the crontab environment or a `restic.env` file with mode `0600`. Archives accumulate in `TUG_CONTROL_BACKUP_DIR`; prune old files with `find ... -mtime +14 -delete`. The cron line has not been run on a real control-plane host; verify that `tug` is on the cron `PATH` and that the data directory matches your install (`TUG_CONTROL_BACKUP_DIR`, see [Configuration](configuration.md)). `TUG_CONTROL_URL` is a connect target only; the certificate is still verified against the public URL in the credential. Restore with `tug control-restore <path> --confirm` and restart control ([Control plane](control-plane.md#backup-and-restore)).
 
 ## Restore drill
 
