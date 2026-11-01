@@ -61,7 +61,7 @@ npm install -g @wpelevator/tug
 The CLI installs the matching `ghcr.io/wpelevator/tug:<version>` image on your hosts.
 
 1. Install the control plane: `tug control-install root@control.example.com --install-docker`. The flag installs missing Docker Engine and Compose on supported Debian, Ubuntu, Fedora and RHEL-compatible hosts; omit it when Docker is ready. Put HTTPS in front of the control API as described in [Control plane](docs/control-plane.md).
-2. Point the CLI at it: `tug init --control-url https://control.example.com --token "$TUG_TOKEN"`.
+2. Point the CLI at it: `tug init --control-url https://control.example.com --token "$TUG_TOKEN"`. It writes `tug.yml` (commit it, and list your servers in it) and keeps the token in the git-ignored `tug.local.yml`; see [CLI reference](docs/cli.md#config-file).
 3. Set the secrets your services need: `tug secret-set DB_PASSWORD`.
 4. Add nodes with `tug node-install root@app1.example.com --name app1 --install-docker`, or `tug node-enroll --name app1` and run the printed Docker command. For a bare cloud host, `tug node-enroll --name app1 --install-docker` prints cloud-init user-data.
 5. Deploy: `tug deploy -f docker-compose.yml`. It waits until every node reports the new version healthy.

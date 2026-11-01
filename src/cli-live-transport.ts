@@ -17,10 +17,7 @@ import {
 const MAX_EVENTS = 1024;
 
 /** Credentials travel only in the upgrade header, never a URL or frame. */
-export function createCliLiveTransport(
-  controlUrl: string,
-  operatorToken?: string,
-): CliLiveTransport {
+export function createCliLiveTransport(controlUrl: string, token?: string): CliLiveTransport {
   const url = new URL(controlUrl);
   if (url.protocol !== 'http:' && url.protocol !== 'https:')
     throw new CliLiveError('live control URL must use http or https');
@@ -36,7 +33,7 @@ export function createCliLiveTransport(
           return;
         }
         const socket = new WebSocket(url, {
-          headers: operatorToken ? { Authorization: `Bearer ${operatorToken}` } : {},
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
           maxPayload: MAX_FRAME,
           handshakeTimeout: LIVE_START_TIMEOUT_MS,
           perMessageDeflate: false,

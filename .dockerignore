@@ -2,5 +2,9 @@
 node_modules
 data
 .tug.json
+.tug.local.json
+tug.local.yml
+tug.local.yaml
+tug.local.json
 *.log
 dist

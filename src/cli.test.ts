@@ -26,11 +26,11 @@ test('connection resolution consistently uses explicit options, then environment
   try {
     await fs.writeFile(
       path.join(dir, 'chosen.json'),
-      JSON.stringify({
-        controlUrl: 'https://config.test',
-        operatorToken: 'config-token',
-        project: 'config-project',
-      }),
+      JSON.stringify({ controlUrl: 'https://config.test', project: 'config-project' }),
+    );
+    await fs.writeFile(
+      path.join(dir, 'chosen.local.json'),
+      JSON.stringify({ token: 'config-token' }),
     );
     const env = {
       TUG_CONFIG: 'chosen.json',
@@ -54,7 +54,7 @@ test('connection resolution consistently uses explicit options, then environment
       'explicit project should override environment and config',
     );
     assert.equal(
-      explicit.operatorToken,
+      explicit.token,
       'env-token',
       'environment operator token should override the config token',
     );
@@ -76,9 +76,9 @@ test('connection resolution consistently uses explicit options, then environment
       'selected config should provide the project without explicit or environment values',
     );
     assert.equal(
-      config.operatorToken,
+      config.token,
       'config-token',
-      'selected config should provide the operator token without an environment token',
+      'the selected config overlay should provide the token without an environment token',
     );
     const fallback = await resolveCliConfig({}, {}, dir);
     assert.equal(
@@ -119,7 +119,7 @@ test('invalid and explicitly missing config produce errors instead of silently s
     await fs.writeFile(path.join(dir, '.tug.json'), '{"project":123}');
     await assert.rejects(
       resolveCliConfig({}, {}, dir),
-      /project must be a nonempty string/,
+      /project must be a nonempty single-line string/,
       'known config keys should be validated',
     );
     await fs.writeFile(path.join(dir, '.tug.json'), '{}');
@@ -233,8 +233,13 @@ test('init applies global options after the command without relying on Docker or
     );
     assert.deepEqual(
       JSON.parse(await fs.readFile(file, 'utf8')),
-      { controlUrl: 'https://flag.test', operatorToken: 'env-token', project: 'flag-project' },
-      'init should persist the same CLI/env/config precedence used by API operations',
+      { controlUrl: 'https://flag.test', project: 'flag-project' },
+      'init should persist the CLI/env/config precedence used by API operations, without the token',
+    );
+    assert.deepEqual(
+      JSON.parse(await fs.readFile(path.join(dir, 'new.local.json'), 'utf8')),
+      { token: 'env-token' },
+      'init should store the token only in the untracked overlay',
     );
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
@@ -479,7 +484,11 @@ test('source upload excludes Tug credentials even with a broad Dockerfile and ig
   try {
     await fs.mkdir(path.join(dir, 'settings'));
     await fs.mkdir(path.join(dir, 'nested'));
-    await fs.writeFile(path.join(dir, '.tug.json'), '{"operatorToken":"secret"}');
+    await fs.writeFile(path.join(dir, '.tug.json'), '{"controlUrl":"https://c.test"}');
+    for (const name of ['tug.local.yml', 'nested/tug.local.json', 'nested/.tug.local.json'])
+      await fs.writeFile(path.join(dir, name), 'token: secret');
+    await fs.writeFile(path.join(dir, 'tug.yml'), 'project: site');
+    await fs.writeFile(path.join(dir, 'nested', 'tug.json'), '{"app":"own file"}');
     await fs.writeFile(
       path.join(dir, 'settings', 'production.json'),
       '{"operatorToken":"other-secret"}',
@@ -509,6 +518,18 @@ test('source upload excludes Tug credentials even with a broad Dockerfile and ig
         (entry) => !entry.endsWith('.tug.json') && !entry.endsWith('settings/production.json'),
       ),
       'source archive must exclude default, nested and selected Tug credential files even when re-included',
+    );
+    assert.ok(
+      entries.every((entry) => !/(^|\/)(tug\.local\.(yml|json)|\.tug\.local\.json)$/.test(entry)),
+      'source archive must exclude the token overlays at any depth',
+    );
+    assert.ok(
+      !entries.includes('tug.yml') && !entries.includes('./tug.yml'),
+      'source archive must exclude the tracked config at the context root',
+    );
+    assert.ok(
+      entries.some((entry) => entry.endsWith('nested/tug.json')),
+      'source archive should keep an application file that happens to be named tug.json below the root',
     );
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
