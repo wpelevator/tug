@@ -1,5 +1,6 @@
 import { Transform } from 'node:stream';
 import { redactSecrets } from './backup-destination.ts';
+import { LABEL_PROJECT, LABEL_SERVICE } from './container-spec.ts';
 import type { AttachedProcess, CreateContainerBody, DockerApi } from './docker-api.ts';
 import type {
   BackupCredentialsResponse,
@@ -12,8 +13,6 @@ import type {
 /** Docker volume holding restic's cache across jobs, so repeated runs do not re-read the repository index. */
 export const RESTIC_CACHE_VOLUME = 'tug_restic_cache';
 export const LABEL_JOB = 'tug.job';
-/** The last line `mariadb-dump` and `mysqldump` write; a stream without it was cut short. */
-export const DUMP_TRAILER = '-- Dump completed';
 const TAIL_BYTES = 4096;
 const OUTPUT_LIMIT = 64 * 1024;
 
@@ -75,31 +74,6 @@ export function backupArgs(payload: BackupJobPayload, stdinName?: string): strin
   if (stdinName) return ['backup', '--stdin', '--stdin-filename', stdinName, ...common];
   const exclude = (payload.volume?.exclude ?? []).flatMap((pattern) => ['--exclude', pattern]);
   return ['backup', '/data', ...exclude, ...common];
-}
-
-/** The dump command for a database service; the password reaches it only through `MYSQL_PWD`. */
-export function dumpCommand(payload: BackupJobPayload): { entrypoint: string; args: string[] } {
-  const service = payload.service!;
-  const mariadb = payload.type === 'mariadb';
-  return {
-    entrypoint: mariadb ? 'mariadb-dump' : 'mysqldump',
-    args: [
-      '-h',
-      service.name,
-      '-u',
-      service.user,
-      // The client trusts the project network; most database images ship no certificate.
-      mariadb ? '--skip-ssl' : '--ssl-mode=DISABLED',
-      '--single-transaction',
-      '--quick',
-      '--routines',
-      '--events',
-      '--triggers',
-      '--add-drop-database',
-      '--databases',
-      ...service.databases,
-    ],
-  };
 }
 
 interface Summary {
@@ -188,18 +162,8 @@ async function ensureImage(docker: DockerApi, ref: string): Promise<void> {
   await docker.pullImage(ref);
 }
 
-async function waitExit(docker: DockerApi, id: string, signal?: AbortSignal): Promise<number> {
-  for (;;) {
-    signal?.throwIfAborted();
-    const inspected = await docker.inspectContainer(id);
-    if (!inspected.State?.Running && inspected.State?.Status !== 'created')
-      return inspected.State?.ExitCode ?? -1;
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-}
-
 function secretValues(credentials: BackupCredentialsResponse): string[] {
-  return [...Object.values(credentials.env), ...Object.values(credentials.secrets)];
+  return Object.values(credentials.env);
 }
 
 /** Runs one backup job to completion. Helper containers carry the `tug.job` label and are always removed. */
@@ -229,7 +193,6 @@ export async function runBackupJob(
   try {
     phase('pulling');
     await ensureImage(docker, payload.resticImage);
-    if (kind === 'backup.run' && payload.service) await ensureImage(docker, payload.service.image);
     ctx.signal?.throwIfAborted();
 
     const binds = [`${RESTIC_CACHE_VOLUME}:/cache`];
@@ -284,58 +247,62 @@ export async function runBackupJob(
       };
 
     let summary: Summary;
-    if (payload.service) {
+    if (payload.command) {
       phase('dumping');
-      const dump = dumpCommand(payload);
-      const producer = await docker.createContainer(name('dump'), {
-        Image: payload.service.image,
-        Entrypoint: [dump.entrypoint],
-        Cmd: dump.args,
-        Env: [`MYSQL_PWD=${credentials.secrets[payload.service.passwordSecret] ?? ''}`],
-        Labels: labels,
-        HostConfig: {
-          NetworkMode: payload.service.network,
-          Memory: memoryBytes(payload.limits.memory),
-        },
-      });
-      created.push(producer);
-      await docker.startContainer(producer);
-      // Logs are kept from the first byte, so attaching after the start loses nothing.
-      const logs = await docker.logs(producer, { follow: true });
+      const { service, argv, filename, verify } = payload.command;
+      // The command runs where the service runs: its environment, network, files and installed tools are all there.
+      const running = (
+        await docker.listContainers({
+          label: [`${LABEL_PROJECT}=${payload.project}`, `${LABEL_SERVICE}=${service}`],
+        })
+      ).find((container) => container.State === 'running');
+      if (!running)
+        throw new JobError(
+          `service ${service} is not running on this node, so there is nothing to back up`,
+        );
+      const producer = await docker.execStart(running.Id, { cmd: argv });
       const proc = await docker.execStart(restic, {
-        cmd: ['restic', ...backupArgs(payload, `${payload.service.name}.sql`)],
+        cmd: ['restic', ...backupArgs(payload, filename)],
         stdin: true,
       });
       const uploaded = collect(proc);
       const tap = new Tail((bytes) => phase('uploading', bytes));
-      const dumpStderr: Buffer[] = [];
-      logs.stderr.on('data', (chunk: Buffer) => dumpStderr.push(chunk));
-      logs.stdout.pipe(tap).pipe(proc.stdin!);
-      const [result, exitCode] = await Promise.all([
-        uploaded,
-        // The log stream ends when the container exits; the exit code comes from inspect.
-        new Promise<void>((resolve) => logs.stdout.once('end', resolve)).then(() =>
-          waitExit(docker, producer, ctx.signal),
-        ),
-      ]);
+      const commandStderr: Buffer[] = [];
+      producer.stderr.on('data', (chunk: Buffer) => commandStderr.push(chunk));
+      producer.stdout.pipe(tap).pipe(proc.stdin!);
+      const exit = new Promise<number>((resolve, reject) => {
+        producer.on('error', reject);
+        producer.on('close', (code: number | null) => resolve(code ?? -1));
+      });
+      const aborted = new Promise<never>((_, reject) =>
+        ctx.signal?.addEventListener('abort', () => {
+          producer.kill();
+          reject(ctx.signal!.reason);
+        }),
+      );
+      const [result, exitCode] = await Promise.race([Promise.all([uploaded, exit]), aborted]);
       summary = parseSummary(result.out);
-      const trailer = tap.tail.toString('utf8').includes(DUMP_TRAILER);
-      if (exitCode !== 0 || !trailer || result.code !== 0) {
-        // restic snapshots whatever it received, so a failed or cut-short dump must not stay in the catalog.
+      const output = tap.tail.toString('utf8');
+      const problem =
+        exitCode !== 0
+          ? `the command exited with code ${exitCode}`
+          : tap.bytes === 0
+            ? 'the command produced no output'
+            : verify && !output.includes(verify)
+              ? `the end of the output does not contain ${JSON.stringify(verify)}, so it was cut short`
+              : result.code !== 0
+                ? 'the upload to the repository failed'
+                : undefined;
+      if (problem) {
+        // restic snapshots whatever it received, so a failed or cut-short stream must not stay in the catalog.
         let note = '';
         if (summary.snapshotId) {
           const forget = await exec(['restic', 'forget', summary.snapshotId]);
           if (forget.code !== 0) note = ' (the partial snapshot could not be forgotten)';
         }
-        const what =
-          exitCode !== 0
-            ? `dump failed with exit code ${exitCode}`
-            : !trailer
-              ? 'dump was cut short (no completion trailer)'
-              : 'upload failed';
         throw fail(
-          `${what}${note}`,
-          `${Buffer.concat(dumpStderr).toString('utf8')}\n${result.err}`,
+          `${problem}${note}`,
+          `${Buffer.concat(commandStderr).toString('utf8')}\n${result.err}`,
         );
       }
     } else {

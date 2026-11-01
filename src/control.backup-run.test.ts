@@ -35,7 +35,10 @@ const compose = {
         MARIADB_ROOT_PASSWORD: '@@tug:secret:DB_ROOT_PASSWORD@@',
       },
       volumes: [{ type: 'volume', source: 'db-data', target: '/var/lib/mysql' }],
-      'x-tug': { placement: { nodes: ['n1'] }, backup: true },
+      'x-tug': {
+        placement: { nodes: ['n1'] },
+        backup: { command: 'dump-it "$DB_PASSWORD"', verify: 'done' },
+      },
     },
   },
   volumes: { 'db-data': {} },
@@ -101,6 +104,7 @@ test('a manual backup flows from the API through the agent protocol to the catal
     assert.ok(command, 'the agent receives a backup.run command');
     const payload = JSON.parse(command.payload_json);
     assert.equal(payload.repository, 's3:https://s3.example.com/bucket/tug/site');
+    assert.deepEqual(payload.command.argv, ['sh', '-c', 'dump-it "$DB_PASSWORD"']);
     assert.ok(
       !command.payload_json.includes('sekret-value-1') &&
         !command.payload_json.includes('rootpw-123'),
@@ -116,10 +120,10 @@ test('a manual backup flows from the API through the agent protocol to the catal
         agent,
       ),
     );
-    assert.equal(
-      credentials.secrets.DB_ROOT_PASSWORD,
-      'rootpw-123',
-      'the dump password is released to the running job',
+    assert.deepEqual(
+      Object.keys(credentials.env).sort(),
+      ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'RESTIC_PASSWORD'],
+      'only repository credentials are released; the command reads its own environment',
     );
     assert.equal(credentials.env.AWS_SECRET_ACCESS_KEY, 'sekret-value-1');
 

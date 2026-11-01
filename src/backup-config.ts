@@ -1,6 +1,5 @@
 import { createHash } from 'node:crypto';
 import { parseCron } from './cron.ts';
-import { sentinelNames } from './normalize.ts';
 import type {
   BackupConfig,
   BackupRetention,
@@ -10,22 +9,23 @@ import type {
   ComposeService,
 } from './protocol.ts';
 
-/** One backup target after defaults, type inference and placement are resolved. */
+/** One backup target after defaults and placement are resolved. */
 export interface ResolvedBackup {
   /** `service:db` or `volume:uploads`, unique within a project. */
   target: string;
   kind: 'service' | 'volume';
   name: string;
+  /** `command` for a service, `volume` for a volume. */
   type: BackupType;
   schedule: string;
   retention: BackupRetention;
   jitterSeconds: number;
   timeoutSec: number;
-  /** Database targets only. */
-  databases?: string[];
-  user?: string;
-  passwordSecret?: string;
-  /** Volume targets only. */
+  /** Service targets: the command run in the service's container, and the snapshot file it is stored as. */
+  command?: string[];
+  filename?: string;
+  verify?: string;
+  /** Volume targets. */
   exclude?: string[];
   /** Services held during a restore; unset means "discover from the Compose file". */
   writers?: string[];
@@ -39,25 +39,10 @@ const MIN_TIMEOUT_SEC = 60;
 const MAX_TIMEOUT_SEC = 24 * 3600;
 const MAX_JITTER_SEC = 3600;
 const RETENTION_KEYS = ['last', 'hourly', 'daily', 'weekly', 'monthly', 'yearly'] as const;
-const SPEC_KEYS = [
-  'type',
-  'schedule',
-  'retention',
-  'jitter',
-  'timeout',
-  'databases',
-  'user',
-  'password',
-  'exclude',
-  'writers',
-];
-const SERVICE_ONLY_KEYS = ['databases', 'user', 'password'];
-const DATABASE_IMAGES: Record<string, BackupType> = {
-  mariadb: 'mariadb',
-  mysql: 'mysql',
-  percona: 'mysql',
-};
-const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
+const COMMON_KEYS = ['schedule', 'retention', 'jitter', 'timeout', 'writers'];
+const SERVICE_KEYS = [...COMMON_KEYS, 'command', 'filename', 'verify'];
+const VOLUME_KEYS = [...COMMON_KEYS, 'exclude'];
+const FILENAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -74,23 +59,6 @@ export function parseBackupTimeout(value: unknown): number | null {
 export function defaultJitterSeconds(project: string, target: string): number {
   const digest = createHash('sha256').update(`${project}\0${target}`).digest();
   return digest.readUInt32BE(0) % 900;
-}
-
-/** The repository name of an image reference: `docker.io/library/mariadb:11.4@sha256:…` gives `mariadb`. */
-function imageName(image: string | undefined): string {
-  const withoutDigest = String(image ?? '').split('@')[0];
-  const lastSlash = withoutDigest.lastIndexOf('/');
-  return withoutDigest.slice(lastSlash + 1).split(':')[0];
-}
-
-function serviceEnv(svc: ComposeService, key: string): string | undefined {
-  const env = svc.environment;
-  if (Array.isArray(env)) {
-    const entry = env.find((item) => String(item).startsWith(`${key}=`));
-    return entry === undefined ? undefined : String(entry).slice(key.length + 1);
-  }
-  const value = isObject(env) ? env[key] : undefined;
-  return value === undefined || value === null ? undefined : String(value);
 }
 
 function validateRetention(
@@ -154,8 +122,21 @@ function normalizeConfig(config: BackupConfig): BackupSpec | null {
   return config;
 }
 
-/** Literal single-node placement of a service, or the reason it has none. */
-function serviceNodes(svc: ComposeService): { nodes: string[]; dynamic: boolean; global: boolean } {
+/** The argv of a `command`: a list is used as is, a string runs through `sh -c` like a shell one-liner. */
+export function commandArgv(command: unknown): string[] | null {
+  if (typeof command === 'string') return command.trim() ? ['sh', '-c', command] : null;
+  return Array.isArray(command) &&
+    command.length &&
+    command.every((part) => typeof part === 'string' && part)
+    ? (command as string[])
+    : null;
+}
+
+function serviceNodes(svc: ComposeService): {
+  nodes: string[];
+  dynamic: boolean;
+  global: boolean;
+} {
   const lp = svc['x-tug'] || {};
   const placement = lp.placement || {};
   return {
@@ -179,8 +160,9 @@ interface Resolved {
 }
 
 /**
- * Resolves and validates every `x-tug.backup` in a Compose file. `project` seeds the default
- * jitter. Errors name the key, so they can be shown to the operator as they are.
+ * Resolves and validates every `x-tug.backup` in a Compose file. Tug knows nothing about what a service
+ * is: a service backup is a command whose output is stored, a volume backup is its files. `project`
+ * seeds the default jitter. Errors name the key, so they can be shown to the operator as they are.
  */
 export function resolveBackups(compose: ComposeFile, project = ''): Resolved {
   const errors: string[] = [];
@@ -190,7 +172,6 @@ export function resolveBackups(compose: ComposeFile, project = ''): Resolved {
   const defaultRetention = (
     isObject(defaults) && isObject(defaults.retention) ? defaults.retention : DEFAULT_RETENTION
   ) as BackupRetention;
-  const backedUpDatabases: string[] = [];
 
   const common = (
     label: string,
@@ -198,9 +179,18 @@ export function resolveBackups(compose: ComposeFile, project = ''): Resolved {
     name: string,
     spec: BackupSpec,
   ): Pick<ResolvedBackup, 'schedule' | 'retention' | 'jitterSeconds' | 'timeoutSec'> | null => {
+    const allowed = kind === 'service' ? SERVICE_KEYS : VOLUME_KEYS;
     for (const key of Object.keys(spec))
-      if (!SPEC_KEYS.includes(key))
-        errors.push(`${label}.${key} is not supported (supported: ${SPEC_KEYS.join(', ')})`);
+      if (!allowed.includes(key))
+        errors.push(
+          `${label}.${key} is not supported${
+            key === 'command' || key === 'filename' || key === 'verify'
+              ? ' on a volume; a volume backup archives its files'
+              : key === 'exclude'
+                ? ' on a service; it applies to volumes'
+                : ''
+          } (supported: ${allowed.join(', ')})`,
+        );
     const before = errors.length;
     const schedule =
       spec.schedule !== undefined
@@ -214,8 +204,7 @@ export function resolveBackups(compose: ComposeFile, project = ''): Resolved {
       spec.retention !== undefined
         ? validateRetention(label, spec.retention, errors)
         : defaultRetention;
-    const target = `${kind}:${name}`;
-    let jitterSeconds = defaultJitterSeconds(project, target);
+    let jitterSeconds = defaultJitterSeconds(project, `${kind}:${name}`);
     if (spec.jitter !== undefined) {
       if (!Number.isInteger(spec.jitter) || spec.jitter < 0 || spec.jitter > MAX_JITTER_SEC)
         errors.push(
@@ -255,17 +244,19 @@ export function resolveBackups(compose: ComposeFile, project = ''): Resolved {
     const before = errors.length;
     const base = common(label, 'service', name, spec);
 
-    const inferred = DATABASE_IMAGES[imageName(svc.image)];
-    const type = spec.type ?? inferred;
-    if (spec.type === 'volume')
-      errors.push(`${label}.type volume is declared on the top-level volume, not on a service`);
-    else if (!type)
+    const argv = spec.command === undefined ? null : commandArgv(spec.command);
+    if (spec.command === undefined)
       errors.push(
-        `${label}.type is required (mariadb or mysql); it could not be inferred from image ${JSON.stringify(svc.image ?? '')}`,
+        `${label}.command is required: the command to run in the ${name} container, whose output is stored (see the recipes in docs/backups.md)`,
       );
-    else if (!['mariadb', 'mysql'].includes(type))
-      errors.push(`${label}.type must be mariadb or mysql for a service`);
-    if (spec.exclude !== undefined) errors.push(`${label}.exclude only applies to volume backups`);
+    else if (!argv) errors.push(`${label}.command must be a non-empty string or list of strings`);
+    if (
+      spec.filename !== undefined &&
+      (typeof spec.filename !== 'string' || !FILENAME_RE.test(spec.filename))
+    )
+      errors.push(`${label}.filename must be a plain file name such as ${name}.sql`);
+    if (spec.verify !== undefined && (typeof spec.verify !== 'string' || !spec.verify))
+      errors.push(`${label}.verify must be text that appears at the end of the output`);
 
     const { nodes, dynamic, global } = serviceNodes(svc);
     const replicas = svc['x-tug']?.replicas ?? 1;
@@ -274,43 +265,16 @@ export function resolveBackups(compose: ComposeFile, project = ''): Resolved {
         `${label} needs a single instance; ${name} is global, replicated or placed on several nodes`,
       );
 
-    const databases =
-      spec.databases ??
-      [serviceEnv(svc, 'MARIADB_DATABASE') ?? serviceEnv(svc, 'MYSQL_DATABASE')].filter(
-        (database): database is string => Boolean(database),
-      );
-    if (
-      !Array.isArray(databases) ||
-      !databases.length ||
-      databases.some((d) => typeof d !== 'string' || !NAME_RE.test(d))
-    )
-      errors.push(
-        `${label}.databases must list database names (none found in MARIADB_DATABASE or MYSQL_DATABASE)`,
-      );
-    const user = spec.user ?? 'root';
-    if (typeof user !== 'string' || !NAME_RE.test(user))
-      errors.push(`${label}.user must be a database user name`);
-    // The root password defaults to the secret the service itself reads it from, whatever that secret is called.
-    const rootVariable = type === 'mysql' ? 'MYSQL_ROOT_PASSWORD' : 'MARIADB_ROOT_PASSWORD';
-    const rootReference = sentinelNames(serviceEnv(svc, rootVariable))[0];
-    const passwordSecret =
-      spec.password ?? (user === 'root' ? (rootReference ?? rootVariable) : undefined);
-    if (!passwordSecret)
-      errors.push(
-        `${label}.password is required when user is not root (the name of the secret holding its password)`,
-      );
-
-    if (errors.length > before || !base || !type) continue;
-    backedUpDatabases.push(name);
+    if (errors.length > before || !base || !argv) continue;
     targets.push({
       target: `service:${name}`,
       kind: 'service',
       name,
-      type: type as BackupType,
+      type: 'command',
       ...base,
-      databases: databases as string[],
-      user,
-      passwordSecret,
+      command: argv,
+      filename: spec.filename ?? `${name}.out`,
+      verify: spec.verify,
       writers: spec.writers,
       node: !dynamic && nodes.length === 1 ? nodes[0] : undefined,
     });
@@ -328,11 +292,6 @@ export function resolveBackups(compose: ComposeFile, project = ''): Resolved {
     }
     const before = errors.length;
     const base = common(label, 'volume', name, spec);
-    if (spec.type !== undefined && spec.type !== 'volume')
-      errors.push(`${label}.type must be volume for a volume`);
-    for (const key of SERVICE_ONLY_KEYS)
-      if ((spec as Record<string, unknown>)[key] !== undefined)
-        errors.push(`${label}.${key} only applies to database service backups`);
     if (
       spec.exclude !== undefined &&
       (!Array.isArray(spec.exclude) ||
@@ -358,11 +317,6 @@ export function resolveBackups(compose: ComposeFile, project = ''): Resolved {
       errors.push(
         `${label} needs x-tug.placement.nodes on volume ${name}, since its services are placed by label or global`,
       );
-    for (const dbService of backedUpDatabases)
-      if (mountedVolumes(compose.services[dbService]).includes(name))
-        errors.push(
-          `${label}: volume ${name} holds the data of ${dbService}, which has its own database backup; a raw copy of a running database is not a backup`,
-        );
 
     if (errors.length > before || !base) continue;
     targets.push({

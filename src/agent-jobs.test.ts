@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { JobRunner } from './agent-jobs.ts';
-import { backupArgs, dumpCommand, forgetArgs, memoryBytes, parseSummary } from './backup-job.ts';
+import { backupArgs, forgetArgs, memoryBytes, parseSummary } from './backup-job.ts';
 import { FakeDocker } from '../tests/fake-docker.ts';
 import type { BackupJobPayload, Command } from './protocol.ts';
 
@@ -12,7 +12,7 @@ const payload = (overrides: Partial<BackupJobPayload> = {}): BackupJobPayload =>
   runId: 'bkr_1',
   project: 'site',
   target: 'service:db',
-  type: 'mariadb',
+  type: 'command',
   repository: 's3:https://s3.example.com/bucket/site',
   resticImage: 'restic/restic:0.17.3',
   node: 'app1',
@@ -27,7 +27,6 @@ const command = (id: string, body: BackupJobPayload, type = 'backup.check'): Com
 });
 const credentials = {
   env: { RESTIC_PASSWORD: 'repo-password-xyz', AWS_SECRET_ACCESS_KEY: 'sekret-value-1' },
-  secrets: {},
 };
 async function runner(docker: FakeDocker, concurrency = 1) {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-jobs-'));
@@ -198,26 +197,6 @@ test('restic arguments carry the node as host, tags, retention and the stdin nam
   assert.match(volume, /^backup \/data --exclude cache\/ --json/);
 });
 
-test('dump commands use the right client per database type and never carry the password in arguments', () => {
-  const service = {
-    name: 'db',
-    image: 'mariadb:11.4',
-    network: 'tug_site',
-    databases: ['wordpress', 'blog'],
-    user: 'root',
-    passwordSecret: 'MARIADB_ROOT_PASSWORD',
-  };
-  const maria = dumpCommand(payload({ service }));
-  assert.equal(maria.entrypoint, 'mariadb-dump');
-  assert.deepEqual(maria.args.slice(-3), ['--databases', 'wordpress', 'blog']);
-  const mysql = dumpCommand(payload({ type: 'mysql', service }));
-  assert.equal(mysql.entrypoint, 'mysqldump');
-  assert.ok(
-    !JSON.stringify([maria, mysql]).includes('MARIADB_ROOT_PASSWORD'),
-    'only a name, never a password',
-  );
-});
-
 test('restic summaries and memory limits parse', () => {
   const output = [
     '{"message_type":"status","percent_done":0.5}',
@@ -255,5 +234,91 @@ test('a volume backup fails when the volume does not exist on the node instead o
     JSON.stringify(result.result),
     /volume tug_site_uploads does not exist on this node/,
     'the error says which volume is missing',
+  );
+});
+
+const SUMMARY =
+  '{"message_type":"summary","snapshot_id":"snap1234","data_added":10,"total_bytes_processed":20}\n';
+
+/** A project with a running `db` container whose command output and exit code the test scripts. */
+async function dockerWithService(command: { code: number; out?: string; err?: string }) {
+  const docker = new FakeDocker();
+  docker.addImage('restic/restic:0.17.3');
+  docker.addImage('db');
+  const id = await docker.createContainer('site-db-1', {
+    Image: 'db',
+    Labels: { 'tug.project': 'site', 'tug.service': 'db' },
+  });
+  await docker.startContainer(id);
+  docker.execResponder = (cmd) => {
+    if (cmd[0] === 'dump-it') return command;
+    if (cmd[0] === 'restic' && cmd[1] === 'backup') return { code: 0, out: SUMMARY };
+    return { code: 0 };
+  };
+  return docker;
+}
+const commandJob = (verify?: string) =>
+  payload({
+    command: {
+      service: 'db',
+      argv: ['dump-it'],
+      filename: 'db.sql',
+      ...(verify ? { verify } : {}),
+    },
+  });
+
+test('a command backup runs in the service container and streams its output into restic', async () => {
+  const docker = await dockerWithService({ code: 0, out: 'data\n-- done\n' });
+  const { jobs } = await runner(docker);
+  await jobs.start(command('cmd_1', commandJob('-- done'), 'backup.run'));
+  await settle(jobs, 1);
+  const [result] = jobs.pending();
+  assert.equal(result.state, 'succeeded', JSON.stringify(result.result));
+  assert.equal((result.result as { snapshotId?: string }).snapshotId, 'snap1234');
+  const started = docker.execOptions.map((o) => o.cmd.join(' '));
+  assert.ok(started.includes('dump-it'), 'the command runs through exec in the service container');
+  assert.ok(
+    started.some((c) => c.startsWith('restic backup --stdin --stdin-filename db.sql')),
+    'its output is the stdin of restic backup under the configured file name',
+  );
+  assert.ok(!docker.names().some((n) => n.startsWith('tug-job-')), 'helper containers are removed');
+});
+
+test('a failing command, missing output or a missing completion marker never leaves a snapshot', async () => {
+  const cases: [{ code: number; out?: string }, string | undefined, RegExp][] = [
+    [{ code: 3, out: 'partial\n-- done\n' }, '-- done', /the command exited with code 3/],
+    [{ code: 0, out: '' }, undefined, /produced no output/],
+    [
+      { code: 0, out: 'partial data\n' },
+      '-- done',
+      /the end of the output does not contain \\"-- done\\", so it was cut short/,
+    ],
+  ];
+  for (const [outcome, verify, message] of cases) {
+    const docker = await dockerWithService(outcome);
+    const { jobs } = await runner(docker);
+    await jobs.start(command('cmd_x', commandJob(verify), 'backup.run'));
+    await settle(jobs, 1);
+    const [result] = jobs.pending();
+    assert.equal(result.state, 'failed', `${JSON.stringify(outcome)} should fail the job`);
+    assert.match(JSON.stringify(result.result), message);
+    assert.ok(
+      docker.execOptions.some((o) => o.cmd.join(' ') === 'restic forget snap1234'),
+      'the snapshot restic already wrote is forgotten',
+    );
+  }
+});
+
+test('a command backup fails clearly when the service is not running on the node', async () => {
+  const docker = new FakeDocker();
+  docker.addImage('restic/restic:0.17.3');
+  docker.execResponder = () => ({ code: 0 });
+  const { jobs } = await runner(docker);
+  await jobs.start(command('cmd_1', commandJob(), 'backup.run'));
+  await settle(jobs, 1);
+  assert.match(
+    JSON.stringify(jobs.pending()[0].result),
+    /service db is not running on this node/,
+    'there is nothing to back up from a stopped service',
   );
 });

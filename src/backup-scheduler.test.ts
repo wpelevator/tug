@@ -9,7 +9,6 @@ import { normalized } from '../tests/fake-docker.ts';
 import type { Db } from './db.ts';
 import type { BackupJobPayload, DesiredState } from './protocol.ts';
 
-const MIN = 60_000;
 const at = (iso: string) => new Date(iso);
 
 interface Queued {
@@ -30,9 +29,11 @@ async function fixture(options: { destination?: boolean; schedule?: string } = {
     services: {
       db: {
         image: 'mariadb:11.4',
-        environment: { MARIADB_DATABASE: 'wordpress' },
         volumes: ['db-data:/var/lib/mysql'],
-        'x-tug': { placement: { nodes: ['app1'] }, backup: { jitter: 0 } },
+        'x-tug': {
+          placement: { nodes: ['app1'] },
+          backup: { jitter: 0, command: ['dump-it'], filename: 'db.sql', verify: 'done' },
+        },
       },
     },
     volumes: {
@@ -158,13 +159,11 @@ test('a due slot queues exactly one backup command, and repeated ticks do not qu
     's3:https://s3.example.com/bucket/tug/site',
     'one repository per project',
   );
-  assert.equal(
-    job.payload.service?.image,
-    'mariadb@sha256:abc',
-    'the dump runs from the pinned service image',
+  assert.deepEqual(
+    job.payload.command,
+    { service: 'db', argv: ['dump-it'], filename: 'db.sql', verify: 'done' },
+    'the job carries the command to run in the service container',
   );
-  assert.equal(job.payload.service?.network, 'tug_site');
-  assert.deepEqual(job.payload.service?.databases, ['wordpress']);
   assert.ok(
     job.payload.tags.includes('target:service:db') && job.payload.tags.includes('trigger:schedule'),
   );

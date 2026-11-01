@@ -34,7 +34,8 @@ export interface IngressSpec {
   key?: string;
 }
 
-export type BackupType = 'mariadb' | 'mysql' | 'volume';
+/** What a backup captures: the output of a command run in a service, or the files of a volume. */
+export type BackupType = 'command' | 'volume';
 
 /** A restic keep policy; at least one key is required. */
 export interface BackupRetention {
@@ -48,7 +49,6 @@ export interface BackupRetention {
 
 /** `x-tug.backup` on a service or top-level volume, as an object. */
 export interface BackupSpec {
-  type?: BackupType;
   /** Five-field cron in UTC, or `@hourly`, `@daily`, `@weekly`, `@monthly`, `@yearly`. */
   schedule?: string;
   retention?: BackupRetention;
@@ -56,15 +56,18 @@ export interface BackupSpec {
   jitter?: number;
   /** Hard limit for one run, such as `30m` or `2h`. */
   timeout?: string | number;
-  databases?: string[];
-  user?: string;
-  /** Name of the project secret holding the database user's password. */
-  password?: string;
+  /** Services only: run in the service's container; its standard output is the backup. A string runs through `sh -c`. */
+  command?: string | string[];
+  /** Services only: name of the file inside the snapshot (default `<service>.out`). */
+  filename?: string;
+  /** Services only: text that must appear in the last 4 KiB of output, so a command cut short is not kept as a good backup. */
+  verify?: string;
+  /** Volumes only: restic exclude patterns. */
   exclude?: string[];
+  /** Services to hold during a restore. */
   writers?: string[];
 }
 
-/** `true`, `false`, a cron string, or the object form. */
 export type BackupConfig = boolean | string | BackupSpec;
 
 export type RolloutStrategy = 'recreate' | 'rolling';
@@ -217,8 +220,6 @@ export const BACKUP_COMMAND_TYPES: readonly CommandType[] = [
 /** `GET /agent/v1/backup/credentials`: environment for the restic helper of one running backup command. */
 export interface BackupCredentialsResponse {
   env: Record<string, string>;
-  /** The project secret named by the job's database password, when it has one. */
-  secrets: Record<string, string>;
 }
 
 /** Why a command may be refused or a run marked missed; recorded on the run. */
@@ -241,15 +242,8 @@ export interface BackupJobPayload {
   node: string;
   tags: string[];
   retention?: BackupRetention;
-  /** Database targets: the service container's image, the Docker network and what to dump. */
-  service?: {
-    name: string;
-    image: string;
-    network: string;
-    databases: string[];
-    user: string;
-    passwordSecret: string;
-  };
+  /** Command targets: what to run in the service's container, and how to name and check its output. */
+  command?: { service: string; argv: string[]; filename: string; verify?: string };
   /** Volume targets: the Docker volume to mount read-only; it must already exist on the node. */
   volume?: {
     name: string;

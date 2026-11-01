@@ -124,13 +124,44 @@ Tug can already hold the destination that scheduled backups will use. Set it onc
 
 ## Scheduled backups
 
-Mark a database service or a volume with `x-tug.backup` ([Compose extensions](compose.md#backups)) and Tug backs it up on its node, on the schedule you give, to the project's repository. Control runs a scheduler that ticks every 30 seconds (`TUG_BACKUP_TICK_MS`); at each slot it queues a `backup.run` command with a deadline. The agent runs it as a background job, so reconciliation and health checks are never held up by a long backup, and one node runs one backup at a time unless `TUG_BACKUP_CONCURRENCY` says otherwise.
+Mark a service or a volume with `x-tug.backup` ([Compose extensions](compose.md#backups)) and Tug backs it up on its node, on the schedule you give, to the project's repository. Control runs a scheduler that ticks every 30 seconds (`TUG_BACKUP_TICK_MS`); at each slot it queues a `backup.run` command with a deadline. The agent runs it as a background job, so reconciliation and health checks are never held up by a long backup, and one node runs one backup at a time unless `TUG_BACKUP_CONCURRENCY` says otherwise.
 
-- **Databases** are dumped with the service's own client (`mariadb-dump` or `mysqldump`, from the service's image, on the project network) and streamed into `restic backup --stdin`, so no staging disk is needed. The password reaches the dump only through the container environment. A dump that fails or ends without its completion trailer is never kept: the partial snapshot is forgotten and the run fails. Users and grants are not dumped; they come from the image's init environment.
-- **Volumes** are mounted read-only into the restic container and archived, with your `exclude` patterns. A volume that does not exist on the node fails the run instead of backing up an empty one. Live volumes are crash-consistent, which suits uploads; databases get dumps.
+- **Services** run your `command` through an exec in the running container and stream its output into `restic backup --stdin`, so no staging disk is needed. The command sees the container's own environment, including its secrets, so passwords are read from the environment (`$MARIADB_ROOT_PASSWORD`) and never appear in Tug's configuration, payloads or events. A command that fails, writes nothing or lacks the `verify` text is never kept: the partial snapshot is forgotten and the run fails. The service must be running on the node.
+- **Volumes** are mounted read-only into the restic container and archived, with your `exclude` patterns. A volume that does not exist on the node fails the run instead of backing up an empty one. Live volumes are crash-consistent, which suits uploads and static files.
 - **Retention** runs after each successful backup (`restic forget --prune` per node and target). Snapshots tagged `trigger:pre-restore` are kept regardless.
 - **Images** for restic come from `TUG_RESTIC_IMAGE` on control (default `restic/restic:0.17.3`); a digest reference is recommended. Nodes pull it outbound like any published image.
 - **Restic runs in a helper container** with a memory limit, labelled `tug.job`, removed when it finishes. An agent that restarts mid-job removes leftovers and reports the job failed.
+
+## Recipes
+
+Tug has no database support of its own; each recipe is just a `command` for the service container. Read the password from the container's environment, write the data to standard output, and give `verify` the line the tool prints on success.
+
+```yaml
+# MariaDB (use mysqldump and MYSQL_ROOT_PASSWORD for MySQL)
+backup:
+  command: mariadb-dump -u root -p"$MARIADB_ROOT_PASSWORD" --single-transaction --quick --routines --events --triggers --add-drop-database --databases wordpress
+  filename: wordpress.sql
+  verify: "-- Dump completed"
+
+# PostgreSQL
+backup:
+  command: pg_dump -U "$POSTGRES_USER" --clean --if-exists "$POSTGRES_DB"
+  filename: app.sql
+  verify: "PostgreSQL database dump complete"
+
+# SQLite file in a volume mounted into the service
+backup:
+  command: sqlite3 /data/app.db .dump
+  filename: app.sql
+  verify: COMMIT
+
+# A directory as a tar stream
+backup:
+  command: tar -C /var/www/html -cf - wp-content/themes
+  filename: themes.tar
+```
+
+`mariadb-dump` and `mysqldump` do not dump users and grants; they come from the image's init environment. A service has one backup command, so to include PostgreSQL roles chain them: `sh -c 'pg_dumpall --globals-only; pg_dump ...'`. Restore with the same tool: `restic dump <snapshot> wordpress.sql | mariadb ...`.
 
 ### Events and what to watch
 

@@ -140,32 +140,40 @@ services:
     image: mariadb:11.4
     x-tug:
       placement: { nodes: [app1] }
-      backup: true
+      backup:
+        command: mariadb-dump -u root -p"$MARIADB_ROOT_PASSWORD" --single-transaction --databases wordpress
+        filename: wordpress.sql
+        verify: "-- Dump completed"
 
 volumes:
   uploads:
     x-tug:
-      placement: { nodes: [store1] }
+      placement: { nodes: [app1] }
       backup: "30 3 * * *"
 ```
 
-`x-tug.backup` marks a database service or a top-level volume as a backup target. The value is `true` (take everything from the project defaults), a cron string, `false`, or an object. The top-level `x-tug.backup` only holds defaults and enables nothing by itself.
+`x-tug.backup` marks something to back up. Tug does not know what your services are, so there are only two kinds of target:
+
+- **A service**: Tug runs your `command` inside the running service container and stores its standard output. The container already has the right client, credentials in its environment and network access, so a database dump, `pg_dump`, `redis-cli --rdb -`, `tar` of a directory or `wp db export -` are all just commands. A string runs through `sh -c`; a list runs as written.
+- **A top-level volume**: Tug mounts the volume read-only and archives its files.
+
+The value is a cron string, `true` (a volume, with everything from the project defaults), `false`, or an object. The top-level `x-tug.backup` only holds defaults and enables nothing by itself.
 
 | Key | Applies to | Meaning | Default |
 | --- | --- | --- | --- |
-| `type` | service | `mariadb` or `mysql`, inferred from an image named `mariadb`, `mysql` or `percona` | required when it cannot be inferred |
 | `schedule` | both | Five-field cron in UTC, or `@hourly`, `@daily`, `@weekly`, `@monthly`, `@yearly` | the project default; an error if neither is set |
 | `retention` | both | restic keep policy with `last`, `hourly`, `daily`, `weekly`, `monthly`, `yearly` | the project default, else `daily: 7, weekly: 4, monthly: 6` |
 | `jitter` | both | Seconds of delay after the scheduled minute, 0 to 3600 | a stable per-target value under 15 minutes |
 | `timeout` | both | Hard limit for a run, `1m` to `24h` | `2h` |
-| `databases` | service | Databases to dump | `MARIADB_DATABASE` or `MYSQL_DATABASE` of the service |
-| `user`, `password` | service | Database user and the name of the project secret holding its password | `root`, with the secret the service reads `MARIADB_ROOT_PASSWORD` or `MYSQL_ROOT_PASSWORD` from |
-| `exclude` | volume | restic exclude patterns | none |
 | `writers` | both | Services to hold during a restore | discovered from `depends_on` and volume mounts |
+| `command` | service | What to run in the container; its output is the backup | required |
+| `filename` | service | Name of the file inside the snapshot | `<service>.out` |
+| `verify` | service | Text that must appear in the last 4 KiB of output | none |
+| `exclude` | volume | restic exclude patterns | none |
 
-Deploy rejects a target that cannot be backed up from one place: a service that is global, replicated or placed on several nodes; a volume used on several nodes without `x-tug.placement.nodes`; and a volume holding the data of a database that has its own backup, since copying a running database's files is not a backup.
+A run fails, and no snapshot is kept, when the command exits non-zero, writes nothing, or its output lacks the `verify` text (use the line your tool prints when it finishes, such as `-- Dump completed`, so a dump cut short is never mistaken for a good one).
 
-Backups run on the node that holds the data and are described in [Backups](backups.md).
+Deploy rejects a service target that is global, replicated or placed on several nodes, and a volume used on several nodes without `x-tug.placement.nodes`. Tug does not check that a volume backup and a command backup overlap or that a volume holds a live database: copying the files of a running database is rarely a consistent backup, so back databases up with a command. Recipes for common databases are in [Backups](backups.md#recipes).
 
 ## Secrets in services
 

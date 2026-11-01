@@ -17,7 +17,7 @@ const base = (repo: string, extra: Partial<BackupJobPayload>): BackupJobPayload 
   runId: `bkr_${Math.random().toString(36).slice(2, 10)}`,
   project: 'bkjob',
   target: 'service:db',
-  type: 'mariadb',
+  type: 'command',
   repository: repo,
   resticImage: RESTIC,
   node: 'node1',
@@ -27,7 +27,6 @@ const base = (repo: string, extra: Partial<BackupJobPayload>): BackupJobPayload 
 });
 const credentials = (env: Record<string, string> = { RESTIC_PASSWORD: 'repo-password' }) => ({
   env,
-  secrets: { MARIADB_ROOT_PASSWORD: 'rootpw-123' },
 });
 const snapshots = (repo: string, password = 'repo-password') =>
   JSON.parse(
@@ -72,6 +71,10 @@ test(
         network,
         '--network-alias',
         'db',
+        '--label',
+        'tug.project=bkjob',
+        '--label',
+        'tug.service=db',
         '-e',
         'MARIADB_ROOT_PASSWORD=rootpw-123',
         '-e',
@@ -102,20 +105,28 @@ test(
         'CREATE TABLE posts(id INT PRIMARY KEY, title VARCHAR(50)); INSERT INTO posts VALUES (1,"hello world");',
       );
 
-      const service = {
-        name: 'db',
-        image: MARIADB,
-        network,
-        databases: ['wordpress'],
-        user: 'root',
-        passwordSecret: 'MARIADB_ROOT_PASSWORD',
-      };
-      const phases: string[] = [];
-      const first = await runBackupJob(base(repo, { service, retention: { last: 2 } }), 'cmd_1', {
-        docker: engine,
-        credentials: credentials(),
-        onPhase: (phase) => phases.push(phase),
+      // The command is whatever the operator wrote; Tug runs it in the service's container and stores its output.
+      const commandFor = (databases: string) => ({
+        service: 'db',
+        argv: [
+          'sh',
+          '-c',
+          `mariadb-dump -uroot -p"$MARIADB_ROOT_PASSWORD" --single-transaction --databases ${databases}`,
+        ],
+        filename: 'db.sql',
+        verify: '-- Dump completed',
       });
+      const service = commandFor('wordpress');
+      const phases: string[] = [];
+      const first = await runBackupJob(
+        base(repo, { command: service, retention: { last: 2 } }),
+        'cmd_1',
+        {
+          docker: engine,
+          credentials: credentials(),
+          onPhase: (phase) => phases.push(phase),
+        },
+      );
       assert.ok(first.snapshotId, 'a database backup should return a snapshot id');
       assert.ok((first.totalBytes ?? 0) > 0, 'the dump should have bytes');
       assert.ok(
@@ -145,7 +156,7 @@ test(
       assert.match(dump.stdout, /Dump completed/, 'the snapshot contains the full dump');
 
       for (let i = 0; i < 3; i++)
-        await runBackupJob(base(repo, { service, retention: { last: 2 } }), `cmd_r${i}`, {
+        await runBackupJob(base(repo, { command: service, retention: { last: 2 } }), `cmd_r${i}`, {
           docker: engine,
           credentials: credentials(),
         });
@@ -153,18 +164,17 @@ test(
 
       const before = snapshots(repo).length;
       await assert.rejects(
-        runBackupJob(
-          base(repo, { service: { ...service, databases: ['nonexistent'] } }),
-          'cmd_bad',
-          { docker: engine, credentials: credentials() },
-        ),
-        /dump failed/,
-        'a failing dump fails the job',
+        runBackupJob(base(repo, { command: commandFor('nonexistent') }), 'cmd_bad', {
+          docker: engine,
+          credentials: credentials(),
+        }),
+        /the command exited with code/,
+        'a failing command fails the job',
       );
       assert.equal(snapshots(repo).length, before, 'a failed dump leaves no snapshot behind');
 
       await assert.rejects(
-        runBackupJob(base(repo, { service }), 'cmd_pw', {
+        runBackupJob(base(repo, { command: service }), 'cmd_pw', {
           docker: engine,
           credentials: credentials({ RESTIC_PASSWORD: 'wrong' }),
         }),

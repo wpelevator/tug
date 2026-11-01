@@ -134,6 +134,7 @@ export class JobRunner {
       () => controller.abort(new Error(`the job exceeded its ${payload.limits.timeoutSec}s limit`)),
       payload.limits.timeoutSec * 1000,
     );
+    timeout.unref();
     let credentials: BackupCredentialsResponse | undefined;
     try {
       credentials = await this.host.fetchCredentials(command.id);
@@ -153,9 +154,7 @@ export class JobRunner {
       );
       this.results.push({ commandId: command.id, state: 'succeeded', result });
     } catch (error) {
-      const values = credentials
-        ? [...Object.values(credentials.env), ...Object.values(credentials.secrets)]
-        : [];
+      const values = credentials ? Object.values(credentials.env) : [];
       this.results.push({
         commandId: command.id,
         state: 'failed',

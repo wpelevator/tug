@@ -1,7 +1,7 @@
 import { cronPeriodMs, nextCronRun } from './cron.ts';
 import { resolveBackups } from './backup-config.ts';
 import { projectRepository } from './backup-destination.ts';
-import { networkName, volumeName } from './container-spec.ts';
+import { volumeName } from './container-spec.ts';
 import { id } from './util.ts';
 import { isUniqueViolation } from './db-driver.ts';
 import type { ResolvedBackup } from './backup-config.ts';
@@ -235,13 +235,11 @@ export function createBackupService(deps: BackupServiceDeps) {
       limits: { memory: DEFAULT_MEMORY, timeoutSec: config.timeoutSec },
     };
     if (config.kind === 'service') {
-      payload.service = {
-        name: config.name,
-        image: desired.services[config.name]?.image ?? '',
-        network: networkName(schedule.project_id),
-        databases: config.databases ?? [],
-        user: config.user ?? 'root',
-        passwordSecret: config.passwordSecret ?? '',
+      payload.command = {
+        service: config.name,
+        argv: config.command ?? [],
+        filename: config.filename ?? `${config.name}.out`,
+        verify: config.verify,
       };
     } else {
       payload.volume = {
@@ -347,8 +345,6 @@ export function createBackupService(deps: BackupServiceDeps) {
       return fail('the target is not placed on exactly one node', 'backup.failed');
     const runId = id('bkr');
     const payload = buildPayload(schedule, runId, trigger, current.desired, node);
-    if (payload.service && !payload.service.image)
-      return fail('the service has no image on its node', 'backup.failed');
     const period = cronPeriodMs(schedule.schedule, at) ?? MAX_DEADLINE_MS * 2;
     const window =
       trigger === 'manual' || trigger === 'pre-restore'

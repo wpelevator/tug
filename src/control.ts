@@ -2810,10 +2810,8 @@ export async function createApp(
   // Credentials for a backup helper are released only while its command is running on the calling node, and
   // never ride in the command payload, events or results.
   get('/agent/v1/backup/credentials', authAgent, async (req, res) => {
-    const command = db.get<
-      Pick<CommandRow, 'node_id' | 'project_id' | 'type' | 'state' | 'payload_json'>
-    >(
-      'SELECT node_id,project_id,type,state,payload_json FROM commands WHERE id=?',
+    const command = db.get<Pick<CommandRow, 'node_id' | 'project_id' | 'type' | 'state'>>(
+      'SELECT node_id,project_id,type,state FROM commands WHERE id=?',
       String(req.query.command || ''),
     );
     if (!command) return res.status(404).json({ error: 'command not found' });
@@ -2825,25 +2823,11 @@ export async function createApp(
       return res.status(409).json({ error: `command is ${command.state}, not running` });
     if (!command.project_id || !backupDestination())
       return res.status(409).json({ error: 'no backup destination is configured' });
-    // A database dump also needs the database password: the one project secret the job's payload names.
-    const passwordSecret = (
-      JSON.parse(command.payload_json || '{}') as { service?: { passwordSecret?: string } }
-    ).service?.passwordSecret;
-    const secrets: Record<string, string> = {};
-    if (passwordSecret) {
-      const row = db.get<Pick<SecretRow, 'encrypted_value'>>(
-        'SELECT encrypted_value FROM secrets WHERE project_id=? AND name=?',
-        command.project_id,
-        passwordSecret,
-      );
-      if (row) secrets[passwordSecret] = decrypt(row.encrypted_value, masterKey);
-    }
     const response: BackupCredentialsResponse = {
       env: {
         ...backupEnv(),
         RESTIC_PASSWORD: repositoryPassword(masterKey, command.project_id),
       },
-      secrets,
     };
     res.json(response);
   });
