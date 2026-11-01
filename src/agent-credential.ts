@@ -11,7 +11,7 @@ import {
   validateInstalledCertificate,
   writeFileDurable,
 } from './pki.ts';
-import type { Credential } from './pki.ts';
+import type { Credential, PersistHooks } from './pki.ts';
 import type { IdentityResponse } from './protocol.ts';
 
 /** The agent's persisted identity: the common credential plus the node it names. */
@@ -81,6 +81,7 @@ export async function agentIdentityCsr(stateDir: string): Promise<string> {
 export async function installIdentity(
   stateDir: string,
   response: IdentityResponse,
+  hooks: PersistHooks = {},
 ): Promise<AgentDocument> {
   const pending = (await readJson(pendingFile(stateDir))) as PendingDocument | null;
   if (!pending?.key) throw new Error('no pending key: run `agent identity` first');
@@ -101,7 +102,7 @@ export async function installIdentity(
     nodeId: response.node.id,
     nodeName: response.node.name,
   };
-  await writeFileDurable(agentFile(stateDir), JSON.stringify(doc));
+  await writeFileDurable(agentFile(stateDir), JSON.stringify(doc), 0o600, hooks);
   await fs.rm(pendingFile(stateDir), { force: true });
   return doc;
 }
@@ -124,12 +125,22 @@ export type HttpClient = (url: string, init?: RequestInit) => Promise<Response>;
 export function createTransport(credential: Credential, connectUrl?: string) {
   const dispatcher = new Agent({ connect: clientTlsOptions(credential) as never });
   const base = new URL(connectUrl ?? credential.url).origin;
-  const http: HttpClient = (url, init) =>
-    undiciFetch(url, {
-      ...(init as object),
+  const http: HttpClient = (url, init) => {
+    let request = init;
+    // The runtime's FormData is not the undici package's FormData, which would stringify it. Serialize it with the
+    // runtime's own Response and stream the result.
+    if (typeof FormData !== 'undefined' && init?.body instanceof FormData) {
+      const encoded = new Response(init.body);
+      const headers = new Headers(init.headers);
+      headers.set('content-type', encoded.headers.get('content-type') ?? 'multipart/form-data');
+      request = { ...init, headers, body: encoded.body, duplex: 'half' } as RequestInit;
+    }
+    return undiciFetch(url, {
+      ...(request as object),
       redirect: 'error',
       dispatcher,
     } as never) as unknown as Promise<Response>;
+  };
   return { http, base, dispatcher, close: () => dispatcher.close() };
 }
 
@@ -150,6 +161,7 @@ export async function renewCertificate(
   stateDir: string,
   doc: AgentDocument,
   post: (csr: string) => Promise<{ certificate: string }>,
+  hooks: PersistHooks = {},
 ): Promise<AgentDocument> {
   const { certificate } = await post(await createCsr(doc.key));
   validateInstalledCertificate({
@@ -159,6 +171,6 @@ export async function renewCertificate(
     uri: identityUri('node', doc.nodeId),
   });
   const next: AgentDocument = { ...doc, cert: certificate };
-  await writeFileDurable(agentFile(stateDir), JSON.stringify(next));
+  await writeFileDurable(agentFile(stateDir), JSON.stringify(next), 0o600, hooks);
   return next;
 }

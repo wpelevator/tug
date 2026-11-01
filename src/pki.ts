@@ -87,7 +87,18 @@ export const certKeyHash = (certPem: string): string =>
   hashSpki(new crypto.X509Certificate(certPem).publicKey.export({ type: 'spki', format: 'der' }));
 
 /** Durable write: temporary file in the same directory, flushed, renamed over the target, directory flushed. */
-export async function writeFileDurable(file: string, content: string, mode = 0o600): Promise<void> {
+export interface PersistHooks {
+  /** Called after the temporary file is flushed and before the rename. Tests throw here to simulate a crash. */
+  afterFlush?: () => void;
+  /** Called after the rename and before the directory flush. */
+  afterRename?: () => void;
+}
+export async function writeFileDurable(
+  file: string,
+  content: string,
+  mode = 0o600,
+  hooks: PersistHooks = {},
+): Promise<void> {
   const dir = path.dirname(file);
   await fs.mkdir(dir, { recursive: true });
   const tmp = path.join(
@@ -102,11 +113,14 @@ export async function writeFileDurable(file: string, content: string, mode = 0o6
     await handle.close();
   }
   try {
+    hooks.afterFlush?.();
     await fs.rename(tmp, file);
   } catch (e) {
+    // A crash leaves the temporary file behind; a failed write must not.
     await fs.rm(tmp, { force: true });
     throw e;
   }
+  hooks.afterRename?.();
   const dirHandle = await fs.open(dir, 'r').catch(() => null);
   if (dirHandle) {
     await dirHandle.sync().catch(() => {});

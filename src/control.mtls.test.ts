@@ -390,3 +390,46 @@ test('root recovery replaces only root and closes its old sessions within a seco
     await s.close();
   }
 });
+
+test('renewal: a node cannot renew with another node key, and expired or bootstrap certificates cannot renew', async () => {
+  const s = await start();
+  try {
+    const a = await s.newNode('a');
+    const b = await s.newNode('b');
+    const stolen = await s.call(b.credential, 'POST', '/agent/v1/renew', { csr: a.csr });
+    assert.equal(
+      stolen.status,
+      403,
+      "a CSR for another node's key must not be signed for this node",
+    );
+    const minted = await s.call(s.root, 'POST', '/api/v1/nodes/enroll-token', { name: 'c' });
+    assert.equal(
+      (await s.call(minted.body.credential, 'POST', '/agent/v1/renew', { csr: a.csr })).status,
+      403,
+      'bootstrap certificates cannot renew',
+    );
+  } finally {
+    await s.close();
+  }
+});
+
+test('renewal: the minimum interval is enforced per node', async () => {
+  const s = await start();
+  process.env.TUG_RENEW_MIN_INTERVAL_MS = '3600000';
+  try {
+    const n = await s.newNode('n1');
+    assert.equal(
+      (await s.call(n.credential, 'POST', '/agent/v1/renew', { csr: n.csr })).status,
+      200,
+      'first renewal works',
+    );
+    assert.equal(
+      (await s.call(n.credential, 'POST', '/agent/v1/renew', { csr: n.csr })).status,
+      429,
+      'a second renewal inside the interval is refused',
+    );
+  } finally {
+    process.env.TUG_RENEW_MIN_INTERVAL_MS = '0';
+    await s.close();
+  }
+});
