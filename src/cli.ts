@@ -1299,9 +1299,11 @@ program
   });
 program
   .command('doctor')
-  .description('run local and control-plane diagnostics')
-  .option('--nodes', 'also run diagnostics on every registered agent and wait')
-  .option('--node <name>', 'run diagnostics on one agent and wait')
+  .description(
+    'check this machine and the control plane: certificate expiry, node connectivity and clock skew',
+  )
+  .option('--nodes', 'also run host diagnostics on every node through its agent and wait')
+  .option('--node <name>', 'run host diagnostics on one node through its agent and wait')
   .option('--timeout <seconds>', 'wait timeout for node diagnostics', '60')
   .action(async (o: { nodes?: boolean; node?: string; timeout: string }) => {
     const local: { name: string; ok: boolean; output?: string; error?: string }[] = [];
@@ -1317,13 +1319,19 @@ program
       }
     }
     const controlDiagnostics = await request('GET', '/api/v1/diagnostics');
+    const warnings = (controlDiagnostics.checks ?? []).flatMap(
+      (check: { name: string; warnings?: string[] }) =>
+        (check.warnings ?? []).map((warning) => `${check.name}: ${warning}`),
+    );
     const output: {
       ok: boolean;
+      warnings?: string[];
       local: typeof local;
       control: unknown;
       nodeDiagnostics?: unknown;
     } = {
       ok: local.every((c) => c.ok) && controlDiagnostics.ok,
+      ...(warnings.length && { warnings }),
       local,
       control: controlDiagnostics,
     };

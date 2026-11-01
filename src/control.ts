@@ -8,6 +8,7 @@ import {
 } from './registry.ts';
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
 import multer from 'multer';
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
@@ -60,6 +61,7 @@ import {
   serverNames,
   writeFileDurable,
 } from './pki.ts';
+import { EXPIRY_WARN_DAYS, certificateExpiry, diagnoseNode } from './diagnostics.ts';
 import { serverTlsOptions } from './tls-server.ts';
 import {
   DEFAULT_MESH_CIDR,
@@ -2890,18 +2892,59 @@ export async function createApp(
     await check('sqlite', async () => ({
       value: db.get<{ count: number }>('SELECT COUNT(*) AS count FROM projects')!.count,
     }));
-    await check('pki', async () => ({
-      caNotAfter: pki.caNotAfter.toISOString(),
-      daysUntilCaExpiry: Math.floor((pki.caNotAfter.getTime() - Date.now()) / 86_400_000),
-    }));
+    await check('certificates', async () => {
+      const nowMs = Date.now();
+      const ca = certificateExpiry(pki.caNotAfter, nowMs, EXPIRY_WARN_DAYS.ca);
+      const saved = JSON.parse(
+        await fs.readFile(path.join(DATA_DIR, 'pki', 'server.json'), 'utf8'),
+      );
+      const server = certificateExpiry(
+        new Date(new crypto.X509Certificate(saved.cert).validTo),
+        nowMs,
+        EXPIRY_WARN_DAYS.server,
+      );
+      const problems = [
+        ...(ca.state === 'expired'
+          ? ['the control CA has expired; see the CA-loss recovery runbook']
+          : []),
+        ...(server.state === 'expired' ? ['the control server certificate has expired'] : []),
+      ];
+      const warnings = [
+        ...(ca.state === 'expiring'
+          ? [`the control CA expires in ${ca.daysLeft} days; plan a CA rotation`]
+          : []),
+        ...(server.state === 'expiring'
+          ? [`the server certificate expires in ${server.daysLeft} days and has not renewed`]
+          : []),
+      ];
+      return {
+        ok: problems.length === 0,
+        ca,
+        server,
+        ...(problems.length && { error: problems.join('; ') }),
+        ...(warnings.length && { warnings }),
+      };
+    });
+    await check('nodes', async () => {
+      const nowMs = Date.now();
+      const staleSeconds = Number(process.env.TUG_STALE_SECONDS || 60);
+      const nodes = db
+        .all<NodeRow>('SELECT * FROM nodes ORDER BY name')
+        .map((n) => diagnoseNode(n, nowMs, staleSeconds));
+      const problems = nodes.flatMap((n) => n.problems.map((p) => `${n.name}: ${p}`));
+      const warnings = nodes.flatMap((n) => n.warnings.map((w) => `${n.name}: ${w}`));
+      return {
+        ok: problems.length === 0,
+        nodes: nodes.map(({ problems: _p, warnings: _w, ...rest }) => rest),
+        ...(problems.length && { error: problems.join('; ') }),
+        ...(warnings.length && { warnings }),
+      };
+    });
     await check('master_key', async () => ({ configured: Boolean(masterKey) }));
     await check('docker', async () => ({
       output: (
         await runCommand('docker', ['version', '--format', '{{.Server.Version}}'])
       ).out.trim(),
-    }));
-    await check('docker_compose', async () => ({
-      output: (await runCommand('docker', ['compose', 'version'])).out.trim(),
     }));
     if (MESH) {
       await check('mesh', async () => {
@@ -3186,6 +3229,13 @@ export async function createApp(
         req.node!.id,
       );
     db.run('UPDATE nodes SET last_seen_at=?,status=? WHERE id=?', ts, 'online', req.node!.id);
+    if (report.sentAt)
+      db.run(
+        'UPDATE nodes SET clock_skew_ms=?,clock_observed_at=? WHERE id=?',
+        Date.parse(report.sentAt) - Date.parse(ts),
+        ts,
+        req.node!.id,
+      );
     try {
       restores.advance();
     } catch (e) {

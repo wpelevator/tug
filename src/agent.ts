@@ -1372,7 +1372,12 @@ export async function pollOnce(ctx: AgentContext = defaultContext()): Promise<Pr
   }
   const jobResults = jobs.pending();
   commandResults.push(...jobResults);
-  const report: StatusReport = { node: ctx.nodeName, projects, commandResults };
+  const report: StatusReport = {
+    node: ctx.nodeName,
+    sentAt: new Date().toISOString(),
+    projects,
+    commandResults,
+  };
   const running = jobs.statuses();
   if (running.length) report.jobs = running;
   if (ingress) report.ingress = ingress;

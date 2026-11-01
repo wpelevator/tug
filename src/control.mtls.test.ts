@@ -240,7 +240,7 @@ test('node identity: create is idempotent for the same key, replace cuts off the
 test('node IDs are immutable and never reused: a removed node name gets a new ID that old certificates cannot match', async () => {
   const s = await start();
   try {
-    const node = await s.newNode('n1');
+    await s.newNode('n1');
     const listed = async () =>
       (
         (await s.call(s.root, 'GET', '/api/v1/nodes')).body.nodes as { id: string; name: string }[]
@@ -279,6 +279,28 @@ test('node IDs are immutable and never reused: a removed node name gets a new ID
       (await s.call(replaced.credential, 'GET', '/agent/v1/work')).status,
       0,
       'a certificate issued for the removed node ID is not accepted for the re-created node even with the same key',
+    );
+  } finally {
+    await s.close();
+  }
+});
+
+test('diagnostics report CA, server and node certificate expiry', async () => {
+  const s = await start();
+  try {
+    await s.newNode('n1');
+    const res = await s.call(s.root, 'GET', '/api/v1/diagnostics');
+    assert.equal(res.status, 200, 'an admin can read the diagnostics');
+    const certificates = res.body.checks.find((c: { name: string }) => c.name === 'certificates');
+    assert.equal(certificates.ok, true, 'fresh certificates pass');
+    assert.equal(certificates.server.state, 'ok', 'the server certificate is valid');
+    assert.ok(certificates.server.daysLeft >= 89, 'the server certificate lasts about 90 days');
+    assert.ok(certificates.ca.daysLeft > 3000, 'the CA lasts about ten years');
+    const nodes = res.body.checks.find((c: { name: string }) => c.name === 'nodes');
+    assert.equal(nodes.nodes[0].certificate.state, 'ok', 'the node certificate is valid');
+    assert.ok(
+      nodes.nodes[0].certificate.daysLeft >= 89,
+      'the node certificate lasts about 90 days',
     );
   } finally {
     await s.close();
