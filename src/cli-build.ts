@@ -49,7 +49,7 @@ const CREDENTIAL_FILE = /\.credential\.json$/;
 
 const ignoreCache = new WeakMap<string[], (relative: string) => boolean>();
 
-/** Translates one `.dockerignore` pattern: `*` and `?` stay within a path segment, `**` crosses them. */
+/** Translates one `.dockerignore` pattern: `*`, `?` and `[...]` classes stay within a path segment, `**` crosses them. */
 function ignorePattern(pattern: string): RegExp {
   let source = '';
   for (let i = 0; i < pattern.length; i++) {
@@ -64,7 +64,13 @@ function ignorePattern(pattern: string): RegExp {
       }
     } else if (char === '*') source += '[^/]*';
     else if (char === '?') source += '[^/]';
-    else if (char === '\\' && i + 1 < pattern.length)
+    else if (char === '[' && pattern.indexOf(']', i + 2) > 0) {
+      const close = pattern.indexOf(']', i + 2);
+      const body = pattern.slice(i + 1, close);
+      const negated = body[0] === '^' || body[0] === '!';
+      source += `[${negated ? '^' : ''}${(negated ? body.slice(1) : body).replace(/[\\\]^]/g, '\\$&')}]`;
+      i = close;
+    } else if (char === '\\' && i + 1 < pattern.length)
       source += pattern[++i].replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
     else source += char.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
   }

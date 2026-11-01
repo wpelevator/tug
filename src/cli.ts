@@ -1217,6 +1217,7 @@ async function makeContext(): Promise<string> {
     await createSourceArchive(process.cwd(), tmp, [
       resolvedConfig!.file,
       resolvedConfig!.localFile,
+      ...(resolvedConfig!.credentialFile ? [resolvedConfig!.credentialFile] : []),
     ]);
   } catch (error) {
     await fs.rm(tmp, { force: true });

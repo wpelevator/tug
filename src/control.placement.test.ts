@@ -210,3 +210,60 @@ test('node-remove deletes a retired node but refuses placed or still-reporting n
     await s.close();
   }
 });
+
+test('explicit placement is refused on disabled or unknown nodes', async () => {
+  const s = await makeServer();
+  try {
+    await post(s.base, '/api/v1/nodes/register', { name: 'n1' });
+    await post(s.base, '/api/v1/nodes/register', { name: 'n2' });
+    await post(s.base, '/api/v1/nodes/n1/disable', {});
+    const deploy = (node: string) =>
+      fetch(`${s.base}/api/v1/deployments`, {
+        method: 'POST',
+        headers: op,
+        body: JSON.stringify({
+          project: 'site',
+          version: node,
+          compose: {
+            services: { web: { image: 'nginx', 'x-tug': { placement: { nodes: [node] } } } },
+          },
+        }),
+      });
+    assert.equal((await deploy('n1')).status, 400, 'a disabled node cannot receive new placement');
+    assert.equal((await deploy('ghost')).status, 400, 'an unregistered node is refused');
+    assert.equal((await deploy('n2')).status, 200, 'an enabled node still accepts placement');
+  } finally {
+    await s.close();
+  }
+});
+
+test('node addresses cannot carry configuration syntax', async () => {
+  const s = await makeServer();
+  try {
+    const register = (body: object) =>
+      fetch(`${s.base}/api/v1/nodes/register`, {
+        method: 'POST',
+        headers: op,
+        body: JSON.stringify(body),
+      });
+    for (const address of ['10.0.0.9 {\n\theader_down X injected\n\t#', 'host:80', 'a b', '[::1]'])
+      assert.equal(
+        (await register({ name: 'bad', address })).status,
+        400,
+        `address ${JSON.stringify(address)} must be rejected`,
+      );
+    assert.equal(
+      (await register({ name: 'bad', publicAddress: '1.2.3.4 {\n#' })).status,
+      400,
+      'a public address with syntax must be rejected',
+    );
+    assert.equal(
+      (await register({ name: 'ok', address: '10.0.0.9', publicAddress: 'node.example.com:51820' }))
+        .status,
+      200,
+      'plain host and host:port public addresses are accepted',
+    );
+  } finally {
+    await s.close();
+  }
+});

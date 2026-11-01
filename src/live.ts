@@ -121,6 +121,16 @@ function validate(value: unknown): asserts value is LiveRequest {
     throw new Error('Invalid projects');
 }
 /** Owns Engine API streams and their lifetimes; callers own authentication, authorization and transport backpressure. */
+/** Keeps environment variable names but not values, so routine `inspect` output does not leak secrets by accident. */
+export function redactInspect(inspected: Record<string, unknown>): Record<string, unknown> {
+  const config = inspected.Config as { Env?: unknown } | undefined;
+  if (!config || !Array.isArray(config.Env)) return inspected;
+  const Env = config.Env.map((entry) =>
+    typeof entry === 'string' ? `${entry.split('=', 1)[0]}=<redacted>` : entry,
+  );
+  return { ...inspected, Config: { ...config, Env } };
+}
+
 export class LiveOperationEngine {
   private readonly options: LiveEngineOptions;
   private readonly sessions = new Map<string, Session>();
@@ -231,7 +241,8 @@ export class LiveOperationEngine {
             ),
           );
           result = lists.flat() as unknown as Record<string, unknown>[];
-        } else result = [await this.options.docker.inspectContainer(request.container)];
+        } else
+          result = [redactInspect(await this.options.docker.inspectContainer(request.container))];
         const frame = { v: 1, type: 'live.result', sessionId: id, result };
         if (Buffer.byteLength(JSON.stringify(frame)) > LIVE_MAX_FRAME_BYTES)
           throw new Error('Live result exceeds serialized frame size limit');

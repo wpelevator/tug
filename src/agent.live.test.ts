@@ -9,6 +9,7 @@ import { WebSocket } from 'ws';
 import { AgentLiveOperations, AgentWakeChannel, resolveLiveContainer } from './agent.ts';
 import type { AgentContext, AgentLiveControlFrame, AgentLiveOutputFrame } from './agent.ts';
 import { LIVE_MAX_FRAME_BYTES } from './protocol.ts';
+import { redactInspect } from './live.ts';
 import type { AttachedProcess, ExecOptions } from './docker-api.ts';
 import { FakeDocker } from '../tests/fake-docker.ts';
 
@@ -351,6 +352,11 @@ test('ps lists the selected project from the Engine and inspect returns structur
     inspected?.type === 'live.result' &&
       (inspected.result as { Id: string }[])[0].Id === containerId,
     'Inspect returns the pinned service container',
+  );
+  assert.deepEqual(
+    redactInspect({ Id: 'c', Config: { Env: ['DB_PASSWORD=hunter2', 'FLAG=', 'BARE'] } }),
+    { Id: 'c', Config: { Env: ['DB_PASSWORD=<redacted>', 'FLAG=<redacted>', 'BARE=<redacted>'] } },
+    'inspect keeps environment variable names but never their values',
   );
 });
 

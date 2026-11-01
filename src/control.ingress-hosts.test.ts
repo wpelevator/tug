@@ -106,3 +106,29 @@ test('a rollback cannot restore a hostname that another project now owns', async
     await s.close();
   }
 });
+
+test('wildcard hostnames overlap exact hosts owned by another project', async () => {
+  const s = await server();
+  try {
+    assert.equal((await s.deploy('victim', 'v1', '*.example.org')).status, 200);
+    const taken = await s.deploy('alpha', 'v1', 'login.example.org');
+    assert.equal(taken.status, 409, "an exact host under another project's wildcard is refused");
+    assert.match(
+      (await json(taken)).error,
+      /overlaps \*\.example\.org/,
+      'the error names the wildcard',
+    );
+    assert.equal(
+      (await s.deploy('alpha', 'v1', 'api.example.net')).status,
+      200,
+      'an unrelated host is unaffected',
+    );
+    assert.equal(
+      (await s.deploy('beta', 'v1', '*.example.net')).status,
+      409,
+      "a wildcard covering another project's exact host is refused",
+    );
+  } finally {
+    await s.close();
+  }
+});

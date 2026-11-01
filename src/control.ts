@@ -41,6 +41,7 @@ import { encrypt, decrypt, loadOrCreateMasterKey } from './secrets.ts';
 import {
   buildDesiredState,
   ingressHostsOf,
+  ingressHostsOverlap,
   loopbackIngressServices,
   serviceSecretNames,
   validateCompose,
@@ -72,6 +73,8 @@ import {
   isWgKey,
   parseCidr,
   wgEndpoint,
+  isNodeEndpoint,
+  isNodeHost,
 } from './mesh.ts';
 import { buildIngressWork, resolveServiceEndpoints } from './ingress.ts';
 import { parseStatusReport } from './status-report.ts';
@@ -959,14 +962,13 @@ export async function createApp(
     if (!wanted.size) return;
     for (const other of currentDesiredStates()) {
       if (other.project === project) continue;
-      for (const [host, service] of ingressHostsOf(other.compose)) {
-        const mine = wanted.get(host);
-        if (mine)
-          throw httpError(
-            409,
-            `${mine}: ingress.host ${host} is already routed by project ${other.project} (${service})`,
-          );
-      }
+      for (const [host, service] of ingressHostsOf(other.compose))
+        for (const [wantedHost, mine] of wanted)
+          if (ingressHostsOverlap(wantedHost, host))
+            throw httpError(
+              409,
+              `${mine}: ingress.host ${wantedHost} ${wantedHost === host ? 'is' : `overlaps ${host},`} already routed by project ${other.project} (${service})`,
+            );
     }
   }
   function createRollback(
@@ -1382,6 +1384,10 @@ export async function createApp(
   }): void {
     if (!NODE_NAME.test(input.name))
       throw httpError(400, 'node name must be 1-63 letters, numbers, dots, underscores or hyphens');
+    if (input.address && !isNodeHost(input.address))
+      throw httpError(400, 'address must be an IP address or hostname without a port');
+    if (input.publicAddress && !isNodeEndpoint(input.publicAddress))
+      throw httpError(400, 'publicAddress must be an IP address or hostname with an optional port');
     if (input.wgPublicKey !== undefined && !isWgKey(input.wgPublicKey))
       throw httpError(400, 'wgPublicKey must be a base64 WireGuard public key');
     const ts = now();
@@ -2175,6 +2181,10 @@ export async function createApp(
         }
       }
       const nodes = nodeRows.map((row) => ({ name: row.name }));
+      for (const [name, svc] of Object.entries(compose.services || {}))
+        for (const node of svc['x-tug']?.placement?.nodes || [])
+          if (!nodes.some((n) => n.name === node))
+            throw httpError(400, `${name}: placement node ${node} is not an enabled node`);
       try {
         validateCompose(
           compose,
@@ -3294,6 +3304,16 @@ export async function createApp(
       return res.status(409).json({ error: `command is ${command.state}, not running` });
     if (!command.project_id || !backupDestination())
       return res.status(409).json({ error: 'no backup destination is configured' });
+    // A command that outlived the project's placement on this node (a newer version moved it) gets nothing.
+    const desiredRow = currentDesired(command.project_id);
+    const desiredNow: DesiredState | undefined = desiredRow
+      ? JSON.parse(desiredRow.state_json)
+      : undefined;
+    const placedHere = Object.values(desiredNow?.services || {}).some((svc) =>
+      svc.placement?.nodes?.includes(req.node!.name),
+    );
+    if (!placedHere)
+      return res.status(403).json({ error: 'project is no longer placed on this node' });
     const response: BackupCredentialsResponse = {
       env: {
         ...backupEnv(),

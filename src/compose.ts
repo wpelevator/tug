@@ -345,6 +345,15 @@ export function ingressHostsOf(compose: ComposeFile): Map<string, string> {
   return hosts;
 }
 
+/** True when two lowercase ingress hosts could route the same request: equal, or one is a `*.` wildcard covering the other. */
+export function ingressHostsOverlap(a: string, b: string): boolean {
+  if (a === b) return true;
+  const suffix = (host: string) => (host.startsWith('*.') ? host.slice(1) : undefined);
+  const wa = suffix(a);
+  const wb = suffix(b);
+  return (wa !== undefined && b.endsWith(wa)) || (wb !== undefined && a.endsWith(wb));
+}
+
 export function validateCompose(
   compose: ComposeFile | undefined,
   nodes: string[] = [],

@@ -185,6 +185,15 @@ test('credentials are released only to the owning node for a running backup comm
     await call(s.base, 'POST', '/api/v1/projects', { name: 'site' });
     const n1 = await json(await call(s.base, 'POST', '/api/v1/nodes/register', { name: 'n1' }));
     const n2 = await json(await call(s.base, 'POST', '/api/v1/nodes/register', { name: 'n2' }));
+    const deployOn = (version: string, node: string) =>
+      call(s.base, 'POST', '/api/v1/deployments', {
+        project: 'site',
+        version,
+        compose: {
+          services: { web: { image: 'nginx', 'x-tug': { placement: { nodes: [node] } } } },
+        },
+      });
+    assert.equal((await deployOn('v1', 'n1')).status, 200, 'the project is placed on n1');
     const db = await openDb(s.dbFile);
     const ids = db.all<{ id: string; name: string }>('SELECT id,name FROM nodes');
     const nodeId = (name: string) => ids.find((n) => n.name === name)!.id;
@@ -251,6 +260,14 @@ test('credentials are released only to the owning node for a running backup comm
       (await fetch(`${s.base}/agent/v1/backup/credentials?command=cmd_run`, { headers })).status,
       403,
       'an operator credential is not a node credential',
+    );
+
+    db.run("UPDATE deployments SET state='succeeded'");
+    assert.equal((await deployOn('v2', 'n2')).status, 200, 'the project moves to n2');
+    assert.equal(
+      (await fetchCredentials(n1.nodeId, 'cmd_run')).status,
+      403,
+      'a running command on a node the project left is refused credentials',
     );
   } finally {
     await s.close();

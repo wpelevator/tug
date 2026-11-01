@@ -1,29 +1,33 @@
 # Security audit
 
-Audit date: 1 November 2026. Base commit: `a80b94236402e06138e61867c527cbf07540f60f`, plus the uncommitted working tree, including the mTLS implementation. Findings describe the code observed during this review, rather than the last release or a deployed installation. This is a source review with isolated local reproductions, not a live infrastructure penetration test. Runtime behavior was not changed to address the findings.
+Original audit: 1 November 2026, based on `a80b94236402e06138e61867c527cbf07540f60f` plus the then-uncommitted mTLS implementation. Rechecked on the same date against `19185259c32c816f8c3ab301efa28aa7b96c683b`. The recheck began at `da7ffb4`; the branch was squash-merged during review, and its tree is identical to the recorded recheck commit. Findings describe source code, not a deployed installation. This is a source review with isolated local reproductions, not a live infrastructure penetration test. Neither review changed runtime behavior.
 
 ## Assessment
 
-The current tool should be operated as a single trust domain: every deployment author must be trusted with the nodes they can select, their co-located workloads and their secrets. Project scopes restrict API records but do not provide workload or host isolation. The mTLS implementation improves connection authentication, but authenticated node reports still cross several authorization and configuration boundaries without sufficient validation.
+The branch has fixed several original exploit paths: malformed status ports are rejected, foreign backup results are ignored, completed commands cannot reopen, disabled nodes are withdrawn from peer/upstream lists, backup archives have private modes, default credential documents are excluded from source uploads, exact hostname conflicts are rejected and the originally identified dependency versions have been patched. A follow-up change then closed the enrollment-address injection, backup-credential release after placement withdrawal, explicit placement on disabled or unknown nodes, wildcard hostname overlap, custom credential files and character classes in source uploads, raw environment values in `inspect`, and unbounded child-process runtime and output. The critical deployment privilege issue (SEC-01), the global writer lifetime (SEC-09), local-build inputs (SEC-06) and mesh expiry (SEC-04) remain.
 
-There are ten findings: one critical, seven high and two medium. Severity assumes a stolen or maliciously used credential, a compromised node, an untrusted application source tree, or an ordinary unprivileged account on the control host, as specified for each finding. None of the reproduced application findings establishes an unauthenticated remote takeover.
+Current disposition of the ten findings: one open, four partially fixed, four fixed for the reproduced finding, and one with its original advisories patched. Original severities are retained below to identify the findings; they are not a count of ten still-unfixed vulnerabilities. Severity assumes the prerequisite described for each finding. None of the reproduced application findings establishes an unauthenticated remote takeover.
 
-| ID | Severity | Finding | Prerequisite | Evidence |
-| --- | --- | --- | --- | --- |
-| SEC-01 | Critical | Project-scoped deployment can obtain node root access | A `deploy` credential | Reproduced API acceptance and rendered Engine body |
-| SEC-02 | High | Node status can inject shared ingress configuration | A node identity with a placed ingress service | Reproduced status-to-Caddyfile flow |
-| SEC-03 | High | Backup reports bypass ownership and command lifecycle checks | A node identity and a foreign or historical command ID | Reproduced catalog forgery and credential release |
-| SEC-04 | High | Disabling a node leaves its mesh access and ingress traffic active | A compromised node being disabled | Reproduced peer and upstream retention |
-| SEC-05 | High | Control backups expose secret and CA keys through permissive file modes | Local read access to the backup directory | Reproduced `0644` archive and key contents |
-| SEC-06 | High | Source uploads can include the root credential and ignored secrets | Remote build from an affected source directory | Reproduced archive contents |
-| SEC-07 | High | A project can take another project's ingress hostname | A project-scoped `deploy` credential | Reproduced route resolution |
-| SEC-08 | High | Locked dependencies include published security vulnerabilities | Deployment upload access; YAML issues also require local input | Reproduced Multer descriptor leak; checked maintainer advisories |
-| SEC-09 | Medium | An unbounded build can monopolize control's global deployment writer | A `deploy` credential | Source-confirmed; destructive exhaustion not attempted |
-| SEC-10 | Medium | The documented prohibition on deploy-role secret reads is false | A `deploy` credential for the affected project | Reproduced plaintext inspect forwarding |
+| ID | Original severity | Current status | Recheck evidence |
+| --- | --- | --- | --- |
+| SEC-01 | Critical | Open | Scoped deployment still accepts a writable host Docker socket mount |
+| SEC-02 | High | Fixed | Status ports and node `address`/`publicAddress` are validated; syntax-bearing addresses receive `400` |
+| SEC-03 | High | Fixed | Foreign/terminal report attacks are blocked; credentials are released only while the project is placed on the calling node |
+| SEC-04 | High | Partial | Peer/upstream withdrawal works and explicit placement on disabled or unknown nodes is refused; certificate expiry and key replacement remain mesh requirements |
+| SEC-05 | High | Fixed | Backup is `0600`, directory is `0700` under umask `0000`, and failed backup staging is cleaned |
+| SEC-06 | High | Partial | Source uploads exclude the resolved credential path and implement character classes; local image builds still read the raw checkout |
+| SEC-07 | High | Fixed | Exact and wildcard overlaps with another project's current hosts are rejected on deploy and rollback |
+| SEC-08 | High | Original advisories patched | Updated lockfile and a closed descriptor after the aborted-upload reproduction; a fresh complete advisory scan was unavailable |
+| SEC-09 | Medium | Partial | Child processes have a deadline and bounded output tail; the global writer still covers preparation and upload totals are unbounded |
+| SEC-10 | Medium | Fixed | Docs grant deploy access to workload secrets; `inspect` redacts environment values to avoid accidental disclosure |
+
+The deployment trust model remains unchanged: every deployment author must be trusted with the nodes they can select, their co-located workloads and their secrets. Project scope is an API record boundary, not host isolation. The details below retain the original evidence as history, with current status and newly reproduced residuals stated before it.
 
 ## Findings and required regression coverage
 
 ### SEC-01: Project scopes do not confine deployment privileges
+
+**Recheck: open.** A credential scoped to project `alpha` still received `200` when deploying a service on `n2` with `/var/run/docker.sock:/var/run/docker.sock`. `containerSpecs` preserved that writable bind. No administrator-owned node/feature policy was found in the current admission path. The access-control document now accurately acknowledges this host-administrator trust requirement; documentation does not remove the capability.
 
 **Evidence:** `src/credentials.ts:35` grants deployment creation to `deploy`; `src/control.ts:2086` onward uses the shared node inventory without a per-actor node allowlist. `src/compose.ts:297` accepts any absolute bind source. `src/container-spec.ts:247` copies it into Engine `HostConfig.Binds`. External volumes, local-volume `driver_opts` and `cap_add` provide additional privileged surfaces.
 
@@ -37,7 +41,7 @@ There are ten findings: one critical, seven high and two medium. Severity assume
 
 ### SEC-02: Node-reported ports become Caddyfile syntax
 
-**Status: fixed.** `src/status-report.ts` validates and normalizes every status report before storage (ports must be integers in `1..65535`), control stores only services placed on the reporting node, and `resolveServiceEndpoints` drops any non-port value. Node address validation at registration remains open. The text below describes the original finding.
+**Follow-up: fixed.** `insertNode` now rejects an `address` that is not an IP literal or hostname without a port and a `publicAddress` that is not a host with an optional port, so enrollment and identity creation can no longer store configuration syntax. Regression: `node addresses cannot carry configuration syntax`. **Recheck (history): partially fixed; configuration injection remained.** A malicious status port now receives `400` before any status write. `src/status-report.ts` enforces numeric port types, control filters unplaced services and `resolveServiceEndpoints` drops invalid stored ports. However, `src/control.ts:1551` still accepts an enrollment request's address without validation. A valid bootstrap credential enrolled with `address: "10.0.0.99 {\n\t\theader_down X-Address injected\n\t\t#"`; after an ordinary placed-service status report, another node's ingress work contained the injected directive. This is the same shared-configuration boundary through a different field, so the finding cannot be closed. Real Caddy execution was not attempted.
 
 **Evidence:** `src/control.ts:3062` stores request project reports without runtime schema validation. `src/ingress.ts:71` accepts `serviceState.port` as supplied, and `src/ingress.ts:152` and `src/ingress.ts:193` interpolate it into shared Caddyfile text. The enrollment/identity address fields also lack strict IP/hostname validation before being used as upstream addresses.
 
@@ -51,7 +55,7 @@ There are ten findings: one critical, seven high and two medium. Severity assume
 
 ### SEC-03: Backup reports bypass ownership and command lifecycle checks
 
-**Status: fixed.** The status handler resolves each command and heartbeat under the authenticated node and only while the command is `running`, before any scheduler call, and results can only be `succeeded` or `failed`, so terminal commands cannot be reopened. The text below describes the original finding.
+**Follow-up: fixed.** `/agent/v1/backup/credentials` now also requires the project's current desired state to place a service on the calling node, so a running command left behind by a placement move receives `403`. A compromised node can still keep a job alive with heartbeats until a maximum execution lifetime is enforced. **Recheck (history): original result-forgery and terminal-reopening attacks fixed; credential lifecycle remained partial.** Foreign command results left the other node's catalog unchanged, and reporting `state: running` received `400` without reopening a terminal command. The handler now checks ownership and running state before scheduler calls. A residual was reproduced through normal API operations: publish project version 1 on `n1`, deliver its backup command, publish version 2 on `n2`, rotate the destination secret, then fetch that command's credentials as `n1`. The old node received the newly rotated destination secret with `200`, although the project was no longer placed there. `src/control.ts:3283` checks command owner/type/state but does not invalidate outstanding authorization on placement withdrawal. A compromised node can keep its running job alive through heartbeats. The existing command deadline is a pickup deadline; it should not be confused with an enforced maximum execution lifetime.
 
 **Evidence:** `src/control.ts:3075` passes job heartbeats to the scheduler without the calling node. `src/control.ts:3079` calls `backups.onResult` before the SQL update that checks `node_id`. `src/backup-scheduler.ts:577` and `src/backup-scheduler.ts:589` locate runs solely by command ID. The guarded command update accepts arbitrary reported states, including a transition from a terminal state back to `running`; the backup credential endpoint subsequently trusts that stored state without checking current placement.
 
@@ -67,7 +71,7 @@ In a second reproduction, an already-completed backup command belonged to `n1` a
 
 ### SEC-04: Node disable revokes API identity but not network membership
 
-**Status: fixed for the mesh, endpoints, ingress and label-based scheduling.** Disabled nodes are excluded from peer lists, service endpoints, ingress topology and label/global placement, and `node-disable` wakes healthy peers. Explicit `placement.nodes` entries are deliberately left unchanged, and expired identities are not yet withdrawn from the mesh. The text below describes the original finding.
+**Follow-up:** deployment now refuses any explicit `placement.nodes` entry that is not an enabled registered node. Certificate expiry in the mesh query and identity-replacement key handling remain open. **Recheck (history): partially fixed.** Disable correctly rejected subsequent node HTTP access and removed the node from healthy peers' desired network and ingress work. Label/global scheduling queries exclude it. However, a new deployment with explicit `placement.nodes: [n1]` still returned `200` after `n1` was disabled; filtering the node inventory does not validate the explicit selection. Existing placement may remain for recovery, but accepting new placement is a separate scheduling gap. Certificate expiry is still absent from the mesh query, and identity replacement retains the stored WireGuard peer key. Packet-level revocation and safe key replacement remain integration/recovery requirements.
 
 **Evidence:** `src/control.ts:1560` sets `disabled_at` and reconciles TLS sockets. `src/control.ts:2924` still returns every stored WireGuard peer; `src/control.ts:2904` constructs endpoint views without excluding disabled nodes. Deployment and scale inventory queries likewise omit the disabled flag.
 
@@ -81,7 +85,7 @@ In a second reproduction, an already-completed backup command belonged to `n1` a
 
 ### SEC-05: Control backup archives are readable beyond the control user
 
-**Status: fixed.** Control creates the backup directory as `0700` (tightening an existing one), the staging directory as `0700` and the archive as `0600` from its first write, and removes staging key material and any partial archive when a backup fails. `control-install` creates `/var/lib/tug-control` as `0700`; archives made before this change remain sensitive and installs made before it keep their old directory mode until `control-install` is run again. The text below describes the original finding.
+**Recheck: fixed for the original permissions and cleanup finding.** Under umask `0000`, the backup archive was `0600` and its directory `0700`. Removing the test master key forced a backup failure, and no staging directory or partial archive remained. Source inspection confirms private staging and the installer directory chmod. Archives made before the fix remain sensitive, and existing installations retain the old data-directory mode until the installer is rerun or permissions are repaired. Backup export encryption remains an operational requirement rather than an implemented feature.
 
 **Evidence:** `src/control.ts:2584` copies the master key, and `src/control.ts:2585` copies PKI material into the backup. `src/control.ts:2595` writes the gzip archive without a restrictive creation mode. The control installer creates `/var/lib/tug-control` without a private directory mode.
 
@@ -95,7 +99,7 @@ In a second reproduction, an already-completed backup command belonged to `n1` a
 
 ### SEC-06: Root credentials and ignored secrets enter source archives
 
-**Status: fixed for source uploads.** Uploads follow `.dockerignore` glob, recursive and negation semantics and always exclude `*.credential.json`; `.gitignore` covers the default output. The default `--credential-out` location is unchanged. The text below describes the original finding.
+**Follow-up:** `tug deploy` now passes the resolved credential file to the source archive filter, and `.dockerignore` character classes (`[ab]`, `[a-z]`, `[!c]`) are implemented. Local `--build-local` builds still read the raw checkout, and the default credential output remains in the working directory. **Recheck (history): partially fixed.** A default `tug-root.credential.json` is now excluded and `.gitignore` covers that naming pattern. Custom paths remain exposed: `src/cli.ts:1217` passes only the tracked config and overlay to `createSourceArchive`, omitting `resolvedConfig.credentialFile`, so an in-tree credential named `admin.json` still appeared in the archive. The hand-written ignore matcher also escapes character classes instead of implementing them: `.dockerignore` entry `secrets/[ab].pem` did not exclude `secrets/a.pem`. Local image builds still receive the raw checkout through `prepareLocalImages`, without mandatory Tug credential exclusions. The default credential output remains in the working directory. Do not describe this as complete Docker ignore compatibility or complete credential protection.
 
 **Evidence:** `src/cli.ts:457` defaults control installation output to `tug-root.credential.json` in the working directory. It is not covered by the repository's credential ignore rules or `src/cli-build.ts:19`. `src/cli.ts:1198` excludes only the tracked config and local overlay, omitting the resolved credential file. `src/cli-build.ts:56` reads `.dockerignore` rules, but `sourceArchiveFilter` compares literal paths instead of Docker pattern semantics.
 
@@ -109,7 +113,7 @@ In a second reproduction, an already-completed backup command belonged to `n1` a
 
 ### SEC-07: Ingress host ownership is not authorized across projects
 
-**Status: fixed for publication.** A deploy or rollback is refused with `409` when another project's current deployment already routes the hostname (compared case-insensitively). Hostnames must be fully qualified, so wildcard overlap does not arise. An administrator-managed per-project hostname allowlist is not implemented, so a `deploy` credential can still claim any unused hostname. The text below describes the original finding.
+**Follow-up: fixed.** Publication and rollback now reject any host that equals or is covered by (or covers) a `*.` wildcard routed by another project, using `ingressHostsOverlap`. Wildcards do not cover their apex. **Recheck (history): partially fixed.** An existing exact hostname blocked a case-varied claim from a scoped credential with `409`; source inspection and regression coverage also show the rollback check. Wildcards are accepted: `src/compose.ts:136` begins its hostname regex with optional `*.`. Publishing `*.example.org` for one project followed by `login.example.org` for another succeeded twice, so overlapping ownership is not checked. The former statement that wildcard overlap could not arise was incorrect. The current global writer serializes deploy and rollback; preserve that consistency or recheck ownership at publication when shortening the writer lifetime. Per-project grants remain unimplemented. Real Caddy route precedence was not exercised.
 
 **Evidence:** `src/compose.ts:145` validates hostname duplication only within the submitted Compose definition. `src/ingress.ts:139` sorts all project/service routes; `src/ingress.ts:144` gives a duplicate host to the first route and only warns about the skipped project.
 
@@ -123,7 +127,7 @@ In a second reproduction, an already-completed backup command belonged to `n1` a
 
 ### SEC-08: Published dependency vulnerabilities remain in the lockfile
 
-**Status: fixed.** The lockfile now resolves `multer` 2.5.0, `js-yaml` 4.3.2 and `tar` 7.5.22, and `npm audit --omit=dev` reports no vulnerabilities (the audit also flagged `express`'s `qs` and `proxy-addr`, now updated). Build-time bounds on YAML and tar input and a CI dependency and container scan are still open. The text below describes the original finding.
+**Recheck: original advisories patched; no fresh clean-scan claim.** The current lockfile resolves Multer `2.5.0`, js-yaml `5.5.0`, tar `7.5.22`, Express `5.3.0`, qs `6.17.1` and proxy-addr `2.0.8`. The aborted-upload reproduction now observes `closed: true`, `destroyed: true` and no open destination descriptor. Maintainer affected-version ranges for the original advisories were rechecked, including the js-yaml 5.x counterpart [GHSA-r3ph-w7gj-g6xm](https://github.com/nodeca/js-yaml/security/advisories/GHSA-r3ph-w7gj-g6xm). The new npm audit attempt failed with `ENOTFOUND registry.npmjs.org`, so a full current advisory or container scan was not verified. Direct dependency minimums for Multer and tar still permit old vulnerable versions if the lockfile is regenerated; raising them and adding parser/work bounds and CI scans remain hardening work.
 
 The attempted `npm audit --json --fetch-retries=0 --fetch-timeout=15000` could not reach `registry.npmjs.org` because DNS/network access is restricted. Maintainer advisories were checked through web retrieval instead. This is a targeted advisory review, not an exhaustive clean dependency scan.
 
@@ -141,6 +145,8 @@ The attempted `npm audit --json --fetch-retries=0 --fetch-timeout=15000` could n
 
 ### SEC-09: Builds can hold a global writer indefinitely
 
+**Follow-up: partial.** `run` in `src/build.ts` now kills child processes after 30 minutes and retains only the last 1 MiB of each output stream. The global writer still covers preparation, and multipart limits still lack an aggregate budget or per-principal quotas. **Recheck (history): open.** `src/control.ts:2102` still holds the global writer through `deployRequest`, including preparation. `src/build.ts:23` still spawns without a cancellation signal/deadline and appends all stdout/stderr to strings. Multipart limits remain 64 files of up to 5 GiB each without an aggregate request budget. No destructive load test was run.
+
 **Evidence:** `src/control.ts:758` maintains a process-wide writer queue. Deployment handling enters it at `src/control.ts:2049` and holds it while awaiting build, save, import and resolution work. `src/build.ts:23` starts child processes without a timeout or cancellation signal and accumulates all stdout/stderr in memory. Cancelling the deployment marks its record but does not terminate the running build. Multipart limits apply per file, allowing up to 64 files of 5 GiB each by default before aggregate validation.
 
 **Impact:** One malicious or stalled Dockerfile, such as a build step that never finishes, can block every later deployment, rollback and control backup/restore waiting on that writer. Excessive build output can exhaust control memory. Uploads and queued operations also lack per-principal aggregate storage/concurrency quotas. A denial-of-service load test was deliberately not run on the shared Docker host.
@@ -150,6 +156,8 @@ The attempted `npm audit --json --fetch-retries=0 --fetch-timeout=15000` could n
 **Regression coverage:** A blocked build in project A must not block an unrelated project's deployment or administrative recovery. Cancellation/timeout must terminate work and release resources. Oversized combined uploads and output must be rejected without unbounded buffering.
 
 ### SEC-10: Deploy-role operations expose project secret values
+
+**Follow-up: fixed.** Live `inspect` keeps `Config.Env` names but replaces values with `<redacted>`; this reduces accidental disclosure only. **Recheck (history): misleading promise corrected; inspect redaction was pending.** `docs/access-control.md:32` now explicitly states that deploy/exec grants workload-secret access. This resolves the original documentation mismatch under the chosen trusted-operator model. A fake Docker inspect result still forwarded a dummy secret through `src/live.ts:234`, so the planned safe inspect projection has not been implemented. Redaction would reduce accidental disclosure, not create a secrecy boundary against deployment authors.
 
 **Evidence:** `/api/v1/live` requires `deploy`. Its `inspect` operation reaches `src/live.ts:234`, which forwards the complete `docker.inspectContainer` result, including resolved `Config.Env`. Exec can also read the environment, and a deployment author can create a workload that sends referenced secrets elsewhere. This contradicts the former access-control statement that a deploy token can never read secret values.
 
@@ -166,21 +174,23 @@ The attempted `npm audit --json --fetch-retries=0 --fetch-timeout=15000` could n
 - The production listener requires CA-validated client certificates with TLS 1.3; identity class, URI and stored public-key hash are checked against current database state. The route class gate runs before body parsing. Real network handshakes could not be rerun in this sandbox, so these are source-reviewed controls rather than a new live-handshake certification.
 - Operator roles come from the route table, and the common guard enforces declared roles and project scope. Node-only routes do not accept operator identities. Revocation/disable closes tracked TLS connections, and ongoing requests recheck identity state.
 - CSRs are signature-checked, restricted to P-256 and signed with server-assigned identity/usage extensions. Credential and private-key writes use restrictive modes and durable replacement. Client transports pin the supplied CA and verify the public control hostname even when the TCP destination is overridden; redirects are refused.
-- Secrets use AES-256-GCM with random nonces. The normal node secret endpoint filters by service placement and referenced secret names; registry credentials are separately scoped by registry host. These controls do not remove the deployment privilege or backup exposure findings above.
+- Secrets use AES-256-GCM with random nonces. The normal node secret endpoint filters by service placement and referenced secret names; registry credentials are separately scoped by registry host. These controls do not remove deployment-author secret access or the outstanding backup credential lifecycle gap.
 - Uploaded source/image archives are prescanned, links and path traversal are rejected, image metadata and tags are checked before import, and agent image downloads verify byte count and SHA-256. Build context and Dockerfile resolution reject paths outside the uploaded root.
 - SQL values generally use bound parameters. Process execution generally uses argv rather than a shell; SSH command interpolation uses shell quoting, and rendered control Compose scalar values are quoted. No literal production private keys or common provider-token patterns were found in the reviewed repository scan; this was not a full Git-history or entropy scan.
 
 ## Validation and limits
 
-The final full test run under Node `v26.13.0` reported 417 tests: 305 passed and 112 failed. Of the failure entries, 108 explicitly reported listener `EPERM`; three others failed CLI/config assertions or credential fixtures, and the Docker API test file also failed after its listener errors. An earlier run reported 420 tests with 297 passing: the in-progress working tree changed during review. A targeted run of 92 existing tests covering builds, archive validation, registry handling, encryption, Compose/container rendering, ingress, mesh, backup scheduling, restore and agent jobs passed. `npm run build` passed.
+The recheck full test run under Node `v26.13.0` reported 456 tests: 327 passed and 129 failed. Failure entries comprised 47 explicit listener `EPERM` errors, 81 attempts to read a null server address after failed listening, and one Docker API test-file failure associated with its listener errors. No assertion failure independent of those setup failures was observed. This is not a passing full-suite result. A targeted run of 97 existing tests covering status parsing, builds, archives, registry handling, encryption, Compose/container rendering, ingress, mesh, backup scheduling, restore and agent jobs passed.
 
-The final `npm run typecheck` passed after concurrent working-tree updates. `npm run lint` failed on an unused assignment in `src/cli.ts:303`, with three unused-variable/function warnings. Formatting checks passed for the audit documentation and changeset. These are release readiness observations, not additional proven vulnerabilities. The live mTLS suite, WebSocket transport tests, Docker-backed integration tests, actual Caddy configuration loading, WireGuard packet revocation, container image/OS scanning and real-host filesystem access were not validated here: local TCP listeners are denied and the Docker socket is inaccessible. npm advisory access from the shell also failed. Repository branch protections, deployed firewall rules, cloud IAM, backup-bucket policies and running host/image patch levels were not inspected.
+Thirteen isolated Node probes, without a listening socket or real Docker operations, confirmed current behavior: scoped host mounts, rejection of injected status ports, blocked foreign/terminal command reports, stale-placement backup credential release after rotation, exact-host conflict rejection, wildcard-overlap acceptance, enrollment-address injection, disabled-node withdrawal, acceptance of explicit disabled-node placement, backup modes and failure cleanup, default/custom credential archive behavior, raw inspect forwarding and patched Multer descriptor cleanup. Only dummy credentials and temporary private test state were used.
+
+`npm run typecheck`, `npm run lint` and `npm run build` passed. The live mTLS suite, WebSocket transport tests, Docker-backed integration tests, actual Caddy loading/route precedence, WireGuard packet revocation and container image/OS scanning were not validated here. Local TCP listeners are denied; no real Docker operations were attempted during the isolated reproductions. npm advisory access from the shell also failed, so the dependency result establishes fixes for the original advisories rather than a complete new clean scan. Repository branch protections, deployed firewall rules, cloud IAM, backup-bucket policies and running host/image patch levels were not inspected.
 
 At the time of the audit the README and several operational documents still described pre-mTLS bearer-token installation and authentication; the documentation has since been updated to match the code, which requires credential files and direct mTLS or TLS passthrough. A conventional TLS-terminating proxy cannot substitute for the end-to-end client certificate check implemented here.
 
 ## Remediation order
 
-1. Establish the deployment trust model and stop presenting scoped deploy access as host or secret isolation (SEC-01 and SEC-10). Prevent credentials from entering build inputs (SEC-06).
-2. Validate node reports, bind backup side effects to command ownership, and withdraw disabled nodes from peers and ingress (SEC-02, SEC-03 and SEC-04).
-3. Protect backup directory/archive modes, reserve ingress hosts and update vulnerable dependencies (SEC-05, SEC-07 and SEC-08).
-4. Bound builds, uploads, process output and queue occupancy; run the full suite in an environment that supports its network and Docker requirements (SEC-09).
+1. Exclude credentials from local build inputs (SEC-06). Decide whether to restrict host-sensitive deployment features or explicitly accept deploy credentials as host administrators (SEC-01).
+2. Bound running-job lifetime (SEC-03) and complete mesh expiry/rejoin handling (SEC-04).
+3. Preserve the verified backup permission and upload cleanup fixes (SEC-05/SEC-08), and rerun complete dependency/container scans in suitable CI.
+4. Move preparation outside the global writer and bound uploads and queue occupancy (SEC-09), and run the full transport/Docker suites outside the restricted sandbox.
