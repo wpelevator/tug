@@ -563,7 +563,7 @@ test('mutations record the acting token on deployments and events', async () => 
           observedVersion: 'v1',
           observedRevision: first.desiredState.revision,
           health: 'serving',
-          services: {},
+          services: ['web'],
         },
       ],
     });

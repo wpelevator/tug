@@ -36,11 +36,75 @@ export function sourceArchiveFilter(
     .replace(/^(\.\/)+/, '')
     .replace(/\/$/, '');
   const parts = relative.split('/');
-  if (parts.some((part) => ALWAYS_EXCLUDED.includes(part))) return false;
+  if (parts.some((part) => ALWAYS_EXCLUDED.includes(part) || CREDENTIAL_FILE.test(part)))
+    return false;
   if (parts.length === 1 && CONFIG_NAMES.includes(relative)) return false;
-  return ![...configPaths, ...ignores].some(
-    (ignore) => relative === ignore || relative.startsWith(`${ignore}/`),
-  );
+  if (configPaths.some((file) => relative === file || relative.startsWith(`${file}/`)))
+    return false;
+  return !compileIgnore(ignores)(relative);
+}
+
+/** Credential documents written by `control-install --credential-out` (default `tug-root.credential.json`). */
+const CREDENTIAL_FILE = /\.credential\.json$/;
+
+const ignoreCache = new WeakMap<string[], (relative: string) => boolean>();
+
+/** Translates one `.dockerignore` pattern: `*` and `?` stay within a path segment, `**` crosses them. */
+function ignorePattern(pattern: string): RegExp {
+  let source = '';
+  for (let i = 0; i < pattern.length; i++) {
+    const char = pattern[i];
+    if (char === '*' && pattern[i + 1] === '*') {
+      if (pattern[i + 2] === '/') {
+        source += '(?:.*/)?';
+        i += 2;
+      } else {
+        source += '.*';
+        i += 1;
+      }
+    } else if (char === '*') source += '[^/]*';
+    else if (char === '?') source += '[^/]';
+    else if (char === '\\' && i + 1 < pattern.length)
+      source += pattern[++i].replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
+    else source += char.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&');
+  }
+  return new RegExp(`^${source}$`);
+}
+
+/**
+ * Compiles `.dockerignore` lines with Docker's semantics: patterns are rooted at the context, a pattern that
+ * matches a directory excludes everything below it, and the last matching rule wins, so `!` re-includes.
+ */
+function compileIgnore(lines: string[]): (relative: string) => boolean {
+  const cached = ignoreCache.get(lines);
+  if (cached) return cached;
+  const rules = lines
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith('#'))
+    .map((line) => {
+      const negated = line.startsWith('!');
+      const pattern = path.posix
+        .normalize((negated ? line.slice(1) : line).trim())
+        .replace(/^\/+/, '')
+        .replace(/\/$/, '');
+      return { negated, pattern: ignorePattern(pattern), valid: pattern !== '' && pattern !== '.' };
+    })
+    .filter((rule) => rule.valid);
+  const matcher = (relative: string): boolean => {
+    const segments = relative.split('/');
+    let ignored = false;
+    for (const { negated, pattern } of rules) {
+      for (let end = 1; end <= segments.length; end++) {
+        if (pattern.test(segments.slice(0, end).join('/'))) {
+          ignored = !negated;
+          break;
+        }
+      }
+    }
+    return ignored;
+  };
+  ignoreCache.set(lines, matcher);
+  return matcher;
 }
 
 export async function createSourceArchive(
@@ -56,8 +120,7 @@ export async function createSourceArchive(
     ignores.push(
       ...(await fs.readFile(path.join(contextDir, '.dockerignore'), 'utf8'))
         .split(/\r?\n/)
-        .map((line) => line.trim().replace(/\/$/, ''))
-        .filter((line) => line && !line.startsWith('#') && !line.startsWith('!')),
+        .map((line) => line.trim()),
     );
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;

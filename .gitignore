@@ -2,6 +2,7 @@ node_modules/
 data/
 .tug.json
 .tug.local.json
+*.credential.json
 tug.local.yml
 tug.local.yaml
 tug.local.json

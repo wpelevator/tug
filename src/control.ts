@@ -71,6 +71,7 @@ import {
   wgEndpoint,
 } from './mesh.ts';
 import { buildIngressWork, resolveServiceEndpoints } from './ingress.ts';
+import { parseStatusReport } from './status-report.ts';
 import type { NodeView } from './ingress.ts';
 import {
   ACTIVE_DEPLOYMENT_STATES,
@@ -115,7 +116,7 @@ import type {
   ImageArtifact,
   LocalImageUpload,
   AgentEvent,
-  CommandResult,
+  ProjectStatus,
   CommandType,
   ComposeFile,
   DesiredState,
@@ -1202,7 +1203,7 @@ export async function createApp(
     if (!state.services?.[service])
       throw httpError(404, `service ${service} not found in project ${project}`);
     const nodeRows = db.all<NodeRow>(
-      'SELECT name,labels_json,last_seen_at FROM nodes ORDER BY created_at,name',
+      'SELECT name,labels_json,last_seen_at FROM nodes WHERE disabled_at IS NULL ORDER BY created_at,name',
     );
     const nodeInfos = nodeRows
       .filter((row) => !isStale(row))
@@ -1567,6 +1568,9 @@ export async function createApp(
       metadata: { node: node.name },
     });
     reconcileSockets();
+    // Healthy peers drop the node from their mesh and ingress configuration on their next work fetch.
+    endpointSnapshot = JSON.stringify(endpointsFor(currentDesiredStates()));
+    wakeAll();
     res.json({ ok: true, node: node.name });
   });
   api('get', '/api/v1/nodes', null, async (req, res) => {
@@ -2084,7 +2088,7 @@ export async function createApp(
           `version cannot start with "${ROLLBACK_VERSION_PREFIX}" (reserved for rollback deployments)`,
         );
       const nodeRows = db.all<NodeRow>(
-        'SELECT name,labels_json,last_seen_at,created_at FROM nodes ORDER BY created_at,name',
+        'SELECT name,labels_json,last_seen_at,created_at FROM nodes WHERE disabled_at IS NULL ORDER BY created_at,name',
       );
       // Stale nodes (agent not seen recently) are not scheduled onto, so a dead host cannot hold a rollout open.
       const nodeInfos = nodeRows
@@ -2898,7 +2902,7 @@ export async function createApp(
       Date.now() - Number(process.env.TUG_STALE_SECONDS || 60) * 1000,
     ).toISOString();
     const nodes = db.all<NodeRow & { has_key: number }>(
-      'SELECT n.*, EXISTS(SELECT 1 FROM wg_peers w WHERE w.node_id=n.id) AS has_key FROM nodes n',
+      'SELECT n.*, EXISTS(SELECT 1 FROM wg_peers w WHERE w.node_id=n.id) AS has_key FROM nodes n WHERE n.disabled_at IS NULL',
     );
     const views: NodeView[] = nodes.map((n) => ({
       name: n.name,
@@ -2920,7 +2924,7 @@ export async function createApp(
   function networkFor(node: NodeRow): NetworkConfig | undefined {
     if (!MESH || !node.overlay_ip) return undefined;
     const peers = db.all<WgPeerRow & { name: string }>(
-      'SELECT w.*, n.name FROM wg_peers w JOIN nodes n ON n.id=w.node_id WHERE w.node_id != ? ORDER BY n.name',
+      'SELECT w.*, n.name FROM wg_peers w JOIN nodes n ON n.id=w.node_id WHERE w.node_id != ? AND n.disabled_at IS NULL ORDER BY n.name',
       node.id,
     );
     return {
@@ -2940,7 +2944,7 @@ export async function createApp(
   /** Names of all nodes and of the ingress nodes, for port binding and upstream decisions. */
   function nodeTopology(): { nodes: string[]; ingressNodes: string[] } {
     const rows = db.all<Pick<NodeRow, 'name' | 'ingress'>>(
-      'SELECT name,ingress FROM nodes ORDER BY name',
+      'SELECT name,ingress FROM nodes WHERE disabled_at IS NULL ORDER BY name',
     );
     return {
       nodes: rows.map((r) => r.name),
@@ -3057,31 +3061,60 @@ export async function createApp(
   });
   post('/agent/v1/status', authAgent, async (req, res) => {
     const ts = now();
-    const report: Partial<StatusReport> = req.body;
-    for (const st of report.projects || []) {
+    let report: StatusReport;
+    try {
+      report = parseStatusReport(req.body);
+    } catch (e) {
+      throw httpError(400, errMessage(e));
+    }
+    for (const st of report.projects) {
+      // A node reports only the services currently placed on it; anything else would feed other nodes' work.
+      const ds = currentDesired(st.project);
+      const desired: DesiredState | undefined = ds ? JSON.parse(ds.state_json) : undefined;
+      const placed = Object.entries(desired?.services || {})
+        .filter(([, svc]) => svc.placement?.nodes?.includes(req.node!.name))
+        .map(([name]) => name);
+      if (!placed.length) continue;
+      const sanitized: ProjectStatus = {
+        ...st,
+        ...(st.services && { services: st.services.filter((name) => placed.includes(name)) }),
+        ...(st.serviceStates && {
+          serviceStates: Object.fromEntries(
+            Object.entries(st.serviceStates).filter(([name]) => placed.includes(name)),
+          ),
+        }),
+      };
       db.run(
         `INSERT INTO node_statuses(id,node_id,project_id,observed_version,status_json,health,updated_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(node_id,project_id) DO UPDATE SET observed_version=excluded.observed_version,status_json=excluded.status_json,health=excluded.health,updated_at=excluded.updated_at`,
         id('ns'),
         req.node!.id,
         st.project,
         st.observedVersion,
-        JSON.stringify(st),
-        st.health || 'unknown',
+        JSON.stringify(sanitized),
+        st.health,
         ts,
       );
       updateDeploymentConvergence(st.project);
     }
-    if (report.jobs?.length) backups.onHeartbeat(report.jobs);
-    for (const cr of (report.commandResults || []) as Partial<CommandResult>[]) {
-      const result = cr.result || {};
-      if (cr.commandId && cr.state)
-        backups.onResult(cr.commandId, cr.state, result as CommandResult['result']);
+    // Commands are resolved under the calling node first: only a running command of this node can be
+    // heartbeated or completed, so foreign and already-finished command ids change nothing.
+    const runningHere = (commandId: string) =>
+      db.get<Pick<CommandRow, 'id'>>(
+        "SELECT id FROM commands WHERE id=? AND node_id=? AND state='running'",
+        commandId,
+        req.node!.id,
+      );
+    const jobs = (report.jobs || []).filter((job) => runningHere(job.commandId));
+    if (jobs.length) backups.onHeartbeat(jobs);
+    for (const cr of report.commandResults) {
+      if (!runningHere(cr.commandId)) continue;
+      backups.onResult(cr.commandId, cr.state, cr.result);
       db.run(
-        'UPDATE commands SET state=?,result_json=?,updated_at=? WHERE id=? AND node_id=?',
-        cr.state || 'succeeded',
-        JSON.stringify(result),
+        "UPDATE commands SET state=?,result_json=?,updated_at=? WHERE id=? AND node_id=? AND state='running'",
+        cr.state,
+        JSON.stringify(cr.result),
         ts,
-        cr.commandId ?? null,
+        cr.commandId,
         req.node!.id,
       );
     }
