@@ -11,13 +11,12 @@ import type { AddressInfo } from 'node:net';
 import * as tar from 'tar';
 import { createApp } from './control.ts';
 import { openDb } from './db.ts';
-import { json } from '../tests/helpers.ts';
+import { json, testIdentity } from '../tests/helpers.ts';
 
 async function server(openDatabase?: typeof openDb) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-images-'));
   Object.assign(process.env, {
     TUG_DATA_DIR: dir,
-    TUG_OPERATOR_TOKEN: 'images-op',
   });
   const bytes = Buffer.from('saved image gzip');
   const calls: string[] = [];
@@ -30,6 +29,7 @@ async function server(openDatabase?: typeof openDb) {
   let fail = false;
   let buildGate: Promise<void> | undefined;
   const app = await createApp({
+    identity: testIdentity,
     openDatabase,
     images: {
       build: async (options) => {
@@ -53,11 +53,11 @@ async function server(openDatabase?: typeof openDb) {
     const started = app.listen(0, '127.0.0.1', () => resolve(started));
   });
   const base = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`;
-  const headers = { Authorization: 'Bearer images-op', 'content-type': 'application/json' };
+  const headers = { 'x-tug-test-operator': 'operator', 'content-type': 'application/json' };
   const post = async (route: string, body: unknown, token?: string) =>
     fetch(`${base}${route}`, {
       method: 'POST',
-      headers: token ? { ...headers, Authorization: `Bearer ${token}` } : headers,
+      headers: token ? { ...headers, 'x-tug-test-node': token } : headers,
       body: JSON.stringify(body),
     });
   const node = async (name: string) => json(await post('/api/v1/nodes/register', { name }));
@@ -84,7 +84,7 @@ async function server(openDatabase?: typeof openDb) {
     }
     return fetch(`${base}/api/v1/deployments`, {
       method: 'POST',
-      headers: { Authorization: 'Bearer images-op' },
+      headers: { 'x-tug-test-operator': 'operator' },
       body: form,
     });
   };
@@ -152,7 +152,7 @@ test('registry-free builds stream only to assigned nodes, preserve rollback imag
       'saved images must have a Tug-owned immutable reference',
     );
     const url = `${s.base}/agent/v1/images/${artifact.buildId}`;
-    const downloaded = await fetch(url, { headers: { Authorization: `Bearer ${n1.agentToken}` } });
+    const downloaded = await fetch(url, { headers: { 'x-tug-test-node': n1.nodeId } });
     assert.equal(downloaded.status, 200, 'an assigned node must be able to download its image');
     assert.deepEqual(
       Buffer.from(await downloaded.arrayBuffer()),
@@ -160,12 +160,12 @@ test('registry-free builds stream only to assigned nodes, preserve rollback imag
       'the download must preserve exact compressed bytes',
     );
     assert.equal(
-      (await fetch(url, { headers: { Authorization: `Bearer ${n2.agentToken}` } })).status,
+      (await fetch(url, { headers: { 'x-tug-test-node': n2.nodeId } })).status,
       404,
       'an unassigned node must not read another node image',
     );
     assert.equal((await fetch(url)).status, 401, 'image downloads must require a live node token');
-    await s.report(n1.agentToken, first.desiredState);
+    await s.report(n1.nodeId, first.desiredState);
     const second = await json(await s.deploy('v1'));
     assert.notEqual(
       second.desiredState.revision,
@@ -177,10 +177,10 @@ test('registry-free builds stream only to assigned nodes, preserve rollback imag
       first.desiredState.services.app.image,
       'reusing a version must not overwrite its prior image',
     );
-    await s.report(n1.agentToken, first.desiredState);
+    await s.report(n1.nodeId, first.desiredState);
     const pending = await json(
       await fetch(`${s.base}/api/v1/deployments/${second.deployment.id}`, {
-        headers: { Authorization: 'Bearer images-op' },
+        headers: { 'x-tug-test-operator': 'operator' },
       }),
     );
     assert.equal(
@@ -200,15 +200,9 @@ test('registry-free builds stream only to assigned nodes, preserve rollback imag
       'rollback must publish a new revision',
     );
     assert.equal(
-      (await fetch(url, { headers: { Authorization: `Bearer ${n1.agentToken}` } })).status,
+      (await fetch(url, { headers: { 'x-tug-test-node': n1.nodeId } })).status,
       200,
       'retained rollback artifacts must survive subsequent publication and cleanup',
-    );
-    await s.node('n1');
-    assert.equal(
-      (await fetch(url, { headers: { Authorization: `Bearer ${n1.agentToken}` } })).status,
-      401,
-      'rotating registration credentials must revoke previous download access',
     );
   } finally {
     await s.close();
@@ -237,7 +231,7 @@ test('local uploads import without a remote build and failed builds keep the pre
       !s.calls.some((call) => call.startsWith('build ')),
       'local uploads must never rebuild sources on control',
     );
-    await s.report(n1.agentToken, local.desiredState);
+    await s.report(n1.nodeId, local.desiredState);
     s.failBuild();
     assert.equal(
       (await s.deploy('broken')).status,
@@ -246,7 +240,7 @@ test('local uploads import without a remote build and failed builds keep the pre
     );
     const work = await json(
       await fetch(`${s.base}/agent/v1/work`, {
-        headers: { Authorization: `Bearer ${n1.agentToken}` },
+        headers: { 'x-tug-test-node': n1.nodeId },
       }),
     );
     assert.equal(
@@ -326,7 +320,7 @@ test('restore rejects missing archives before changing live data and requires re
       'a backup missing referenced image bytes must be rejected before changing live control state',
     );
     assert.equal(
-      (await fetch(`${s.base}/api/v1/status`, { headers: { Authorization: 'Bearer images-op' } }))
+      (await fetch(`${s.base}/api/v1/status`, { headers: { 'x-tug-test-operator': 'operator' } }))
         .status,
       200,
       'control must remain usable after rejecting an invalid backup',
@@ -337,7 +331,7 @@ test('restore rejects missing archives before changing live data and requires re
     });
     assert.equal(restored.status, 200, 'a complete verified backup must restore successfully');
     assert.equal(
-      (await fetch(`${s.base}/api/v1/status`, { headers: { Authorization: 'Bearer images-op' } }))
+      (await fetch(`${s.base}/api/v1/status`, { headers: { 'x-tug-test-operator': 'operator' } }))
         .status,
       503,
       'DB-dependent APIs must report restart required after restore',
@@ -401,7 +395,7 @@ test('cancelled long builds renew their lease but never publish after cancellati
     );
     await delay(100);
     const status = await json(
-      await fetch(`${s.base}/api/v1/status`, { headers: { Authorization: 'Bearer images-op' } }),
+      await fetch(`${s.base}/api/v1/status`, { headers: { 'x-tug-test-operator': 'operator' } }),
     );
     const deployment = status.deployments.find(
       (row: { version: string }) => row.version === 'cancel-me',
@@ -430,7 +424,7 @@ test('cancelled long builds renew their lease but never publish after cancellati
     );
     const final = await json(
       await fetch(`${s.base}/api/v1/deployments/${deployment.id}`, {
-        headers: { Authorization: 'Bearer images-op' },
+        headers: { 'x-tug-test-operator': 'operator' },
       }),
     );
     assert.equal(
@@ -486,7 +480,7 @@ test('requests during restore file replacement return 503 without touching the c
     await held.reached;
     try {
       const status = await fetch(`${s.base}/api/v1/status`, {
-        headers: { Authorization: 'Bearer images-op' },
+        headers: { 'x-tug-test-operator': 'operator' },
       });
       assert.equal(
         status.status,
@@ -554,7 +548,7 @@ test('upload validation rejects server-owned tags and cleans malformed multipart
     form.set('image-0', new Blob([s.bytes]), 'image.tgz');
     const response = await fetch(`${s.base}/api/v1/deployments`, {
       method: 'POST',
-      headers: { Authorization: 'Bearer images-op' },
+      headers: { 'x-tug-test-operator': 'operator' },
       body: form,
     });
     assert.equal(response.status, 400, 'malformed multipart JSON must produce a client error');
@@ -609,7 +603,7 @@ test('publication failure rolls back desired state and keeps the previous deploy
   try {
     const node = await s.node('n1');
     const first = await json(await s.deploy('first'));
-    await s.report(node.agentToken, first.desiredState);
+    await s.report(node.nodeId, first.desiredState);
     failPublication = true;
     const response = await s.deploy('failed');
     assert.equal(response.status, 500, 'publication failures must be returned as server errors');

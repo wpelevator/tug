@@ -6,14 +6,15 @@ import path from 'node:path';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from './control.ts';
-import { testImageResolver } from '../tests/helpers.ts';
+import { testImageResolver, testIdentity } from '../tests/helpers.ts';
 import { generateWgKeyPair } from './mesh.ts';
+import { createCsr, encodeCredential, generateKeyPair } from './pki.ts';
 import { json } from '../tests/helpers.ts';
 
 const NETWORK_ENV = [
   'TUG_MESH',
   'TUG_MESH_CIDR',
-  'TUG_SERVICE_DNS',
+  'TUG_SERVICE_NAMES',
   'TUG_WG_PORT',
   'TUG_ACME_EMAIL',
 ];
@@ -25,20 +26,21 @@ async function server(env: Record<string, string> = {}) {
     process.env,
     {
       TUG_DATA_DIR: dir,
-      TUG_OPERATOR_TOKEN: 'op-net-token',
     },
     env,
   );
-  const app = await createApp({ images: { resolve: testImageResolver } });
+  const app = await createApp({ identity: testIdentity, images: { resolve: testImageResolver } });
   const srv = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));
   });
   const base = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`;
-  const op = { Authorization: 'Bearer op-net-token', 'content-type': 'application/json' };
+  const op = { 'x-tug-test-operator': 'operator', 'content-type': 'application/json' };
   const post = (route: string, body: unknown, headers: Record<string, string> = op) =>
     fetch(`${base}${route}`, { method: 'POST', headers, body: JSON.stringify(body) });
   const agent = (token: string) => ({
-    Authorization: `Bearer ${token}`,
+    ...(token.startsWith('op-')
+      ? { 'x-tug-test-operator': 'operator' }
+      : { 'x-tug-test-node': token }),
     'content-type': 'application/json',
   });
   const work = async (token: string) =>
@@ -84,7 +86,7 @@ test('with every networking layer off, the work response and node info are uncha
   try {
     const reg = await s.register('n1', { wgPublicKey: undefined });
     assert.equal(reg.node.overlay_ip, null, 'no overlay address is allocated');
-    const w = await s.work(reg.agentToken);
+    const w = await s.work(reg.nodeId);
     assert.deepEqual(
       Object.keys(w).sort(),
       ['commands', 'desiredStates', 'nodeId', 'ports', 'retainedImages', 'serverTime'],
@@ -100,7 +102,7 @@ test('with every networking layer off, the work response and node info are uncha
         await s.post(
           '/agent/v1/wireguard/key',
           { publicKey: generateWgKeyPair().publicKey },
-          s.agent(reg.agentToken),
+          s.agent(reg.nodeId),
         )
       ).status,
       409,
@@ -131,45 +133,29 @@ test('mesh allocates stable overlay IPs and each node receives every other node 
       'sequential allocation from the default CIDR',
     );
     assert.equal(
-      (
-        await s.post(
-          '/agent/v1/wireguard/key',
-          { publicKey: b.publicKey },
-          s.agent(regB.agentToken),
-        )
-      ).status,
+      (await s.post('/agent/v1/wireguard/key', { publicKey: b.publicKey }, s.agent(regB.nodeId)))
+        .status,
       200,
       'agent reports its public key',
     );
     assert.equal(
-      (
-        await s.post(
-          '/agent/v1/wireguard/key',
-          { publicKey: c.publicKey },
-          s.agent(regC.agentToken),
-        )
-      ).status,
+      (await s.post('/agent/v1/wireguard/key', { publicKey: c.publicKey }, s.agent(regC.nodeId)))
+        .status,
       200,
     );
     assert.equal(
-      (await s.post('/agent/v1/wireguard/key', { publicKey: 'junk' }, s.agent(regC.agentToken)))
-        .status,
+      (await s.post('/agent/v1/wireguard/key', { publicKey: 'junk' }, s.agent(regC.nodeId))).status,
       400,
       'malformed keys are rejected',
     );
     assert.equal(
-      (
-        await s.post(
-          '/agent/v1/wireguard/key',
-          { publicKey: a.publicKey },
-          s.agent(regC.agentToken),
-        )
-      ).status,
+      (await s.post('/agent/v1/wireguard/key', { publicKey: a.publicKey }, s.agent(regC.nodeId)))
+        .status,
       409,
       'a key cannot belong to two nodes',
     );
 
-    const wA = await s.work(regA.agentToken);
+    const wA = await s.work(regA.nodeId);
     assert.deepEqual(
       wA.network,
       {
@@ -197,13 +183,13 @@ test('mesh allocates stable overlay IPs and each node receives every other node 
     );
 
     // re-registering keeps the overlay address and key
-    const again = await s.register('a', { publicAddress: '203.0.113.50' });
+    const again = await s.register('a');
     assert.equal(again.node.overlay_ip, '10.210.0.1', 're-registration keeps the overlay IP');
-    const wB = await s.work(regB.agentToken);
+    const wB = await s.work(regB.nodeId);
     assert.equal(
       wB.network.peers.find((p: { node: string }) => p.node === 'a').endpoint,
-      '203.0.113.50:51999',
-      'a changed public address updates the peer endpoint',
+      '203.0.113.1:51999',
+      'replacing a node key keeps its metadata, so the peer endpoint is unchanged',
     );
     assert.equal(
       wB.network.peers.find((p: { node: string }) => p.node === 'a').publicKey,
@@ -218,27 +204,24 @@ test('mesh allocates stable overlay IPs and each node receives every other node 
 test('enroll accepts the agent public key and rejects malformed ones', async () => {
   const s = await server({ TUG_MESH: 'true' });
   try {
-    const minted = await json(await s.post('/api/v1/nodes/enroll-token', { uses: 2 }));
-    const bad = await fetch(`${s.base}/agent/v1/enroll`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ enrollToken: minted.enrollToken, name: 'x', wgPublicKey: 'nope' }),
-    });
-    assert.equal(bad.status, 400, 'bad key is a 400');
+    const minted = await json(await s.post('/api/v1/nodes/enrollment-credential', { name: 'x' }));
+    const bootstrap = {
+      'x-tug-test-credential': encodeCredential(minted.credential),
+      'content-type': 'application/json',
+    };
+    const csr = await createCsr((await generateKeyPair()).privateKeyPem);
+    const enroll = (wgPublicKey: string) =>
+      fetch(`${s.base}/agent/v1/enroll`, {
+        method: 'POST',
+        headers: bootstrap,
+        body: JSON.stringify({ csr, wgPublicKey }),
+      });
+    assert.equal((await enroll('nope')).status, 400, 'bad key is a 400');
     const pair = generateWgKeyPair();
-    const ok = await fetch(`${s.base}/agent/v1/enroll`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        enrollToken: minted.enrollToken,
-        name: 'x',
-        wgPublicKey: pair.publicKey,
-      }),
-    });
-    const enrolled = await json(ok);
+    const enrolled = await json(await enroll(pair.publicKey));
     assert.equal(enrolled.node.overlay_ip, '10.210.0.1');
     const other = await s.register('y', { wgPublicKey: generateWgKeyPair().publicKey });
-    const w = await s.work(other.agentToken);
+    const w = await s.work(other.nodeId);
     assert.deepEqual(
       w.network.peers.map((p: { publicKey: string }) => p.publicKey),
       [pair.publicKey],
@@ -257,16 +240,16 @@ test('rotate-wg-key queues a command for the node and a new key replaces the old
     const a = await s.register('a', { wgPublicKey: k1.publicKey });
     const b = await s.register('b', { wgPublicKey: generateWgKeyPair().publicKey });
     const queued = await json(await s.post('/api/v1/nodes/a/rotate-wg-key', {}));
-    assert.equal(queued.nodeId, 'a');
-    const w = await s.work(a.agentToken);
+    assert.equal(queued.nodeId, a.nodeId, 'the command targets node a by its immutable ID');
+    const w = await s.work(a.nodeId);
     assert.deepEqual(
       w.commands.map((c: { type: string }) => c.type),
       ['wg.rotate-key'],
       'agent receives the rotation command',
     );
     assert.equal((await s.post('/api/v1/nodes/ghost/rotate-wg-key', {})).status, 404);
-    await s.post('/agent/v1/wireguard/key', { publicKey: k2.publicKey }, s.agent(a.agentToken));
-    const peers = (await s.work(b.agentToken)).network.peers;
+    await s.post('/agent/v1/wireguard/key', { publicKey: k2.publicKey }, s.agent(a.nodeId));
+    const peers = (await s.work(b.nodeId)).network.peers;
     assert.deepEqual(
       peers.map((p: { publicKey: string }) => p.publicKey),
       [k2.publicKey],
@@ -300,14 +283,14 @@ test('service endpoints are published per project only once the node reports the
     });
     assert.equal(dep.status, 200, 'ingress annotation passes deploy validation');
     assert.deepEqual(
-      (await s.work(app.agentToken)).serviceEndpoints,
+      (await s.work(app.nodeId)).serviceEndpoints,
       { blog: {} },
       'nothing is serving yet, so no records',
     );
 
-    await s.report(dbn.agentToken, 'dbn', 'blog', ['db']);
+    await s.report(dbn.nodeId, 'dbn', 'blog', ['db']);
     assert.deepEqual(
-      (await s.work(app.agentToken)).serviceEndpoints,
+      (await s.work(app.nodeId)).serviceEndpoints,
       { blog: { db: [{ node: 'dbn', address: dbn.node.overlay_ip }] } },
       'db resolves to its node overlay IP once serving',
     );
@@ -326,10 +309,10 @@ test('service endpoints are published per project only once the node reports the
           },
         ],
       },
-      s.agent(dbn.agentToken),
+      s.agent(dbn.nodeId),
     );
     assert.deepEqual(
-      (await s.work(app.agentToken)).serviceEndpoints,
+      (await s.work(app.nodeId)).serviceEndpoints,
       { blog: {} },
       'record withdrawn when the node stops serving',
     );
@@ -346,18 +329,18 @@ test('only ingress nodes get an edge config, built from all projects and serving
     await s.register('dbn', { wgPublicKey: generateWgKeyPair().publicKey });
     await s.post('/api/v1/deployments', { project: 'blog', version: 'v1', compose: stack });
     assert.equal(
-      (await s.work(edge.agentToken)).ingress,
+      (await s.work(edge.nodeId)).ingress,
       undefined,
       'a node is not an edge until marked',
     );
 
     assert.equal((await s.post('/api/v1/nodes/edge/ingress', { enabled: true })).status, 200);
-    let w = await s.work(edge.agentToken);
+    let w = await s.work(edge.nodeId);
     assert.equal(w.ingress.routes.length, 0, 'no route until an upstream serves');
     assert.match(w.ingress.warnings[0], /no serving upstream/);
 
-    await s.report(app.agentToken, 'app', 'blog', ['web']);
-    w = await s.work(edge.agentToken);
+    await s.report(app.nodeId, 'app', 'blog', ['web']);
+    w = await s.work(edge.nodeId);
     assert.match(
       w.ingress.caddyfile,
       new RegExp(
@@ -376,7 +359,7 @@ test('only ingress nodes get an edge config, built from all projects and serving
     );
 
     await s.post('/api/v1/nodes/edge/ingress', { enabled: false });
-    assert.equal((await s.work(edge.agentToken)).ingress, undefined, 'role can be removed');
+    assert.equal((await s.work(edge.nodeId)).ingress, undefined, 'role can be removed');
   } finally {
     await s.close();
   }
@@ -393,8 +376,8 @@ test('ingress works without the mesh using node addresses, and ingress status is
       version: 'v1',
       compose: { services: { web: stack.services.web } },
     });
-    await s.report(app.agentToken, 'app', 'blog', ['web']);
-    const w = await s.work(edge.agentToken);
+    await s.report(app.nodeId, 'app', 'blog', ['web']);
+    const w = await s.work(edge.nodeId);
     assert.deepEqual(
       w.ingress.routes[0].upstreams,
       ['192.168.1.5:8080'],
@@ -417,7 +400,7 @@ test('ingress works without the mesh using node addresses, and ingress status is
         commandResults: [],
         ingress: { state: 'serving', configHash: 'h', routes: 1 },
       },
-      s.agent(edge.agentToken),
+      s.agent(edge.nodeId),
     );
     assert.equal((await diag()).ok, true, 'doctor passes once the edge reports serving');
   } finally {
@@ -449,17 +432,17 @@ test('the work response tells each node where to bind published ports', async ()
     await s.post('/api/v1/deployments', { project: 'site', version: 'v1', compose: site });
     await s.post('/api/v1/deployments', { project: 'blog', version: 'v1', compose: stack });
     assert.deepEqual(
-      (await s.work(edge.agentToken)).ports,
+      (await s.work(edge.nodeId)).ports,
       { address: edge.node.overlay_ip, loopback: { site: ['web'] } },
       'with the mesh the edge binds to its overlay IP, and a project wholly on the only ingress node puts its ingress port on loopback',
     );
     assert.deepEqual(
-      (await s.work(app.agentToken)).ports,
+      (await s.work(app.nodeId)).ports,
       { address: app.node.overlay_ip, loopback: {} },
       'a non-ingress node binds to its overlay IP, not its public address',
     );
     assert.deepEqual(
-      (await s.work(keyless.agentToken)).ports,
+      (await s.work(keyless.nodeId)).ports,
       { address: '192.168.1.7', loopback: {} },
       'a node that has not reported a WireGuard key binds to its address, matching its service endpoint',
     );
@@ -470,7 +453,7 @@ test('the work response tells each node where to bind published ports', async ()
   try {
     const n = await plain.register('n1', { address: '203.0.113.20' });
     assert.deepEqual(
-      (await plain.work(n.agentToken)).ports,
+      (await plain.work(n.nodeId)).ports,
       { address: '203.0.113.20', loopback: {} },
       'without the mesh a node binds to its address (the agent warns when it is public)',
     );
@@ -520,8 +503,8 @@ test('deploy rejects invalid ingress annotations and custom TLS without its secr
     );
     const edge = await s.register('edge');
     await s.post('/api/v1/nodes/edge/ingress', { enabled: true });
-    await s.report(app.agentToken, 'app', 'blog', ['web']);
-    const w = await s.work(edge.agentToken);
+    await s.report(app.nodeId, 'app', 'blog', ['web']);
+    const w = await s.work(edge.nodeId);
     assert.deepEqual(
       w.ingress.files,
       { 'certs/a.example.com.crt': 'CERT-PEM\n', 'certs/a.example.com.key': 'KEY-PEM\n' },
@@ -529,7 +512,7 @@ test('deploy rejects invalid ingress annotations and custom TLS without its secr
     );
     assert.match(w.ingress.caddyfile, /tls \/etc\/caddy\/certs\/a\.example\.com\.crt/);
     assert.equal(
-      (await s.work(app.agentToken)).ingress,
+      (await s.work(app.nodeId)).ingress,
       undefined,
       'app nodes never receive the TLS key material',
     );

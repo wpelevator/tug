@@ -49,15 +49,14 @@ async function context() {
     stateDir,
     apply: true,
     controlUrl: 'https://control.test',
-    token: 'node-token',
     docker,
     http: async (input, init) => {
       requests.push(String(input));
       if (String(input).includes('/images/')) {
         assert.equal(
           new Headers(init?.headers).get('Authorization'),
-          'Bearer node-token',
-          'image downloads must use the node token',
+          null,
+          'image downloads must not send a bearer token',
         );
         return new Response(badBytes ? 'bad' : bytes);
       }

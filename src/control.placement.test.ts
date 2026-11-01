@@ -5,15 +5,14 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createApp } from './control.ts';
-import { testImageResolver } from '../tests/helpers.ts';
+import { testImageResolver, testIdentity } from '../tests/helpers.ts';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
 async function makeServer() {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-place-'));
   process.env.TUG_DATA_DIR = dir;
-  process.env.TUG_OPERATOR_TOKEN = 'op-place-token';
-  const app = await createApp({ images: { resolve: testImageResolver } });
+  const app = await createApp({ identity: testIdentity, images: { resolve: testImageResolver } });
   const srv = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));
   });
@@ -22,7 +21,7 @@ async function makeServer() {
     close: () => new Promise((resolve) => srv.close(resolve)),
   };
 }
-const op = { Authorization: 'Bearer op-place-token', 'content-type': 'application/json' };
+const op = { 'x-tug-test-operator': 'operator', 'content-type': 'application/json' };
 async function post(base: string, route: string, body: unknown) {
   const res = await fetch(`${base}${route}`, {
     method: 'POST',
@@ -97,13 +96,13 @@ test('stale nodes are skipped by label placement and scale, and scale never fall
     for (const node of [live, dead])
       await fetch(`${s.base}/agent/v1/status`, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${node.agentToken}`, 'content-type': 'application/json' },
+        headers: { 'x-tug-test-node': node.nodeId, 'content-type': 'application/json' },
         body: JSON.stringify({ projects: [] }),
       });
     await new Promise((resolve) => setTimeout(resolve, 1300));
     await fetch(`${s.base}/agent/v1/status`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${live.agentToken}`, 'content-type': 'application/json' },
+      headers: { 'x-tug-test-node': live.nodeId, 'content-type': 'application/json' },
       body: JSON.stringify({ projects: [] }),
     });
     const compose = {
@@ -159,7 +158,7 @@ test('node-remove deletes a retired node but refuses placed or still-reporting n
     for (const node of [keep, old])
       await fetch(`${s.base}/agent/v1/status`, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${node.agentToken}`, 'content-type': 'application/json' },
+        headers: { 'x-tug-test-node': node.nodeId, 'content-type': 'application/json' },
         body: JSON.stringify({ projects: [] }),
       });
     assert.equal((await del('ghost')).status, 404, 'removing an unknown node should be 404');

@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createApp } from './control.ts';
-import { testImageResolver } from '../tests/helpers.ts';
+import { testImageResolver, testIdentity } from '../tests/helpers.ts';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { json } from '../tests/helpers.ts';
@@ -14,8 +14,7 @@ async function makeServer() {
   process.env.TUG_DATA_DIR = dir;
   process.env.TUG_CONTROL_BACKUP_DIR = path.join(dir, 'control-backups');
   process.env.TUG_CONTROL_RESTORE_DIR = path.join(dir, 'control-restore');
-  process.env.TUG_OPERATOR_TOKEN = 'op-control-backup-token';
-  const app = await createApp({ images: { resolve: testImageResolver } });
+  const app = await createApp({ identity: testIdentity, images: { resolve: testImageResolver } });
   const srv = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));
   });
@@ -25,7 +24,10 @@ async function makeServer() {
     close: () => new Promise((resolve) => srv.close(resolve)),
   };
 }
-const op = { Authorization: 'Bearer op-control-backup-token', 'content-type': 'application/json' };
+const op: Record<string, string> = {
+  'x-tug-test-operator': 'operator',
+  'content-type': 'application/json',
+};
 
 test('creates control-plane backup and requires confirmation for restore', async () => {
   const s = await makeServer();
@@ -46,6 +48,54 @@ test('creates control-plane backup and requires confirmation for restore', async
     });
     assert.equal(res.status, 400);
   } finally {
+    await s.close();
+  }
+});
+
+test('control backups are private to the control user even under a permissive umask', async () => {
+  const s = await makeServer();
+  const backupDir = path.join(s.dir, 'control-backups');
+  delete process.env.TUG_CONTROL_BACKUP_DIR;
+  const previousUmask = process.umask(0);
+  try {
+    await fs.mkdir(backupDir, { mode: 0o755 });
+    const res = await fetch(`${s.base}/api/v1/control/backups/run`, {
+      method: 'POST',
+      headers: op,
+      body: '{}',
+    });
+    assert.equal(res.status, 200, 'the backup should succeed');
+    const backup = await json(res);
+    assert.equal(
+      (await fs.stat(backup.artifactRef)).mode & 0o777,
+      0o600,
+      'the archive holds the master key and CA key, so only its owner may read it',
+    );
+    assert.equal(
+      (await fs.stat(backupDir)).mode & 0o777,
+      0o700,
+      'a pre-existing backup directory is tightened to owner-only access',
+    );
+    assert.deepEqual(
+      (await fs.readdir(backupDir)).filter((name) => name.endsWith('-staging')),
+      [],
+      'staging copies of the keys are removed after a backup',
+    );
+
+    await fs.rm(path.join(s.dir, 'master.key'));
+    const failed = await fetch(`${s.base}/api/v1/control/backups/run`, {
+      method: 'POST',
+      headers: op,
+      body: '{}',
+    });
+    assert.notEqual(failed.status, 200, 'a backup that cannot copy the master key fails');
+    assert.deepEqual(
+      (await fs.readdir(backupDir)).filter((name) => name !== path.basename(backup.artifactRef)),
+      [],
+      'a failed backup leaves neither staging key material nor a partial archive',
+    );
+  } finally {
+    process.umask(previousUmask);
     await s.close();
   }
 });

@@ -8,26 +8,38 @@ import { WebSocket } from 'ws';
 import { AgentWakeChannel } from './agent.ts';
 import { FakeDocker } from '../tests/fake-docker.ts';
 import type { AgentContext } from './agent.ts';
-import { createApp, listen } from './control.ts';
+import http from 'node:http';
+import { attachAgentStream, createApp } from './control.ts';
 import { LIVE_MAX_SESSIONS } from './protocol.ts';
 import type { StreamMessage, WakeResponse } from './protocol.ts';
-import { testImageResolver, json } from '../tests/helpers.ts';
+import { testImageResolver, json, testIdentity } from '../tests/helpers.ts';
 
 const OPERATOR = 'op-stream-test';
+/** Test-seam headers for a token: the operator, an encoded operator credential, or a node ID. */
+const idHeaders = (token: string): Record<string, string> =>
+  token === OPERATOR
+    ? { 'x-tug-test-operator': 'operator' }
+    : token.length > 200
+      ? { 'x-tug-test-credential': token }
+      : { 'x-tug-test-node': token };
 
 async function server(liveStartTimeoutMs?: number) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-stream-'));
   process.env.TUG_DATA_DIR = dir;
-  process.env.TUG_OPERATOR_TOKEN = OPERATOR;
-  delete process.env.TUG_TLS_CERT_FILE;
-  delete process.env.TUG_TLS_KEY_FILE;
-  const app = await createApp({ liveStartTimeoutMs, images: { resolve: testImageResolver } });
-  const httpServer = await listen(app, 0);
+  const app = await createApp({
+    identity: testIdentity,
+    liveStartTimeoutMs,
+    images: { resolve: testImageResolver },
+  });
+  // HTTP-level stream tests skip TLS and use the identity seam; mTLS upgrades are covered in control.mtls.test.ts.
+  const httpServer = http.createServer(app);
+  attachAgentStream(app, httpServer);
+  await new Promise<void>((resolve) => httpServer.listen(0, resolve));
   const base = `http://127.0.0.1:${(httpServer.address() as AddressInfo).port}`;
   const call = (method: string, route: string, body?: unknown) =>
     fetch(`${base}${route}`, {
       method,
-      headers: { Authorization: `Bearer ${OPERATOR}`, 'content-type': 'application/json' },
+      headers: { 'x-tug-test-operator': 'operator', 'content-type': 'application/json' },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
   const registered = await json(
@@ -56,7 +68,7 @@ function nextMessage(ws: WebSocket): Promise<StreamMessage> {
 test('authenticated stream wakes the node and the cursor closes long-poll races', async () => {
   const s = await server();
   const ws = new WebSocket(s.base.replace(/^http/, 'ws') + '/agent/v1/stream', {
-    headers: { Authorization: `Bearer ${s.registered.agentToken}` },
+    headers: { 'x-tug-test-node': s.registered.nodeId },
   });
   try {
     const ready = await nextMessage(ws);
@@ -67,7 +79,7 @@ test('authenticated stream wakes the node and the cursor closes long-poll races'
     );
     assert.equal(
       ready.nodeId,
-      'n1',
+      s.registered.nodeId,
       'the stream-ready message should identify the authenticated node',
     );
 
@@ -81,7 +93,7 @@ test('authenticated stream wakes the node and the cursor closes long-poll races'
 
     const immediate = (await json(
       await fetch(`${s.base}/agent/v1/wake?after=${ready.cursor}&timeout=1000`, {
-        headers: { Authorization: `Bearer ${s.registered.agentToken}` },
+        headers: { 'x-tug-test-node': s.registered.nodeId },
       }),
     )) as WakeResponse;
     assert.equal(
@@ -96,7 +108,7 @@ test('authenticated stream wakes the node and the cursor closes long-poll races'
     );
     assert.equal(
       diagnostics.commands[0].nodeId,
-      'n1',
+      s.registered.nodeId,
       'the wake should correspond to work queued for the target node',
     );
 
@@ -117,7 +129,7 @@ test('authenticated stream wakes the node and the cursor closes long-poll races'
     );
     const work = await json(
       await fetch(`${s.base}/agent/v1/work`, {
-        headers: { Authorization: `Bearer ${s.registered.agentToken}` },
+        headers: { 'x-tug-test-node': s.registered.nodeId },
       }),
     );
     const report = {
@@ -135,7 +147,7 @@ test('authenticated stream wakes the node and the cursor closes long-poll races'
     const reported = await fetch(`${s.base}/agent/v1/status`, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${s.registered.agentToken}`,
+        'x-tug-test-node': s.registered.nodeId,
         'content-type': 'application/json',
       },
       body: JSON.stringify(report),
@@ -151,7 +163,7 @@ test('authenticated stream wakes the node and the cursor closes long-poll races'
     const repeated = await fetch(`${s.base}/agent/v1/status`, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${s.registered.agentToken}`,
+        'x-tug-test-node': s.registered.nodeId,
         'content-type': 'application/json',
       },
       body: JSON.stringify(report),
@@ -163,7 +175,7 @@ test('authenticated stream wakes the node and the cursor closes long-poll races'
     );
     const unchanged = (await json(
       await fetch(`${s.base}/agent/v1/wake?after=${endpointMessage.cursor}&timeout=25`, {
-        headers: { Authorization: `Bearer ${s.registered.agentToken}` },
+        headers: { 'x-tug-test-node': s.registered.nodeId },
       }),
     )) as WakeResponse;
     assert.equal(
@@ -182,7 +194,7 @@ test('stream rejects invalid agent credentials', async () => {
   try {
     const status = await new Promise<number>((resolve, reject) => {
       const ws = new WebSocket(s.base.replace(/^http/, 'ws') + '/agent/v1/stream', {
-        headers: { Authorization: 'Bearer wrong' },
+        headers: { 'x-tug-test-operator': 'operator' },
       });
       ws.once('unexpected-response', (_request, response) => {
         response.resume();
@@ -196,8 +208,8 @@ test('stream rejects invalid agent credentials', async () => {
     });
     assert.equal(
       status,
-      401,
-      'an invalid agent token should be rejected during the WebSocket upgrade',
+      403,
+      'an operator credential must not open the agent stream (wrong class)',
     );
   } finally {
     await s.close();
@@ -208,12 +220,15 @@ test('agent wake channel falls back to long polling when WebSockets are unavaila
   const s = await server();
   const ctx: AgentContext = {
     docker: new FakeDocker(),
-    http: fetch,
+    http: ((url: string | URL | Request, init?: RequestInit) =>
+      fetch(url, {
+        ...init,
+        headers: { ...(init?.headers as object), 'x-tug-test-node': s.registered.nodeId },
+      })) as typeof fetch,
     nodeName: 'n1',
     stateDir: await fs.mkdtemp(path.join(os.tmpdir(), 'tug-stream-agent-')),
     apply: false,
     controlUrl: s.base,
-    token: s.registered.agentToken,
   };
   const channel = new AgentWakeChannel(ctx, () => new WebSocket('ws://127.0.0.1:1'));
   try {
@@ -262,7 +277,7 @@ function inbox(ws: WebSocket) {
 
 async function socket(base: string, route: string, token: string) {
   const ws = new WebSocket(base.replace(/^http/, 'ws') + route, {
-    headers: { Authorization: `Bearer ${token}` },
+    headers: idHeaders(token),
   });
   const next = inbox(ws);
   await new Promise<void>((resolve, reject) => {
@@ -282,7 +297,7 @@ async function liveFixture(nodes = ['n1'], liveStartTimeoutMs?: number) {
     compose: { services: { web: { image: 'nginx:alpine', 'x-tug': { placement: { nodes } } } } },
   });
   assert.equal(deployed.status, 200, 'live test desired state should publish successfully');
-  const agent = await socket(s.base, '/agent/v1/stream', s.registered.agentToken);
+  const agent = await socket(s.base, '/agent/v1/stream', s.registered.nodeId);
   assert.equal(
     (await agent.next()).type,
     'ready',
@@ -304,7 +319,7 @@ const execRequest = {
 async function rejectedUpgrade(base: string, token: string): Promise<number> {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(base.replace(/^http/, 'ws') + '/api/v1/live', {
-      headers: { Authorization: `Bearer ${token}` },
+      headers: idHeaders(token),
     });
     ws.once('unexpected-response', (_request, response) => {
       response.resume();
@@ -323,10 +338,10 @@ test('live upgrades enforce roles and project scope before resolving desired sta
   let operator: Awaited<ReturnType<typeof socket>> | undefined;
   try {
     const read = await json(
-      await s.call('POST', '/api/v1/tokens', { name: 'reader-live', role: 'read' }),
+      await s.call('POST', '/api/v1/credentials', { name: 'reader-live', role: 'read' }),
     );
     const scoped = await json(
-      await s.call('POST', '/api/v1/tokens', {
+      await s.call('POST', '/api/v1/credentials', {
         name: 'scoped-live',
         role: 'deploy',
         projects: ['own'],
@@ -338,13 +353,13 @@ test('live upgrades enforce roles and project scope before resolving desired sta
       'invalid credentials should fail the live upgrade',
     );
     assert.equal(
-      await rejectedUpgrade(s.base, read.token),
+      await rejectedUpgrade(s.base, read.credential),
       403,
       'read tokens should not open live sessions',
     );
     assert.equal(
-      await rejectedUpgrade(s.base, s.registered.agentToken),
-      401,
+      await rejectedUpgrade(s.base, s.registered.nodeId),
+      403,
       'agent credentials should not authenticate an operator live socket',
     );
     assert.equal(
@@ -352,7 +367,7 @@ test('live upgrades enforce roles and project scope before resolving desired sta
       426,
       'authenticated ordinary GET should explain that live requires WebSocket upgrade',
     );
-    operator = await socket(s.base, '/api/v1/live', scoped.token);
+    operator = await socket(s.base, '/api/v1/live', scoped.credential);
     operator.send({
       v: 1,
       type: 'live.open',
@@ -554,7 +569,7 @@ test('operator cancel/disconnect and agent replacement clean up the exact live s
         );
       } else if (action === 'disconnect') operator.ws.terminate();
       else {
-        replacement = await socket(s.base, '/agent/v1/stream', s.registered.agentToken);
+        replacement = await socket(s.base, '/agent/v1/stream', s.registered.nodeId);
         assert.equal(
           (await replacement.next()).type,
           'ready',
@@ -612,7 +627,7 @@ test('live rejects foreign session spoofing and malformed/binary operator frames
     'work-available',
     'registering a mesh peer should preserve agent wake notifications',
   );
-  const foreign = await socket(s.base, '/agent/v1/stream', other.agentToken);
+  const foreign = await socket(s.base, '/agent/v1/stream', other.nodeId);
   await foreign.next();
   const operator = await socket(s.base, '/api/v1/live', OPERATOR);
   const invalid: Awaited<ReturnType<typeof socket>>[] = [];

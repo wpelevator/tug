@@ -1,18 +1,18 @@
-# Networking: mesh, service DNS and ingress
+# Networking: mesh, cross-node service names and ingress
 
 Three independent, opt-in layers let services on different hosts find each other and let the internet find them. With every layer off, deploys behave exactly as before. The control plane stays single-writer: it allocates addresses, stores peers and renders configuration, but never carries data-plane traffic.
 
 | Layer | What it adds | Turned on by |
 |---|---|---|
 | A. WireGuard mesh | Every node gets an overlay IP and a `wg0` tunnel to every other node | `TUG_MESH=true` on control and on each agent |
-| B. Service DNS | Services on other nodes resolve by name to their node's overlay IP, only while healthy | on by default with the mesh; `TUG_SERVICE_DNS` on control overrides |
+| B. Cross-node service names | Services on other nodes resolve by name to their node's address (hosts-file entries, not DNS), only while healthy | on by default with the mesh; `TUG_SERVICE_NAMES=true\|false` on control overrides |
 | C. Ingress and TLS | A managed Caddy on an ingress node routes hostnames to services anywhere, with automatic HTTPS | `tug node-ingress <node>` plus `x-tug.ingress` on a service |
 
 Independently of the layers, [published ports are private by default](#published-ports-private-by-default): Tug binds them to the address other nodes and the ingress use, never to every interface unless you wrote that.
 
 ## Layer A: WireGuard mesh
 
-Control owns addressing. When `TUG_MESH=true`, registering or enrolling a node allocates a stable `nodes.overlay_ip` from `TUG_MESH_CIDR` (default `10.210.0.0/16`, first free host address; re-registering keeps it). The default does not overlap the integration subnet `10.89.240.0/24`, Docker's default `172.16.0.0/12` pools or the usual home and VPN ranges; pick another CIDR if it collides with a network you route to. The mesh needs at least a `/29`.
+Control owns addressing. When `TUG_MESH=true`, registering or enrolling a node allocates a stable `nodes.overlay_ip` from `TUG_MESH_CIDR` (default `10.210.0.0/16`, first free host address; replacing the node's identity keeps it). The default does not overlap the integration subnet `10.89.240.0/24`, Docker's default `172.16.0.0/12` pools or the usual home and VPN ranges; pick another CIDR if it collides with a network you route to. The mesh needs at least a `/29`.
 
 Keys never leave the node. The agent generates an X25519 keypair locally, keeps the private key in `<state dir>/wireguard/private.key` (mode `0600`) and sends only the public key: at enrollment (`wgPublicKey`), or on its first poll with `POST /agent/v1/wireguard/key` for nodes registered by the CLI or `node-install`. Control stores it in the `wg_peers` table (`node_id`, `public_key`, `overlay_ip`, `endpoint`, `allowed_ips`).
 
@@ -28,29 +28,29 @@ Containers reach other nodes through the host: traffic leaves the container, is 
 
 `control-install --mesh` sets `TUG_MESH=true` on control. Retire a node with `tug node-remove`, which drops its overlay peer so the others stop dialing it.
 
-**Running the agent.** The agent needs `wg` and `ip` (both are in the Tug image), `NET_ADMIN`, and the host network namespace so that `wg0` exists on the host. `node-install --mesh` and `node-enroll --mesh` generate the right `docker run` (`--network host --cap-add NET_ADMIN -e TUG_MESH=true`). The host needs WireGuard support in the kernel (built in since Linux 5.6; older kernels need the `wireguard` module or DKMS package).
+**Running the agent.** The agent needs `wg` and `ip` (both are in the Tug image), `NET_ADMIN`, and the host network namespace so that `wg0` exists on the host. `node-install --mesh` and `node-prepare-enrollment --mesh` generate the right `docker run` (`--network host --cap-add NET_ADMIN -e TUG_MESH=true`). The host needs WireGuard support in the kernel (built in since Linux 5.6; older kernels need the `wireguard` module or DKMS package).
 
 **Key rotation.** `tug node-rotate-wg-key <node>` queues a `wg.rotate-key` command. The agent generates a new keypair, reports the public key and returns it in the command result; every other node picks up the new key on its next poll, and the node itself resyncs `wg0` with the new private key. Expect a few seconds of lost traffic to that node. A rotation that fails after the key was replaced is retried by the normal key report on the next poll.
 
-**Firewall.** Open UDP `51820` (or `TUG_WG_PORT` on control) between nodes that act as endpoints. Allow outbound UDP from nodes behind NAT. Nothing else is required between nodes, and agents still only dial out to control over HTTP(S). `node-install --mesh` checks that kernel support exists and that the UDP port is free, or already held by this node's own running Tug mesh agent, so repeating the install to upgrade or repair an agent works.
+**Firewall.** Open UDP `51820` (or `TUG_WG_PORT` on control) between nodes that act as endpoints. Allow outbound UDP from nodes behind NAT. Nothing else is required between nodes, and agents still only dial out to control over its single mTLS port. `node-install --mesh` checks that kernel support exists and that the UDP port is free, or already held by this node's own running Tug mesh agent, so repeating the install to upgrade or repair an agent works.
 
-## Layer B: service DNS
+## Layer B: cross-node service names
 
-Decision: `extra_hosts` injection, not a DNS service. It adds no long-running process, needs nothing new on the nodes and degrades gracefully; the cost is that records only change when the agent re-renders the project, which already happens on every poll.
+Decision: `extra_hosts` injection, not a DNS service. The names are hosts-file entries written into containers at creation, so there is no DNS server, no round-robin answer and no update between reconciliations; "service DNS" is reserved for a possible DNS implementation (see [M12](roadmap.md)). Names for services on the same node are Docker's own network DNS and are unrelated. It adds no long-running process, needs nothing new on the nodes and degrades gracefully; the cost is that records only change when the agent re-renders the project, which already happens on every poll.
 
-When service DNS is on (default with the mesh; force with `TUG_SERVICE_DNS=true|false`), the work response carries `serviceEndpoints`: for each project on the node, each service to the list of `{ node, address }` where
+When cross-node service names are on (default with the mesh; force with `TUG_SERVICE_NAMES=true|false`), the work response carries `serviceEndpoints`: for each project on the node, each service to the list of `{ node, address }` where
 
 - the service is placed on that node,
 - the node has polled within `TUG_STALE_SECONDS`, and
 - the node's latest status reports that service as `rolloutState: serving` (so a failing health check withdraws the record).
 
-`address` is the node's overlay IP, or its `address` column when it has no mesh key. `composeForNode` adds `extra_hosts` to every service on the node for every service that runs elsewhere, as both `<service>` and `<service>.<project>.tug`. Services placed on the same node keep resolving through Compose's own DNS, and entries you wrote yourself in `extra_hosts` win. A service on several nodes gets one entry per serving node.
+`address` is the node's overlay IP, or its `address` column when it has no mesh key. The agent's container definition (`containerSpecs`) adds `extra_hosts` to every service on the node for every service that runs elsewhere, as both `<service>` and `<service>.<project>.tug`. Services placed on the same node keep resolving through the project network's Docker DNS, and entries you wrote yourself in `extra_hosts` win. A service on several nodes gets one entry per serving node.
 
 Consequences:
 
 - The name resolves to the node's address, not the container. The target service must publish its port (`ports: ["3306:3306"]`) and clients connect to the published host port. Tug binds that port to the same address the name resolves to ([Published ports](#published-ports-private-by-default)), so it is not on the internet. Rolling services are the exception, see [Rolling services and service names](#rolling-services-and-service-names).
 - `/etc/hosts` has no load balancing: most resolvers use the first entry, so multi-node services give failover on node loss rather than round robin. Real load balancing is a non-goal.
-- Records appear after the target reports `serving` and the client's node re-renders its Compose file on its next poll, which recreates the client container if its `extra_hosts` changed. Order dependent services with health checks and expect one extra recreate on first deploy.
+- Records appear after the target reports `serving` and the client's node re-renders its container definitions on its next poll, which recreates the client container if its `extra_hosts` changed. Order dependent services with health checks and expect one extra recreate on first deploy.
 
 ## Layer C: ingress and TLS
 
@@ -71,7 +71,7 @@ services:
         tls: auto
 ```
 
-`tug node-ingress edge1` marks a node as an ingress node (`--disable` removes the role). `port` may be the container port or the published host port; control resolves it to the published host port, and `validateCompose` rejects an ingress port that is not published, because the edge reaches services on `<node address>:<published port>`.
+An ingress hostname belongs to one project: a deploy or rollback is refused with `409` if another project's current deployment already routes the host (case-insensitive). `tug node-ingress edge1` marks a node as an ingress node (`--disable` removes the role). `port` may be the container port or the published host port; control resolves it to the published host port, and `validateCompose` rejects an ingress port that is not published, because the edge reaches services on `<node address>:<published port>`.
 
 Caddy dials each upstream where its port is bound ([Published ports](#published-ports-private-by-default)): `127.0.0.1` for a service whose ingress port listens on loopback on the ingress node, otherwise the node's overlay address (or `address`, without the mesh), including for services on the ingress node itself.
 
@@ -95,7 +95,7 @@ Ingress works without the mesh: upstreams then use each node's `address`, which 
 
 ## Published ports: private by default
 
-A `ports` entry such as `"3306:3306"` would listen on every interface of the node, and Docker's iptables rules bypass host firewalls such as ufw, so the port would be on the internet unless a provider firewall blocks it. Tug therefore rewrites every `ports` entry that names no host IP in the per-node Compose file:
+A `ports` entry such as `"3306:3306"` would listen on every interface of the node, and Docker's iptables rules bypass host firewalls such as ufw, so the port would be on the internet unless a provider firewall blocks it. Tug therefore rewrites every `ports` entry that names no host IP in the container definition the agent builds for the node:
 
 | Situation | Bound to |
 |---|---|
@@ -115,7 +115,7 @@ Details:
 - Control sends the binding in the work response (`ports`, `PortBinding` in `src/protocol.ts`): the address and, per project, the loopback services. A hostname `address` is resolved on the node, only when some port of the project binds to it; if it does not resolve the project fails to apply rather than falling back to every interface. The address must belong to one of the node's interfaces, otherwise Docker cannot bind it (`cannot assign requested address`). On a cloud VM whose public IP is 1:1 NAT (not on an interface), register the private address, or use the mesh.
 - Without the mesh and with a public `address`, ports are bound to that public address and the agent sends one `ports.public` warning event naming the services (again whenever the set changes). Turn on the mesh, register a private `address`, or write the host IP in `ports` to make the exposure explicit.
 - Rolling revisions keep the host IP when their host port is remapped, so revision ports (`TUG_ROLLOUT_PORTS`) are bound the same way.
-- With the mesh, ports bind to the address on `wg0`. After a host reboot Docker may try to start containers before the agent has brought `wg0` up; those fail to bind and the agent's next `docker compose up -d` starts them.
+- With the mesh, ports bind to the address on `wg0`. After a host reboot Docker may try to start containers before the agent has brought `wg0` up; those fail to bind and the agent's next reconcile starts them.
 - `tug doctor --nodes` runs a `ports.public` check on every agent: it lists containers of Tug projects (and their rolling revisions) listening on `0.0.0.0`, `::` or a public IP. It is a warning, not a failure, because an explicit `0.0.0.0` may be intended.
 
 M12 (container networking over the mesh) will remove most published ports for internal traffic.
@@ -155,7 +155,7 @@ sequenceDiagram
     loop every poll
         A->>Ctrl: GET /agent/v1/work
         Ctrl-->>A: desiredStates + network (peers) + serviceEndpoints
-        A->>A: wg syncconf if peers changed, then compose up with extra_hosts
+        A->>A: wg syncconf if peers changed, then reconcile containers with extra_hosts
         A->>Ctrl: POST /agent/v1/status (web serving)
         E->>Ctrl: GET /agent/v1/work
         Ctrl-->>E: network + ingress (Caddyfile, certs, routes)

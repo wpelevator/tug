@@ -1,21 +1,21 @@
 # Architecture
 
-Tug deploys Docker Compose projects to one or more Docker hosts through a small self-hosted control plane and a pull-based agent on each node. SSH is used only to bootstrap hosts; normal deploys go through the control API and the agents.
+Tug deploys Docker Compose applications to one or more Docker hosts through a small self-hosted control plane and a pull-based agent on each node. The agents drive each node's Docker Engine API directly; Compose is used only on the operator machine to normalize the file. SSH is used only to install the control plane and nodes; normal deploys go through the control API and the agents, which share one mutual-TLS port. [Terminology](terminology.md) defines the vocabulary used here.
 
 ## Components
 
 The [README](../README.md#how-it-fits-together) has an overview diagram of how these fit together.
 
-- **Control plane** (`src/control.ts`): an Express API backed by SQLite (`tug.db`) and an install-time master key (`master.key`) in `TUG_DATA_DIR`. It stores nodes, projects, deployments, desired states, encrypted secrets, volumes, queued commands, events, hashed API tokens and locks, and builds images from uploaded source tarballs or imports operator-built archives. It always stores and serves built images as compressed artifacts and resolves published image tags to immutable registry digests before publication.
-- **Access control** (`src/tokens.ts`): every operator route is declared once in a role table (`read`, `deploy`, `admin`) and passes through one guard that authenticates the bearer (the root operator token or a named API token, both by hash lookup), checks the role and the token's allowed projects, and attaches the acting token name that deployments and audit events record. Agents authenticate separately with per-node tokens. See [Access control](access-control.md).
+- **Control plane** (`src/control.ts`): an Express API behind a single TLS 1.3 listener that requires a client certificate ([Control plane](control-plane.md#authentication-and-pki)), backed by SQLite (`tug.db`), an install-time master key (`master.key`) and the private CA (`pki/`) in `TUG_DATA_DIR`. It stores nodes, projects, deployments, desired states, encrypted secrets, volumes, queued commands, events, operator and enrollment credentials (public-key hashes, never private keys) and locks, and builds images from uploaded source tarballs or imports operator-built archives. It always stores and serves built images as compressed artifacts and resolves published image tags to immutable registry digests before publication.
+- **Access control** (`src/credentials.ts`, `src/pki.ts`): every peer presents a certificate signed by control's CA. The certificate names one principal (`tug:operator:<id>`, `tug:node:<id>` or `tug:enroll:<id>`) and control authorizes it by comparing the certificate's public-key hash with the key stored for that principal. Every operator route is declared once in a role table (`read`, `deploy`, `admin`) and passes through one guard that checks the role and the credential's allowed projects, and attaches the acting credential name that deployments and audit events record. Agent routes derive the node from the certificate and touch only that node's objects. See [Access control](access-control.md).
 - **Agent** (`src/agent.ts`): runs on every node, fetches authoritative work from `GET /agent/v1/work` and reconciles containers through the Docker Engine API (`src/docker-api.ts`) over the local socket. It builds one container definition per placed service (`src/container-spec.ts`), substitutes released secrets into the container environment, verifies/downloads/loads artifact-backed images, pulls published images by their pinned registry digest when the desired revision is new to the node, executes health checks, and reports status. Nodes need only the Docker Engine, not the Compose plugin.
 - **Reconciler** (`src/reconciler.ts`): one loop for every service. Containers carry `tug.project`, `tug.service`, `tug.revision` and `tug.config-hash` labels; the hash covers the resolved definition, the image identity and the versions of the secrets the service uses, and a container whose hash differs is replaced. `recreate` stops the old container and starts the new one; `rolling` (`x-tug.rollout.strategy: rolling`) starts the new one on a free host port beside the old one, health-checks it, lets the ingress switch and removes the old one after a drain. Tug names its own network `tug_<project>`, volumes `tug_<project>_<volume>` and containers `tug-<project>-<service>-<hash8>`; service names are network aliases. Reconciliation never removes volumes; `volume.delete` is the only way one goes away.
 - **Compose normalization** (`src/normalize.ts`): `tug deploy` runs `docker compose config` on the operator machine, which does interpolation, `extends`, profiles and `env_file`. Control secrets are interpolated as `@@tug:secret:NAME@@` sentinels that the agent replaces with released values. The CLI reads Compose's YAML rendering because its JSON rendering drops service-level `x-tug`. Control validates the result against an allowlist of keys ([Compose](compose.md#supported-keys)); agents never parse Compose YAML.
 - **CLI** (`src/cli.ts`): the `tug` command for operators. It talks to the control API and uses SSH only for `control-install` and `node-install`. See [CLI reference](cli.md).
 - **Networking** (`src/mesh.ts`, `src/ingress.ts`): optional WireGuard mesh, health-aware service endpoints and the managed Caddy edge. `mesh.ts` has overlay IP allocation, key handling, `wg` config rendering, peer diffing and the idempotent `wg0` reconcile; `ingress.ts` resolves service endpoints and ingress routes, renders the Caddyfile (control) and reconciles the Caddy container (agent). See [Networking](networking.md).
-- **Entrypoint** (`src/main.ts`, `dist/main.js` in the image): one image serves both roles; `node src/main.ts control|agent` or `TUG_ROLE`.
-- **Protocol** (`src/protocol.ts`): the control↔agent contract. It holds the types, and a few shared constants such as the active and terminal deployment states, for everything crossing the boundary: `DesiredState`, `ServiceSpec` and `HealthCheck`; the `/agent/v1/*` payloads (`WorkResponse` with its optional `network`, `serviceEndpoints` and `ingress` blocks, `Command` / `CommandResult`, `StatusReport` / `ProjectStatus` / `IngressStatus`, `StreamMessage`, `WakeResponse`, `SecretsResponse`, `WgKeyRequest`); and enrollment (`EnrollRequest` / `EnrollResponse`, `RegisterResponse`, `JoinKey`). `control.ts`, `agent.ts`, `compose.ts` and `cli.ts` all import from it, so change the wire format there first.
-- **Injectable agent runners** (`src/runners.ts`): `reconcile`, `executeCommand`, `waitForHealth`, `containerIp` and `pollOnce` take an `AgentContext` (`{ docker, http, nodeName, stateDir, apply, controlUrl, token, host?, mesh?, caddyImage? }`). `docker` is a `DockerRunner` (`createDockerRunner()` wraps `run('docker', …)` from `build.ts`), `host` is a `HostRunner` for `wg` and `ip` (`createHostRunner()`), and `http` is a `fetch`-compatible client. The Caddy reload goes through `docker`. Production code uses `defaultContext()`; `src/agent.test.ts` passes a fake docker runner to unit-test rollout ordering, secret-triggered `--force-recreate` and the docker, tcp and http health-check branches without a Docker daemon. The privileged-Docker integration test remains the end-to-end check.
+- **Runtime entrypoint** (`src/main.ts`, installed as the `tug-runtime` binary and `dist/main.js` in the image): one image runs both control and agent; `node src/main.ts control|agent` or `TUG_ROLE`. It also provides the `agent identity` and `agent install-cert` subcommands that node installation uses.
+- **Protocol** (`src/protocol.ts`): the control↔agent contract. It holds the types, and a few shared constants such as the active and terminal deployment states, for everything crossing the boundary: `DesiredState`, `ServiceSpec` and `HealthCheck`; the `/agent/v1/*` payloads (`WorkResponse` with its optional `network`, `serviceEndpoints` and `ingress` blocks, `Command` / `CommandResult`, `StatusReport` / `ProjectStatus` / `IngressStatus`, `StreamMessage`, `WakeResponse`, `SecretsResponse`, `WgKeyRequest`); and identity and enrollment (`IdentityRequest` / `IdentityResponse`, `EnrollRequest` / `EnrollResponse`, `RenewRequest` / `RenewResponse`, `EnrollmentCredentialResponse`, `JoinKey`). `control.ts`, `agent.ts`, `compose.ts` and `cli.ts` all import from it, so change the wire format there first.
+- **Injectable agent runners** (`src/runners.ts`): `reconcile`, `executeCommand`, `waitForHealth`, `containerIp` and `pollOnce` take an `AgentContext` (`{ docker, http, nodeName, stateDir, apply, controlUrl, credential?, host?, mesh?, caddyImage?, rolloutPorts? }`). `docker` is a `DockerApi` (the real `DockerEngine` talks to the Engine API over the local socket, `tests/fake-docker.ts` implements it in memory), `host` is a `HostRunner` for `wg` and `ip` (`createHostRunner()`), and `http` is a `fetch`-compatible client pinned to the node's credential. Production code uses `defaultContext()`; the agent tests pass the in-memory Docker fake to unit-test rollout ordering, secret-triggered recreation and the docker, tcp and http health-check branches without a Docker daemon. The privileged-Docker integration test remains the end-to-end check.
 
 ## Desired state and reconciliation
 
@@ -27,9 +27,9 @@ Restarts, log fetches, diagnostics and volume deletions are queued as commands f
 
 ### Agent wake channel
 
-After each reconciliation, the agent waits on `GET /agent/v1/stream`, an authenticated WebSocket upgrade using the same per-node bearer token as the HTTP agent API. Control sends a `work-available` hint for durable work; desired state and queued commands remain in SQLite and the agent always fetches them through `GET /agent/v1/work`. Deployments, rollbacks, secret changes and cluster-wide network changes wake every node because they can change placement, service endpoints or ingress. Node commands and ingress-role changes wake only their target node.
+After each reconciliation, the agent waits on `GET /agent/v1/stream`, a WebSocket upgrade authenticated by the same node certificate as the HTTP agent API. Control sends a `work-available` hint for durable work; desired state and queued commands remain in SQLite and the agent always fetches them through `GET /agent/v1/work`. Deployments, rollbacks, secret changes and cluster-wide network changes wake every node because they can change placement, service endpoints or ingress. Node commands and ingress-role changes wake only their target node.
 
-The same socket carries ephemeral live operations. The CLI opens authenticated `GET /api/v1/live`, sends one versioned request, and control resolves the project, service and optional node before binding the session to that exact connected agent. For a rolling service, the agent addresses the active rollout container instead of the Compose service container. `exec` (with a PTY when asked), `tug run` one-off containers, `logs -f`, `ps` and `inspect` stream responses directly; input, cancellation and disconnect cleanup travel in the other direction. Live requests are never persisted, queued or replayed, all three hops enforce frame, buffer and session limits, and losing any socket closes the session and kills the agent's local Docker client process. Docker does not expose the remote exec process identity through this client stream, so an already-started process inside the container may continue after cancellation or disconnect; do not treat client cancellation as remote process termination. `inspect` is deliberately a `deploy` operation because raw Docker data can expose environment variables.
+The same socket carries ephemeral live operations. The CLI opens `GET /api/v1/live` with its operator credential, sends one versioned request, and control resolves the project, service and optional node before binding the session to that exact connected agent. For a rolling service, the agent addresses the active rollout container instead of the Compose service container. `exec` (with a PTY when asked), `tug run` one-off containers, `logs -f`, `ps` and `inspect` stream responses directly; input, cancellation and disconnect cleanup travel in the other direction. Live requests are never persisted, queued or replayed, all three hops enforce frame, buffer and session limits, and losing any socket closes the session and kills the agent's local Docker client process. Docker does not expose the remote exec process identity through this client stream, so an already-started process inside the container may continue after cancellation or disconnect; do not treat client cancellation as remote process termination. `inspect` is deliberately a `deploy` operation because raw Docker data can expose environment variables.
 
 If a proxy or firewall rejects WebSockets, the agent uses `GET /agent/v1/wake?after=<cursor>&timeout=<milliseconds>` for durable work only. Each node has a monotonic in-memory wake cursor, so a wake issued just before the long poll begins is returned immediately instead of being lost. Cursors and sockets are intentionally ephemeral: control restart merely loses a hint, while periodic `TUG_POLL_INTERVAL_MS` reconciliation remains the correctness and drift-repair path. Live operations require the WebSocket path because replaying them through long-poll would be unsafe.
 
@@ -49,7 +49,7 @@ A future Bun bundle that includes control or agent code can supply a `bun:sqlite
 
 ## Image artifacts
 
-The `builds` table records immutable image references, config-digest identity, platform, archive SHA-256/size and a relative artifact path. Image save/download/hash operations stream bytes; saved archives are validated before import. Build archives finalize before the desired-state transaction becomes current. Failed publication leaves the previous deployment current. `GET /agent/v1/images/:buildId` authenticates the node token and checks the retained service placement; `WorkResponse.retainedImages` protects rollback images from agent pruning.
+The `builds` table records immutable image references, config-digest identity, platform, archive SHA-256/size and a relative artifact path. Image save/download/hash operations stream bytes; saved archives are validated before import. Build archives finalize before the desired-state transaction becomes current. Failed publication leaves the previous deployment current. `GET /agent/v1/images/:buildId` authenticates the node certificate and checks the retained service placement; `WorkResponse.retainedImages` protects rollback images from agent pruning.
 
 Docker image stores can expose either a config digest or an OCI index/manifest digest as their local image ID. Artifacts use the saved configuration digest as their canonical identity. After a verified import, agents cache the daemon's actual tag ID paired with that canonical ID and archive hash; they check the tag again before reusing it. This permits classic Docker and containerd-backed Docker to exchange saved images without confusing their different IDs.
 
@@ -57,7 +57,9 @@ Archives are validated before Docker can import them. A containerd-backed `docke
 
 Local builds use a multipart `POST /api/v1/deployments`: `payload` contains the Compose/project/version and `localImages` descriptors; each descriptor names a corresponding `image-N` file. Each archive must contain exactly its declared Tug tag and actual configuration/platform/checksum. Source contexts and local images are mutually exclusive. Control retags imported images under its own deployment identity before publishing their saved archives.
 
-## Node bootstrap (`tug node-install`)
+## Node installation (`tug node-install`)
+
+The node makes its own key and certificate request, so no bootstrap secret travels and the private key never leaves the host. The operator's admin credential authorizes the identity at that moment.
 
 ```mermaid
 sequenceDiagram
@@ -65,25 +67,30 @@ sequenceDiagram
     participant CLI as tug CLI
     participant Ctrl as Control plane
     participant DB as SQLite
-    participant Host as Remote host (SSH)
+    participant Host as Node host (SSH)
     participant Agent as Agent container
 
     Op->>CLI: node-install root@host --name app1
     CLI->>Host: SSH preflight (docker, paths, disk, control reachable)
-    CLI->>Ctrl: POST /api/v1/nodes/register
-    Ctrl->>DB: insert node, generate agentToken
-    Ctrl-->>CLI: { node, agentToken }
-    CLI->>Host: docker save | scp | docker load (image transfer)
+    CLI->>Host: docker save | scp | docker load (only with --build-local-image)
+    CLI->>Host: ssh: docker run image agent identity (key stays in the state volume)
+    Host-->>CLI: certificate request (CSR)
+    CLI->>Ctrl: POST /api/v1/nodes/app1/identity { csr, mode: create } (admin credential, mTLS)
+    Ctrl->>DB: insert node with a new immutable ID and the CSR key hash
+    Ctrl-->>CLI: { node, certificate, ca, url }
+    CLI->>Host: ssh: agent install-cert (response on stdin)
     CLI->>Host: ssh node-install.sh (writes /etc/tug/agent.env, docker run agent)
     Host->>Agent: start container
     loop every TUG_POLL_INTERVAL_MS
-        Agent->>Ctrl: GET /agent/v1/work (Bearer agentToken)
+        Agent->>Ctrl: GET /agent/v1/work (node certificate, mTLS)
         Ctrl->>DB: update last_seen_at, status=online
     end
     CLI-->>Op: { ok, node }
 ```
 
-## Self-service enrollment (`tug node-enroll`)
+`node-replace-identity` and `node-repair-identity` run the same flow with `mode: replace` (and, for repair, move corrupt credential documents aside first). See [Nodes](nodes.md).
+
+## Self-service enrollment (`tug node-prepare-enrollment`)
 
 ```mermaid
 sequenceDiagram
@@ -94,23 +101,25 @@ sequenceDiagram
     participant Host as Fresh host
     participant Agent as Agent container
 
-    Op->>CLI: node-enroll --name app1
-    CLI->>Ctrl: POST /api/v1/nodes/enroll-token { name, ttl, uses }
-    Ctrl->>DB: insert enroll_token (hash, name, uses, expiry)
-    Ctrl-->>CLI: { enrollToken, expiresAt }
-    CLI-->>Op: docker run ... -e TUG_JOIN_KEY=<key> ... agent
+    Op->>CLI: node-prepare-enrollment --name app1
+    CLI->>Ctrl: POST /api/v1/nodes/enrollment-credential { name, labels, ttlSeconds }
+    Ctrl->>DB: insert enrollment credential (key hash, name, reserved node ID, expiry)
+    Ctrl-->>CLI: bootstrap credential
+    CLI-->>Op: docker run ... -e TUG_JOIN_KEY=<join key> ... agent
     Op->>Host: paste docker run (or cloud-init)
     Host->>Agent: start container
-    Agent->>Agent: no token on volume -> decode join key
-    Agent->>Ctrl: POST /agent/v1/enroll (enrollToken + hostname/ip)
-    Ctrl->>DB: validate & consume enroll_token, insert node, mint agentToken
-    Ctrl-->>Agent: { node, agentToken }
-    Agent->>Agent: persist agent credentials to volume
+    Agent->>Agent: no identity on the volume -> decode join key, make key and CSR
+    Agent->>Ctrl: POST /agent/v1/enroll { csr, address } (bootstrap certificate, mTLS)
+    Ctrl->>DB: validate and consume the key, insert node with the reserved ID
+    Ctrl-->>Agent: { node, certificate, ca, url }
+    Agent->>Agent: persist agent.json to the state volume
     loop every TUG_POLL_INTERVAL_MS
-        Agent->>Ctrl: GET /agent/v1/work (Bearer agentToken)
+        Agent->>Ctrl: GET /agent/v1/work (node certificate, mTLS)
         Ctrl->>DB: update last_seen_at, status=online
     end
 ```
+
+The bootstrap certificate reaches only `POST /agent/v1/enroll`. A retry with the same key signs another certificate for the same node without changing stored values.
 
 ## Deploy (`tug deploy`)
 
@@ -227,7 +236,8 @@ Secrets are encrypted at rest with AES-256-GCM using the control master key, and
 Agents write generated state under `TUG_STATE_DIR` (default `/var/lib/tug`):
 
 ```text
-/var/lib/tug/agent.json                                # durable creds persisted after self-service enrollment
+/var/lib/tug/agent.json                                # the node identity document: private key, certificate and pinned CA (0600)
+/var/lib/tug/agent-pending.json                        # a new key waiting for its certificate during enrollment or renewal
 /var/lib/tug/agent.db                                  # last applied version/revision and secret versions per project
 /var/lib/tug/managed-images.json                       # only Tug-owned image references eligible for conservative pruning
 /var/lib/tug/image-identities.json                     # canonical artifact identities paired with daemon-local tag IDs
@@ -237,4 +247,4 @@ Agents write generated state under `TUG_STATE_DIR` (default `/var/lib/tug`):
 /var/lib/tug/projects/<project>/rollout.json               # rolling services: active/candidate/draining revisions and the last rejected one
 ```
 
-When agents enroll via `node-enroll`, mount the state directory as a named volume (`-v tug-agent:/var/lib/tug`) so `agent.json` survives container recreation and the agent does not re-enroll after an image update or reboot.
+The state directory must be a persistent volume (`-v tug-agent:/var/lib/tug`; `node-install` mounts the host directory), so `agent.json` survives container recreation and the agent does not enroll again after an image update or reboot.

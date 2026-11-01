@@ -6,10 +6,21 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { validateImageArchive, verifyDownload } from './artifacts.ts';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
 import net from 'node:net';
 import dns from 'node:dns/promises';
 import { WebSocket } from 'ws';
+import {
+  agentIdentityCsr,
+  createTransport,
+  describeMissingIdentity,
+  installIdentity,
+  loadAgentDocument,
+  renewCertificate,
+  renewalTime,
+} from './agent-credential.ts';
+import type { AgentDocument } from './agent-credential.ts';
+import { clientTlsOptions, parseCredential } from './pki.ts';
+import type { Credential } from './pki.ts';
 import { createHash } from 'node:crypto';
 import { addressBoundServices, isRolling, serviceSecretVersions } from './compose.ts';
 import {
@@ -60,6 +71,7 @@ import type {
   CommandResult,
   DesiredState,
   DiagnosticCheck,
+  EnrollRequest,
   EnrollResponse,
   HealthCheck,
   IngressStatus,
@@ -76,9 +88,8 @@ import type {
   WorkResponse,
 } from './protocol.ts';
 
-const CONTROL_URL_FROM_ENV = Boolean(process.env.TUG_CONTROL_URL);
-let CONTROL_URL = process.env.TUG_CONTROL_URL || 'http://localhost:8080';
-let TOKEN: string | undefined = process.env.TUG_AGENT_TOKEN;
+// Connect-only override (for example an SSH tunnel); the certificate is still verified against the credential's public URL.
+const CONTROL_URL_OVERRIDE = process.env.TUG_CONTROL_URL;
 let NODE_NAME = process.env.TUG_NODE_NAME || process.env.HOSTNAME || 'node1';
 const STATE_DIR = process.env.TUG_STATE_DIR || '/var/lib/tug';
 const APPLY = process.env.TUG_APPLY !== 'false';
@@ -95,7 +106,8 @@ export interface AgentContext {
   stateDir: string;
   apply: boolean;
   controlUrl: string;
-  token: string | undefined;
+  /** The node credential presented to control; absent only in tests with a fake `http`. */
+  credential?: Credential;
   /** Runs `wg` / `ip` for the mesh. */
   host?: HostRunner;
   /** Manage the WireGuard mesh (generate a key, report it, reconcile `wg0`). */
@@ -105,15 +117,18 @@ export interface AgentContext {
   rolloutPorts?: string;
 }
 
-export function defaultContext(): AgentContext {
+let activeDocument: AgentDocument | undefined;
+export function defaultContext(doc: AgentDocument | undefined = activeDocument): AgentContext {
+  if (!doc) throw new Error(describeMissingIdentity());
+  const transport = createTransport(doc, CONTROL_URL_OVERRIDE);
   return {
     docker: new DockerEngine(),
-    http: fetch,
-    nodeName: NODE_NAME,
+    http: transport.http as HttpClient,
+    nodeName: doc.nodeName,
     stateDir: STATE_DIR,
     apply: APPLY,
-    controlUrl: CONTROL_URL,
-    token: TOKEN,
+    controlUrl: transport.base,
+    credential: doc,
     host: createHostRunner(),
     mesh: MESH,
     caddyImage: process.env.TUG_CADDY_IMAGE,
@@ -154,10 +169,6 @@ async function agentDb(stateDir: string): Promise<Db> {
   return db;
 }
 
-function authHeaders(ctx: AgentContext): Record<string, string> {
-  if (!ctx.token) throw new Error('TUG_AGENT_TOKEN required');
-  return { Authorization: `Bearer ${ctx.token}` };
-}
 async function api<T = unknown>(
   ctx: AgentContext,
   route: string,
@@ -165,10 +176,7 @@ async function api<T = unknown>(
 ): Promise<T> {
   const res = await ctx.http(`${ctx.controlUrl}${route}`, {
     ...opts,
-    headers: {
-      ...authHeaders(ctx),
-      ...((opts.headers as Record<string, string> | undefined) || {}),
-    },
+    headers: (opts.headers as Record<string, string> | undefined) || {},
   });
   if (!res.ok)
     throw new Error(`${opts.method || 'GET'} ${route}: ${res.status} ${await res.text()}`);
@@ -183,7 +191,7 @@ interface LiveChannelHandlers {
   onDisconnect?: () => void;
 }
 
-type WebSocketFactory = (url: string, token: string) => WebSocket;
+type WebSocketFactory = (url: string, credential: Credential | undefined) => WebSocket;
 
 /** Keeps one outbound stream open and falls back to a bounded HTTP wait when an intermediary rejects WebSockets. */
 export class AgentWakeChannel {
@@ -197,11 +205,14 @@ export class AgentWakeChannel {
 
   constructor(
     ctx: AgentContext,
-    createSocket: WebSocketFactory = (url, token) =>
-      new WebSocket(url, {
-        headers: { Authorization: `Bearer ${token}` },
+    createSocket: WebSocketFactory = (url, credential) => {
+      if (!credential) throw new Error('agent credential required');
+      return new WebSocket(url, {
+        ...(clientTlsOptions(credential) as object),
         maxPayload: LIVE_MAX_FRAME_BYTES,
-      }),
+        followRedirects: false,
+      });
+    },
     handlers: LiveChannelHandlers = {},
   ) {
     this.ctx = ctx;
@@ -216,12 +227,11 @@ export class AgentWakeChannel {
 
   private async connect(): Promise<boolean> {
     if (this.socket?.readyState === WebSocket.OPEN) return true;
-    if (!this.ctx.token) throw new Error('TUG_AGENT_TOKEN required');
     const url = new URL('/agent/v1/stream', this.ctx.controlUrl);
     url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
     return new Promise((resolve) => {
       let settled = false;
-      const socket = this.createSocket(url.toString(), this.ctx.token!);
+      const socket = this.createSocket(url.toString(), this.ctx.credential);
       this.socket = socket;
       const finish = (connected: boolean) => {
         if (settled) return;
@@ -933,7 +943,7 @@ export async function ensureArtifact(ctx: AgentContext, artifact: ImageArtifact)
   try {
     const response = await ctx.http(
       `${ctx.controlUrl}/agent/v1/images/${encodeURIComponent(artifact.buildId)}`,
-      { headers: authHeaders(ctx), redirect: 'error', signal: AbortSignal.timeout(10 * 60 * 1000) },
+      { redirect: 'error', signal: AbortSignal.timeout(10 * 60 * 1000) },
     );
     if (!response.ok || !response.body)
       throw new Error(`image download failed: HTTP ${response.status}`);
@@ -1362,7 +1372,12 @@ export async function pollOnce(ctx: AgentContext = defaultContext()): Promise<Pr
   }
   const jobResults = jobs.pending();
   commandResults.push(...jobResults);
-  const report: StatusReport = { node: ctx.nodeName, projects, commandResults };
+  const report: StatusReport = {
+    node: ctx.nodeName,
+    sentAt: new Date().toISOString(),
+    projects,
+    commandResults,
+  };
   const running = jobs.statuses();
   if (running.length) report.jobs = running;
   if (ingress) report.ingress = ingress;
@@ -1377,24 +1392,6 @@ export async function pollOnce(ctx: AgentContext = defaultContext()): Promise<Pr
   return projects;
 }
 
-interface Creds {
-  agentToken: string;
-  nodeName?: string;
-  controlUrl?: string;
-}
-
-const CREDS_FILE = () => path.join(STATE_DIR, 'agent.json');
-async function loadCreds(): Promise<Creds | null> {
-  try {
-    return JSON.parse(await fs.readFile(CREDS_FILE(), 'utf8'));
-  } catch {
-    return null;
-  }
-}
-async function saveCreds(creds: Creds): Promise<void> {
-  await ensureDir(STATE_DIR);
-  await fs.writeFile(CREDS_FILE(), JSON.stringify(creds), { mode: 0o600 });
-}
 async function readJoinKey(): Promise<string | null> {
   if (process.env.TUG_JOIN_KEY) return process.env.TUG_JOIN_KEY.trim();
   const file = process.env.TUG_JOIN_KEY_FILE;
@@ -1407,83 +1404,86 @@ async function readJoinKey(): Promise<string | null> {
   }
   return null;
 }
-async function enroll(joinKey: string): Promise<Creds> {
+/** Enrolls with a single-use bootstrap certificate; a retry reuses the pending key, which control accepts by key. */
+async function enroll(joinKey: string): Promise<AgentDocument> {
   let decoded: JoinKey;
   try {
     decoded = JSON.parse(Buffer.from(joinKey, 'base64url').toString('utf8'));
+    if (decoded.v !== 2) throw new Error('unsupported join key version');
+    parseCredential(decoded.credential);
   } catch (e) {
-    throw new Error('invalid TUG_JOIN_KEY (expected base64url-encoded JSON)', { cause: e });
+    throw new Error('invalid join key (expected a base64url-encoded v2 join key)', { cause: e });
   }
-  if (!decoded.enrollToken) throw new Error('join key is missing enrollToken');
-  const controlUrl = !CONTROL_URL_FROM_ENV && decoded.controlUrl ? decoded.controlUrl : CONTROL_URL;
-  // node's fetch reads NODE_EXTRA_CA_CERTS only at startup, so apply an embedded CA by
-  // persisting it and re-execing ourselves once with the env var set.
-  if (decoded.ca && !process.env.NODE_EXTRA_CA_CERTS) {
-    await ensureDir(STATE_DIR);
-    const caPath = path.join(STATE_DIR, 'control-ca.pem');
-    await fs.writeFile(caPath, decoded.ca);
-    const r = spawnSync(process.execPath, process.argv.slice(1), {
-      stdio: 'inherit',
-      env: { ...process.env, NODE_EXTRA_CA_CERTS: caPath },
-    });
-    process.exit(r.status ?? 1);
-  }
-  console.log(`enrolling with ${controlUrl} as ${NODE_NAME}`);
+  const transport = createTransport(decoded.credential, CONTROL_URL_OVERRIDE || decoded.connectUrl);
+  console.log(`enrolling with ${decoded.credential.url} as ${decoded.name}`);
+  const csr = await agentIdentityCsr(STATE_DIR);
   const wgPublicKey = MESH ? (await ensureWgKeys(STATE_DIR)).publicKey : undefined;
-  const res = await fetch(`${controlUrl}/agent/v1/enroll`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      enrollToken: decoded.enrollToken,
-      name: NODE_NAME,
-      address: process.env.TUG_NODE_ADDRESS,
-      publicAddress: process.env.TUG_NODE_PUBLIC_ADDRESS,
-      wgPublicKey,
-      labels:
-        decoded.labels ||
-        (process.env.TUG_LABELS
-          ? process.env.TUG_LABELS.split(',')
-              .map((s) => s.trim())
-              .filter(Boolean)
-          : undefined),
-    }),
-  });
-  if (!res.ok) throw new Error(`enroll failed: ${res.status} ${await res.text()}`);
-  const out = (await res.json()) as EnrollResponse;
-  const creds: Creds = {
-    agentToken: out.agentToken,
-    nodeName: out.node?.name || NODE_NAME,
-    controlUrl,
+  const body: EnrollRequest = {
+    csr,
+    address: process.env.TUG_NODE_ADDRESS,
+    publicAddress: process.env.TUG_NODE_PUBLIC_ADDRESS,
+    wgPublicKey,
   };
-  await saveCreds(creds);
-  if (wgPublicKey) await writeReportedKey(STATE_DIR, wgPublicKey);
-  console.log(`enrolled as node ${creds.nodeName}`);
-  return creds;
-}
-// Establish durable credentials before polling: explicit env token (SSH/push install) wins,
-// then credentials persisted on the state volume, then a one-time enroll via the join key.
-export async function loadOrEnroll(): Promise<Creds> {
-  let creds: Creds | null = TOKEN
-    ? { agentToken: TOKEN, nodeName: NODE_NAME, controlUrl: CONTROL_URL }
-    : await loadCreds();
-  if (!creds) {
-    const joinKey = await readJoinKey();
-    if (!joinKey)
-      throw new Error(
-        'no TUG_AGENT_TOKEN, no persisted credentials, and no TUG_JOIN_KEY to enroll with',
-      );
-    creds = await enroll(joinKey);
+  try {
+    const res = await transport.http(`${transport.base}/agent/v1/enroll`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error(`enroll failed: ${res.status} ${await res.text()}`);
+    const doc = await installIdentity(STATE_DIR, (await res.json()) as EnrollResponse);
+    if (wgPublicKey) await writeReportedKey(STATE_DIR, wgPublicKey);
+    console.log(`enrolled as node ${doc.nodeName}`);
+    return doc;
+  } finally {
+    void transport.close();
   }
-  TOKEN = creds.agentToken;
-  NODE_NAME = creds.nodeName || NODE_NAME;
-  if (!CONTROL_URL_FROM_ENV && creds.controlUrl) CONTROL_URL = creds.controlUrl;
-  return creds;
+}
+/** Loads the persisted identity, or enrolls with a join key. Without either the agent refuses to start. */
+export async function loadOrEnroll(): Promise<AgentDocument> {
+  let doc = await loadAgentDocument(STATE_DIR);
+  if (!doc) {
+    const joinKey = await readJoinKey();
+    if (!joinKey) throw new Error(describeMissingIdentity());
+    doc = await enroll(joinKey);
+  }
+  NODE_NAME = doc.nodeName;
+  activeDocument = doc;
+  return doc;
 }
 
+const RENEW_RETRY_MS = 15 * 60_000;
+
 export async function main(): Promise<void> {
-  await loadOrEnroll();
-  console.log(`tug-agent node=${NODE_NAME} control=${CONTROL_URL} apply=${APPLY}`);
-  const ctx = defaultContext();
+  const doc = await loadOrEnroll();
+  const ctx = defaultContext(doc);
+  console.log(`tug-agent node=${NODE_NAME} control=${ctx.controlUrl} apply=${APPLY}`);
+  let renewAt = renewalTime(doc.cert);
+  /** Renews with the same key, saves, then swaps the client and reconnects. Failure keeps the old identity until it expires. */
+  const renewIfDue = async (): Promise<void> => {
+    if (Date.now() < renewAt || !ctx.credential) return;
+    try {
+      const current = ctx.credential as AgentDocument;
+      const next = await renewCertificate(STATE_DIR, current, (csr) =>
+        api<{ certificate: string }>(ctx, '/agent/v1/renew', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ csr }),
+        }),
+      );
+      const transport = createTransport(next, CONTROL_URL_OVERRIDE);
+      const previous = ctx.http;
+      ctx.http = transport.http as HttpClient;
+      ctx.credential = next;
+      void previous;
+      renewAt = renewalTime(next.cert);
+      wake.close();
+      console.log('node certificate renewed');
+    } catch (e) {
+      renewAt = Date.now() + RENEW_RETRY_MS;
+      console.error(`certificate renewal failed (keeping the current one): ${errMessage(e)}`);
+    }
+  };
   const wake = new AgentWakeChannel(ctx, undefined, {
     onLive: (frame) => live.handle(frame),
     onDisconnect: () => live.dispose(),
@@ -1492,6 +1492,7 @@ export async function main(): Promise<void> {
     wake.send(frame);
   });
   for (;;) {
+    await renewIfDue();
     try {
       await pollOnce(ctx);
     } catch (e) {

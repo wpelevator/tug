@@ -6,9 +6,9 @@ import path from 'node:path';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from './control.ts';
-import { testImageResolver } from '../tests/helpers.ts';
-import { ROLES, ROUTE_ROLES, hasRole } from './tokens.ts';
-import type { Role } from './tokens.ts';
+import { testImageResolver, testIdentity } from '../tests/helpers.ts';
+import { ROLES, ROUTE_ROLES, hasRole } from './credentials.ts';
+import type { Role } from './credentials.ts';
 
 const OPERATOR = 'op-tokens-test';
 async function makeServer(dir?: string) {
@@ -16,8 +16,7 @@ async function makeServer(dir?: string) {
   process.env.TUG_DATA_DIR = data;
   process.env.TUG_CONTROL_BACKUP_DIR = path.join(data, 'control-backups');
   process.env.TUG_CONTROL_RESTORE_DIR = path.join(data, 'control-restore');
-  process.env.TUG_OPERATOR_TOKEN = OPERATOR;
-  const app = await createApp({ images: { resolve: testImageResolver } });
+  const app = await createApp({ identity: testIdentity, images: { resolve: testImageResolver } });
   const srv = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));
   });
@@ -26,7 +25,13 @@ async function makeServer(dir?: string) {
     const res = await fetch(`${base}${route}`, {
       method,
       headers: {
-        ...(bearer ? { Authorization: `Bearer ${bearer}` } : {}),
+        ...(bearer === OPERATOR
+          ? { 'x-tug-test-operator': 'operator' }
+          : bearer && bearer.length > 200
+            ? { 'x-tug-test-credential': bearer }
+            : bearer
+              ? { 'x-tug-test-node': bearer }
+              : {}),
         'content-type': 'application/json',
       },
       body: body === undefined ? undefined : JSON.stringify(body),
@@ -41,11 +46,11 @@ async function makeServer(dir?: string) {
       text,
     };
   };
-  /** Creates a token as the operator and returns its secret. */
+  /** Creates a credential as the operator and returns its secret. */
   const mint = async (name: string, role: Role, projects?: string[]) => {
-    const res = await call(OPERATOR, 'POST', '/api/v1/tokens', { name, role, projects });
+    const res = await call(OPERATOR, 'POST', '/api/v1/credentials', { name, role, projects });
     assert.equal(res.status, 200, `creating token ${name} should succeed: ${res.text}`);
-    return res.body.token as string;
+    return res.body.credential as string;
   };
   return { app, base, data, call, mint, close: () => new Promise((resolve) => srv.close(resolve)) };
 }
@@ -53,19 +58,19 @@ const compose = (node = 'n1') => ({
   services: { web: { image: 'nginx:alpine', 'x-tug': { placement: { nodes: [node] } } } },
 });
 
-test('named tokens are created once, listed without secrets, unique, validated and revocable immediately', async () => {
+test('named credentials are created once, listed without secrets, unique, validated and revocable immediately', async () => {
   const s = await makeServer();
   try {
-    const created = await s.call(OPERATOR, 'POST', '/api/v1/tokens', {
+    const created = await s.call(OPERATOR, 'POST', '/api/v1/credentials', {
       name: 'ci-bot',
       role: 'deploy',
       projects: ['b', 'a', 'a'],
     });
-    assert.equal(created.status, 200, 'the operator should be able to create a token');
+    assert.equal(created.status, 200, 'the operator should be able to create a credential');
     assert.match(
-      created.body.token,
-      /^tug_tok_/,
-      'token secrets should carry the recognizable tug_tok_ prefix',
+      created.body.credential,
+      /^[A-Za-z0-9_-]{200,}$/,
+      'operator credentials are returned once as a base64url document',
     );
     assert.deepEqual(
       created.body.projects,
@@ -77,35 +82,38 @@ test('named tokens are created once, listed without secrets, unique, validated a
       'operator',
       'creation should record the acting credential',
     );
-    const listed = await s.call(OPERATOR, 'GET', '/api/v1/tokens');
-    assert.equal(listed.body.tokens.length, 1, 'the new token should be listed');
+    const listed = await s.call(OPERATOR, 'GET', '/api/v1/credentials');
+    assert.equal(
+      listed.body.credentials.filter((t: { name: string }) => t.name !== 'operator').length,
+      1,
+      'the new credential should be listed',
+    );
     assert.ok(
-      !listed.text.includes(created.body.token) && !/token_hash|"token"/.test(listed.text),
+      !listed.text.includes(created.body.credential) && !/token_hash|"token"/.test(listed.text),
       'listings must never contain the secret or its hash',
     );
     assert.equal(
-      (await s.call(created.body.token, 'GET', '/api/v1/status')).status,
+      (await s.call(created.body.credential, 'GET', '/api/v1/status')).status,
       200,
       'a fresh token should authenticate',
     );
 
-    const duplicate = await s.call(OPERATOR, 'POST', '/api/v1/tokens', {
+    const duplicate = await s.call(OPERATOR, 'POST', '/api/v1/credentials', {
       name: 'ci-bot',
       role: 'read',
     });
-    assert.equal(duplicate.status, 409, 'token names must be unique');
+    assert.equal(duplicate.status, 409, 'credential names must be unique');
     for (const [body, pattern] of [
-      [{ name: 'bad name', role: 'read' }, /token name/],
-      [{ name: '', role: 'read' }, /token name/],
-      [{ name: 'operator', role: 'read' }, /reserved/],
-      [{ name: 'system:auto-rollback', role: 'read' }, /token name/],
+      [{ name: 'bad name', role: 'read' }, /credential name/],
+      [{ name: '', role: 'read' }, /credential name/],
+      [{ name: 'system:auto-rollback', role: 'read' }, /credential name/],
       [{ name: 'x', role: 'root' }, /role must be/],
       [{ name: 'x', role: 'admin', projects: ['a'] }, /cannot be limited/],
       [{ name: 'x', role: 'read', projects: [] }, /projects must be/],
       [{ name: 'x', role: 'read', projects: ['../etc'] }, /projects must be/],
       [{ name: 'x', role: 'read', expiresInSeconds: 0 }, /expiresInSeconds/],
     ] as [unknown, RegExp][]) {
-      const res = await s.call(OPERATOR, 'POST', '/api/v1/tokens', body);
+      const res = await s.call(OPERATOR, 'POST', '/api/v1/credentials', body);
       assert.equal(
         res.status,
         400,
@@ -119,31 +127,34 @@ test('named tokens are created once, listed without secrets, unique, validated a
     }
 
     assert.equal(
-      (await s.call(OPERATOR, 'DELETE', '/api/v1/tokens/ci-bot')).status,
+      (await s.call(OPERATOR, 'DELETE', '/api/v1/credentials/ci-bot')).status,
       200,
       'revoking an existing token should succeed',
     );
     assert.equal(
-      (await s.call(created.body.token, 'GET', '/api/v1/status')).status,
+      (await s.call(created.body.credential, 'GET', '/api/v1/status')).status,
       401,
-      'a revoked token must stop working immediately',
+      'a revoked credential must stop working immediately',
     );
     assert.equal(
-      (await s.call(OPERATOR, 'POST', '/api/v1/tokens', { name: 'ci-bot', role: 'read' })).status,
+      (await s.call(OPERATOR, 'POST', '/api/v1/credentials', { name: 'ci-bot', role: 'read' }))
+        .status,
       409,
-      'a revoked token keeps its name so the audit trail stays unambiguous',
+      'a revoked credential keeps its name so the audit trail stays unambiguous',
     );
     assert.equal(
-      (await s.call(OPERATOR, 'DELETE', '/api/v1/tokens/missing')).status,
+      (await s.call(OPERATOR, 'DELETE', '/api/v1/credentials/missing')).status,
       404,
       'revoking an unknown token should report not found',
     );
-    const after = (await s.call(OPERATOR, 'GET', '/api/v1/tokens')).body.tokens[0];
-    assert.ok(after.revokedAt, 'listings should show when a token was revoked');
+    const after = (await s.call(OPERATOR, 'GET', '/api/v1/credentials')).body.credentials.find(
+      (t: { name: string }) => t.name === 'ci-bot',
+    );
+    assert.ok(after.revokedAt, 'listings should show when a credential was revoked');
     assert.equal(
       (await s.call('tug_tok_unknown', 'GET', '/api/v1/status')).status,
       401,
-      'unknown tokens are unauthorized',
+      'unknown credentials are unauthorized',
     );
     assert.equal(
       (await s.call(null, 'GET', '/api/v1/status')).status,
@@ -160,31 +171,35 @@ test('named tokens are created once, listed without secrets, unique, validated a
   }
 });
 
-test('expired tokens are rejected and last_used_at is recorded', async () => {
+test('expired credentials are rejected and last_used_at is recorded', async () => {
   const s = await makeServer();
   try {
-    const res = await s.call(OPERATOR, 'POST', '/api/v1/tokens', {
+    const res = await s.call(OPERATOR, 'POST', '/api/v1/credentials', {
       name: 'short',
       role: 'read',
       expiresInSeconds: 1,
     });
-    assert.ok(res.body.expiresAt, 'a token created with expiry should report it');
+    assert.ok(res.body.expiresAt, 'a credential created with expiry should report it');
     assert.equal(
-      (await s.call(res.body.token, 'GET', '/api/v1/status')).status,
+      (await s.call(res.body.credential, 'GET', '/api/v1/status')).status,
       200,
-      'a token works before it expires',
+      'a credential works before it expires',
     );
     let lastUsed: string | null = null;
     for (let i = 0; i < 20 && !lastUsed; i++) {
-      lastUsed = (await s.call(OPERATOR, 'GET', '/api/v1/tokens')).body.tokens[0].lastUsedAt;
+      lastUsed = (await s.call(OPERATOR, 'GET', '/api/v1/credentials')).body.credentials[0]
+        .lastUsedAt;
       if (!lastUsed) await new Promise((r) => setTimeout(r, 25));
     }
-    assert.ok(lastUsed, 'using a token should record last_used_at without blocking the request');
+    assert.ok(
+      lastUsed,
+      'using a credential should record last_used_at without blocking the request',
+    );
     await new Promise((r) => setTimeout(r, 1100));
     assert.equal(
-      (await s.call(res.body.token, 'GET', '/api/v1/status')).status,
+      (await s.call(res.body.credential, 'GET', '/api/v1/status')).status,
       401,
-      'an expired token must be unauthorized',
+      'an expired credential must be unauthorized',
     );
   } finally {
     await s.close();
@@ -212,7 +227,9 @@ const SAMPLES: Record<string, { path: string; body?: unknown }> = {
     body: { url: '/srv/restic', env: {} },
   },
   'DELETE /api/v1/backup/destination': { path: '/api/v1/backup/destination' },
-  'GET /api/v1/backup/key': { path: '/api/v1/backup/key?project=site' },
+  'GET /api/v1/backup/repository-password': {
+    path: '/api/v1/backup/repository-password?project=site',
+  },
   'POST /api/v1/projects': { path: '/api/v1/projects', body: { name: 'site' } },
   'POST /api/v1/deployments': {
     path: '/api/v1/deployments',
@@ -232,20 +249,24 @@ const SAMPLES: Record<string, { path: string; body?: unknown }> = {
   'DELETE /api/v1/volumes/:name': { path: '/api/v1/volumes/x' },
   'DELETE /api/v1/nodes/:name': { path: '/api/v1/nodes/ghost' },
   'GET /api/v1/nodes': { path: '/api/v1/nodes' },
-  'POST /api/v1/nodes/register': { path: '/api/v1/nodes/register', body: {} },
-  'POST /api/v1/nodes/enroll-token': { path: '/api/v1/nodes/enroll-token', body: {} },
+  'POST /api/v1/nodes/:name/identity': { path: '/api/v1/nodes/x/identity', body: {} },
+  'POST /api/v1/nodes/:name/disable': { path: '/api/v1/nodes/x/disable', body: {} },
+  'POST /api/v1/nodes/enrollment-credential': {
+    path: '/api/v1/nodes/enrollment-credential',
+    body: {},
+  },
   'POST /api/v1/nodes/:name/rotate-wg-key': { path: '/api/v1/nodes/ghost/rotate-wg-key', body: {} },
   'POST /api/v1/nodes/:name/ingress': { path: '/api/v1/nodes/ghost/ingress', body: {} },
   'POST /api/v1/control/backups/run': { path: '/api/v1/control/backups/run', body: {} },
   'POST /api/v1/control/restore': { path: '/api/v1/control/restore', body: {} },
   'GET /api/v1/diagnostics': { path: '/api/v1/diagnostics' },
   'POST /api/v1/diagnostics/nodes': { path: '/api/v1/diagnostics/nodes', body: {} },
-  'POST /api/v1/tokens': { path: '/api/v1/tokens', body: {} },
-  'GET /api/v1/tokens': { path: '/api/v1/tokens' },
-  'DELETE /api/v1/tokens/:name': { path: '/api/v1/tokens/ghost' },
+  'POST /api/v1/credentials': { path: '/api/v1/credentials', body: {} },
+  'GET /api/v1/credentials': { path: '/api/v1/credentials' },
+  'DELETE /api/v1/credentials/:name': { path: '/api/v1/credentials/ghost' },
 };
 
-test('every operator route enforces its declared role for read, deploy and admin tokens', async () => {
+test('every operator route enforces its declared role for read, deploy and admin credentials', async () => {
   const s = await makeServer();
   try {
     const tokens: Record<Role, string> = {
@@ -281,7 +302,7 @@ test('every operator route enforces its declared role for read, deploy and admin
       assert.equal(
         (await s.call('tug_tok_wrong', method, sample.path, sample.body)).status,
         401,
-        `${key} should reject unknown tokens with 401`,
+        `${key} should reject unknown credentials with 401`,
       );
       assert.equal(
         (await s.call(null, method, sample.path, sample.body)).status,
@@ -301,30 +322,24 @@ test('every operator route enforces its declared role for read, deploy and admin
   }
 });
 
-test('agent endpoints ignore API tokens and the registry auth hook is removed', async () => {
+test('operator credentials are refused on node routes and anonymous requests reach nothing', async () => {
   const s = await makeServer();
   try {
     const admin = await s.mint('a', 'admin');
     assert.equal(
       (await s.call(admin, 'GET', '/agent/v1/work')).status,
-      401,
-      'agent endpoints accept agent tokens only, even admin API tokens are refused',
+      403,
+      'agent endpoints accept node certificates only, even admin operator credentials are refused',
     );
     assert.equal(
       (await s.call(OPERATOR, 'GET', '/agent/v1/secrets?project=site')).status,
-      401,
+      403,
       'the operator token cannot read the agent secrets endpoint',
     );
     assert.equal(
-      (await s.call(null, 'POST', '/api/v1/registry/auth', { username: 'n', password: 'p' }))
-        .status,
-      404,
-      'the removed registry hook must not accept node or operator credentials',
-    );
-    assert.equal(
-      (await s.call(null, 'GET', '/healthz')).status,
-      200,
-      'health checks stay unauthenticated',
+      (await s.call(null, 'GET', '/agent/v1/work')).status,
+      401,
+      'a request that presents no identity reaches no route, including node routes',
     );
   } finally {
     await s.close();
@@ -337,7 +352,7 @@ test('the route table matches the live router, so a new /api/v1 route without a 
     interface Layer {
       route?: { path: string; methods: Record<string, boolean> };
     }
-    const stack = (s.app as unknown as { _router: { stack: Layer[] } })._router.stack;
+    const stack = (s.app as unknown as { router: { stack: Layer[] } }).router.stack;
     const live = stack
       .flatMap((layer) =>
         layer.route && layer.route.path.startsWith('/api/v1')
@@ -366,7 +381,7 @@ test('the route table matches the live router, so a new /api/v1 route without a 
   }
 });
 
-test('project-scoped tokens only reach their own projects and learn nothing about others', async () => {
+test('project-scoped credentials only reach their own projects and learn nothing about others', async () => {
   const s = await makeServer();
   try {
     await s.call(OPERATOR, 'POST', '/api/v1/nodes/register', { name: 'n1' });
@@ -378,13 +393,13 @@ test('project-scoped tokens only reach their own projects and learn nothing abou
       version: 'v1',
       compose: compose(),
     });
-    assert.equal(deployA.status, 200, `scoped token deploys its own project: ${deployA.text}`);
+    assert.equal(deployA.status, 200, `scoped credential deploys its own project: ${deployA.text}`);
     const deployB = await s.call(unscoped, 'POST', '/api/v1/deployments', {
       project: 'b',
       version: 'v1',
       compose: compose(),
     });
-    assert.equal(deployB.status, 200, 'unscoped deploy token deploys any project');
+    assert.equal(deployB.status, 200, 'unscoped deploy credential deploys any project');
     await s.call(OPERATOR, 'POST', '/api/v1/secrets', {
       project: 'b',
       name: 'KEY',
@@ -424,7 +439,7 @@ test('project-scoped tokens only reach their own projects and learn nothing abou
       assert.equal(
         res.status,
         403,
-        `${method} ${route} must be forbidden for a token scoped to project a; got ${res.status}`,
+        `${method} ${route} must be forbidden for a credential scoped to project a; got ${res.status}`,
       );
       assert.equal(
         res.body.error,
@@ -435,12 +450,12 @@ test('project-scoped tokens only reach their own projects and learn nothing abou
     assert.equal(
       (await s.call(viewer, 'GET', '/api/v1/secrets?project=b')).status,
       403,
-      'secret names of other projects are hidden from scoped tokens',
+      'secret names of other projects are hidden from scoped credentials',
     );
     assert.equal(
       (await s.call(ci, 'POST', '/api/v1/projects', { name: 'b' })).status,
       403,
-      'a scoped token cannot create a project outside its scope',
+      'a scoped credential cannot create a project outside its scope',
     );
 
     const status = (await s.call(viewer, 'GET', '/api/v1/status')).body;
@@ -478,7 +493,7 @@ test('project-scoped tokens only reach their own projects and learn nothing abou
   }
 });
 
-test('deploy tokens cannot manage secrets, nodes, backups, diagnostics or tokens, and no endpoint returns secret values', async () => {
+test('deploy credentials cannot manage secrets, nodes, backups, diagnostics or tokens, and no endpoint returns secret values', async () => {
   const s = await makeServer();
   try {
     await s.call(OPERATOR, 'POST', '/api/v1/secrets', {
@@ -493,20 +508,20 @@ test('deploy tokens cannot manage secrets, nodes, backups, diagnostics or tokens
       ['DELETE', '/api/v1/secrets/DB_PASSWORD'],
       ['GET', '/api/v1/nodes'],
       ['POST', '/api/v1/nodes/register', { name: 'evil' }],
-      ['POST', '/api/v1/nodes/enroll-token', {}],
+      ['POST', '/api/v1/nodes/enrollment-credential', {}],
       ['POST', '/api/v1/control/backups/run', {}],
       ['POST', '/api/v1/control/restore', { artifactRef: '/x', confirm: true }],
       ['GET', '/api/v1/diagnostics'],
       ['POST', '/api/v1/diagnostics/nodes', {}],
-      ['GET', '/api/v1/tokens'],
-      ['POST', '/api/v1/tokens', { name: 'esc', role: 'admin' }],
-      ['DELETE', '/api/v1/tokens/d'],
+      ['GET', '/api/v1/credentials'],
+      ['POST', '/api/v1/credentials', { name: 'esc', role: 'admin' }],
+      ['DELETE', '/api/v1/credentials/d'],
       ['DELETE', '/api/v1/volumes/x'],
     ] as [string, string, unknown?][])
       assert.equal(
         (await s.call(deploy, method, route, body)).status,
         403,
-        `deploy token must not ${method} ${route}`,
+        `deploy credential must not ${method} ${route}`,
       );
     assert.equal(
       (await s.call(OPERATOR, 'GET', '/api/v1/secrets')).body.secrets[0].name,
@@ -539,20 +554,24 @@ test('mutations record the acting token on deployments and events', async () => 
         compose: compose(),
       })
     ).body;
-    assert.equal(first.deployment.actor, 'ci-bot', 'the deploy response should name the token');
+    assert.equal(
+      first.deployment.actor,
+      'ci-bot',
+      'the deploy response should name the credential',
+    );
     assert.equal(
       (await s.call(ci, 'GET', `/api/v1/deployments/${first.deployment.id}`)).body.actor,
       'ci-bot',
       'the deployment record should store the acting token',
     );
-    await s.call(registered.agentToken, 'POST', '/agent/v1/status', {
+    await s.call(registered.nodeId, 'POST', '/agent/v1/status', {
       projects: [
         {
           project: 'site',
           observedVersion: 'v1',
           observedRevision: first.desiredState.revision,
           health: 'serving',
-          services: {},
+          services: ['web'],
         },
       ],
     });
@@ -578,11 +597,11 @@ test('mutations record the acting token on deployments and events', async () => 
       `/api/v1/deployments/${rollback.deployment.id}/cancel`,
       {},
     );
-    assert.equal(cancel.status, 200, `cancel should work for a deploy token: ${cancel.text}`);
+    assert.equal(cancel.status, 200, `cancel should work for a deploy credential: ${cancel.text}`);
     assert.equal(
       (await s.call(ci, 'POST', '/api/v1/restart', { project: 'site', service: 'web' })).status,
       200,
-      'restart is allowed for deploy tokens',
+      'restart is allowed for deploy credentials',
     );
     await s.call(OPERATOR, 'POST', '/api/v1/secrets', {
       project: 'site',
@@ -590,7 +609,7 @@ test('mutations record the acting token on deployments and events', async () => 
       value: 'super-secret-value',
     });
     await s.call(OPERATOR, 'DELETE', '/api/v1/secrets/API_KEY?project=site');
-    await s.call(OPERATOR, 'DELETE', '/api/v1/tokens/ci-bot');
+    await s.call(OPERATOR, 'DELETE', '/api/v1/credentials/ci-bot');
 
     const events = (await s.call(OPERATOR, 'GET', '/api/v1/events?limit=100')).body.events as {
       type: string;
@@ -604,21 +623,21 @@ test('mutations record the acting token on deployments and events', async () => 
       events.find((e) => e.type === type && e.actor === actor);
     assert.ok(
       find('deploy', 'ci-bot')?.deployment_id === first.deployment.id,
-      'deploy event names the token and deployment',
+      'deploy event names the credential and deployment',
     );
     assert.ok(
       find('deploy', 'operator'),
       'deploy event by the root token is attributed to operator',
     );
-    assert.ok(find('rollback', 'ci-bot'), 'rollback event names the token');
-    assert.ok(find('cancel', 'ci-bot'), 'cancel event names the token');
-    assert.ok(find('restart', 'ci-bot'), 'restart event names the token');
+    assert.ok(find('rollback', 'ci-bot'), 'rollback event names the credential');
+    assert.ok(find('cancel', 'ci-bot'), 'cancel event names the credential');
+    assert.ok(find('restart', 'ci-bot'), 'restart event names the credential');
     assert.ok(
       find('secret.set', 'operator') && find('secret.delete', 'operator'),
       'secret changes are attributed',
     );
     assert.ok(
-      find('token.create', 'operator') && find('token.revoke', 'operator'),
+      find('credential.create', 'operator') && find('credential.revoke', 'operator'),
       'token creation and revocation are attributed',
     );
     assert.ok(
@@ -637,7 +656,7 @@ test('control backup and restore keep tokens working', async () => {
   const revoked = await s.mint('soon-revoked', 'read');
   const backup = (await s.call(OPERATOR, 'POST', '/api/v1/control/backups/run', {})).body;
   const later = await s.mint('later', 'read');
-  await s.call(OPERATOR, 'DELETE', '/api/v1/tokens/soon-revoked');
+  await s.call(OPERATOR, 'DELETE', '/api/v1/credentials/soon-revoked');
   const restored = await s.call(OPERATOR, 'POST', '/api/v1/control/restore', {
     artifactRef: backup.artifactRef,
     confirm: true,
@@ -645,7 +664,7 @@ test('control backup and restore keep tokens working', async () => {
   assert.equal(
     restored.status,
     200,
-    `restore should succeed with the api_tokens table present: ${restored.text}`,
+    `restore should succeed with the operator_credentials table present: ${restored.text}`,
   );
   assert.equal(restored.body.restartRequired, true, 'restore still requires a restart');
   assert.equal(
@@ -659,30 +678,30 @@ test('control backup and restore keep tokens working', async () => {
     assert.equal(
       (await again.call(kept, 'GET', '/api/v1/status')).status,
       200,
-      'a token present in the backup works after restore and restart',
+      'a credential present in the backup works after restore and restart',
     );
     assert.equal(
-      (await again.call(kept, 'POST', '/api/v1/tokens', { name: 'x', role: 'read' })).status,
+      (await again.call(kept, 'POST', '/api/v1/credentials', { name: 'x', role: 'read' })).status,
       403,
-      'restored tokens keep their role',
+      'restored credentials keep their role',
     );
     assert.equal(
       (await again.call(later, 'GET', '/api/v1/status')).status,
       401,
-      'a token created after the backup is gone, as the restore replaces control state',
+      'a credential created after the backup is gone, as the restore replaces control state',
     );
     assert.equal(
       (await again.call(revoked, 'GET', '/api/v1/status')).status,
       200,
-      'the backup predates that revocation, so the token is valid again as of the snapshot',
+      'the backup predates that revocation, so the credential is valid again as of the snapshot',
     );
     assert.equal(
-      (await again.call(OPERATOR, 'GET', '/api/v1/tokens')).body.tokens
+      (await again.call(OPERATOR, 'GET', '/api/v1/credentials')).body.credentials
         .map((t: { name: string }) => t.name)
         .sort()
         .join(),
-      'kept,soon-revoked',
-      'only the tokens from the backup remain',
+      'kept,operator,soon-revoked',
+      'only the credentials from the backup remain',
     );
   } finally {
     await again.close();

@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createApp } from './control.ts';
-import { testImageResolver } from '../tests/helpers.ts';
+import { testImageResolver, testIdentity } from '../tests/helpers.ts';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { json } from '../tests/helpers.ts';
@@ -12,8 +12,7 @@ import { json } from '../tests/helpers.ts';
 async function makeServer() {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-sec-scope-'));
   process.env.TUG_DATA_DIR = dir;
-  process.env.TUG_OPERATOR_TOKEN = 'op-scope-token';
-  const app = await createApp({ images: { resolve: testImageResolver } });
+  const app = await createApp({ identity: testIdentity, images: { resolve: testImageResolver } });
   const srv = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));
   });
@@ -22,7 +21,7 @@ async function makeServer() {
     close: () => new Promise((resolve) => srv.close(resolve)),
   };
 }
-const op = { Authorization: 'Bearer op-scope-token', 'content-type': 'application/json' };
+const op = { 'x-tug-test-operator': 'operator', 'content-type': 'application/json' };
 async function post(base: string, route: string, body: unknown, headers = op) {
   const res = await fetch(`${base}${route}`, {
     method: 'POST',
@@ -57,7 +56,7 @@ test('agent secret fetch is scoped to requested assigned services', async () => 
     };
     await post(s.base, '/api/v1/deployments', { project: 'site', version: 'v1', compose });
     const res = await fetch(`${s.base}/agent/v1/secrets?project=site&services=web`, {
-      headers: { Authorization: `Bearer ${node.agentToken}` },
+      headers: { 'x-tug-test-node': node.nodeId },
     });
     assert.equal(res.status, 200);
     const body = await json(res);

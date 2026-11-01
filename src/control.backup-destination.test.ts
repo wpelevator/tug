@@ -6,7 +6,7 @@ import path from 'node:path';
 import { createApp } from './control.ts';
 import { openDb } from './db.ts';
 import { decrypt } from './secrets.ts';
-import { json, testImageResolver } from '../tests/helpers.ts';
+import { json, testImageResolver, testIdentity } from '../tests/helpers.ts';
 import { repositoryPassword } from './backup-destination.ts';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -14,8 +14,7 @@ import type { AddressInfo } from 'node:net';
 async function server() {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-bkdest-'));
   process.env.TUG_DATA_DIR = dir;
-  process.env.TUG_OPERATOR_TOKEN = 'op-bkdest';
-  const app = await createApp({ images: { resolve: testImageResolver } });
+  const app = await createApp({ identity: testIdentity, images: { resolve: testImageResolver } });
   const srv = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));
   });
@@ -26,7 +25,10 @@ async function server() {
     close: () => new Promise((resolve) => srv.close(resolve)),
   };
 }
-const headers = { Authorization: 'Bearer op-bkdest', 'content-type': 'application/json' };
+const headers: Record<string, string> = {
+  'x-tug-test-operator': 'operator',
+  'content-type': 'application/json',
+};
 const call = (base: string, method: string, route: string, body?: unknown, h = headers) =>
   fetch(`${base}${route}`, { method, headers: h, body: body ? JSON.stringify(body) : undefined });
 const destination = {
@@ -109,14 +111,14 @@ test('destination and key endpoints are admin only', async () => {
   const s = await server();
   try {
     const created = await json(
-      await call(s.base, 'POST', '/api/v1/tokens', { name: 'ci', role: 'deploy' }),
+      await call(s.base, 'POST', '/api/v1/credentials', { name: 'ci', role: 'deploy' }),
     );
-    const ci = { Authorization: `Bearer ${created.token}`, 'content-type': 'application/json' };
+    const ci = { 'x-tug-test-credential': created.credential, 'content-type': 'application/json' };
     for (const [method, route] of [
       ['GET', '/api/v1/backup/destination'],
       ['POST', '/api/v1/backup/destination'],
       ['DELETE', '/api/v1/backup/destination'],
-      ['GET', '/api/v1/backup/key?project=site'],
+      ['GET', '/api/v1/backup/repository-password?project=site'],
     ])
       assert.equal(
         (await call(s.base, method, route, method === 'POST' ? destination : undefined, ci)).status,
@@ -132,13 +134,15 @@ test('the project repository password is derived from the master key and audited
   const s = await server();
   try {
     assert.equal(
-      (await call(s.base, 'GET', '/api/v1/backup/key?project=ghost')).status,
+      (await call(s.base, 'GET', '/api/v1/backup/repository-password?project=ghost')).status,
       404,
       'an unknown project has no key',
     );
     await call(s.base, 'POST', '/api/v1/projects', { name: 'site' });
     await call(s.base, 'POST', '/api/v1/backup/destination', destination);
-    const body = await json(await call(s.base, 'GET', '/api/v1/backup/key?project=site'));
+    const body = await json(
+      await call(s.base, 'GET', '/api/v1/backup/repository-password?project=site'),
+    );
     const key = (await fs.readFile(s.keyFile, 'utf8')).trim();
     assert.equal(body.password, repositoryPassword(key, 'site'), 'the password is derived');
     assert.equal(
@@ -200,19 +204,19 @@ test('credentials are released only to the owning node for a running backup comm
     insert('cmd_run', 'n1', 'backup.run', 'running');
     insert('cmd_pending', 'n1', 'backup.run', 'pending');
     insert('cmd_other', 'n1', 'service.restart', 'running');
-    const fetchCredentials = (agentToken: string, command: string) =>
+    const fetchCredentials = (nodeId: string, command: string) =>
       fetch(`${s.base}/agent/v1/backup/credentials?command=${command}`, {
-        headers: { Authorization: `Bearer ${agentToken}` },
+        headers: { 'x-tug-test-node': nodeId },
       });
 
     assert.equal(
-      (await fetchCredentials(n1.agentToken, 'cmd_run')).status,
+      (await fetchCredentials(n1.nodeId, 'cmd_run')).status,
       409,
       'no credentials before a destination exists',
     );
     await call(s.base, 'POST', '/api/v1/backup/destination', destination);
 
-    const ok = await fetchCredentials(n1.agentToken, 'cmd_run');
+    const ok = await fetchCredentials(n1.nodeId, 'cmd_run');
     assert.equal(ok.status, 200, 'the running backup command gets its credentials');
     const { env } = await json(ok);
     const key = (await fs.readFile(s.keyFile, 'utf8')).trim();
@@ -224,29 +228,29 @@ test('credentials are released only to the owning node for a running backup comm
     );
 
     assert.equal(
-      (await fetchCredentials(n2.agentToken, 'cmd_run')).status,
+      (await fetchCredentials(n2.nodeId, 'cmd_run')).status,
       403,
       'another node is refused',
     );
     assert.equal(
-      (await fetchCredentials(n1.agentToken, 'cmd_pending')).status,
+      (await fetchCredentials(n1.nodeId, 'cmd_pending')).status,
       409,
       'a pending command is refused',
     );
     assert.equal(
-      (await fetchCredentials(n1.agentToken, 'cmd_other')).status,
+      (await fetchCredentials(n1.nodeId, 'cmd_other')).status,
       403,
       'a non-backup command is refused',
     );
     assert.equal(
-      (await fetchCredentials(n1.agentToken, 'cmd_missing')).status,
+      (await fetchCredentials(n1.nodeId, 'cmd_missing')).status,
       404,
       'an unknown command is refused',
     );
     assert.equal(
       (await fetch(`${s.base}/agent/v1/backup/credentials?command=cmd_run`, { headers })).status,
-      401,
-      'an operator token is not an agent credential',
+      403,
+      'an operator credential is not a node credential',
     );
   } finally {
     await s.close();

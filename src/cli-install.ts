@@ -1,4 +1,4 @@
-import yaml from 'js-yaml';
+import * as yaml from 'js-yaml';
 
 /** The agent dials container IPs for health checks; from the default bridge they are unreachable on current Docker (29.x), so it always shares the host network namespace. */
 export const HOST_NETWORK_FLAG = '--network host';

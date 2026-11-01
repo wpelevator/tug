@@ -4,11 +4,11 @@ services:
     build: .
     command: control
     environment:
-      PORT: 8080
+      PORT: 8443
       TUG_DATA_DIR: /data
-      TUG_OPERATOR_TOKEN: integration-token
+      TUG_PUBLIC_URL: https://control:8443
     ports:
-      - "127.0.0.1:${TUG_TEST_PORT:-18080}:8080"
+      - "127.0.0.1:${TUG_TEST_PORT:-18080}:8443"
     volumes:
       - tug-data:/data
       - /var/run/docker.sock:/var/run/docker.sock
@@ -20,12 +20,14 @@ services:
     command: ["tools/scripts/integration-provision.js"]
     restart: "no"
     environment:
-      TUG_CONTROL_URL: http://control:8080
-      TUG_TOKEN: integration-token
+      TUG_CONTROL_URL: https://control:8443
+      TUG_PUBLIC_URL: https://control:8443
+      TUG_DATA_DIR: /data
       TUG_TOKEN_DIR: /tokens
       TUG_NODES: vps-a,vps-b,vps-c
     volumes:
       - node-tokens:/tokens
+      - tug-data:/data
     depends_on:
       - control
 
@@ -37,7 +39,6 @@ services:
     privileged: true
     environment:
       TUG_NODE_NAME: vps-a
-      TUG_CONTROL_URL: http://control:8080
       TUG_APPLY: "true"
       TUG_POLL_INTERVAL_MS: 2000
     volumes:
@@ -55,7 +56,6 @@ services:
     privileged: true
     environment:
       TUG_NODE_NAME: vps-b
-      TUG_CONTROL_URL: http://control:8080
       TUG_APPLY: "true"
       TUG_POLL_INTERVAL_MS: 2000
     volumes:
@@ -73,7 +73,6 @@ services:
     privileged: true
     environment:
       TUG_NODE_NAME: vps-c
-      TUG_CONTROL_URL: http://control:8080
       TUG_APPLY: "true"
       TUG_POLL_INTERVAL_MS: 2000
     volumes:

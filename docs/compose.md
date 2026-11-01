@@ -1,6 +1,6 @@
 # Compose extensions
 
-Tug deploys standard Docker Compose files with an `x-tug` extension on services and volumes for placement and health checks. Control generates a per-node Compose file containing only the services and volumes placed on that node, with `x-tug`, `build`, `deploy` and `container_name` removed (and `extra_hosts` added for services on other nodes) and `image` set to the built or declared image. Published `ports` without a host IP are bound to the node's overlay IP, `127.0.0.1` or the node's `address` instead of every interface; write the host IP (for example `"0.0.0.0:80:80"`) to publish on purpose. See [Published ports](networking.md#published-ports-private-by-default).
+Tug deploys standard Docker Compose files with an `x-tug` extension on services and volumes for placement and health checks. Compose is used only on the operator machine, where `tug deploy` normalizes the file; nodes run no Compose. Each agent turns the services placed on its node into Docker Engine API container definitions, without `x-tug`, `build`, `deploy` and `container_name`, with `extra_hosts` added for services on other nodes and `image` set to the built or declared image. Published `ports` without a host IP are bound to the node's overlay IP, `127.0.0.1` or the node's `address` instead of every interface; write the host IP (for example `"0.0.0.0:80:80"`) to publish on purpose. See [Published ports](networking.md#published-ports-private-by-default).
 
 ## Services
 
@@ -45,7 +45,7 @@ services:
         tls: auto            # auto | custom | off
 ```
 
-Services that run on a different node than a given service are reachable from it by name (`db` or `db.<project>.tug`) when the mesh and service DNS are on, as long as the target publishes its port (Tug binds it to the overlay address, not the internet). Control injects these names into the per-node Compose file as `extra_hosts`; see [Networking](networking.md#layer-b-service-dns).
+Services that run on a different node than a given service are reachable from it by name (`db` or `db.<project>.tug`) when the mesh and cross-node service names are on, as long as the target publishes its port (Tug binds it to the overlay address, not the internet). The agent adds these names to the containers as hosts-file (`extra_hosts`) entries, not DNS records; see [Networking](networking.md#layer-b-cross-node-service-names).
 
 Services with `build:` are built by control from uploaded source, or on the operator machine with `deploy --build-local`. Each build receives an immutable tag distinct from the display version and is delivered as a saved image archive from control. Build services require a source context or local image upload. Published `image:` tags are resolved once on control to `image@sha256:…` before deployment publication; explicit SHA-256 references remain pinned. Multi-platform indexes remain intact. Agents pull the stored digest from the upstream registry, so rollback and nodes added later use that same manifest. Private registry credentials use the encrypted project secret described in [Control plane](control-plane.md#published-images-and-private-registries). Uploaded source contexts must contain regular files/directories within the build root; symlinks and escaping build paths are rejected.
 
@@ -79,9 +79,9 @@ With `strategy: rolling` the agent starts the new revision next to the old one, 
 
 How it works, and its limits:
 
-- Rolling services are meant to be stateless. Each revision is its own Compose project (`<project>-<service>-<hash>`), and old and new revisions run side by side, so named volumes are shared between them (mounted from the main project's `<project>_<volume>`) and concurrent access is the operator's responsibility. Use `recreate` for databases and anything that cannot have two writers.
+- Rolling services are meant to be stateless. Each revision is its own container (`tug-<project>-<service>-<hash8>`), and old and new revisions run side by side, so named volumes are shared between them (the project's `tug_<project>_<volume>`) and concurrent access is the operator's responsibility. Use `recreate` for databases and anything that cannot have two writers.
 - Each revision publishes the ingress port on its own host port from a free range (`TUG_ROLLOUT_PORTS` on the agent, default `20000-20999`), not on the declared host port. The declared port, for example `8080` above, is only the contract for the ingress validation. Reach a rolling service through its ingress hostname; see [Networking](networking.md#rolling-services-and-service-names) for what that means for service names.
-- `depends_on` is dropped for rolling services and from recreated services that point at them (the services live in different Compose projects). The services share the main project network, so names such as `db` still resolve; use health checks and client retries rather than start order.
+- `depends_on` is dropped for rolling services and from recreated services that point at them, because rolling revisions are started and replaced on their own schedule rather than as part of the project's start order. All revisions share the project network, so names such as `db` still resolve; use health checks and client retries rather than start order.
 - Switching a service from `recreate` to `rolling` keeps the old container in the main project serving until its replacement takes over and then removes it after the drain; switching back keeps the rolling revision for one drain after the recreated container is up. A service that had no container yet starts on a range port straight away.
 - A rejected revision is not retried on every poll; deploy again (or roll back) to try again.
 
@@ -233,7 +233,7 @@ Set `DB_PASSWORD` and `DB_ROOT_PASSWORD` with `tug secret-set` before deploying.
 
 ## Not supported
 
-- `container_name` (Compose project names isolate containers per project).
+- `container_name` (Tug names containers `tug-<project>-<service>-<hash8>` so projects stay isolated).
 - `deploy` (Swarm semantics).
 
 ## Supported keys

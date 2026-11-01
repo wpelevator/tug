@@ -6,19 +6,38 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { test } from 'node:test';
 import WebSocket, { WebSocketServer } from 'ws';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import { createServer } from 'node:https';
+import type { TLSSocket } from 'node:tls';
+import { Pki, identityUri, serverNames } from './pki.ts';
+import { serverTlsOptions } from './tls-server.ts';
 import { createCliLiveTransport } from './cli-live-transport.ts';
 import { parseLiveRequest, runCliLive } from './cli-live.ts';
 
 const execFileAsync = promisify(execFile);
 async function serverFixture() {
-  const server = new WebSocketServer({ port: 0, host: '127.0.0.1' });
-  await once(server, 'listening');
-  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const pki = await Pki.load(await fs.mkdtemp(path.join(os.tmpdir(), 'tug-live-')), true);
+  const issued = await pki.issueServer(serverNames('https://localhost:8443'));
+  const https = createServer(
+    serverTlsOptions({ cert: issued.cert, key: issued.key, ca: pki.caPem }),
+  );
+  const server = new WebSocketServer({ server: https });
+  https.listen(0, '127.0.0.1');
+  await once(https, 'listening');
+  const url = `https://127.0.0.1:${(https.address() as AddressInfo).port}`;
+  const client = await pki.issueClient(
+    identityUri('operator', 'o1'),
+    86_400_000,
+    'https://localhost:8443',
+  );
   const close = async () => {
-    for (const client of server.clients) client.terminate();
+    for (const socket of server.clients) socket.terminate();
     await new Promise<void>((resolve) => server.close(() => resolve()));
+    https.closeAllConnections();
+    await new Promise<void>((resolve) => https.close(() => resolve()));
   };
-  return { server, url, close };
+  return { server, url, credential: client.credential, close };
 }
 const request = parseLiveRequest('exec', {
   project: 'site',
@@ -28,13 +47,13 @@ const request = parseLiveRequest('exec', {
 const frame = (socket: WebSocket, value: object) =>
   socket.send(JSON.stringify({ v: 1, sessionId: 's', ...value }));
 
-test('WebSocket transport authenticates the upgrade and frames exact request and binary input', async () => {
+test('WebSocket transport authenticates the upgrade with the client certificate and frames exact request and binary input', async () => {
   const f = await serverFixture();
   const received: Record<string, unknown>[] = [];
-  let authorization: string | undefined;
+  let authorized: boolean | undefined;
   let route: string | undefined;
   f.server.on('connection', (socket, upgrade) => {
-    authorization = upgrade.headers.authorization;
+    authorized = (upgrade.socket as TLSSocket).authorized;
     route = upgrade.url;
     socket.on('message', (data) => {
       const message = JSON.parse(data.toString());
@@ -51,7 +70,7 @@ test('WebSocket transport authenticates the upgrade and frames exact request and
     });
   });
   try {
-    const session = await createCliLiveTransport(f.url, 'secret-token').open(
+    const session = await createCliLiveTransport(f.credential, f.url).open(
       request,
       new AbortController().signal,
     );
@@ -62,9 +81,9 @@ test('WebSocket transport authenticates the upgrade and frames exact request and
     for await (const event of session.events) events.push(event);
     await session.close();
     assert.equal(
-      authorization,
-      'Bearer secret-token',
-      'operator credentials must be sent as an upgrade authorization header',
+      authorized,
+      true,
+      'the upgrade must arrive over a verified client-certificate connection',
     );
     assert.equal(
       route,
@@ -115,7 +134,7 @@ test('transport rejects malformed, binary, unknown and oversized remote frames',
     });
     try {
       await assert.rejects(
-        createCliLiveTransport(f.url).open(request, new AbortController().signal),
+        createCliLiveTransport(f.credential, f.url).open(request, new AbortController().signal),
         'invalid frames before startup must reject the session before input can be forwarded',
       );
     } finally {
@@ -135,7 +154,7 @@ test('transport waits for live.started before exposing a session', async () => {
   );
   try {
     let resolved = false;
-    const opening = createCliLiveTransport(f.url)
+    const opening = createCliLiveTransport(f.credential, f.url)
       .open(request, new AbortController().signal)
       .then((session) => {
         resolved = true;
@@ -170,7 +189,10 @@ test('event queue bounds a remote sender while the consumer is paused', async ()
     }),
   );
   try {
-    const session = await createCliLiveTransport(f.url).open(request, new AbortController().signal);
+    const session = await createCliLiveTransport(f.credential, f.url).open(
+      request,
+      new AbortController().signal,
+    );
     await disconnected;
     const event = await session.events[Symbol.asyncIterator]().next();
     assert.equal(
@@ -197,7 +219,10 @@ test('disconnects and aborted connections terminate without leaking sockets', as
     });
   });
   try {
-    const session = await createCliLiveTransport(f.url).open(request, new AbortController().signal);
+    const session = await createCliLiveTransport(f.credential, f.url).open(
+      request,
+      new AbortController().signal,
+    );
     const event = await session.events[Symbol.asyncIterator]().next();
     assert.equal(
       event.value?.type,
@@ -207,7 +232,7 @@ test('disconnects and aborted connections terminate without leaking sockets', as
     const abort = new AbortController();
     abort.abort();
     await assert.rejects(
-      createCliLiveTransport(f.url).open(request, abort.signal),
+      createCliLiveTransport(f.credential, f.url).open(request, abort.signal),
       /cancelled/,
       'pre-aborted connections must fail without opening a socket',
     );
@@ -239,7 +264,7 @@ test('CLI commands route through resolved configuration and preserve exec argv i
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     TUG_CONTROL_URL: f.url,
-    TUG_TOKEN: 'token',
+    TUG_CREDENTIAL: JSON.stringify(f.credential),
     TUG_PROJECT: 'from-env',
   };
   delete env.TUG_CONFIG;
@@ -302,7 +327,7 @@ test('transport maps remote adapter errors into CLI failures', async () => {
   });
   try {
     await assert.rejects(
-      runCliLive(request, createCliLiveTransport(f.url)),
+      runCliLive(request, createCliLiveTransport(f.credential, f.url)),
       /TTY adapter is unavailable/,
       'agent capability errors must surface without claiming remote TTY success',
     );
@@ -331,7 +356,10 @@ test('large stdin is split into bounded frames and cancel remains an explicit wi
     ),
   );
   try {
-    const session = await createCliLiveTransport(f.url).open(request, new AbortController().signal);
+    const session = await createCliLiveTransport(f.credential, f.url).open(
+      request,
+      new AbortController().signal,
+    );
     const input = Buffer.alloc(180 * 1024, 255);
     await session.send({ type: 'stdin', data: input });
     await session.send({ type: 'cancel' });

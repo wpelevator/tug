@@ -9,7 +9,7 @@
   "type": "module",
   "bin": {
     "tug": "./dist/cli.js",
-    "tug-node": "./dist/main.js"
+    "tug-runtime": "./dist/main.js"
   },
   "files": [
     "dist"
@@ -39,19 +39,21 @@
     "test:smoke:image": "node tools/scripts/smoke-runtime-image.js"
   },
   "dependencies": {
-    "commander": "^12.1.0",
-    "dotenv": "^16.4.7",
-    "express": "^4.21.2",
-    "js-yaml": "^4.1.0",
+    "@peculiar/x509": "^3.1.0",
+    "commander": "^15.0.0",
+    "dotenv": "^18.0.9",
+    "express": "^5.3.0",
+    "js-yaml": "^5.5.0",
     "multer": "^2.2.0",
+    "reflect-metadata": "^0.2.2",
     "tar": "^7.4.3",
+    "undici": "^8.12.3",
     "ws": "^8.22.1"
   },
   "devDependencies": {
     "@changesets/cli": "^3.0.3",
     "@eslint/js": "^10.0.1",
-    "@types/express": "^4.17.25",
-    "@types/js-yaml": "^4.0.9",
+    "@types/express": "^5.0.6",
     "@types/multer": "^2.3.0",
     "@types/node": "^22.20.5",
     "@types/ws": "^8.18.2",

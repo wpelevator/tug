@@ -55,6 +55,18 @@ const compose: ComposeFile = {
 const state = (c: ComposeFile = compose, project = 'blog'): DesiredState =>
   buildDesiredState({ project, version: 'v1', compose: c });
 
+test('a reported port that is not a valid port number never becomes an endpoint port', () => {
+  const status = serving('app1', 'blog', 'web');
+  const injected = '8080 {\n\theader_down X-Audit injected\n\t#' as unknown as number;
+  status.status.serviceStates!.web.port = injected;
+  const endpoints = resolveServiceEndpoints([state()], [node('app1')], [status], STALE_BEFORE);
+  assert.equal(
+    endpoints.blog.web[0].port,
+    undefined,
+    'a string port is dropped so it cannot reach the Caddyfile',
+  );
+});
+
 test('endpoints list only fresh nodes whose copy of the service reports serving', () => {
   const nodes = [node('app1'), node('app22'), node('dbnode')];
   const all = resolveServiceEndpoints(

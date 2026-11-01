@@ -4,15 +4,14 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createApp } from './control.ts';
-import { json, testImageResolver } from '../tests/helpers.ts';
+import { json, testImageResolver, testIdentity } from '../tests/helpers.ts';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
 async function server() {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-bkrun-'));
   process.env.TUG_DATA_DIR = dir;
-  process.env.TUG_OPERATOR_TOKEN = 'op-bkrun';
-  const app = await createApp({ images: { resolve: testImageResolver } });
+  const app = await createApp({ identity: testIdentity, images: { resolve: testImageResolver } });
   const srv = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));
   });
@@ -21,7 +20,10 @@ async function server() {
     close: () => new Promise((resolve) => srv.close(resolve)),
   };
 }
-const op = { Authorization: 'Bearer op-bkrun', 'content-type': 'application/json' };
+const op: Record<string, string> = {
+  'x-tug-test-operator': 'operator',
+  'content-type': 'application/json',
+};
 const call = (base: string, method: string, route: string, body?: unknown, headers = op) =>
   fetch(`${base}${route}`, { method, headers, body: body ? JSON.stringify(body) : undefined });
 
@@ -49,7 +51,7 @@ test('a manual backup flows from the API through the agent protocol to the catal
   try {
     const node = await json(await call(s.base, 'POST', '/api/v1/nodes/register', { name: 'n1' }));
     const agent = {
-      Authorization: `Bearer ${node.agentToken}`,
+      'x-tug-test-node': node.nodeId,
       'content-type': 'application/json',
     };
     await call(s.base, 'POST', '/api/v1/secrets', {

@@ -5,8 +5,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import yaml from 'js-yaml';
+import * as yaml from 'js-yaml';
 import * as tar from 'tar';
+import { writeCredentialFile } from '../tests/helpers.ts';
 import { resolveCliConfig, integerOption } from './cli-config.ts';
 import { createSourceArchive, prepareLocalImages } from './cli-build.ts';
 import {
@@ -28,14 +29,16 @@ test('connection resolution consistently uses explicit options, then environment
       path.join(dir, 'chosen.json'),
       JSON.stringify({ controlUrl: 'https://config.test', project: 'config-project' }),
     );
+    await writeCredentialFile(path.join(dir, 'config-cred.json'));
+    await writeCredentialFile(path.join(dir, 'env-cred.json'));
     await fs.writeFile(
       path.join(dir, 'chosen.local.json'),
-      JSON.stringify({ token: 'config-token' }),
+      JSON.stringify({ credential: 'config-cred.json' }),
     );
     const env = {
       TUG_CONFIG: 'chosen.json',
       TUG_CONTROL_URL: 'https://env.test',
-      TUG_TOKEN: 'env-token',
+      TUG_CREDENTIAL_FILE: 'env-cred.json',
       TUG_PROJECT: 'env-project',
     };
     const explicit = await resolveCliConfig(
@@ -54,9 +57,9 @@ test('connection resolution consistently uses explicit options, then environment
       'explicit project should override environment and config',
     );
     assert.equal(
-      explicit.token,
-      'env-token',
-      'environment operator token should override the config token',
+      path.basename(explicit.credentialFile!),
+      'env-cred.json',
+      'the environment credential should override the config credential',
     );
     const environment = await resolveCliConfig({}, env, dir);
     assert.equal(
@@ -76,14 +79,14 @@ test('connection resolution consistently uses explicit options, then environment
       'selected config should provide the project without explicit or environment values',
     );
     assert.equal(
-      config.token,
-      'config-token',
-      'the selected config overlay should provide the token without an environment token',
+      path.basename(config.credentialFile!),
+      'config-cred.json',
+      'the selected config overlay should provide the credential without an environment credential',
     );
     const fallback = await resolveCliConfig({}, {}, dir);
     assert.equal(
       fallback.controlUrl,
-      'http://localhost:8080',
+      'https://localhost:8443',
       'missing implicit config should use the documented local control URL',
     );
     assert.equal(
@@ -138,14 +141,13 @@ test('CLI exposes flat commands and rejects malformed invocations before side ef
   const env = {
     ...process.env,
     TUG_CONFIG: path.join(dir, 'missing.json'),
-    TUG_CONTROL_URL: 'http://unreachable.invalid',
-    TUG_TOKEN: 'unused',
+    TUG_CONTROL_URL: 'https://unreachable.invalid',
   };
   try {
     const { stdout } = await exec(process.execPath, [entry, '--help'], { env, cwd: dir });
     for (const name of [
       'control-install',
-      'node-enroll',
+      'node-prepare-enrollment',
       'node-register',
       'secret-set',
       'volume-remove',
@@ -170,7 +172,7 @@ test('CLI exposes flat commands and rejects malformed invocations before side ef
       ['node-revoke-registry-token', 'n1'],
       ['deploy', '--timeout', '0'],
       ['control-install', 'root@host', '--port', '65536'],
-      ['node-enroll', '--uses', 'NaN'],
+      ['node-prepare-enrollment', '--uses', 'NaN'],
       ['events', '--limit', '501'],
       ['control-restore', '/backup.tgz'],
     ]) {
@@ -208,6 +210,8 @@ test('init applies global options after the command without relying on Docker or
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-init-'));
   try {
     const file = path.join(dir, 'new.json');
+    const source = path.join(dir, 'source-cred.json');
+    await writeCredentialFile(source);
     await exec(
       process.execPath,
       [
@@ -219,15 +223,16 @@ test('init applies global options after the command without relying on Docker or
         'https://flag.test',
         '--project',
         'flag-project',
+        source,
       ],
       {
         cwd: dir,
         env: {
           ...process.env,
+          HOME: dir,
           TUG_CONFIG: path.join(dir, 'ignored.json'),
           TUG_CONTROL_URL: 'https://env.test',
           TUG_PROJECT: 'env-project',
-          TUG_TOKEN: 'env-token',
         },
       },
     );
@@ -236,10 +241,16 @@ test('init applies global options after the command without relying on Docker or
       { controlUrl: 'https://flag.test', project: 'flag-project' },
       'init should persist the CLI/env/config precedence used by API operations, without the token',
     );
-    assert.deepEqual(
-      JSON.parse(await fs.readFile(path.join(dir, 'new.local.json'), 'utf8')),
-      { token: 'env-token' },
-      'init should store the token only in the untracked overlay',
+    const overlay = JSON.parse(await fs.readFile(path.join(dir, 'new.local.json'), 'utf8'));
+    assert.match(
+      overlay.credential,
+      /\.config\/tug\/credentials\/.+\.json$/,
+      'init should point the overlay at the imported credential',
+    );
+    assert.equal(
+      (await fs.stat(overlay.credential)).mode & 0o777,
+      0o600,
+      'the imported credential file must be 0600',
     );
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
@@ -605,5 +616,54 @@ test('Docker bootstrap preserves a working installation without package-manager 
     await exec('/bin/sh', ['-n', script]);
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('source upload applies Docker ignore semantics and never includes credential documents', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-ignore-'));
+  const archive = path.join(os.tmpdir(), `tug-ignore-${path.basename(dir)}.tar.gz`);
+  try {
+    for (const folder of ['private/deep', 'keep', 'nested'])
+      await fs.mkdir(path.join(dir, folder), { recursive: true });
+    for (const file of [
+      'Dockerfile',
+      'key.pem',
+      'nested/other.pem',
+      '.env.production',
+      'private/config.json',
+      'private/deep/x.json',
+      'keep/a.txt',
+      'keep/public.txt',
+      'tug-root.credential.json',
+      'nested/admin.credential.json',
+    ])
+      await fs.writeFile(path.join(dir, file), 'x');
+    await fs.writeFile(
+      path.join(dir, '.dockerignore'),
+      [
+        '*.pem',
+        '.env*',
+        'private/**',
+        'keep/*',
+        '!keep/public.txt',
+        '!tug-root.credential.json',
+      ].join('\n'),
+    );
+    await createSourceArchive(dir, archive, []);
+    const entries: string[] = [];
+    await tar.t({
+      file: archive,
+      onReadEntry: (entry) => {
+        entries.push(entry.path.replace(/^\.\//, ''));
+      },
+    });
+    assert.deepEqual(
+      entries.filter((entry) => entry && !entry.endsWith('/')).sort(),
+      ['.dockerignore', 'Dockerfile', 'keep/public.txt', 'nested/other.pem'],
+      'globs, recursive patterns and negation follow .dockerignore (a root *.pem keeps nested/other.pem) and credential documents are never uploaded',
+    );
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+    await fs.rm(archive, { force: true });
   }
 });

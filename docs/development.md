@@ -24,9 +24,9 @@ Unit tests sit next to the source files as `src/*.test.ts`. The agent integratio
 
 The Dockerfiles are multi-stage: a build stage runs `npm ci && npm run build`, and the final image ships `dist/` plus production dependencies only, with entrypoint `node dist/main.js`. `tsc` does not copy `src/templates/*`, so `npm run build` copies them next to the emitted `dist/cli.js`; the CLI resolves them relative to the running file, so `node src/cli.ts` and `node dist/cli.js` both work.
 
-The runtime image ships its own Docker client and Compose plugin for the control host, which still installs through Compose, because mounting the host Docker socket does not make the host's CLI plugins available inside the agent. Runtime and fake-VPS Dockerfiles pin `DOCKER_COMPOSE_VERSION=2.32.4` and support `amd64`/`arm64`; update and verify both pins together. This Compose version retains compatibility with the older nested Docker daemons used in integration tests.
+The runtime image ships the Docker client (control uses it to load, tag and remove image archives through the mounted socket), `wg` and `ip` for the mesh, and the compiled `tug-runtime` entry (`dist/main.js`). It deliberately has no Compose plugin: agents drive the Docker Engine API, and the control-plane host runs the control container with the host's own Compose (`control-install` checks for it). `Dockerfile.alpine` is the same runtime on Alpine without the mesh tools.
 
-Run `npm run test:smoke:image` to build the actual shipped runtime image and execute its Docker, Compose and Node binaries plus compiled control/agent database initialization, a writable snapshot and read-only validation without mounting the host socket or CLI plugins. To test an already-built image, set `TUG_RUNTIME_IMAGE=<tag>`. CI runs this packaging smoke before the integration test, so the fake-VPS image cannot mask missing runtime tools.
+Run `npm run test:smoke:image` to build the actual shipped runtime image and execute its Docker client and Node binaries, the compiled control/agent database initialization (a writable snapshot and read-only validation) and `tools/scripts/verify-mtls-runtime.js`, which issues certificates with `@peculiar/x509`, serves mTLS with the production TLS options and calls it through the undici transport, including the loopback connect-target override that still verifies the public name. Nothing from the host socket or CLI plugins is mounted. To test an already-built image, set `TUG_RUNTIME_IMAGE=<tag>`; to check the Alpine image, set `TUG_RUNTIME_DOCKERFILE=Dockerfile.alpine`. CI runs this packaging smoke before the integration test, so the fake-VPS image cannot mask missing runtime tools.
 
 ## Continuous integration and releases
 
@@ -34,7 +34,7 @@ Run `npm run test:smoke:image` to build the actual shipped runtime image and exe
 
 ### CI caching
 
-The `.github/actions/setup` composite action installs Node.js with the npm download cache (keyed on the lockfile) and runs `npm ci`; every job uses it. The integration jobs prebuild their images with `.github/actions/build-images` (Buildx and the GitHub Actions layer cache, scopes `runtime` and `fake-vps`) and set `TUG_COMPOSE_BUILD=` so the integration scripts run `compose up` without `--build`; the Compose files tag those images `tug-runtime:integration` and `tug-fake-vps:integration`. Locally the variable is unset and the scripts keep passing `--build`. Only pushes to `main` write the cache, because a pull request can read the default branch's cache but not another pull request's. The release workflow's `edge` job exports the `runtime` scope and the versioned `image` job reads it. The Dockerfiles pin the Node.js major (`node:24-*`), so an upstream LTS bump cannot silently invalidate the cache or change the shipped runtime.
+The `.github/actions/setup` composite action installs Node.js with the npm download cache (keyed on the lockfile) and runs `npm ci`; every job uses it. The integration jobs prebuild their images with `.github/actions/build-images` (Buildx and the GitHub Actions layer cache, scopes `runtime` and `fake-vps`) and set `TUG_COMPOSE_BUILD=` so the integration scripts run `docker compose up` (on the CI host, to start the test stack) without `--build`; the Compose files tag those images `tug-runtime:integration` and `tug-fake-vps:integration`. Locally the variable is unset and the scripts keep passing `--build`. Only pushes to `main` write the cache, because a pull request can read the default branch's cache but not another pull request's. The release workflow's `edge` job exports the `runtime` scope and the versioned `image` job reads it. The Dockerfiles pin the Node.js major (`node:24-*`), so an upstream LTS bump cannot silently invalidate the cache or change the shipped runtime.
 
 Published images are `ghcr.io/wpelevator/tug`. To test an unreleased CLI against a checkout, use `--build-local-image` on `control-install` and `node-install` (builds `tug:local` from the working directory and copies it over SSH). The dev Compose files (`docker-compose*.yml`) and the integration tests always build the image from the checkout with `build: .` and never pull from GHCR.
 
@@ -42,31 +42,42 @@ Published images are `ghcr.io/wpelevator/tug`. To test an unreleased CLI against
 
 `docker-compose.yml` defines:
 
-- `control`: the control API on port `8080`, with SQLite, master key and saved image archives in a named volume, plus the Docker socket for builds.
-- `agent`: an optional profile service; run it with `--profile agent` after setting `TUG_AGENT_TOKEN`.
+- `control`: the control plane on its single mTLS port `8443`, with SQLite, the master key, the private CA and saved image archives in a named volume, plus the Docker socket for builds. It requires `TUG_PUBLIC_URL`, the HTTPS origin clients connect to.
+- `agent`: an optional profile service (applying nothing, `TUG_APPLY=false`); run it with `--profile agent` once you have an enrollment credential for it.
 
 ```bash
+export TUG_PUBLIC_URL=https://localhost:8443
 docker compose up --build control
-# after registering a node and obtaining its token:
-TUG_AGENT_TOKEN=... docker compose --profile agent up agent
+# issue the root operator credential on the control-plane host (fresh state only):
+docker compose exec control node dist/main.js control issue-credential --name root --role admin > tug-root.credential.json
+node src/cli.ts init tug-root.credential.json
+# prepare a node, then start the agent with the join key it prints:
+node src/cli.ts node-prepare-enrollment --name dev-node --agent-control-url https://127.0.0.1:8443
+TUG_JOIN_KEY=... docker compose --profile agent up agent
 ```
 
-The control service prints the initial operator token and stores it in `./data/operator.token` when run on the host, or in the `tug-data` volume when run in Docker.
+Control does not print or store a credential on startup; `issue-credential` writes the credential to stdout and keeps no private key. The agent keeps its identity in the `agent-state` volume, so it ignores the join key after the first start.
 
 ## Host mode
 
 ```bash
+export TUG_PUBLIC_URL=https://localhost:8443
 npm run start:control
-export TUG_TOKEN=$(cat data/operator.token)
-node src/cli.ts init --control-url http://localhost:8080 --token "$TUG_TOKEN"
-node src/cli.ts node-register dev-node --address 127.0.0.1
+node src/main.ts control issue-credential --name root --role admin > tug-root.credential.json
+node src/cli.ts init tug-root.credential.json
 ```
 
-Start an agent that renders files and reports status without applying Docker changes:
+Host mode shares `./data` (or `TUG_DATA_DIR`) between control and `issue-credential`. Register a development node the way `node-install` does, with the node making its own key:
 
 ```bash
-export TUG_AGENT_TOKEN=<token from node-register>
-export TUG_NODE_NAME=dev-node
+export TUG_STATE_DIR=$PWD/data/agent TUG_NODE_NAME=dev-node
+node src/main.ts agent identity > dev-node.csr
+node src/cli.ts node-register dev-node --csr dev-node.csr --address 127.0.0.1 | node src/main.ts agent install-cert
+```
+
+Start an agent that reports status without applying Docker changes:
+
+```bash
 export TUG_APPLY=false
 npm run start:agent
 ```
@@ -84,13 +95,13 @@ Services with `build:` upload the current directory and control builds and store
 
 `docker-compose.sample.yml` is a three-service sample app with explicit placement: `web` on `vps-a`, `worker` on `vps-b`, `cache` on `vps-c`.
 
-`docker-compose.integration.yml` starts a control plane and three fake VPSes. On macOS/Docker Desktop each fake VPS is a privileged Linux container with its own Docker daemon and Tug agent, so agents apply Compose into isolated Docker environments rather than the host daemon.
+`docker-compose.integration.yml` starts a control plane and three fake VPSes. On macOS/Docker Desktop each fake VPS is a privileged Linux container with its own Docker daemon and Tug agent, so agents apply containers into isolated Docker environments through their own Engine API rather than the host daemon.
 
 ```bash
 npm run test:integration
 ```
 
-The test provisions `vps-a`, `vps-b` and `vps-c`, sets a sample secret, deploys `docker-compose.sample.yml`, waits for all three agents to report the desired version, verifies published images run by the digest pinned on control, and tears the stack down. Set `KEEP_INTEGRATION_STACK=true` to keep containers and volumes for inspection. The integration network defaults to subnet `10.89.240.0/24`; override it with `TUG_TEST_SUBNET` if that overlaps with local Docker or VPN networks. For concurrent runs, set a unique `COMPOSE_PROJECT_NAME`, `TUG_TEST_PORT` and matching `TUG_CONTROL_URL`.
+The test starts control, runs a provisioner that issues the root credential and each fake VPS's node identity (the `agent identity` / `agent install-cert` flow, written to the shared `/tokens` volume), sets a sample secret, deploys `docker-compose.sample.yml`, waits for all three agents to report the desired revision, verifies published images run by the digest pinned on control, and tears the stack down. Set `KEEP_INTEGRATION_STACK=true` to keep containers and volumes for inspection. The integration network defaults to subnet `10.89.240.0/24`; override it with `TUG_TEST_SUBNET` if that overlaps with local Docker or VPN networks. For concurrent runs, set a unique `COMPOSE_PROJECT_NAME`, `TUG_TEST_PORT` and matching `TUG_CONTROL_URL` (an `https://` connect target; the credential still verifies `https://control:8443`).
 
 ### Registry-free image integration
 
@@ -122,7 +133,7 @@ limactl start --name=vps template-vps.yml
 npm run test:integration:network
 ```
 
-Layers `docker-compose.integration-network.yml` over the same stack with `TUG_MESH=true` on control and all agents and `vps-c` marked as an ingress node, deploys `docker-compose.network-sample.yml` (`web` on `vps-a`, `client` on `vps-b`) and runs `tools/scripts/integration-verify-network.js`: node-to-node pings and a WireGuard handshake over the overlay, a container on `vps-b` fetching `http://web:8080` by name, Caddy on `vps-c` serving `Host: app.test` from `vps-a`, and mesh connectivity again after `node-rotate-wg-key`. It uses the compose project `tug-it-net` and the same ports as the plain integration test, so run them one at a time. The Docker host's kernel must support WireGuard (Linux 5.6+, Docker Desktop's VM included).
+Layers `docker-compose.integration-network.yml` over the same stack with `TUG_MESH=true` on control and all agents and `vps-c` marked as an ingress node, deploys `docker-compose.network-sample.yml` (`web` on `vps-a`, `client` on `vps-b`) and runs `tools/scripts/integration-verify-network.js`: node-to-node pings and a WireGuard handshake over the overlay, a container on `vps-b` fetching `http://web:8080` by its cross-node service name, Caddy on `vps-c` serving `Host: app.test` from `vps-a`, and mesh connectivity again after `node-rotate-wg-key`. It uses the compose project `tug-it-net` and the same ports as the plain integration test, so run them one at a time. The Docker host's kernel must support WireGuard (Linux 5.6+, Docker Desktop's VM included).
 
 ## Running the agent outside Docker
 

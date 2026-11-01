@@ -1,7 +1,9 @@
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
-import type { Db } from './db.ts';
+import type { Db, EnrollmentCredentialRow, NodeRow } from './db.ts';
 import { isUniqueViolation } from './db-driver.ts';
-import { hashToken, id, now, token } from './util.ts';
+import { id, now } from './util.ts';
+import { OPERATOR_MAX_LIFETIME_MS, identityUri } from './pki.ts';
+import type { Credential, Pki } from './pki.ts';
 
 /** Roles are cumulative: `deploy` includes `read`, and `admin` includes both. */
 export const ROLES = ['read', 'deploy', 'admin'] as const;
@@ -9,20 +11,18 @@ export type Role = (typeof ROLES)[number];
 export type RouteRole = Role | 'public';
 const RANK: Record<Role, number> = { read: 1, deploy: 2, admin: 3 };
 
-/** Name recorded in the audit trail for the root operator token. */
-export const OPERATOR_ACTOR = 'operator';
-/** Reserved actor for rollbacks control starts on its own. Token names cannot contain a colon, so no token can use it. */
+/** Name of the admin credential issued on the control host at installation. It is an ordinary named admin. */
+export const ROOT_ACTOR = 'root';
+/** Reserved actor for rollbacks control starts on its own. Credential names cannot contain a colon, so none can use it. */
 export const AUTO_ROLLBACK_ACTOR = 'system:auto-rollback';
-export const TOKEN_PREFIX = 'tug_tok';
-export const TOKEN_NAME_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$/;
+export const CREDENTIAL_NAME_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$/;
 export const PROJECT_NAME_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/;
-/** `last_used_at` is refreshed at most this often per token, so reads do not turn into writes. */
+/** `last_used_at` is refreshed at most this often per credential, so reads do not turn into writes. */
 const LAST_USED_INTERVAL_MS = 60_000;
 
 /**
  * The single source of truth for who may call what. Every `/api/v1` route must appear here: createApp refuses to
- * register an unlisted route, and a test compares this table with the live router. `public` routes do their own
- * credential check and are not behind the token guard. docs/access-control.md mirrors this table.
+ * register an unlisted route, and a test compares this table with the live router. docs/access-control.md mirrors this table.
  */
 export const ROUTE_ROLES: Record<string, RouteRole> = {
   'GET /api/v1/live': 'deploy',
@@ -44,8 +44,9 @@ export const ROUTE_ROLES: Record<string, RouteRole> = {
   'DELETE /api/v1/secrets/:name': 'admin',
   'DELETE /api/v1/volumes/:name': 'admin',
   'GET /api/v1/nodes': 'admin',
-  'POST /api/v1/nodes/register': 'admin',
-  'POST /api/v1/nodes/enroll-token': 'admin',
+  'POST /api/v1/nodes/enrollment-credential': 'admin',
+  'POST /api/v1/nodes/:name/identity': 'admin',
+  'POST /api/v1/nodes/:name/disable': 'admin',
   'POST /api/v1/nodes/:name/rotate-wg-key': 'admin',
   'POST /api/v1/nodes/:name/ingress': 'admin',
   'DELETE /api/v1/nodes/:name': 'admin',
@@ -58,14 +59,14 @@ export const ROUTE_ROLES: Record<string, RouteRole> = {
   'GET /api/v1/backup/destination': 'admin',
   'POST /api/v1/backup/destination': 'admin',
   'DELETE /api/v1/backup/destination': 'admin',
-  'GET /api/v1/backup/key': 'admin',
+  'GET /api/v1/backup/repository-password': 'admin',
   'POST /api/v1/control/backups/run': 'admin',
   'POST /api/v1/control/restore': 'admin',
   'GET /api/v1/diagnostics': 'admin',
   'POST /api/v1/diagnostics/nodes': 'admin',
-  'POST /api/v1/tokens': 'admin',
-  'GET /api/v1/tokens': 'admin',
-  'DELETE /api/v1/tokens/:name': 'admin',
+  'POST /api/v1/credentials': 'admin',
+  'GET /api/v1/credentials': 'admin',
+  'DELETE /api/v1/credentials/:name': 'admin',
 };
 
 /** The authenticated caller of an API request. `projects` is null when the credential is not project-scoped. */
@@ -74,10 +75,10 @@ export interface Actor {
   role: Role;
   projects: string[] | null;
 }
-export interface TokenRow {
+export interface CredentialRow {
   id: string;
   name: string;
-  token_hash: string;
+  key_hash: string;
   role: Role;
   projects_json: string | null;
   created_at: string;
@@ -86,7 +87,7 @@ export interface TokenRow {
   expires_at: string | null;
   revoked_at: string | null;
 }
-export interface TokenInfo {
+export interface CredentialInfo {
   name: string;
   role: Role;
   projects: string[] | null;
@@ -97,8 +98,15 @@ export interface TokenInfo {
   revokedAt: string | null;
 }
 
+/** The principal behind a request, resolved from the client certificate and current database state. */
+export type Identity =
+  | { klass: 'node'; node: NodeRow }
+  | { klass: 'operator'; actor: Actor; credentialId: string }
+  | { klass: 'enroll'; row: EnrollmentCredentialRow };
+
 declare module 'express-serve-static-core' {
   interface Request {
+    identity?: Identity;
     actor?: Actor;
   }
 }
@@ -110,22 +118,20 @@ export const isRole = (value: unknown): value is Role =>
 export const hasRole = (actor: Actor, required: Role): boolean =>
   RANK[actor.role] >= RANK[required];
 
-/** Validates a token request body, throwing a 400 error describing the first problem. */
-export function parseTokenRequest(body: unknown): {
+/** Validates a credential request body, throwing a 400 error describing the first problem. */
+export function parseCredentialRequest(body: unknown): {
   name: string;
   role: Role;
   projects: string[] | null;
-  expiresAt: string | null;
+  expiresAt: string;
 } {
   const input = (body && typeof body === 'object' ? body : {}) as Record<string, unknown>;
   const { name, role, projects, expiresInSeconds } = input;
-  if (typeof name !== 'string' || !TOKEN_NAME_PATTERN.test(name))
+  if (typeof name !== 'string' || !CREDENTIAL_NAME_PATTERN.test(name))
     throw statusError(
       400,
-      'token name must be 1-64 letters, numbers, dots, underscores or hyphens, starting with a letter or number',
+      'credential name must be 1-64 letters, numbers, dots, underscores or hyphens, starting with a letter or number',
     );
-  if (name === OPERATOR_ACTOR)
-    throw statusError(400, `token name ${OPERATOR_ACTOR} is reserved for the root operator token`);
   if (!isRole(role)) throw statusError(400, `role must be one of ${ROLES.join(', ')}`);
   let scope: string[] | null = null;
   if (projects !== undefined && projects !== null) {
@@ -142,25 +148,25 @@ export function parseTokenRequest(body: unknown): {
     if (role === 'admin')
       throw statusError(
         400,
-        'admin tokens manage the whole control plane and cannot be limited to projects',
+        'admin credentials manage the whole control plane and cannot be limited to projects',
       );
     scope = [...new Set(projects as string[])].sort();
   }
-  let expiresAt: string | null = null;
+  let expiresAt: string = new Date(Date.now() + OPERATOR_MAX_LIFETIME_MS).toISOString();
   if (expiresInSeconds !== undefined && expiresInSeconds !== null) {
     if (
       typeof expiresInSeconds !== 'number' ||
       !Number.isSafeInteger(expiresInSeconds) ||
       expiresInSeconds < 1 ||
-      expiresInSeconds > 10 * 365 * 86400
+      expiresInSeconds > OPERATOR_MAX_LIFETIME_MS / 1000
     )
-      throw statusError(400, 'expiresInSeconds must be a positive integer of at most ten years');
+      throw statusError(400, 'expiresInSeconds must be a positive integer of at most one year');
     expiresAt = new Date(Date.now() + expiresInSeconds * 1000).toISOString();
   }
   return { name, role, projects: scope, expiresAt };
 }
 
-const info = (row: TokenRow): TokenInfo => ({
+const info = (row: CredentialRow): CredentialInfo => ({
   name: row.name,
   role: row.role,
   projects: row.projects_json ? JSON.parse(row.projects_json) : null,
@@ -171,67 +177,110 @@ const info = (row: TokenRow): TokenInfo => ({
   revokedAt: row.revoked_at,
 });
 
-/** Creates a token. The plaintext is returned once; only its hash is stored. */
-export function createToken(
+/**
+ * Creates an operator credential. Control generates the keypair, stores only the key hash and returns the credential once;
+ * the certificate and the database row expire together.
+ */
+export async function createCredential(
   db: Db,
-  request: ReturnType<typeof parseTokenRequest>,
+  pki: Pki,
+  url: string,
+  request: ReturnType<typeof parseCredentialRequest>,
   createdBy: string,
-): TokenInfo & { token: string } {
-  const value = token(TOKEN_PREFIX);
+  options: { replace?: boolean } = {},
+): Promise<CredentialInfo & { credential: Credential }> {
+  const credentialId = id('cred');
+  const lifetime = Math.min(Date.parse(request.expiresAt) - Date.now(), OPERATOR_MAX_LIFETIME_MS);
+  const issued = await pki.issueClient(identityUri('operator', credentialId), lifetime, url);
+  const expiresAt = issued.notAfter.toISOString();
   try {
+    if (options.replace) {
+      const existing = db.get<CredentialRow>(
+        'SELECT * FROM operator_credentials WHERE name=?',
+        request.name,
+      );
+      if (existing) {
+        db.run(
+          'UPDATE operator_credentials SET id=?,key_hash=?,role=?,projects_json=?,created_at=?,created_by=?,last_used_at=NULL,expires_at=?,revoked_at=NULL WHERE name=?',
+          credentialId,
+          issued.keyHash,
+          request.role,
+          request.projects ? JSON.stringify(request.projects) : null,
+          now(),
+          createdBy,
+          expiresAt,
+          request.name,
+        );
+        return {
+          ...info(
+            db.get<CredentialRow>('SELECT * FROM operator_credentials WHERE name=?', request.name)!,
+          ),
+          credential: issued.credential,
+        };
+      }
+    }
     db.run(
-      'INSERT INTO api_tokens(id,name,token_hash,role,projects_json,created_at,created_by,expires_at) VALUES(?,?,?,?,?,?,?,?)',
-      id('tok'),
+      'INSERT INTO operator_credentials(id,name,key_hash,role,projects_json,created_at,created_by,expires_at) VALUES(?,?,?,?,?,?,?,?)',
+      credentialId,
       request.name,
-      hashToken(value),
+      issued.keyHash,
       request.role,
       request.projects ? JSON.stringify(request.projects) : null,
       now(),
       createdBy,
-      request.expiresAt,
+      expiresAt,
     );
   } catch (e) {
     if (isUniqueViolation(e))
       throw statusError(
         409,
-        `token name ${request.name} is already used (revoked tokens keep their names for the audit trail)`,
+        `credential name ${request.name} is already used (revoked credentials keep their names for the audit trail)`,
       );
     throw e;
   }
   return {
-    ...info(db.get<TokenRow>('SELECT * FROM api_tokens WHERE name=?', request.name)!),
-    token: value,
+    ...info(
+      db.get<CredentialRow>('SELECT * FROM operator_credentials WHERE name=?', request.name)!,
+    ),
+    credential: issued.credential,
   };
 }
 
-export function listTokens(db: Db): TokenInfo[] {
-  return db.all<TokenRow>('SELECT * FROM api_tokens ORDER BY created_at, name').map(info);
+export function listCredentials(db: Db): CredentialInfo[] {
+  return db
+    .all<CredentialRow>('SELECT * FROM operator_credentials ORDER BY created_at, name')
+    .map(info);
 }
 
-/** Revokes a token immediately. Returns false if no such token exists; revoking twice keeps the first revocation time. */
-export function revokeToken(db: Db, name: string): boolean {
-  const row = db.get<TokenRow>('SELECT * FROM api_tokens WHERE name=?', name);
+/** Revokes a credential immediately. Returns false if no such credential exists; revoking twice keeps the first revocation time. */
+export function revokeCredential(db: Db, name: string): boolean {
+  const row = db.get<CredentialRow>('SELECT * FROM operator_credentials WHERE name=?', name);
   if (!row) return false;
-  db.run('UPDATE api_tokens SET revoked_at=? WHERE id=? AND revoked_at IS NULL', now(), row.id);
+  db.run(
+    'UPDATE operator_credentials SET revoked_at=? WHERE id=? AND revoked_at IS NULL',
+    now(),
+    row.id,
+  );
   return true;
 }
 
-/** Resolves a bearer value to an actor by hash lookup: the root operator token first, then named tokens. */
-export function authenticate(db: Db, raw: string): Actor | null {
-  if (!raw) return null;
-  const hash = hashToken(raw);
-  const operator = db.get<{ value: string }>(
-    'SELECT value FROM meta WHERE key=?',
-    'operator_token_hash',
-  );
-  if (operator && hash === operator.value)
-    return { name: OPERATOR_ACTOR, role: 'admin', projects: null };
-  const row = db.get<TokenRow>('SELECT * FROM api_tokens WHERE token_hash=?', hash);
-  if (!row || row.revoked_at || (row.expires_at && row.expires_at <= now())) return null;
+/**
+ * Resolves an operator certificate identity to an actor from current database state: the principal must exist, the
+ * certificate's key must be the stored key, and the credential must be neither revoked nor expired.
+ */
+export function authenticate(db: Db, credentialId: string, keyHash: string): Actor | null {
+  const row = db.get<CredentialRow>('SELECT * FROM operator_credentials WHERE id=?', credentialId);
+  if (
+    !row ||
+    row.key_hash !== keyHash ||
+    row.revoked_at ||
+    (row.expires_at && row.expires_at <= now())
+  )
+    return null;
   // Best effort and throttled: bookkeeping failures must never fail authentication.
   if (!row.last_used_at || Date.parse(row.last_used_at) < Date.now() - LAST_USED_INTERVAL_MS)
     try {
-      db.run('UPDATE api_tokens SET last_used_at=? WHERE id=?', now(), row.id);
+      db.run('UPDATE operator_credentials SET last_used_at=? WHERE id=?', now(), row.id);
     } catch {
       /* Best-effort bookkeeping. */
     }
@@ -244,7 +293,7 @@ export function authenticate(db: Db, raw: string): Actor | null {
 
 /**
  * Which project a request targets: a name, `null` for control-wide data (admin only), or `undefined` when it cannot be
- * resolved (for example an unknown ID). Unresolvable targets are denied to scoped tokens without saying why, so they
+ * resolved (for example an unknown ID). Unresolvable targets are denied to scoped credentials without saying why, so they
  * cannot probe which IDs or projects exist.
  */
 export type ProjectResolver = (
@@ -252,7 +301,7 @@ export type ProjectResolver = (
 ) => string | null | undefined | Promise<string | null | undefined>;
 export const bodyProject: ProjectResolver = (req) => String(req.body?.project || 'site');
 export const queryProject: ProjectResolver = (req) => String(req.query.project || 'site');
-const FORBIDDEN_PROJECT = 'forbidden: this token may not access that project';
+const FORBIDDEN_PROJECT = 'forbidden: this credential may not access that project';
 
 /** Throws 403 unless the actor may act on `project`. Used where the project is only known after the body is parsed. */
 export function assertProject(actor: Actor, project: string): void {
@@ -260,12 +309,12 @@ export function assertProject(actor: Actor, project: string): void {
     throw statusError(403, FORBIDDEN_PROJECT);
 }
 
-/** Builds the request guard: authenticate (401), check the role (403), then check project scope (403). */
-export function createGuard(db: Db) {
+/** Builds the request guard: read the operator identity resolved by the class gate (401), check the role (403), then check project scope (403). */
+export function createGuard() {
   return (required: Role, resolve?: ProjectResolver): RequestHandler =>
     async (req: Request, res: Response, next: NextFunction) => {
       try {
-        const actor = authenticate(db, (req.headers.authorization || '').replace(/^Bearer /, ''));
+        const actor = req.identity?.klass === 'operator' ? req.identity.actor : null;
         if (!actor) {
           res.status(401).json({ error: 'unauthorized' });
           return;
@@ -296,7 +345,7 @@ export function createGuard(db: Db) {
     };
 }
 
-/** Appends a control-originated audit event naming the acting token. */
+/** Appends a control-originated audit event naming the acting credential. */
 export function recordEvent(
   db: Db,
   event: {

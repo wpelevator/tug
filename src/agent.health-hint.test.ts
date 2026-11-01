@@ -36,7 +36,6 @@ test('a failed tcp health check carries the hint when the agent is not in a cont
     stateDir: '/tmp/unused',
     apply: true,
     controlUrl: 'http://control.test',
-    token: 't',
   } as AgentContext;
   // 127.0.0.1:1 is closed, so the check fails quickly with ECONNREFUSED.
   const failing = waitForHealth(ctx, 'proj', id, 'db', {

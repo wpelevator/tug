@@ -108,7 +108,7 @@ export function loopbackIngressServices(
     .sort();
 }
 
-/** Where `composeForNode` binds published ports that name no host IP. */
+/** Where the agent's container definitions bind published ports that name no host IP. */
 export interface PortBind {
   address: string;
   loopback?: ReadonlySet<string>;
@@ -335,6 +335,16 @@ function validateTopLevel(compose: ComposeFile, errors: string[]): void {
   }
 }
 
+/** Lower-cased ingress hostnames a Compose definition claims, by `service` name. */
+export function ingressHostsOf(compose: ComposeFile): Map<string, string> {
+  const hosts = new Map<string, string>();
+  for (const [name, svc] of Object.entries(compose.services || {})) {
+    const host = svc['x-tug']?.ingress?.host;
+    if (typeof host === 'string') hosts.set(host.toLowerCase(), name);
+  }
+  return hosts;
+}
+
 export function validateCompose(
   compose: ComposeFile | undefined,
   nodes: string[] = [],
@@ -349,7 +359,9 @@ export function validateCompose(
     const placement = lp.placement || {};
     const selected = placement.nodes || [];
     const hasLabels = Array.isArray(placement.labels) && placement.labels.length > 0;
-    const isGlobal = lp.global === true || placement.global === true;
+    const isGlobal = lp.global === true;
+    if ('global' in placement)
+      errors.push(`${name}: x-tug.placement.global is not supported; use x-tug.global`);
     if (nodes.length > 1 && selected.length === 0 && !hasLabels && !isGlobal)
       errors.push(
         `${name}: multi-node deployments require x-tug.placement.nodes or placement.labels`,
@@ -392,7 +404,7 @@ export function buildDesiredState({
   for (const [name, src] of Object.entries(compose.services || {})) {
     const lp = src['x-tug'] || {};
     let placement = lp.placement || (defaultNode ? { nodes: [defaultNode] } : {});
-    const global = lp.global === true || placement.global === true;
+    const global = lp.global === true;
     const labels = placement.labels || [];
     if (nodes && (!placement.nodes || !placement.nodes.length) && (labels.length || global)) {
       const matched = nodes

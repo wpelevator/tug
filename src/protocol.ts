@@ -7,7 +7,6 @@
 export interface Placement {
   nodes?: string[];
   labels?: string[];
-  global?: boolean;
 }
 
 export interface HealthCheck {
@@ -531,6 +530,8 @@ export interface ProjectStatus {
 
 export interface StatusReport {
   node: string;
+  /** The agent clock when it sent the report (ISO 8601); control derives clock skew from it. */
+  sentAt?: string;
   projects: ProjectStatus[];
   commandResults: CommandResult[];
   ingress?: IngressStatus;
@@ -571,42 +572,60 @@ export interface NodeInfo {
   updated_at: string;
 }
 
-/** Response of `POST /api/v1/nodes/register`. */
-export interface RegisterResponse {
-  node: NodeInfo;
-  agentToken: string;
+/** Body of `POST /api/v1/nodes/:name/identity`, posted by an admin with a CSR the node generated for its own key. */
+export interface IdentityRequest {
+  csr: string;
+  /** `create` makes a new node (idempotent for the identical key); `replace` installs a new key on an existing node. */
+  mode: 'create' | 'replace';
+  address?: string;
+  publicAddress?: string;
+  labels?: string[];
 }
 
-/** Body of `POST /agent/v1/enroll`. */
+/** Response of `POST /api/v1/nodes/:name/identity` and `POST /agent/v1/enroll`. */
+export interface IdentityResponse {
+  node: NodeInfo;
+  certificate: string;
+  /** PEM CA certificate every client pins. */
+  ca: string;
+  /** Credential-free HTTPS origin the certificate is verified against. */
+  url: string;
+}
+
+/** Body of `POST /agent/v1/enroll`, authenticated by the bootstrap certificate. Name and labels come from its row. */
 export interface EnrollRequest {
-  enrollToken?: string;
-  name?: string;
+  csr: string;
   address?: string;
   publicAddress?: string;
   /** Base64 WireGuard public key; the private key never leaves the node. */
   wgPublicKey?: string;
-  /** Node labels (tags) used for label-based placement. */
-  labels?: string[];
 }
 
 /** Response of `POST /agent/v1/enroll`. */
-export type EnrollResponse = RegisterResponse;
+export type EnrollResponse = IdentityResponse;
 
-/** Response of `POST /api/v1/nodes/enroll-token`. */
-export interface EnrollTokenResponse {
-  enrollToken: string;
-  name: string | null;
-  usesRemaining: number;
+/** Body of `POST /agent/v1/renew`: a CSR for the node's existing key. */
+export interface RenewRequest {
+  csr: string;
+}
+export interface RenewResponse {
+  certificate: string;
+}
+
+/** Response of `POST /api/v1/nodes/enrollment-credential`: the bootstrap credential, usable once for `POST /agent/v1/enroll`. */
+export interface EnrollmentCredentialResponse {
+  credential: { v: 1; url: string; ca: string; cert: string; key: string };
+  name: string;
+  labels: string[];
   expiresAt: string;
 }
 
 /** The base64url-encoded JSON payload of TUG_JOIN_KEY. */
 export interface JoinKey {
-  v: number;
-  controlUrl?: string;
-  enrollToken: string;
-  /** PEM CA certificate to trust for a private/self-signed control plane. */
-  ca?: string;
-  /** Node labels to register at enrollment. */
-  labels?: string[];
+  v: 2;
+  /** The bootstrap credential. */
+  credential: { v: 1; url: string; ca: string; cert: string; key: string };
+  name: string;
+  /** Connect-only target (for example a tunnel); verification always uses the credential's public url. */
+  connectUrl?: string;
 }

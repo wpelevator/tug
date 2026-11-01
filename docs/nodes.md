@@ -1,25 +1,41 @@
 # Nodes
 
-A node is a Docker host running the Tug agent container. Add nodes either by pushing an install over SSH or by letting a fresh host enroll itself.
+A node is a registered Docker host on which Tug places services, and the agent is the container on it that fetches work from the control plane and manages the node's containers through the Docker Engine API. Nodes need Docker Engine only, not the Compose plugin. Add nodes either by pushing an install over SSH or by letting a fresh host enroll itself.
 
-## Push install over SSH (`node-install`)
+## Node names and IDs
+
+A node has a **name** you choose (used in `x-tug.placement.nodes`, the CLI and the config file) and an **ID** that control generates (`node_` followed by random hex). The ID is immutable: it is never derived from the name, never changes when the identity is replaced, and is never reused. The node's certificate names its ID (`tug:node:<id>`), and every record control keeps for the node (status, commands, WireGuard peer, backup schedules and volumes) refers to the ID. When `node-remove` frees a name, a node created later with that name gets a new ID, so certificates issued for the removed node can never authenticate the new one, even if the same key is installed again, and leftover records of the removed node do not attach to it. `tug status` and `tug events` show IDs next to names where a record carries one.
+
+## Install over SSH (`node-install`)
 
 ```bash
-tug node-install root@app1.example.com --name app1 --address 10.0.0.11 \
-  --control-url https://control.example.com --install-docker
+tug node-install root@app1.example.com --name app1 --address 10.0.0.11 --install-docker
 ```
 
-This registers the node with control (issuing one agent token), runs SSH preflight checks, pulls the Tug image on the host (by default `ghcr.io/wpelevator/tug:<CLI version>`; see [Image](#image)), writes `/etc/tug/agent.env`, and starts the agent container.
+The node generates its own key and certificate request; an admin credential authorizes the identity at that moment and the certificate is installed back over SSH, so no bootstrap secret travels and the private key never leaves the node's state volume. In order, the command runs SSH preflight checks, runs `agent identity` on the host (printing the CSR for the pending key in `/var/lib/tug/agent-pending.json`), posts it to `POST /api/v1/nodes/:name/identity` with `mode: create`, pipes the response into `agent install-cert` (which validates that the certificate names this node, chains to the CA in the response and matches the pending key before durably writing `/var/lib/tug/agent.json`), writes `/etc/tug/agent.env` and starts the agent container. Every step is safe to repeat: rerunning after a partial failure reuses the pending key, and `create` with the identical key is an idempotent retry that keeps the first call's metadata. No secret appears in an SSH command line or log. The command then waits for a status report from the new identity (`--no-wait` skips it).
 
 `--address` is where other nodes and the ingress reach this node's services without the mesh, and the address its published ports bind to ([Published ports](networking.md#published-ports-private-by-default)); give an IP on one of the host's interfaces, preferably a private one. `--public-address` is only the WireGuard endpoint.
 
 Built application images are downloaded directly from control. Published images are pulled by their stored digest from upstream registries, with private credentials released through control when needed. No node registry login is required.
 
-Small hosts: a 1 GB VPS is enough for one site (a database and WordPress together use a few hundred MB), but not for much else. Ubuntu's `unattended-upgrades` and `apt-check` can run for hours on such a host and starve Docker of memory and CPU until commands time out; during testing one pegged a 1 GB node at load 16. Tug does not manage host updates; if the host is small, schedule them for a quiet window or disable the timers (`systemctl disable --now apt-daily.timer apt-daily-upgrade.timer`) and patch deliberately. A control plane and a node on the same host also compete for port 8080 if a service publishes it, which is why the WordPress example is not meant to share a host with control until [M15](roadmap.md#m15--flexible-node-roles).
+Small hosts: a 1 GB VPS is enough for one site (a database and WordPress together use a few hundred MB), but not for much else. Ubuntu's `unattended-upgrades` and `apt-check` can run for hours on such a host and starve Docker of memory and CPU until commands time out; during testing one pegged a 1 GB node at load 16. Tug does not manage host updates; if the host is small, schedule them for a quiet window or disable the timers (`systemctl disable --now apt-daily.timer apt-daily-upgrade.timer`) and patch deliberately. A control plane and a node on the same host also compete for port 8443 if a service publishes it, which is why the WordPress example is not meant to share a host with control until [M15](roadmap.md#m15--flexible-node-roles).
 
-Preflight checks fail early, with a fix hint, unless the host has Docker Engine accessible to the SSH user, writable `/opt`, `/var/lib` and `/etc/tug` paths, at least 1024 MB free under `/var/lib`, and can reach `<control-url>/healthz`. The control URL must be `https://` unless you pass `--http-only-dev` for local or private development.
+Preflight checks fail early, with a fix hint, unless the host has Docker Engine (no Compose plugin needed) accessible to the SSH user, writable `/opt`, `/var/lib` and `/etc/tug` paths, at least 1024 MB free under `/var/lib`, and can open a TCP connection to the control port. Preflight checks reachability only and copies no operator credential to the host; real TLS authorization happens when the agent first connects.
 
-The global `--control-url` selects the operator's API connection. When agents must use a different address, pass `--agent-control-url` to `node-install` or `node-enroll`; it controls node preflight and the address stored in the agent environment/enrollment key, while API requests keep using the operator endpoint. Without the option, agents use the resolved operator URL. For a local SSH tunnel to control and a private endpoint for nodes: `tug --control-url http://127.0.0.1:18082 node-install root@app1.example.com --name app1 --agent-control-url http://10.110.0.3:8080 --http-only-dev`. Prefer HTTPS for the advertised URL; the explicit HTTP override is needed for this private-network example.
+The global `--control-url` changes only where the operator CLI connects; the certificate is still verified against the credential's public URL. When agents must dial a different address, pass `--agent-control-url`; it is written to the agent environment as `TUG_CONTROL_URL` and is likewise a connect target only. For a local SSH tunnel to control and a private endpoint for nodes: `tug --control-url https://127.0.0.1:18082 node-install root@app1.example.com --name app1 --agent-control-url https://10.110.0.3:8443`. Both overrides must be `https://`.
+
+### Certificates, renewal and recovery
+
+Node certificates last 90 days. The agent renews at two thirds of the lifetime plus up to ten percent random jitter by sending a CSR for its existing key to `POST /agent/v1/renew`, saves the new certificate durably, then swaps its HTTP client and reconnects the stream. If renewal fails it keeps working on the old certificate until that expires. Authorization follows the key, so old certificates stay valid until they expire and routine renewal closes no connection. Control enforces a minimum interval between renewals per node (`TUG_RENEW_MIN_INTERVAL_MS`, default one hour).
+
+| Situation | Command |
+| --- | --- |
+| Cut a node off immediately, without SSH or deleting anything | `tug node-disable <node>` (also removes it from other nodes' WireGuard peers, service endpoints, ingress and label-based scheduling; explicit `placement.nodes` entries are left alone) |
+| Certificate expired, key lost or suspected compromised, node disabled, CA loss, or an older backup restored | `tug node-replace-identity <ssh-target> --name <node>` installs a new key (`mode: replace`); the old key's certificates stop working at once and their sockets close |
+| `agent.json` or `agent-pending.json` is corrupt | `tug node-repair-identity <ssh-target> --name <node>` moves the corrupt documents aside (never service volumes or agent event state) and replaces the identity |
+| Every node after a CA loss or older restore | recover root on the control-plane host (`control-install --recover-root`), then `tug node-replace-identity --all` |
+
+`node-install --all` and `node-replace-identity --all` walk the SSH targets declared in `tug.yml` one node at a time, continue after failures and print a per-node result. Suspected key compromise is `node-disable` followed by `node-replace-identity`. `node-remove` deletes the node (its ID is retired for good) and revokes any unconsumed join key.
 
 ## Declaring nodes in the config file
 
@@ -36,16 +52,16 @@ nodes:
     label: [web, ingress]
 ```
 
-`tug node-install --name app1` then runs as if `root@203.0.113.7 --address ... --label web --label ingress --install-docker` had been typed; `tug node-register app1` and `tug node-enroll --name app1` read the same entry. Flags override the file key by key, and a `label` list on the command line replaces the file's list. An `<ssh-target>` argument overrides `ssh`; without one, a node with no `ssh` in the file is an error that names the missing key. The argument is never guessed to be a node name, because `app1` is also a valid hostname. `nodeDefaults` apply to every node, declared or not.
+`tug node-install --name app1` then runs as if `root@203.0.113.7 --address ... --label web --label ingress --install-docker` had been typed; `tug node-register app1` and `tug node-prepare-enrollment --name app1` read the same entry. Flags override the file key by key, and a `label` list on the command line replaces the file's list. An `<ssh-target>` argument overrides `ssh`; without one, a node with no `ssh` in the file is an error that names the missing key. The argument is never guessed to be a node name, because `app1` is also a valid hostname. `nodeDefaults` apply to every node, declared or not.
 
-The control plane stays the source of truth. Only `node-install`, `node-register` and `node-enroll` read `nodes`, as flag defaults; `status`, `deploy`, `scale`, `ps`, `logs`, `exec`, `node-remove` and every other command ask control and never consult the file. Registering a node is an upsert that overwrites its stored addresses and labels and issues a new agent token, so re-running `node-install` after editing the file updates control, last write wins. Editing the file without re-running it changes nothing in control.
+The control plane stays the source of truth. Only `node-install`, `node-replace-identity`, `node-repair-identity`, `node-register` and `node-prepare-enrollment` read `nodes`, as flag defaults; `status`, `deploy`, `scale`, `ps`, `logs`, `exec`, `node-remove` and every other command ask control and never consult the file. Re-running `node-install` with the same key is an idempotent retry that keeps the first call's metadata; `node-replace-identity` installs a new key and keeps the node's ID, metadata and placement. Editing the file without re-running anything changes nothing in control.
 
-## Self-service enrollment (`node-enroll`)
+## Self-service enrollment (`node-prepare-enrollment`)
 
-A pull-based alternative modeled on Portainer Edge agents: the operator never needs SSH to the host. Mint an enrollment key, then run the printed `docker run` on the fresh host or put it in cloud-init/user-data so the host enrolls on first boot. The agent dials out to control, so this works behind NAT and firewalls.
+For hosts you cannot SSH to or do not want to touch: cloud-init and user-data provisioning, autoscaling and golden images, hosts behind NAT or in private networks, and delegated onboarding by someone without admin credentials. Mint a join key with an admin credential, then run the printed `docker run` on the fresh host or put it in user-data. The agent dials out to control.
 
 ```bash
-tug node-enroll --name app1
+tug node-prepare-enrollment --name app1
 # prints, e.g.:
 #   docker run -d --name tug-agent --restart unless-stopped \
 #     -v /var/run/docker.sock:/var/run/docker.sock \
@@ -54,27 +70,28 @@ tug node-enroll --name app1
 #     ghcr.io/wpelevator/tug:<CLI version> agent
 ```
 
-The enrollment key (`TUG_JOIN_KEY`) is base64url-encoded JSON with the control URL, a short-lived limited-use `enrollToken` and, with `--ca`, the control plane's CA certificate. The durable agent token is minted by control during enrollment and persisted to the agent's state volume (`/var/lib/tug/agent.json`); it never appears on the `docker run` command line or in `docker inspect`. On restart the agent loads the persisted token and skips enrollment; on a fresh volume it enrolls again. A leaked join key is spent after its uses and expires on its own.
+The join key (`TUG_JOIN_KEY`) is base64url-encoded JSON `{ v: 2, credential, name, connectUrl? }`. The credential is a **bootstrap certificate** with SAN `tug:enroll:<id>` and its private key; it can reach `POST /agent/v1/enroll` and nothing else. The agent generates its own node key (into `agent-pending.json`), sends a CSR with the bootstrap certificate, validates and installs the returned node certificate exactly as `agent install-cert` does, and from then on ignores the join key. On restart the agent loads `/var/lib/tug/agent.json` and skips enrollment.
+
+Join keys are single-use, name-bound and short-lived (default one hour). There is no `--uses` and no reusable or unbound key, so golden-image and autoscaling flows mint one key per instance, for example into each instance's cloud-init. Name and labels come from the control-side row, never from the join key or the request. Enrollment is create-only: an existing name is refused and a join key can never replace a node. A retry with the same CSR key after a lost response signs another certificate and changes nothing stored. Minting again for a name revokes its previous unconsumed key, and `node-remove` revokes it too. The join key is an **enrollment credential** and as sensitive as any bootstrap secret: it contains a private key, a saved user-data document contains a credential, and in cloud user-data it may be readable from the provider's metadata service by processes on the host. Single use, short life, name binding and create-only enrollment limit the damage.
 
 Options:
 
-- `--name <node>` binds the node name; without it each host names itself from its hostname.
-- `--agent-control-url <url>` advertises an agent-reachable endpoint independently of the operator's global `--control-url`.
-- `--uses <n>` lets one key enroll several hosts (default `1`).
+- `--name <node>` (required) binds the node name.
+- `--agent-control-url <url>` sets `connectUrl`, a connect-only target; the credential's public URL is still the verified name.
 - `--ttl <seconds>` sets the key lifetime (default `3600`).
-- `--ca <ca.pem>` embeds a private or self-signed control CA, so agents trust it without a separate `NODE_EXTRA_CA_CERTS`.
+- `--label <label>` sets node labels (repeatable).
 - `--image <tag>` sets the image in the printed command (default `ghcr.io/wpelevator/tug:<CLI version>`).
+- `--mesh` prints a mesh-capable command.
 - `--json` prints machine-readable output.
-- `--install-docker` prints a complete cloud-init document that installs Docker Engine and Compose before starting the agent. With `--json`, the result includes both `command` and `cloudInit` fields.
-- `--http-only-dev` allows a plaintext HTTP control URL.
+- `--install-docker` prints a complete cloud-init document that installs Docker Engine before starting the agent. With `--json`, the result includes both `command` and `cloudInit` fields.
 
-To keep the key out of shell history and `docker inspect`, mount it as a file and set `TUG_JOIN_KEY_FILE=/path/to/key` instead of `TUG_JOIN_KEY`.
+To keep the key out of shell history and `docker inspect`, mount it as a `0600` file and set `TUG_JOIN_KEY_FILE=/path/to/key` instead of `TUG_JOIN_KEY`. Without an identity or a join key the agent refuses to start and points to `tug node-install`, `tug node-prepare-enrollment` or `tug node-repair-identity`.
 
 ## Bare-host Docker installation
 
-`control-install --install-docker` and `node-install --install-docker` run the same Docker bootstrap over SSH before Docker preflight or runtime-image transfer. Without the flag, Docker Engine and Compose must already work. The SSH target must be root for installation; Tug does not modify group membership or configure passwordless sudo.
+`control-install --install-docker` and `node-install --install-docker` run the same Docker bootstrap over SSH before Docker preflight or runtime-image transfer. Without the flag, Docker Engine must already work (and the Compose plugin on the control-plane host, which runs the control container with Compose). The SSH target must be root for installation; Tug does not modify group membership or configure passwordless sudo.
 
-For a host created by your cloud provider, save `tug node-enroll --name app1 --install-docker` as user-data. Its stdout starts with `#cloud-config`, includes the bootstrap script and starts the agent only after Docker installation succeeds. The default version-matched Tug runtime image must be accessible from the host; an overridden development `tug:local` image must already be loaded there. Enrollment tokens remain short-lived and should be treated as credentials when saving user-data.
+For a host created by your cloud provider, save `tug node-prepare-enrollment --name app1 --install-docker` as user-data. Its stdout starts with `#cloud-config`, includes the bootstrap script and starts the agent only after Docker installation succeeds. The default version-matched Tug runtime image must be accessible from the host; an overridden development `tug:local` image must already be loaded there. Join keys are short-lived and should be treated as credentials when saving user-data.
 
 Bootstrap requires systemd and supports these releases:
 
@@ -86,29 +103,33 @@ Bootstrap requires systemd and supports these releases:
 | RHEL (dnf) | 9, 10 | [RHEL](https://docs.docker.com/engine/install/rhel/) |
 | Rocky Linux, AlmaLinux, CentOS Stream (dnf) | 9, 10 | [CentOS](https://docs.docker.com/engine/install/centos/) |
 
-It adds Docker's official apt or dnf repository, installs Engine and Buildx, and enables Docker (the control host also gets the Compose plugin). A working Engine installation is preserved. If only Compose is missing, it installs the plugin without upgrading Engine. An inaccessible existing daemon, unsupported OS or release, or conflicting distribution packages (`docker.io` and `podman-docker` on Debian/Ubuntu; `docker`, `moby-engine` and `podman-docker` on RPM hosts) produce a clear error for manual resolution; Tug does not remove them or alter Docker daemon trust settings. Other distributions, such as Alpine or Arch, and hosts without systemd need Docker installed manually.
+It adds Docker's official apt or dnf repository, installs Engine and Buildx, and enables Docker (the control-plane host also gets the Compose plugin, because `control-install` runs the control container with Compose; nodes do not). A working Engine installation is preserved. If only Compose is missing, it installs the plugin without upgrading Engine. An inaccessible existing daemon, unsupported OS or release, or conflicting distribution packages (`docker.io` and `podman-docker` on Debian/Ubuntu; `docker`, `moby-engine` and `podman-docker` on RPM hosts) produce a clear error for manual resolution; Tug does not remove them or alter Docker daemon trust settings. Other distributions, such as Alpine or Arch, and hosts without systemd need Docker installed manually.
 
 ## Image
 
-`node-install` and `node-enroll` default `--image` to `ghcr.io/wpelevator/tug:<version>`, where `<version>` is the installed CLI's own package version, so the CLI and the agents it installs stay on the same release. Pass `--image <tag>` to run another image, for example `ghcr.io/wpelevator/tug:edge` for the latest build of `main` or a mirror in your own registry.
+`node-install` and `node-prepare-enrollment` default `--image` to `ghcr.io/wpelevator/tug:<version>`, where `<version>` is the installed CLI's own package version, so the CLI and the agents it installs stay on the same release. Pass `--image <tag>` to run another image, for example `ghcr.io/wpelevator/tug:edge` for the latest build of `main` or a mirror in your own registry.
 
 `node-install --build-local-image` is for development: it builds the image from the current checkout, copies it to the host with `docker save` / `scp` / `docker load` and runs it, tagging it `tug:local` unless `--image` is also given. It needs a Tug checkout (the Dockerfile) in the working directory. See [Releases](releases.md) for how images are published. The image is built for the target host's architecture (read with `uname -m` over SSH), so an arm64 laptop can install an amd64 VPS; x86_64 and aarch64 hosts are supported.
 
 ## Node labels
 
-`node-install`, `node-enroll` and `node-register` accept a repeatable `--label <label>`. Labels are plain tags stored on the node and listed by the node list API; services select nodes with `x-tug.placement.labels` (see [Compose extensions](compose.md#services)). Re-registering a node replaces its labels.
+`node-install`, `node-prepare-enrollment` and `node-register` accept a repeatable `--label <label>`. Labels are plain string tags stored on the node and listed by the node list API; services select nodes that carry all of their `x-tug.placement.labels` (see [Compose extensions](compose.md#services)). They are set when the node is created (`node-install`, `node-register --mode create` or the enrollment credential); `node-replace-identity` keeps them. They are unrelated to Docker container labels.
 
 ## Joining the WireGuard mesh
 
-The agent always runs with host networking (`--network host`): it dials container IPs for TCP and HTTP health checks, which a bridge-networked agent cannot reach on current Docker (29.x). Add `--mesh` to `node-install` or `node-enroll` (and set `TUG_MESH=true` on control) to also give it `NET_ADMIN`, so it can create `wg0` and join the overlay. Give nodes that other nodes must dial a `--public-address`; nodes behind NAT can omit it. See [Networking](networking.md).
+The agent always runs with host networking (`--network host`): it dials container IPs for TCP and HTTP health checks, which a bridge-networked agent cannot reach on current Docker (29.x). Add `--mesh` to `node-install` or `node-prepare-enrollment` (and set `TUG_MESH=true` on control) to also give it `NET_ADMIN`, so it can create `wg0` and join the overlay. Give nodes that other nodes must dial a `--public-address`; nodes behind NAT can omit it. See [Networking](networking.md).
 
-## Register only (`node-register`)
+## CSR in, certificate out (`node-register`)
 
-`tug node-register <node> [--address <ip>] [--public-address <ip>]` registers a node and prints its agent token without installing anything, for running the agent yourself (see [Development](development.md)).
+`tug node-register <name> --csr node.csr [--mode create|replace]` is the primitive behind the SSH commands: it posts a CSR you generated on the node (for example with `agent identity`) to the identity endpoint and prints the certificate, CA and public URL. Use it for local development or when you drive the steps yourself; install the output with `agent install-cert`.
 
 ## Status and diagnostics
 
-Nodes are `online` while they contact control and become `stale` after `TUG_STALE_SECONDS` (default `60`) without an authenticated work fetch, status report or wake wait. Agents keep an outbound WebSocket open so control can wake them for deployments and commands; if WebSockets are unavailable they use an HTTP long poll, and `TUG_POLL_INTERVAL_MS` remains the periodic reconciliation fallback. `tug status` lists nodes, deployments and per-node project status; `tug doctor --nodes` (or `--node <name>`) runs Docker and Compose checks on agents and waits for the result. The wait defaults to 60 seconds.
+Nodes are `online` while they contact control and become `stale` after `TUG_STALE_SECONDS` (default `60`) without an authenticated work fetch, status report or wake wait. Agents keep an outbound WebSocket open so control can wake them for deployments and commands; if WebSockets are unavailable they use an HTTP long poll, and `TUG_POLL_INTERVAL_MS` remains the periodic reconciliation fallback. `tug status` lists nodes, deployments and per-node project status; `tug doctor --nodes` (or `--node <name>`) runs Docker Engine (and, with the mesh or ingress, WireGuard and Caddy) checks through each agent and waits for the result; the wait defaults to 60 seconds. Online and offline are connectivity states only: a `stale` node has not contacted control recently, which does not prove the machine is off. `tug doctor` also reports each node's certificate expiry and, for nodes that are reporting now, the observed clock skew (see [Doctor](#doctor-certificate-expiry-and-clock-skew)).
+
+### Doctor: certificate expiry and clock skew
+
+`tug doctor` always reports the control CA and server certificate expiry and each node certificate's expiry, with warnings when renewal is overdue (CA under 90 days, server certificate under 30, a node certificate under 14) and a failure for an expired certificate. For nodes it distinguishes **observed** clock skew from **unknown**: agents send their clock with every status report, control records the difference, and doctor shows it only for a node that is online now. A node that is stale, has never reported or is disabled has an unknown clock, not a zero skew. The figure includes request latency. A skew of 30 seconds or more is a warning; five minutes or more fails, because certificates are back-dated five minutes and a node that far ahead or behind cannot validate new certificates (fix time synchronization on the host).
 
 ## Configuration
 

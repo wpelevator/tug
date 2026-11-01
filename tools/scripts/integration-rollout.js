@@ -3,12 +3,13 @@
 // the app and the Caddy ingress. Requests hit the ingress continuously from inside the VPS while:
 //   1. v1 is deployed, 2. v2 is rolled out (zero failed requests, an unrelated service is not restarted),
 //   3. v3, whose health check fails, is rejected (v2 keeps serving) and rolled back automatically.
+import { api as mtlsApi, fetchRootCredential } from './mtls-fetch.js';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 
 const project = process.env.COMPOSE_PROJECT_NAME || 'tug-it-rollout';
-const control = process.env.TUG_CONTROL_URL || 'http://localhost:18080';
-const token = process.env.TUG_TOKEN || 'integration-token';
+const control = process.env.TUG_CONTROL_URL || 'https://127.0.0.1:18080';
+let credential;
 const files = [
   '-f',
   'docker-compose.integration.yml',
@@ -23,15 +24,7 @@ function docker(args, input) {
   return { ok: r.status === 0, out: (r.stdout || '') + (r.stderr || '') };
 }
 const vps = (script) => docker(['exec', '-T', 'vps-a', 'sh', '-c', script]);
-async function api(route, body) {
-  const res = await fetch(`${control}${route}`, {
-    method: body ? 'POST' : 'GET',
-    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  if (!res.ok) throw new Error(`${route}: ${res.status} ${await res.text()}`);
-  return res.json();
-}
+const api = (route, body) => mtlsApi(credential, control, route, body);
 async function until(label, fn, timeoutMs = 180000) {
   const started = Date.now();
   let last = '';
@@ -124,9 +117,10 @@ docker([
   'vps-a',
 ]);
 try {
-  await until('control is healthy', async () => ({
-    ok: await fetch(`${control}/healthz`).then(
-      (r) => r.ok,
+  credential = (await fetchRootCredential(composeArgs, process.cwd())).credential;
+  await until('control is reachable', async () => ({
+    ok: await api('/api/v1/status').then(
+      () => true,
       () => false,
     ),
     out: 'not ready',

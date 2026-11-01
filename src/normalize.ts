@@ -4,7 +4,7 @@
 // (`x-tug`), while the YAML rendering keeps them.
 // Control secrets are not resolved on the operator's machine: each one is interpolated as a sentinel
 // that the agent replaces with the node's released value when it creates the container.
-import yaml from 'js-yaml';
+import * as yaml from 'js-yaml';
 import { run } from './build.ts';
 import type { RunResult } from './build.ts';
 import type { ComposeFile } from './protocol.ts';

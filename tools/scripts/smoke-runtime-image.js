@@ -29,7 +29,14 @@ function docker(args) {
 try {
   if (!process.env.TUG_RUNTIME_IMAGE) {
     console.log('Building the shipped runtime image for packaging checks…');
-    await docker(['build', '-t', image, '.']);
+    await docker([
+      'build',
+      '-f',
+      process.env.TUG_RUNTIME_DOCKERFILE || 'Dockerfile',
+      '-t',
+      image,
+      '.',
+    ]);
   }
   const client = await docker(['run', '--rm', '--entrypoint', 'docker', image, '--version']);
   assert.match(
@@ -37,26 +44,25 @@ try {
     /^Docker version /,
     'The shipped runtime image must include a working Docker client',
   );
-  const compose = await docker([
-    'run',
-    '--rm',
-    '--entrypoint',
-    'docker',
-    image,
-    'compose',
-    'version',
-    '--short',
-  ]);
-  assert.match(
-    compose,
-    /^v?\d+\.\d+\.\d+/,
-    'The shipped runtime image must include a discoverable executable Compose plugin',
-  );
   const node = await docker(['run', '--rm', '--entrypoint', 'node', image, '--version']);
   assert.match(
     node,
     /^v\d+\./,
     'The shipped runtime image must include a working Node.js executable',
+  );
+  const mtls = JSON.parse(
+    await docker([
+      'run',
+      '--rm',
+      '--entrypoint',
+      'node',
+      image,
+      'tools/scripts/verify-mtls-runtime.js',
+    ]),
+  );
+  assert.ok(
+    mtls.results.every((result) => result.ok),
+    'The shipped runtime image must issue certificates and complete mTLS requests with undici',
   );
   await docker([
     'run',
@@ -92,7 +98,7 @@ try {
 } finally { await fs.rm(dir, { recursive: true, force: true }); }`,
   ]);
   console.log(
-    `Runtime image packaging passed: ${client}; Compose ${compose}; Node ${node}. No host Docker socket or host plugin was mounted.`,
+    `Runtime image packaging passed: ${client}; Node ${node}; mTLS issuance and undici transport verified. No host Docker socket or host plugin was mounted.`,
   );
 } finally {
   if (!process.env.TUG_RUNTIME_IMAGE) await docker(['image', 'rm', image]).catch(() => {});

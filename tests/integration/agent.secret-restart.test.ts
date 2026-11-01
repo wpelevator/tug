@@ -55,12 +55,17 @@ test(
     await new Promise<void>((resolve) => server.listen(0, resolve));
     const port = (server.address() as AddressInfo).port;
 
-    process.env.TUG_CONTROL_URL = `http://127.0.0.1:${port}`;
-    process.env.TUG_AGENT_TOKEN = 'test-token';
-    process.env.TUG_NODE_NAME = 'n1';
-    process.env.TUG_STATE_DIR = path.join(dir);
-    process.env.TUG_APPLY = 'true';
+    // The fake control speaks plain HTTP, so the context supplies its own `http` instead of an mTLS transport.
     const { reconcile } = await import('../../src/agent.ts');
+    const { DockerEngine } = await import('../../src/docker-api.ts');
+    const ctx = {
+      docker: new DockerEngine(),
+      http: fetch,
+      nodeName: 'n1',
+      stateDir: dir,
+      apply: true,
+      controlUrl: `http://127.0.0.1:${port}`,
+    };
 
     const compose = {
       services: {
@@ -98,14 +103,14 @@ test(
       await fs.rm(dir, { recursive: true, force: true });
     });
 
-    await reconcile(desired);
+    await reconcile(desired, ctx);
     const beforeWith = dockerInspect('svc_with_secret');
     const beforeWithout = dockerInspect('svc_without_secret');
     assert.ok(beforeWith?.State?.Running);
     assert.ok(beforeWithout?.State?.Running);
 
     secretVersions = { SECRET_A: 2 };
-    await reconcile(desired);
+    await reconcile(desired, ctx);
 
     const afterWith = dockerInspect('svc_with_secret');
     const afterWithout = dockerInspect('svc_without_secret');
