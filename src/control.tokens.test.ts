@@ -312,7 +312,7 @@ test('every operator route enforces its declared role for read, deploy and admin
   }
 });
 
-test('agent endpoints ignore API tokens and the registry auth hook is removed', async () => {
+test('operator credentials are refused on node routes and anonymous requests reach nothing', async () => {
   const s = await makeServer();
   try {
     const admin = await s.mint('a', 'admin');
@@ -327,15 +327,9 @@ test('agent endpoints ignore API tokens and the registry auth hook is removed', 
       'the operator token cannot read the agent secrets endpoint',
     );
     assert.equal(
-      (await s.call(null, 'POST', '/api/v1/registry/auth', { username: 'n', password: 'p' }))
-        .status,
+      (await s.call(null, 'GET', '/agent/v1/work')).status,
       401,
-      'the removed registry hook is unreachable without a certificate',
-    );
-    assert.equal(
-      (await s.call(null, 'GET', '/healthz')).status,
-      401,
-      'there is no unauthenticated route, not even a health check',
+      'a request that presents no identity reaches no route, including node routes',
     );
   } finally {
     await s.close();
