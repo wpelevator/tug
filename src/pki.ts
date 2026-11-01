@@ -215,9 +215,9 @@ export interface SubjectNames {
   ip: string[];
 }
 /** The DNS names and IP addresses a server certificate covers, from the public URL plus optional extras. */
-export function serverNames(publicUrl: string, extras: string[] = []): SubjectNames {
+export function serverNames(advertiseUrl: string, extras: string[] = []): SubjectNames {
   const names: SubjectNames = { dns: [], ip: [] };
-  const host = new URL(publicUrl).hostname.replace(/^\[|\]$/g, '');
+  const host = new URL(advertiseUrl).hostname.replace(/^\[|\]$/g, '');
   for (const entry of [host, ...extras.map((e) => e.trim()).filter(Boolean)]) {
     const bucket = net.isIP(entry) ? names.ip : names.dns;
     if (!bucket.includes(entry)) bucket.push(entry);
@@ -367,7 +367,13 @@ export class Pki {
   }
 
   /** The server certificate and key for the given names. */
-  async issueServer(names: SubjectNames) {
+  get controlName(): string {
+    return controlNameFromCa(this.caPem);
+  }
+
+  /** The server certificate always carries the generated control name, plus the given addresses. */
+  async issueServer(addresses: SubjectNames) {
+    const names: SubjectNames = { dns: [this.controlName, ...addresses.dns], ip: addresses.ip };
     const keys = await generateKeyPair();
     const { cert, notAfter } = await this.signLeaf({
       publicKey: keys.publicKey,
@@ -395,16 +401,29 @@ export function validateInstalledCertificate(options: {
     throw new Error(`certificate does not name ${options.uri}`);
 }
 
-/** TLS client options pinned to the credential's CA. Verification is always against the public host, even through a tunnel. */
+/**
+ * The generated name control answers to, derived from its CA key: stable for the life of the CA and independent of any
+ * address. Control puts it in its server certificate and clients recompute it from the CA they pin, so moving control to
+ * another IP or DNS name needs no new credentials.
+ */
+export function controlNameFromCa(caPem: string): string {
+  const spki = new crypto.X509Certificate(caPem).publicKey.export({ type: 'spki', format: 'der' });
+  return `control-${hashSpki(spki).slice(0, 12)}.tug`;
+}
+
+/**
+ * TLS client options pinned to the credential's CA. The server is verified by its generated control name, never by the
+ * address the connection goes to, so an address override (a tunnel, a private IP, a moved host) keeps full verification.
+ */
 export function clientTlsOptions(credential: Credential): tls.ConnectionOptions {
-  const publicHost = new URL(credential.url).hostname.replace(/^\[|\]$/g, '');
+  const name = controlNameFromCa(credential.ca);
   return {
     ca: credential.ca,
     cert: credential.cert,
     key: credential.key,
     minVersion: 'TLSv1.3',
-    ...(net.isIP(publicHost) ? {} : { servername: publicHost }),
-    checkServerIdentity: (_host, cert) => tls.checkServerIdentity(publicHost, cert),
+    servername: name,
+    checkServerIdentity: (_host, cert) => tls.checkServerIdentity(name, cert),
   };
 }
 

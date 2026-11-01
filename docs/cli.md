@@ -9,7 +9,7 @@ A positional argument names the primary target: the SSH host for `node-install`,
 | Global option | Environment | Config key | Default |
 |---|---|---|---|
 | `--config <file>` | `TUG_CONFIG` | — | `tug.yml`, `tug.yaml`, `tug.json` or `.tug.json` in the current directory |
-| `--control-url <url>` (operator API endpoint) | `TUG_CONTROL_URL` | `controlUrl` | the credential's public URL (an override is a connect target only) |
+| `--control-url <url>` (operator API endpoint) | `TUG_CONTROL_URL` | `controlUrl` | the credential's default address (an override is a connect target only) |
 | `--project <name>` | `TUG_PROJECT` | `project` | `site` |
 | `--credential <file>` | `TUG_CREDENTIAL` (inline) or `TUG_CREDENTIAL_FILE` | `credential` (a file path), only in the untracked overlay | No credential |
 
@@ -56,7 +56,7 @@ The file is not desired state and Tug never reconciles against it. Only `node-in
 ## Setup
 
 - `tug init [<credential-file>|-]` creates the config file with the resolved control URL and project when it is missing, imports the credential (a file, or `-` for stdin) into a `0600` file under `~/.config/tug/credentials/` and points the git-ignored overlay next to the config at it; see [Config file](#config-file). Use global `--control-url`, `--project` or `--config` to select them.
-- `tug control-install <ssh-target> --public-url <https-origin> [--extra-san <name>]... [--mesh] [--install-docker] [--port <port>] [--image <tag>] [--build-local-image] [--credential-out <file>] [--recover-root]` installs control over SSH and, on a fresh install, issues the root credential straight into a `0600` local file. The mTLS port defaults to `8443`. `--recover-root` replaces only root's key from the control-plane host. See [Control plane](control-plane.md).
+- `tug control-install <ssh-target> --advertise-url <https-origin> [--extra-san <name>]... [--mesh] [--install-docker] [--port <port>] [--image <tag>] [--build-local-image] [--credential-out <file>] [--recover-root]` installs control over SSH and, on a fresh install, issues the root credential straight into a `0600` local file. The mTLS port defaults to `8443`. `--recover-root` replaces only root's key from the control-plane host. See [Control plane](control-plane.md).
 - `tug node-disable <node>` blocks a node's key immediately without SSH, deleting or changing placement or stopping its containers: it withdraws the node's service endpoints and ingress routes but does not drain workloads. `node-replace-identity` brings it back.
 - `tug node-install|node-replace-identity|node-repair-identity [<ssh-target>] --name <node> [--all] [--agent-control-url <url>] [--install-docker] [--address <ip>] [--public-address <ip>] [--label <label>]... [--mesh] [--wg-port <port>] [--image <tag>] [--build-local-image] [--no-wait]` runs the SSH-assisted identity flow (`create`, or `replace` for the latter two; `node-repair-identity` first moves corrupt agent credential documents aside). Without `<ssh-target>` the target is `nodes.<node>.ssh` from the [config file](#config-file); `--all` walks every node with an `ssh` entry, continues after failures and prints per-node results. `--mesh` enables host networking and `NET_ADMIN` and adds WireGuard kernel and UDP-port checks; `--wg-port` defaults to `51820`. See [Nodes](nodes.md).
 - `tug node-register <node> --csr <file> [--mode create|replace]` signs a node-generated CSR and prints the identity response (node, certificate, CA and public URL). It installs nothing; use `agent install-cert` on the host.
@@ -67,7 +67,7 @@ The file is not desired state and Tug never reconciles against it. Only `node-in
 
 Every control URL, including overrides, must be `https://`. A node without a public address can dial out to control. See [Nodes](nodes.md) and [Networking](networking.md).
 
-`--control-url` selects where the operator CLI connects and `--agent-control-url` where the agent connects; both are connect targets only, and the certificate is always verified against the credential's public URL (DNS or IP). Use them when the operator connects through a local SSH tunnel while nodes connect over a private network, for example `tug --control-url https://127.0.0.1:18082 node-install root@app1.example.com --name app1 --agent-control-url https://10.110.0.3:8443`.
+`--control-url` selects where the operator CLI connects and `--agent-control-url` where the agent connects; both are connect targets only, and the server is always verified by the control name derived from the pinned CA, so the address can be a DNS name, an IP, a tunnel or a moved host. Use them when the operator connects through a local SSH tunnel while nodes connect over a private network, for example `tug --control-url https://127.0.0.1:18082 node-install root@app1.example.com --name app1 --agent-control-url https://10.110.0.3:8443`.
 
 ## Secrets
 

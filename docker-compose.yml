@@ -4,7 +4,7 @@ services:
     command: ["control"]
     environment:
       PORT: 8443
-      TUG_PUBLIC_URL: ${TUG_PUBLIC_URL:?set TUG_PUBLIC_URL to the https origin clients use, e.g. https://localhost:8443}
+      TUG_ADVERTISE_URL: ${TUG_ADVERTISE_URL:?set TUG_ADVERTISE_URL to the https origin clients use, e.g. https://localhost:8443}
       TUG_DATA_DIR: /data
     ports:
       - "8443:8443"

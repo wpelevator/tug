@@ -430,7 +430,7 @@ program
     'install the control plane on a Docker-capable host over SSH and issue the root credential into a local 0600 file; it listens for mTLS only, so front it with TCP passthrough rather than a terminating proxy',
   )
   .requiredOption(
-    '--public-url <url>',
+    '--advertise-url <url>',
     'credential-free https origin clients use, including the published port',
   )
   .option(
@@ -469,7 +469,7 @@ program
     async (
       sshTarget: string,
       o: InstallOpts & {
-        publicUrl: string;
+        advertiseUrl: string;
         extraSan: string[];
         port: string;
         credentialOut: string;
@@ -477,7 +477,7 @@ program
         mesh?: boolean;
       },
     ) => {
-      const publicUrl = normalizeControlUrl(o.publicUrl);
+      const advertiseUrl = normalizeControlUrl(o.advertiseUrl);
       if (o.installDocker) await bootstrapDocker(sshTarget, true);
       preflightRemote(sshTarget, { ports: [Number(o.port)], minDiskMb: 2048, compose: true });
       const image = resolveImage(o.image, o.buildLocalImage);
@@ -485,7 +485,7 @@ program
       const yamlValue = (value: string) => JSON.stringify(value);
       const compose = await loadTemplate(templatesDir, 'control-compose.yml', {
         IMAGE: yamlValue(image),
-        PUBLIC_URL: yamlValue(new URL(publicUrl).origin),
+        ADVERTISE_URL: yamlValue(new URL(advertiseUrl).origin),
         EXTRA_SANS: yamlValue(o.extraSan.join(',')),
         PORT: o.port,
         MESH: yamlValue(o.mesh ? 'true' : 'false'),
@@ -511,7 +511,7 @@ program
           `root credential written to ${o.credentialOut}; import it with: tug init ${o.credentialOut}`,
         );
       }
-      console.log(JSON.stringify({ ok: true, sshTarget, url: publicUrl }, null, 2));
+      console.log(JSON.stringify({ ok: true, sshTarget, url: advertiseUrl }, null, 2));
     },
   );
 

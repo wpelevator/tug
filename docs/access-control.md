@@ -116,7 +116,7 @@ tug credential-revoke ci-site
 
 ## Deploying from GitHub Actions
 
-Create a project-scoped `deploy` credential and store it as a repository secret (the credential already carries the control plane's public URL and CA):
+Create a project-scoped `deploy` credential and store it as a repository secret (the credential already carries the control plane's default address and CA):
 
 ```bash
 tug credential-create github-site --role deploy --project site

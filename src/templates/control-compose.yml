@@ -6,7 +6,7 @@ services:
     environment:
       PORT: 8443
       TUG_DATA_DIR: /data
-      TUG_PUBLIC_URL: {{PUBLIC_URL}}
+      TUG_ADVERTISE_URL: {{ADVERTISE_URL}}
       TUG_EXTRA_SANS: {{EXTRA_SANS}}
       TUG_MESH: {{MESH}}
     ports:

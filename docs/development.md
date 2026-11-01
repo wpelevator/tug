@@ -26,7 +26,7 @@ The Dockerfiles are multi-stage: a build stage runs `npm ci && npm run build`, a
 
 The runtime image ships the Docker client (control uses it to load, tag and remove image archives through the mounted socket), `wg` and `ip` for the mesh, and the compiled `tug-runtime` entry (`dist/main.js`). It deliberately has no Compose plugin: agents drive the Docker Engine API, and the control-plane host runs the control container with the host's own Compose (`control-install` checks for it). `Dockerfile.alpine` is the same runtime on Alpine without the mesh tools.
 
-Run `npm run test:smoke:image` to build the actual shipped runtime image and execute its Docker client and Node binaries, the compiled control/agent database initialization (a writable snapshot and read-only validation) and `tools/scripts/verify-mtls-runtime.js`, which issues certificates with `@peculiar/x509`, serves mTLS with the production TLS options and calls it through the undici transport, including the loopback connect-target override that still verifies the public name. Nothing from the host socket or CLI plugins is mounted. To test an already-built image, set `TUG_RUNTIME_IMAGE=<tag>`; to check the Alpine image, set `TUG_RUNTIME_DOCKERFILE=Dockerfile.alpine`. CI runs this packaging smoke before the integration test, so the fake-VPS image cannot mask missing runtime tools.
+Run `npm run test:smoke:image` to build the actual shipped runtime image and execute its Docker client and Node binaries, the compiled control/agent database initialization (a writable snapshot and read-only validation) and `tools/scripts/verify-mtls-runtime.js`, which issues certificates with `@peculiar/x509`, serves mTLS with the production TLS options and calls it through the undici transport, including the loopback connect-target override that still verifies the generated control name. Nothing from the host socket or CLI plugins is mounted. To test an already-built image, set `TUG_RUNTIME_IMAGE=<tag>`; to check the Alpine image, set `TUG_RUNTIME_DOCKERFILE=Dockerfile.alpine`. CI runs this packaging smoke before the integration test, so the fake-VPS image cannot mask missing runtime tools.
 
 ## Continuous integration and releases
 
@@ -42,11 +42,11 @@ Published images are `ghcr.io/wpelevator/tug`. To test an unreleased CLI against
 
 `docker-compose.yml` defines:
 
-- `control`: the control plane on its single mTLS port `8443`, with SQLite, the master key, the private CA and saved image archives in a named volume, plus the Docker socket for builds. It requires `TUG_PUBLIC_URL`, the HTTPS origin clients connect to.
+- `control`: the control plane on its single mTLS port `8443`, with SQLite, the master key, the private CA and saved image archives in a named volume, plus the Docker socket for builds. It requires `TUG_ADVERTISE_URL`, the HTTPS origin clients connect to.
 - `agent`: an optional profile service (applying nothing, `TUG_APPLY=false`); run it with `--profile agent` once you have an enrollment credential for it.
 
 ```bash
-export TUG_PUBLIC_URL=https://localhost:8443
+export TUG_ADVERTISE_URL=https://localhost:8443
 docker compose up --build control
 # issue the root operator credential on the control-plane host (fresh state only):
 docker compose exec control node dist/main.js control issue-credential --name root --role admin > tug-root.credential.json
@@ -61,7 +61,7 @@ Control does not print or store a credential on startup; `issue-credential` writ
 ## Host mode
 
 ```bash
-export TUG_PUBLIC_URL=https://localhost:8443
+export TUG_ADVERTISE_URL=https://localhost:8443
 npm run start:control
 node src/main.ts control issue-credential --name root --role admin > tug-root.credential.json
 node src/cli.ts init tug-root.credential.json

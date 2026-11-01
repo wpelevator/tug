@@ -7,7 +7,7 @@ CLI options override environment variables, which override the config files and 
 | Variable | Purpose |
 |---|---|
 | `TUG_CONFIG` | Path to the CLI config file (default: `tug.yml`, `tug.yaml`, `tug.json` or `.tug.json` in the current directory). |
-| `TUG_CONTROL_URL` | Connect target for the control API (an `https://` URL; for example a tunnel). The credential's public URL is still the verified name; overrides the config file. |
+| `TUG_CONTROL_URL` | Connect target for the control API (an `https://` URL; for example a tunnel). The server is verified by its generated control name regardless; overrides the config file and the credential's default address. |
 | `TUG_PROJECT` | Default project; overrides the config file. |
 | `TUG_CREDENTIAL` | Encoded operator credential (for CI). Conflicts with `TUG_CREDENTIAL_FILE`; overrides the overlay. |
 | `TUG_CREDENTIAL_FILE` | Path of a credential file; overrides the `credential` path in the untracked overlay. |
@@ -17,7 +17,7 @@ CLI options override environment variables, which override the config files and 
 | Variable | Default | Purpose |
 |---|---|---|
 | `PORT` | `8443` | The single mTLS port. |
-| `TUG_PUBLIC_URL` | required | Credential-free `https://` origin clients connect to, including the port. Its host becomes the server certificate's primary DNS/IP SAN. |
+| `TUG_ADVERTISE_URL` | required | Credential-free `https://` origin clients connect to by default, including the port. It is written into credentials and its host is added to the server certificate, but clients verify the generated control name, not this address. |
 | `TUG_EXTRA_SANS` | unset | Comma-separated extra DNS names or IPs for the server certificate. |
 | `TUG_RENEW_MIN_INTERVAL_MS` | `3600000` | Minimum time between certificate renewals per node. |
 | `TUG_DATA_DIR` | `./data` | SQLite database, master key, `pki/` (CA and server certificate), image archives, build contexts and backups. |
@@ -39,7 +39,7 @@ CLI options override environment variables, which override the config files and 
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `TUG_CONTROL_URL` | unset | Connect-only override of the control address (for example a private endpoint); the certificate is verified against the credential's public URL. |
+| `TUG_CONTROL_URL` | unset | Connect-only override of the control address (for example a private endpoint); the server is verified by its generated control name. |
 | `TUG_JOIN_KEY` / `TUG_JOIN_KEY_FILE` | unset | Join key (or a `0600` file holding it) used only when the node has no identity yet; ignored once `agent.json` exists. |
 | `TUG_NODE_NAME` | hostname | Node name when not bound by the enrollment key. |
 | `TUG_NODE_ADDRESS`, `TUG_NODE_PUBLIC_ADDRESS` | unset | Addresses reported at enrollment. |

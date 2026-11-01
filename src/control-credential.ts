@@ -28,14 +28,14 @@ export function parseIssueArgs(argv: string[]): IssueArgs {
  */
 export async function issueHostCredential(args: IssueArgs): Promise<string> {
   const dataDir = process.env.TUG_DATA_DIR || './data';
-  const publicUrl = process.env.TUG_PUBLIC_URL;
-  if (!publicUrl) throw new Error('TUG_PUBLIC_URL is required');
+  const advertiseUrl = process.env.TUG_ADVERTISE_URL;
+  if (!advertiseUrl) throw new Error('TUG_ADVERTISE_URL is required');
   const db = await openDb(path.join(dataDir, 'tug.db'));
   try {
     const fresh = !db.get('SELECT 1 FROM operator_credentials') && !db.get('SELECT 1 FROM nodes');
     const pki = await Pki.load(path.join(dataDir, 'pki'), fresh);
     const request = parseCredentialRequest({ name: args.name, role: args.role });
-    const created = await createCredential(db, pki, new URL(publicUrl).origin, request, 'host', {
+    const created = await createCredential(db, pki, new URL(advertiseUrl).origin, request, 'host', {
       replace: args.replace,
     });
     if (args.replace)

@@ -13,6 +13,7 @@ import {
   BACKDATE_MS,
   certKeyHash,
   clientTlsOptions,
+  controlNameFromCa,
   createCsr,
   decodeCredential,
   encodeCredential,
@@ -274,23 +275,64 @@ test('mTLS: session resumption is refused so every connection presents its certi
   }
 });
 
-test('mTLS: connect target may differ from the public name and is still verified', async () => {
+test('mTLS: clients verify the generated control name, so the address in a credential never matters', async () => {
   const pki = await Pki.load(await tmp(), true);
-  const { srv, port } = await mtlsServer(pki, serverNames('https://control.example:8443'));
+  assert.match(
+    pki.controlName,
+    /^control-[0-9a-f]{12}\.tug$/,
+    'the name is generated from the CA key',
+  );
+  assert.equal(
+    controlNameFromCa(pki.caPem),
+    pki.controlName,
+    'clients recompute the same name from the CA',
+  );
+  const { srv, port } = await mtlsServer(pki, serverNames('https://old-address.example:8443'));
   try {
     const client = await pki.issueClient(
       identityUri('operator', 'o1'),
       86_400_000,
-      'https://control.example:8443',
+      'https://old-address.example:8443',
     );
     (await connect({ port, ...clientTlsOptions(client.credential) })).destroy();
+    (
+      await connect({
+        port,
+        ...clientTlsOptions({ ...client.credential, url: 'https://moved.example:9443' }),
+      })
+    ).destroy();
+  } finally {
+    srv.close();
+  }
+});
+
+test('mTLS: a server certificate without the control name is refused, even for the right address', async () => {
+  const pki = await Pki.load(await tmp(), true);
+  const keys = await generateKeyPair();
+  const impostor = await pki.signLeaf({
+    publicKey: keys.publicKey,
+    kind: 'server',
+    names: { dns: ['localhost'], ip: ['127.0.0.1'] },
+    lifetimeMs: 86_400_000,
+  });
+  const srv = https.createServer(
+    serverTlsOptions({ cert: impostor.cert, key: keys.privateKeyPem, ca: pki.caPem }),
+    (_req, res) => res.end('ok'),
+  );
+  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+  try {
+    const client = await pki.issueClient(
+      identityUri('operator', 'o1'),
+      86_400_000,
+      'https://localhost:1',
+    );
     await assert.rejects(
       connect({
-        port,
-        ...clientTlsOptions({ ...client.credential, url: 'https://wrong.example:8443' }),
+        port: (srv.address() as AddressInfo).port,
+        ...clientTlsOptions(client.credential),
       }),
       /./,
-      'a wrong public name must fail verification even through a tunnel',
+      'a certificate that does not carry the control name must fail verification',
     );
   } finally {
     srv.close();
