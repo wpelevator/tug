@@ -202,6 +202,10 @@ const SAMPLES: Record<string, { path: string; body?: unknown }> = {
   'GET /api/v1/secrets': { path: '/api/v1/secrets' },
   'POST /api/v1/backups/run': { path: '/api/v1/backups/run', body: { project: 'site' } },
   'GET /api/v1/backups': { path: '/api/v1/backups' },
+  'POST /api/v1/restores': { path: '/api/v1/restores', body: { project: 'site', target: 'x:y' } },
+  'GET /api/v1/restores': { path: '/api/v1/restores' },
+  'POST /api/v1/restores/:id/release': { path: '/api/v1/restores/rst_x/release' },
+  'POST /api/v1/restores/:id/resume': { path: '/api/v1/restores/rst_x/resume' },
   'GET /api/v1/backup/destination': { path: '/api/v1/backup/destination' },
   'POST /api/v1/backup/destination': {
     path: '/api/v1/backup/destination',

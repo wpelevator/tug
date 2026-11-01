@@ -748,6 +748,162 @@ program
         `${r.finished_at ?? r.queued_at}\t${r.target}\t${r.trigger}\t${r.state}\t${r.snapshot_id?.slice(0, 8) ?? '-'}\t${formatBytes(r.size_bytes)}${r.error ? `\t${r.error}` : ''}`,
       );
   });
+interface RestorePlanView {
+  target: string;
+  node: string;
+  snapshotId: string;
+  snapshotTime: string | null;
+  mode: string;
+  scratchVolume?: string;
+  writers: string[];
+  safetyBackup: boolean;
+}
+interface RestoreRecord {
+  id: string;
+  target: string;
+  state: string;
+  mode: string;
+  snapshot_id: string;
+  scratch_volume: string | null;
+  error: string | null;
+  started_at: string | null;
+}
+
+program
+  .command('restore <target>')
+  .description(
+    'restore a service or volume from a backup. Without --confirm it only prints the plan. An in-place restore locks the project, stops the services that write to the target, takes a safety backup, restores, then starts them again',
+  )
+  .option('--from <id>', 'backup run id, restic snapshot id, or latest', 'latest')
+  .option(
+    '--scratch',
+    'restore a volume into a new volume next to the live one, touching nothing live',
+  )
+  .option(
+    '--no-safety-backup',
+    'skip the backup of the current data taken before an in-place restore',
+  )
+  .option(
+    '--writers <service>',
+    'service to stop during the restore, instead of discovering them (repeatable)',
+    collect,
+    [],
+  )
+  .option('--no-writers', 'restore without stopping any service')
+  .option('--confirm', 'perform the restore')
+  .option('--timeout <seconds>', 'give up waiting after this many seconds', '3600')
+  .action(
+    async (
+      target: string,
+      o: {
+        from: string;
+        scratch?: boolean;
+        safetyBackup: boolean;
+        writers: string[] | false;
+        confirm?: boolean;
+        timeout: string;
+      },
+    ) => {
+      const project = (await loadCfg()).project || 'site';
+      const explicit = Array.isArray(o.writers) && o.writers.length > 0 ? o.writers : undefined;
+      const result = await request<{
+        confirmed: boolean;
+        plan: RestorePlanView;
+        restoreId?: string;
+      }>('POST', '/api/v1/restores', {
+        project,
+        target,
+        from: o.from,
+        scratch: o.scratch === true,
+        safetyBackup: o.safetyBackup,
+        writers: explicit,
+        noWriters: o.writers === false,
+        confirm: o.confirm === true,
+      });
+      const plan = result.plan;
+      console.log(`target:   ${plan.target} on ${plan.node}`);
+      console.log(
+        `snapshot: ${plan.snapshotId}${plan.snapshotTime ? ` (${plan.snapshotTime})` : ''}`,
+      );
+      console.log(
+        `mode:     ${plan.mode}${plan.scratchVolume ? ` into new volume ${plan.scratchVolume}` : ''}`,
+      );
+      if (plan.mode === 'in-place') {
+        console.log(`stops:    ${plan.writers.length ? plan.writers.join(', ') : 'nothing'}`);
+        console.log(
+          `safety:   ${plan.safetyBackup ? 'a backup of the current data is taken first' : 'none (--no-safety-backup)'}`,
+        );
+      }
+      if (!result.confirmed) {
+        console.log('\nNothing was changed. Run again with --confirm to restore.');
+        return;
+      }
+      const deadline = Date.now() + Number(o.timeout) * 1000;
+      for (;;) {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        const { restores } = await request<{ restores: RestoreRecord[] }>(
+          'GET',
+          `/api/v1/restores?project=${encodeURIComponent(project)}`,
+        );
+        const restore = restores.find((item) => item.id === result.restoreId);
+        if (restore?.state === 'succeeded') {
+          console.log(
+            `restore ${restore.id} completed${restore.scratch_volume ? `; files are in volume ${restore.scratch_volume}` : ''}`,
+          );
+          return;
+        }
+        if (restore && ['failed', 'interrupted', 'released'].includes(restore.state)) {
+          console.error(`restore ${restore.id} ${restore.state}: ${restore.error ?? ''}`);
+          if (restore.state === 'interrupted')
+            console.error(
+              `the services stay stopped; run tug restore-resume ${restore.id} to try again or tug restore-release ${restore.id} to start them (data may be partly restored)`,
+            );
+          process.exitCode = 1;
+          return;
+        }
+        if (Date.now() > deadline) {
+          console.error(
+            `timed out waiting; restore ${result.restoreId} continues on control (tug restore-list)`,
+          );
+          process.exitCode = 1;
+          return;
+        }
+      }
+    },
+  );
+program
+  .command('restore-list')
+  .description('show recent restores and their state')
+  .action(async () => {
+    const project = (await loadCfg()).project || 'site';
+    const { restores } = await request<{ restores: RestoreRecord[] }>(
+      'GET',
+      `/api/v1/restores?project=${encodeURIComponent(project)}`,
+    );
+    if (!restores.length) console.log('no restores');
+    for (const r of restores)
+      console.log(
+        `${r.started_at}\t${r.id}\t${r.target}\t${r.mode}\t${r.state}\t${r.snapshot_id.slice(0, 8)}${r.error ? `\t${r.error}` : ''}`,
+      );
+  });
+program
+  .command('restore-resume <id>')
+  .description('run an interrupted restore again; the stopped services stay stopped meanwhile')
+  .action(async (id: string) =>
+    console.log(
+      JSON.stringify(await request('POST', `/api/v1/restores/${encodeURIComponent(id)}/resume`)),
+    ),
+  );
+program
+  .command('restore-release <id>')
+  .description(
+    'start the services an interrupted restore stopped and unlock the project; the data may be partly restored',
+  )
+  .action(async (id: string) =>
+    console.log(
+      JSON.stringify(await request('POST', `/api/v1/restores/${encodeURIComponent(id)}/release`)),
+    ),
+  );
 program
   .command('backup-destination-set <url>')
   .description(

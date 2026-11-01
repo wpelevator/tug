@@ -158,7 +158,16 @@ test('backup commands are listed in help', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-backup-help-'));
   const env = { ...process.env, TUG_CONFIG: path.join(dir, 'missing.json') };
   const help = (await exec(process.execPath, [entry, '--help'], { env, cwd: dir })).stdout;
-  for (const name of ['backup-run', 'backup-list', 'backup-destination-set', 'backup-key'])
+  for (const name of [
+    'backup-run',
+    'backup-list',
+    'backup-destination-set',
+    'backup-key',
+    'restore',
+    'restore-list',
+    'restore-resume',
+    'restore-release',
+  ])
     assert.ok(help.includes(name), `help should list ${name}`);
 });
 

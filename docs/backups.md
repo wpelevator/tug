@@ -167,7 +167,26 @@ backup:
 
 `tug events` shows `backup.completed`, `backup.failed`, `backup.missed`, `backup.stale` and `backup.no_destination`. A backup is `missed` when its node did not pick it up before its deadline (`node_offline`) or when control was not running at the slot: a week of downtime produces one missed event and one catch-up run per target, not a burst. A failed scheduled run is retried once after ten minutes. A target with no success for two periods raises `backup.stale` once a day, which catches a destination key that has quietly stopped working. While control is down no backup starts, which is the price of one scheduler; running jobs finish and report when control returns.
 
-`tug backup-run` takes a backup now and `tug backup-list` shows the catalog ([CLI](cli.md#backups)). Restores are not implemented yet: use restic against the project's repository (`tug backup-key` prints its location and password).
+`tug backup-run` takes a backup now and `tug backup-list` shows the catalog ([CLI](cli.md#backups)). ### Restore
+
+```bash
+tug restore db                       # prints the plan, changes nothing
+tug restore db --confirm             # latest backup of the db service
+tug restore uploads --scratch --confirm   # files into a new volume, touching nothing live
+```
+
+Restores are as generic as backups. A service is restored by running its `x-tug.backup.restore` command in the running container with the stored file on standard input (`restic dump` piped in), so a MariaDB service uses `restore: sh -c 'mariadb -uroot -p"$MARIADB_ROOT_PASSWORD"'`. A volume is emptied and filled from the snapshot, or restored into a new volume with `--scratch`. A service without a `restore` command is refused rather than guessed at.
+
+An in-place restore is deliberately careful:
+
+1. It **locks the project**, so a deploy, rollback or secret change gets a clear refusal while it runs.
+2. It **stops the writers**: the `writers` you named, or discovered from `depends_on` (for a service) or volume mounts (for a volume), including everything that depends on them. If none are found it refuses unless you pass `--writers` or `--no-writers`, because an app that reaches the database without `depends_on` is the hole in discovery and the plan makes you look.
+3. It takes a **safety backup** of the current data, tagged `trigger:pre-restore` and exempt from retention (skip with `--no-safety-backup`). If that fails, nothing has changed: the writers start again and the lock is dropped.
+4. It restores, then starts the writers and unlocks.
+
+Only a snapshot this target produced can be restored into it (its `project:` and `target:` tags are checked). If the restore itself fails, the writers stay stopped and the project locked, because a half-restored database serving traffic is worse than an outage. The restore is `interrupted`; `tug restore-resume <id>` tries again and `tug restore-release <id>` starts the services anyway. Scheduled backups of a target are skipped while it is being restored. A restore is recorded with `restore.started`, `restore.completed`, `restore.failed` and `restore.released` events.
+
+A scratch restore of a volume is also the restore drill: it proves a backup can be read without touching anything live. Databases are the same drill by hand: `restic dump <snapshot> wordpress.sql` into a throwaway container.
 
 ## Control plane backup
 

@@ -44,6 +44,10 @@ The project column says how a scoped token's allowed projects are checked: the p
 | `GET /api/v1/commands/:id` | `deploy` | Command's project; commands without a project (diagnostics, key rotation) need `admin` |
 | `POST /api/v1/backups/run` | `deploy` | Body `project` |
 | `GET /api/v1/backups` | `read` | Query `project` |
+| `POST /api/v1/restores` | `admin` | Body `project`; without `confirm` it only returns the plan |
+| `GET /api/v1/restores` | `read` | Query `project` |
+| `POST /api/v1/restores/:id/release` | `admin` | Drops the holds of an interrupted restore |
+| `POST /api/v1/restores/:id/resume` | `admin` | Runs an interrupted restore again |
 | `GET /api/v1/backup/destination` | `admin` | Control-wide; URL and variable names, never values |
 | `POST /api/v1/backup/destination` | `admin` | Control-wide |
 | `DELETE /api/v1/backup/destination` | `admin` | Control-wide |

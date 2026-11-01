@@ -161,7 +161,13 @@ test('a due slot queues exactly one backup command, and repeated ticks do not qu
   );
   assert.deepEqual(
     job.payload.command,
-    { service: 'db', argv: ['dump-it'], filename: 'db.sql', verify: 'done' },
+    {
+      service: 'db',
+      argv: ['dump-it'],
+      filename: 'db.sql',
+      verify: 'done',
+      restoreArgv: undefined,
+    },
     'the job carries the command to run in the service container',
   );
   assert.ok(

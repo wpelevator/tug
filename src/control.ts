@@ -73,6 +73,7 @@ import {
   redactSecrets,
 } from './backup-destination.ts';
 import { createBackupService } from './backup-scheduler.ts';
+import { createRestoreService } from './backup-restore.ts';
 import {
   AUTO_ROLLBACK_ACTOR,
   ROUTE_ROLES,
@@ -1489,10 +1490,13 @@ export async function createApp(
     redact: (text) => redactSecrets(text, Object.values(backupEnv())),
   });
   app.locals.backups = backups;
+  const restores = createRestoreService({ db, backups, wake: (project) => wakeAll(project) });
+  app.locals.restores = restores;
   const backupTickMs = Number(process.env.TUG_BACKUP_TICK_MS) || 30_000;
   const backupTimer = setInterval(() => {
     try {
       backups.tick();
+      restores.advance();
     } catch (e) {
       console.error(`backup scheduler failed: ${errMessage(e)}`);
     }
@@ -1500,6 +1504,7 @@ export async function createApp(
   backupTimer.unref();
   try {
     backups.tick(); // catch up on slots missed while control was down
+    restores.advance(); // re-adopt unfinished restores and keep their projects locked
   } catch (e) {
     console.error(`backup scheduler failed: ${errMessage(e)}`);
   }
@@ -1518,6 +1523,50 @@ export async function createApp(
       return res.status(result.errors.length ? 409 : 404).json({
         error: result.errors.join('; ') || `project ${project} has no backup targets`,
       });
+    res.json(result);
+  });
+  api('post', '/api/v1/restores', bodyProject, async (req, res) => {
+    const body = req.body ?? {};
+    const project = String(body.project || 'site');
+    if (typeof body.target !== 'string' || !body.target)
+      return res
+        .status(400)
+        .json({ error: 'target is required, such as service:db or volume:uploads' });
+    const target = body.target.includes(':')
+      ? body.target
+      : (db.get<{ target: string }>(
+          'SELECT target FROM backup_schedules WHERE project_id=? AND enabled=1 AND target LIKE ?',
+          project,
+          `%:${body.target}`,
+        )?.target ?? body.target);
+    const request = {
+      project,
+      target,
+      from: typeof body.from === 'string' ? body.from : undefined,
+      scratch: body.scratch === true,
+      safetyBackup: body.safetyBackup !== false,
+      writers: Array.isArray(body.writers) ? body.writers.map(String) : undefined,
+      noWriters: body.noWriters === true,
+      actor: req.actor!.name,
+    };
+    const plan = restores.plan(request);
+    if ('error' in plan) return res.status(plan.status).json({ error: plan.error });
+    if (body.confirm !== true) return res.json({ confirmed: false, plan });
+    const started = restores.start(request, plan);
+    if ('error' in started) return res.status(started.status).json({ error: started.error });
+    res.json({ confirmed: true, plan, ...started });
+  });
+  api('get', '/api/v1/restores', queryProject, async (req, res) =>
+    res.json({ restores: restores.list(String(req.query.project || 'site')) }),
+  );
+  api('post', '/api/v1/restores/:id/release', null, async (req, res) => {
+    const result = restores.releaseInterrupted(req.params.id);
+    if ('error' in result) return res.status(result.status).json({ error: result.error });
+    res.json(result);
+  });
+  api('post', '/api/v1/restores/:id/resume', null, async (req, res) => {
+    const result = restores.resume(req.params.id);
+    if ('error' in result) return res.status(result.status).json({ error: result.error });
     res.json(result);
   });
   api('get', '/api/v1/backups', queryProject, async (req, res) => {
@@ -2731,6 +2780,8 @@ export async function createApp(
     const network = networkFor(node);
     if (network) work.network = network;
     work.ports = portBindingFor(node, desiredStates);
+    const holds = restores.holds();
+    if (Object.keys(holds).length) work.holds = holds;
     if (SERVICE_DNS) {
       const all = endpointsFor(allStates);
       work.serviceEndpoints = Object.fromEntries(
@@ -2777,6 +2828,11 @@ export async function createApp(
         req.node!.id,
       );
     db.run('UPDATE nodes SET last_seen_at=?,status=? WHERE id=?', ts, 'online', req.node!.id);
+    try {
+      restores.advance();
+    } catch (e) {
+      console.error(`restore failed to advance: ${errMessage(e)}`);
+    }
     const nextEndpointSnapshot = JSON.stringify(endpointsFor(currentDesiredStates()));
     if (nextEndpointSnapshot !== endpointSnapshot) {
       endpointSnapshot = nextEndpointSnapshot;

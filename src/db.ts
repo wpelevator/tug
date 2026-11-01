@@ -133,6 +133,26 @@ export interface BackupRunRow {
   metadata_json: string | null;
 }
 
+export interface RestoreRunRow {
+  id: string;
+  project_id: string;
+  target: string;
+  node_id: string | null;
+  snapshot_id: string;
+  mode: 'in-place' | 'scratch';
+  scratch_volume: string | null;
+  safety_backup: number;
+  safety_run_id: string | null;
+  writers_json: string;
+  state: string;
+  command_id: string | null;
+  actor: string | null;
+  started_at: string | null;
+  state_changed_at: string | null;
+  finished_at: string | null;
+  error: string | null;
+}
+
 export interface BackupDestinationRow {
   id: 'default';
   url: string;
@@ -255,6 +275,8 @@ CREATE TABLE IF NOT EXISTS locks(name TEXT PRIMARY KEY, owner TEXT, expires_at T
 CREATE TABLE IF NOT EXISTS backup_destination(id TEXT PRIMARY KEY CHECK(id='default'), url TEXT NOT NULL, env_names_json TEXT NOT NULL, checked_at TEXT, check_result_json TEXT, updated_at TEXT);
 CREATE TABLE IF NOT EXISTS backup_schedules(id TEXT PRIMARY KEY, project_id TEXT NOT NULL, target TEXT NOT NULL, type TEXT NOT NULL, node_id TEXT, config_json TEXT NOT NULL, schedule TEXT NOT NULL, jitter_seconds INTEGER NOT NULL, next_run_at TEXT NOT NULL, last_run_at TEXT, last_success_at TEXT, last_status TEXT, stale_notified_at TEXT, deployment_id TEXT, enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT, updated_at TEXT, UNIQUE(project_id, target));
 CREATE TABLE IF NOT EXISTS backup_runs(id TEXT PRIMARY KEY, schedule_id TEXT, project_id TEXT NOT NULL, target TEXT NOT NULL, type TEXT NOT NULL, node_id TEXT, command_id TEXT, trigger TEXT NOT NULL, state TEXT NOT NULL, scheduled_for TEXT, queued_at TEXT, started_at TEXT, finished_at TEXT, snapshot_id TEXT, size_bytes INTEGER, added_bytes INTEGER, duration_ms INTEGER, restic_version TEXT, error TEXT, actor TEXT, deployment_version TEXT, metadata_json TEXT);
+CREATE TABLE IF NOT EXISTS restore_runs(id TEXT PRIMARY KEY, project_id TEXT NOT NULL, target TEXT NOT NULL, node_id TEXT, snapshot_id TEXT NOT NULL, mode TEXT NOT NULL, scratch_volume TEXT, safety_backup INTEGER NOT NULL DEFAULT 1, safety_run_id TEXT, writers_json TEXT NOT NULL DEFAULT '[]', state TEXT NOT NULL, command_id TEXT, actor TEXT, started_at TEXT, state_changed_at TEXT, finished_at TEXT, error TEXT);
+CREATE TABLE IF NOT EXISTS service_holds(project_id TEXT NOT NULL, service TEXT NOT NULL, reason TEXT NOT NULL, restore_id TEXT, created_at TEXT, PRIMARY KEY(project_id, service));
 CREATE UNIQUE INDEX IF NOT EXISTS backup_runs_slot ON backup_runs(schedule_id, scheduled_for) WHERE trigger='schedule';
 CREATE INDEX IF NOT EXISTS backup_runs_target ON backup_runs(project_id, target, finished_at);
 `);

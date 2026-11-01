@@ -167,6 +167,7 @@ The value is a cron string, `true` (a volume, with everything from the project d
 | `timeout` | both | Hard limit for a run, `1m` to `24h` | `2h` |
 | `writers` | both | Services to hold during a restore | discovered from `depends_on` and volume mounts |
 | `command` | service | What to run in the container; its output is the backup | required |
+| `restore` | service | What to run in the container to load a backup back; the stored file arrives on its standard input | none (the service cannot be restored by Tug) |
 | `filename` | service | Name of the file inside the snapshot | `<service>.out` |
 | `verify` | service | Text that must appear in the last 4 KiB of output | none |
 | `exclude` | volume | restic exclude patterns | none |

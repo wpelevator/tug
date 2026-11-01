@@ -256,7 +256,7 @@ export function createBackupService(deps: BackupServiceDeps) {
     schedule: BackupScheduleRow,
     trigger: RunTrigger,
     scheduledFor: string | null,
-    state: 'queued' | 'missed',
+    state: 'queued' | 'missed' | 'cancelled',
     extra: {
       error?: string;
       actor?: string;
@@ -281,7 +281,7 @@ export function createBackupService(deps: BackupServiceDeps) {
         state,
         scheduledFor,
         stamp(),
-        state === 'missed' ? stamp() : null,
+        state === 'queued' ? null : stamp(),
         extra.error ?? null,
         extra.actor ?? null,
         null,
@@ -320,6 +320,18 @@ export function createBackupService(deps: BackupServiceDeps) {
         );
       return { error };
     };
+    // A restore rewrites this target's data; a backup taken mid-restore would capture a half-restored state.
+    if (
+      trigger !== 'pre-restore' &&
+      db.get(
+        "SELECT 1 FROM restore_runs WHERE project_id=? AND target=? AND mode='in-place' AND state NOT IN ('succeeded','failed','released')",
+        schedule.project_id,
+        schedule.target,
+      )
+    ) {
+      insertRun(schedule, trigger, scheduledFor, 'cancelled', { error: 'restore_in_progress' });
+      return { error: 'a restore of this target is in progress' };
+    }
     if (!destination()) {
       const runId = insertRun(schedule, trigger, scheduledFor, 'missed', {
         error: 'no backup destination is configured',
@@ -675,7 +687,41 @@ export function createBackupService(deps: BackupServiceDeps) {
     return { targets, runs };
   }
 
-  return { sync, tick, onHeartbeat, onResult, runNow, list };
+  /** Queues the `backup.restore` job for a target on its node. */
+  function queueRestore(
+    project: string,
+    target: string,
+    restore: NonNullable<BackupJobPayload['restore']>,
+    runId: string,
+  ): { commandId: string; nodeId: string } | { error: string } {
+    const schedule = db.get<BackupScheduleRow>(
+      'SELECT * FROM backup_schedules WHERE project_id=? AND target=? AND enabled=1',
+      project,
+      target,
+    );
+    const current = deployed(project)[0];
+    if (!schedule || !current)
+      return { error: `${target} is not a backup target of project ${project}` };
+    if (!destination()) return { error: 'no backup destination is configured' };
+    const config = parse<ResolvedBackup>(schedule.config_json, {} as ResolvedBackup);
+    const node = targetNode(config, current.desired);
+    if (!node || !schedule.node_id)
+      return { error: 'the target is not placed on exactly one node' };
+    const payload = buildPayload(schedule, runId, 'manual', current.desired, node);
+    payload.restore = restore;
+    delete payload.retention;
+    const deadline = new Date(clock().getTime() + (config.timeoutSec + 10 * 60) * 1000);
+    const commandId = deps.queueCommand(
+      schedule.node_id,
+      project,
+      'backup.restore',
+      payload as unknown as Record<string, unknown>,
+      deadline.toISOString(),
+    );
+    return { commandId, nodeId: schedule.node_id };
+  }
+
+  return { sync, tick, onHeartbeat, onResult, runNow, list, queueRestore };
 }
 
 export type BackupService = ReturnType<typeof createBackupService>;
