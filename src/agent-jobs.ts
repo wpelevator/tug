@@ -150,7 +150,11 @@ export class JobRunner {
             if (bytes !== undefined) status.bytes = bytes;
           },
         },
-        command.type === 'backup.check' ? 'backup.check' : 'backup.run',
+        command.type === 'backup.check'
+          ? 'backup.check'
+          : command.type === 'backup.restore'
+            ? 'backup.restore'
+            : 'backup.run',
       );
       this.results.push({ commandId: command.id, state: 'succeeded', result });
     } catch (error) {

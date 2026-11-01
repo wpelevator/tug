@@ -240,6 +240,7 @@ export function createBackupService(deps: BackupServiceDeps) {
         argv: config.command ?? [],
         filename: config.filename ?? `${config.name}.out`,
         verify: config.verify,
+        restoreArgv: config.restore,
       };
     } else {
       payload.volume = {

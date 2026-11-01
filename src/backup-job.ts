@@ -171,7 +171,7 @@ export async function runBackupJob(
   payload: BackupJobPayload,
   commandId: string,
   ctx: JobContext,
-  kind: 'backup.run' | 'backup.check' = 'backup.run',
+  kind: 'backup.run' | 'backup.check' | 'backup.restore' = 'backup.run',
 ): Promise<BackupJobResult> {
   const started = Date.now();
   const { docker, credentials } = ctx;
@@ -199,12 +199,22 @@ export async function runBackupJob(
     if (payload.repository.startsWith('/'))
       binds.push(`${payload.repository}:${payload.repository}`);
     if (payload.volume) {
-      // Docker would silently create an empty volume for a missing name and the backup would succeed with nothing in it.
-      if (!(await docker.inspectVolume(payload.volume.dockerVolume)))
+      const scratch = kind === 'backup.restore' && payload.restore?.mode === 'scratch';
+      const dockerVolume = scratch
+        ? (payload.restore?.scratchVolume ?? '')
+        : payload.volume.dockerVolume;
+      if (scratch) {
+        if (!dockerVolume) throw new JobError('a scratch restore needs a scratch volume name');
+        if (!(await docker.inspectVolume(dockerVolume)))
+          await docker.createVolume(dockerVolume, {
+            labels: { 'tug.project': payload.project, 'tug.restore': payload.runId },
+          });
+      } else if (!(await docker.inspectVolume(dockerVolume)))
+        // Docker would silently create an empty volume for a missing name and the backup would succeed with nothing in it.
         throw new JobError(
-          `volume ${payload.volume.dockerVolume} does not exist on this node; a volume is created when a service that uses it is placed here`,
+          `volume ${dockerVolume} does not exist on this node; a volume is created when a service that uses it is placed here`,
         );
-      binds.push(`${payload.volume.dockerVolume}:/data:ro`);
+      binds.push(`${dockerVolume}:/data${kind === 'backup.restore' ? '' : ':ro'}`);
     }
     const restic = await helper('restic', {
       Image: payload.resticImage,
@@ -229,6 +239,7 @@ export async function runBackupJob(
     if (probe.code !== 0) {
       // Only a missing repository is initialized; a wrong password or an unreachable bucket must fail the job.
       if (
+        kind === 'backup.restore' ||
         !/Is there a repository at the following location|does not exist|no such file/i.test(
           probe.err,
         )
@@ -245,6 +256,75 @@ export async function runBackupJob(
         resticVersion: version,
         repository,
       };
+
+    if (kind === 'backup.restore') {
+      const restore = payload.restore;
+      if (!restore) throw new JobError('the restore job names no snapshot');
+      phase('restoring');
+      // Only snapshots this target produced may be restored into it.
+      const listed = await exec(['restic', 'snapshots', restore.snapshotId, '--json']);
+      const snapshot = (() => {
+        try {
+          return (JSON.parse(listed.out) as { tags?: string[] }[])[0];
+        } catch {
+          return undefined;
+        }
+      })();
+      if (listed.code !== 0 || !snapshot)
+        throw fail(`snapshot ${restore.snapshotId} was not found in the repository`, listed.err);
+      for (const tag of [`project:${payload.project}`, `target:${payload.target}`])
+        if (!snapshot.tags?.includes(tag))
+          throw new JobError(
+            `snapshot ${restore.snapshotId} is not a ${payload.target} backup of project ${payload.project} (missing tag ${tag})`,
+          );
+      if (payload.command) {
+        const { service, filename, restoreArgv } = payload.command;
+        if (!restoreArgv)
+          throw new JobError(
+            `${service} has no x-tug.backup.restore command, so Tug does not know how to load the backup back`,
+          );
+        const running = (
+          await docker.listContainers({
+            label: [`${LABEL_PROJECT}=${payload.project}`, `${LABEL_SERVICE}=${service}`],
+          })
+        ).find((container) => container.State === 'running');
+        if (!running) throw new JobError(`service ${service} is not running on this node`);
+        const dump = await docker.execStart(restic, {
+          cmd: ['restic', 'dump', restore.snapshotId, filename],
+        });
+        const loader = await docker.execStart(running.Id, { cmd: restoreArgv, stdin: true });
+        const reading = collect(dump);
+        const loading = collect(loader);
+        dump.stdout.pipe(loader.stdin!);
+        const [read, loaded] = await Promise.all([reading, loading]);
+        if (read.code !== 0) throw fail('could not read the snapshot', read.err);
+        if (loaded.code !== 0)
+          throw fail(
+            `the restore command exited with code ${loaded.code}`,
+            loaded.err || loaded.out,
+          );
+      } else {
+        // Replace the volume's contents with the snapshot's; a scratch volume starts empty.
+        if (restore.mode === 'in-place') {
+          const clear = await exec(['find', '/data', '-mindepth', '1', '-delete']);
+          if (clear.code !== 0) throw fail('could not empty the volume', clear.err);
+        }
+        const result = await exec([
+          'restic',
+          'restore',
+          restore.snapshotId,
+          '--target',
+          '/',
+          '--verify',
+        ]);
+        if (result.code !== 0) throw fail('restic restore failed', result.err || result.out);
+      }
+      return {
+        runId: payload.runId,
+        durationMs: Date.now() - started,
+        resticVersion: version,
+      };
+    }
 
     let summary: Summary;
     if (payload.command) {

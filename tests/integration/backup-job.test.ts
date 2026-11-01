@@ -223,6 +223,120 @@ test(
       assert.match(files.stdout, /a\.jpg/, 'volume files are in the snapshot');
       assert.doesNotMatch(files.stdout, /cache\/x/, 'excluded paths are left out');
 
+      // ---- Restore: also generic, the operator supplies the command that loads the stored file back ----
+      const restoreCommand = {
+        ...service,
+        restoreArgv: ['sh', '-c', 'mariadb -uroot -p"$MARIADB_ROOT_PASSWORD"'],
+      };
+      const fresh = await runBackupJob(
+        base(repo, { command: service, retention: { last: 5 } }),
+        'cmd_fresh',
+        { docker: engine, credentials: credentials() },
+      );
+      const restorePayload = (extra: Partial<BackupJobPayload>) =>
+        base(repo, { ...extra, restore: { snapshotId: fresh.snapshotId!, mode: 'in-place' } });
+      sql('DELETE FROM posts; INSERT INTO posts VALUES (2,"damaged");');
+      await runBackupJob(
+        restorePayload({ command: restoreCommand }),
+        'cmd_restore',
+        {
+          docker: engine,
+          credentials: credentials(),
+        },
+        'backup.restore',
+      );
+      const rows = sql('SELECT title FROM posts').stdout;
+      assert.match(rows, /hello world/, 'the restore command loaded the snapshot back');
+      assert.doesNotMatch(rows, /damaged/, 'the damaged data was replaced by the dump');
+
+      await assert.rejects(
+        runBackupJob(
+          restorePayload({ command: service }),
+          'cmd_norestore',
+          {
+            docker: engine,
+            credentials: credentials(),
+          },
+          'backup.restore',
+        ),
+        /no x-tug\.backup\.restore command/,
+        'a target without a restore command cannot be restored',
+      );
+      await assert.rejects(
+        runBackupJob(
+          base(repo, {
+            target: 'volume:uploads',
+            type: 'volume',
+            volume: { name: 'uploads', dockerVolume: 'tug_bkjob_uploads' },
+            restore: { snapshotId: fresh.snapshotId!, mode: 'in-place' },
+          }),
+          'cmd_wrong',
+          { docker: engine, credentials: credentials() },
+          'backup.restore',
+        ),
+        /is not a volume:uploads backup/,
+        'a snapshot of another target is never restored into this one',
+      );
+
+      // Volume: change files, restore in place, then restore into a scratch volume.
+      docker(
+        'run',
+        '--rm',
+        '-v',
+        'tug_bkjob_uploads:/d',
+        'alpine',
+        'sh',
+        '-c',
+        'rm /d/a.jpg; echo new > /d/b.jpg',
+      );
+      const volumeRestore = (mode: 'in-place' | 'scratch', scratchVolume?: string) =>
+        base(repo, {
+          target: 'volume:uploads',
+          type: 'volume',
+          tags: ['tug', 'project:bkjob', 'target:volume:uploads'],
+          volume: { name: 'uploads', dockerVolume: 'tug_bkjob_uploads' },
+          restore: { snapshotId: volumeResult.snapshotId!, mode, scratchVolume },
+        });
+      await runBackupJob(
+        volumeRestore('in-place'),
+        'cmd_vrestore',
+        { docker: engine, credentials: credentials() },
+        'backup.restore',
+      );
+      const listing = docker(
+        'run',
+        '--rm',
+        '-v',
+        'tug_bkjob_uploads:/d',
+        'alpine',
+        'ls',
+        '/d',
+      ).stdout;
+      assert.match(listing, /a\.jpg/, 'the original file is back');
+      assert.doesNotMatch(
+        listing,
+        /b\.jpg/,
+        'files created after the backup are removed by an in-place restore',
+      );
+
+      docker('volume', 'rm', '-f', 'tug_bkjob_scratch');
+      await runBackupJob(
+        volumeRestore('scratch', 'tug_bkjob_scratch'),
+        'cmd_vscratch',
+        { docker: engine, credentials: credentials() },
+        'backup.restore',
+      );
+      assert.match(
+        docker('run', '--rm', '-v', 'tug_bkjob_scratch:/d', 'alpine', 'ls', '/d').stdout,
+        /a\.jpg/,
+        'a scratch restore materializes the files in a separate volume',
+      );
+      assert.match(
+        docker('run', '--rm', '-v', 'tug_bkjob_uploads:/d', 'alpine', 'ls', '/d').stdout,
+        /a\.jpg/,
+        'the live volume is untouched by a scratch restore',
+      );
+
       assert.equal(
         docker('ps', '-aq', '--filter', 'label=tug.job').stdout.trim(),
         '',
@@ -231,7 +345,7 @@ test(
     } finally {
       docker('rm', '-f', 'tug-bkjob-db');
       docker('network', 'rm', network);
-      docker('volume', 'rm', '-f', 'tug_bkjob_uploads');
+      docker('volume', 'rm', '-f', 'tug_bkjob_uploads', 'tug_bkjob_scratch');
       await fs.rm(dir, { recursive: true, force: true });
     }
   },

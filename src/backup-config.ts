@@ -23,6 +23,8 @@ export interface ResolvedBackup {
   timeoutSec: number;
   /** Service targets: the command run in the service's container, and the snapshot file it is stored as. */
   command?: string[];
+  /** Run in the service container to restore; the stored file arrives on its standard input. */
+  restore?: string[];
   filename?: string;
   verify?: string;
   /** Volume targets. */
@@ -40,7 +42,7 @@ const MAX_TIMEOUT_SEC = 24 * 3600;
 const MAX_JITTER_SEC = 3600;
 const RETENTION_KEYS = ['last', 'hourly', 'daily', 'weekly', 'monthly', 'yearly'] as const;
 const COMMON_KEYS = ['schedule', 'retention', 'jitter', 'timeout', 'writers'];
-const SERVICE_KEYS = [...COMMON_KEYS, 'command', 'filename', 'verify'];
+const SERVICE_KEYS = [...COMMON_KEYS, 'command', 'restore', 'filename', 'verify'];
 const VOLUME_KEYS = [...COMMON_KEYS, 'exclude'];
 const FILENAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 
@@ -184,7 +186,7 @@ export function resolveBackups(compose: ComposeFile, project = ''): Resolved {
       if (!allowed.includes(key))
         errors.push(
           `${label}.${key} is not supported${
-            key === 'command' || key === 'filename' || key === 'verify'
+            key === 'command' || key === 'restore' || key === 'filename' || key === 'verify'
               ? ' on a volume; a volume backup archives its files'
               : key === 'exclude'
                 ? ' on a service; it applies to volumes'
@@ -250,6 +252,9 @@ export function resolveBackups(compose: ComposeFile, project = ''): Resolved {
         `${label}.command is required: the command to run in the ${name} container, whose output is stored (see the recipes in docs/backups.md)`,
       );
     else if (!argv) errors.push(`${label}.command must be a non-empty string or list of strings`);
+    const restoreArgv = spec.restore === undefined ? undefined : commandArgv(spec.restore);
+    if (spec.restore !== undefined && !restoreArgv)
+      errors.push(`${label}.restore must be a non-empty string or list of strings`);
     if (
       spec.filename !== undefined &&
       (typeof spec.filename !== 'string' || !FILENAME_RE.test(spec.filename))
@@ -273,6 +278,7 @@ export function resolveBackups(compose: ComposeFile, project = ''): Resolved {
       type: 'command',
       ...base,
       command: argv,
+      restore: restoreArgv ?? undefined,
       filename: spec.filename ?? `${name}.out`,
       verify: spec.verify,
       writers: spec.writers,

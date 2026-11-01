@@ -58,6 +58,8 @@ export interface BackupSpec {
   timeout?: string | number;
   /** Services only: run in the service's container; its standard output is the backup. A string runs through `sh -c`. */
   command?: string | string[];
+  /** Services only: run in the service container to restore; the stored file arrives on its standard input. */
+  restore?: string | string[];
   /** Services only: name of the file inside the snapshot (default `<service>.out`). */
   filename?: string;
   /** Services only: text that must appear in the last 4 KiB of output, so a command cut short is not kept as a good backup. */
@@ -243,7 +245,14 @@ export interface BackupJobPayload {
   tags: string[];
   retention?: BackupRetention;
   /** Command targets: what to run in the service's container, and how to name and check its output. */
-  command?: { service: string; argv: string[]; filename: string; verify?: string };
+  command?: {
+    service: string;
+    argv: string[];
+    filename: string;
+    verify?: string;
+    /** Run in the service container with the snapshot's file on stdin when restoring. */
+    restoreArgv?: string[];
+  };
   /** Volume targets: the Docker volume to mount read-only; it must already exist on the node. */
   volume?: {
     name: string;
@@ -404,6 +413,8 @@ export interface WorkResponse {
   ingress?: IngressWork;
   /** Host addresses for published ports that name no host IP. */
   ports?: PortBinding;
+  /** Per project, services that must stay stopped because a restore is rewriting their data. */
+  holds?: Record<string, string[]>;
 }
 
 /**
@@ -483,7 +494,14 @@ export interface IngressStatus {
 // ---- POST /agent/v1/status ---------------------------------------------------------------------
 
 export type ProjectHealth = 'serving' | 'skipped' | 'failed';
-export type RolloutState = 'pending' | 'pulling' | 'starting' | 'health_checking' | 'serving';
+export type RolloutState =
+  | 'pending'
+  | 'pulling'
+  | 'starting'
+  | 'health_checking'
+  | 'serving'
+  /** Stopped on purpose while a restore rewrites its data. */
+  | 'held';
 
 export interface ServiceState {
   rolloutState: RolloutState;
