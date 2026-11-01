@@ -192,7 +192,7 @@ test('restic arguments carry the node as host, tags, retention and the stdin nam
     payload({
       type: 'volume',
       target: 'volume:uploads',
-      volume: { name: 'uploads', mount: { kind: 'volume', name: 'x' }, exclude: ['cache/'] },
+      volume: { name: 'uploads', dockerVolume: 'x', exclude: ['cache/'] },
     }),
   ).join(' ');
   assert.match(volume, /^backup \/data --exclude cache\/ --json/);
@@ -232,4 +232,28 @@ test('restic summaries and memory limits parse', () => {
   assert.equal(memoryBytes('512m'), 512 * 1024 * 1024);
   assert.equal(memoryBytes('2g'), 2 * 1024 ** 3);
   assert.throws(() => memoryBytes('lots'), /invalid memory limit/);
+});
+
+test('a volume backup fails when the volume does not exist on the node instead of backing up an empty one', async () => {
+  const docker = dockerWith(() => ({ code: 0 }));
+  const { jobs } = await runner(docker);
+  await jobs.start(
+    command(
+      'cmd_vol',
+      payload({
+        type: 'volume',
+        target: 'volume:uploads',
+        volume: { name: 'uploads', dockerVolume: 'tug_site_uploads' },
+      }),
+      'backup.run',
+    ),
+  );
+  await settle(jobs, 1);
+  const [result] = jobs.pending();
+  assert.equal(result.state, 'failed', 'a missing volume fails the job');
+  assert.match(
+    JSON.stringify(result.result),
+    /volume tug_site_uploads does not exist on this node/,
+    'the error says which volume is missing',
+  );
 });

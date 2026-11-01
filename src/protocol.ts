@@ -250,10 +250,10 @@ export interface BackupJobPayload {
     user: string;
     passwordSecret: string;
   };
-  /** Volume targets: the Docker volume (or an NFS exporter's directory) to mount read-only. */
+  /** Volume targets: the Docker volume to mount read-only; it must already exist on the node. */
   volume?: {
     name: string;
-    mount: { kind: 'volume'; name: string } | { kind: 'bind'; path: string };
+    dockerVolume: string;
     exclude?: string[];
   };
   limits: { memory: string; timeoutSec: number };

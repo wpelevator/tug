@@ -244,13 +244,9 @@ export function createBackupService(deps: BackupServiceDeps) {
         passwordSecret: config.passwordSecret ?? '',
       };
     } else {
-      const ext = desired.compose.volumes?.[config.name]?.['x-tug'];
-      const nfs = ext?.type === 'nfs';
       payload.volume = {
         name: config.name,
-        mount: nfs
-          ? { kind: 'bind', path: ext?.export || `/srv/tug/${config.name}` }
-          : { kind: 'volume', name: volumeName(schedule.project_id, config.name) },
+        dockerVolume: volumeName(schedule.project_id, config.name),
         exclude: config.exclude,
       };
     }

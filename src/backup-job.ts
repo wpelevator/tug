@@ -236,8 +236,12 @@ export async function runBackupJob(
     if (payload.repository.startsWith('/'))
       binds.push(`${payload.repository}:${payload.repository}`);
     if (payload.volume) {
-      const mount = payload.volume.mount;
-      binds.push(`${mount.kind === 'volume' ? mount.name : mount.path}:/data:ro`);
+      // Docker would silently create an empty volume for a missing name and the backup would succeed with nothing in it.
+      if (!(await docker.inspectVolume(payload.volume.dockerVolume)))
+        throw new JobError(
+          `volume ${payload.volume.dockerVolume} does not exist on this node; a volume is created when a service that uses it is placed here`,
+        );
+      binds.push(`${payload.volume.dockerVolume}:/data:ro`);
     }
     const restic = await helper('restic', {
       Image: payload.resticImage,

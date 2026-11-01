@@ -190,7 +190,7 @@ test(
           tags: ['tug', 'project:bkjob', 'target:volume:uploads'],
           volume: {
             name: 'uploads',
-            mount: { kind: 'volume', name: 'tug_bkjob_uploads' },
+            dockerVolume: 'tug_bkjob_uploads',
             exclude: ['cache'],
           },
         }),
