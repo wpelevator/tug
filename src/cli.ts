@@ -644,6 +644,110 @@ program
     ),
   );
 
+interface BackupRunRecord {
+  id: string;
+  target: string;
+  node_id: string | null;
+  trigger: string;
+  state: string;
+  snapshot_id: string | null;
+  size_bytes: number | null;
+  added_bytes: number | null;
+  finished_at: string | null;
+  queued_at: string | null;
+  error: string | null;
+}
+interface BackupListing {
+  destinationConfigured: boolean;
+  targets: {
+    target: string;
+    node: string | null;
+    schedule: string;
+    enabled: boolean;
+    nextRunAt: string;
+    lastSuccessAt: string | null;
+    lastStatus: string | null;
+  }[];
+  runs: BackupRunRecord[];
+}
+const formatBytes = (bytes: number | null): string =>
+  bytes === null
+    ? '-'
+    : bytes < 1024 ** 2
+      ? `${Math.ceil(bytes / 1024)} KiB`
+      : `${(bytes / 1024 ** 2).toFixed(1)} MiB`;
+const BACKUP_TERMINAL = ['succeeded', 'failed', 'missed', 'cancelled'];
+
+program
+  .command('backup-run [targets...]')
+  .description(
+    'back up the named services or volumes now, or every backup target of the project; waits and exits nonzero if any backup fails',
+  )
+  .option('--no-wait', 'return once the backups are queued')
+  .option('--timeout <seconds>', 'give up waiting after this many seconds', '3600')
+  .action(async (targets: string[], o: { wait: boolean; timeout: string }) => {
+    const project = (await loadCfg()).project || 'site';
+    const queued = await request<{ runs: { runId: string; target: string }[]; errors: string[] }>(
+      'POST',
+      '/api/v1/backups/run',
+      { project, targets: targets.length ? targets : undefined },
+    );
+    for (const message of queued.errors) console.error(message);
+    for (const run of queued.runs) console.log(`queued ${run.target} as ${run.runId}`);
+    let failed = queued.errors.length > 0;
+    if (o.wait) {
+      const deadline = Date.now() + Number(o.timeout) * 1000;
+      const pending = new Set(queued.runs.map((run) => run.runId));
+      while (pending.size && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        const listing = await request<BackupListing>(
+          'GET',
+          `/api/v1/backups?project=${encodeURIComponent(project)}&limit=200`,
+        );
+        for (const run of listing.runs)
+          if (pending.has(run.id) && BACKUP_TERMINAL.includes(run.state)) {
+            pending.delete(run.id);
+            const ok = run.state === 'succeeded';
+            failed ||= !ok;
+            console.log(
+              ok
+                ? `${run.target}: snapshot ${run.snapshot_id?.slice(0, 8)}, ${formatBytes(run.added_bytes)} added`
+                : `${run.target}: ${run.state}${run.error ? ` (${run.error})` : ''}`,
+            );
+          }
+      }
+      if (pending.size) {
+        console.error(
+          `timed out waiting for ${pending.size} backup(s); they keep running on the node`,
+        );
+        failed = true;
+      }
+    }
+    if (failed) process.exitCode = 1;
+  });
+program
+  .command('backup-list')
+  .description('show each backup target with its last success and next run, then recent runs')
+  .option('--limit <n>', 'number of recent runs to show', '20')
+  .action(async (o: { limit: string }) => {
+    const project = (await loadCfg()).project || 'site';
+    const listing = await request<BackupListing>(
+      'GET',
+      `/api/v1/backups?project=${encodeURIComponent(project)}&limit=${encodeURIComponent(o.limit)}`,
+    );
+    if (!listing.destinationConfigured)
+      console.error('no backup destination is configured; run tug backup-destination-set');
+    if (!listing.targets.length)
+      console.log('no backup targets; add x-tug.backup to a database service or volume');
+    for (const t of listing.targets)
+      console.log(
+        `${t.target}\t${t.node ?? '-'}\t${t.schedule}\tlast success ${t.lastSuccessAt ?? 'never'}\tnext ${t.enabled ? t.nextRunAt : 'disabled'}`,
+      );
+    for (const r of listing.runs)
+      console.log(
+        `${r.finished_at ?? r.queued_at}\t${r.target}\t${r.trigger}\t${r.state}\t${r.snapshot_id?.slice(0, 8) ?? '-'}\t${formatBytes(r.size_bytes)}${r.error ? `\t${r.error}` : ''}`,
+      );
+  });
 program
   .command('backup-destination-set <url>')
   .description(

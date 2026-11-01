@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { parseCron } from './cron.ts';
+import { sentinelNames } from './normalize.ts';
 import type {
   BackupConfig,
   BackupRetention,
@@ -289,13 +290,11 @@ export function resolveBackups(compose: ComposeFile, project = ''): Resolved {
     const user = spec.user ?? 'root';
     if (typeof user !== 'string' || !NAME_RE.test(user))
       errors.push(`${label}.user must be a database user name`);
+    // The root password defaults to the secret the service itself reads it from, whatever that secret is called.
+    const rootVariable = type === 'mysql' ? 'MYSQL_ROOT_PASSWORD' : 'MARIADB_ROOT_PASSWORD';
+    const rootReference = sentinelNames(serviceEnv(svc, rootVariable))[0];
     const passwordSecret =
-      spec.password ??
-      (user === 'root'
-        ? type === 'mysql'
-          ? 'MYSQL_ROOT_PASSWORD'
-          : 'MARIADB_ROOT_PASSWORD'
-        : undefined);
+      spec.password ?? (user === 'root' ? (rootReference ?? rootVariable) : undefined);
     if (!passwordSecret)
       errors.push(
         `${label}.password is required when user is not root (the name of the secret holding its password)`,

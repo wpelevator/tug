@@ -159,13 +159,13 @@ volumes:
 | `jitter` | both | Seconds of delay after the scheduled minute, 0 to 3600 | a stable per-target value under 15 minutes |
 | `timeout` | both | Hard limit for a run, `1m` to `24h` | `2h` |
 | `databases` | service | Databases to dump | `MARIADB_DATABASE` or `MYSQL_DATABASE` of the service |
-| `user`, `password` | service | Database user and the name of the project secret holding its password | `root` and `MARIADB_ROOT_PASSWORD` or `MYSQL_ROOT_PASSWORD` |
+| `user`, `password` | service | Database user and the name of the project secret holding its password | `root`, with the secret the service reads `MARIADB_ROOT_PASSWORD` or `MYSQL_ROOT_PASSWORD` from |
 | `exclude` | volume | restic exclude patterns | none |
 | `writers` | both | Services to hold during a restore | discovered from `depends_on` and volume mounts |
 
 Deploy rejects a target that cannot be backed up from one place: a service that is global, replicated or placed on several nodes; a volume used on several nodes without `x-tug.placement.nodes`; and a volume holding the data of a database that has its own backup, since copying a running database's files is not a backup.
 
-This is the configuration surface for [M11](roadmap.md#m11--backups-restores-and-run-once-jobs). Today Tug validates and records these keys; scheduled execution, the destination and the catalog are not implemented yet, so use the sidecar recipe in [Backups](backups.md) until they land.
+Backups run on the node that holds the data and are described in [Backups](backups.md).
 
 ## Secrets in services
 

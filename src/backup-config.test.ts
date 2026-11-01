@@ -267,3 +267,17 @@ test('the default jitter is stable per target, below 900 seconds, and differs be
   );
   assert.ok(spread.size > 10, 'twenty sites should not all start together');
 });
+
+test('the database password defaults to the secret the service reads its root password from', () => {
+  const compose = site();
+  compose.services.db.environment = {
+    MARIADB_DATABASE: 'wordpress',
+    MARIADB_ROOT_PASSWORD: '@@tug:secret:DB_ROOT_PASSWORD@@',
+  };
+  const db = resolveBackups(compose, 'site').targets.find((t) => t.name === 'db');
+  assert.equal(
+    db?.passwordSecret,
+    'DB_ROOT_PASSWORD',
+    'the dump uses the secret the container itself is configured with',
+  );
+});

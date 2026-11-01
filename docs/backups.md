@@ -122,7 +122,21 @@ Scheduling and retention declared per service or volume instead of a sidecar ima
 
 Tug can already hold the destination that scheduled backups will use. Set it once on control with `tug backup-destination-set` and read it with `backup-destination-show` ([CLI](cli.md#backups)). Credentials are encrypted with the master key, are never returned by the API, and are released only to a node that is running a backup command for it. Every project gets its own restic repository at `<destination>/<project>`, so a leaked password exposes one site, and one project's prune never blocks another's backups. The password is derived from the master key; print it with `tug backup-key` and escrow it.
 
-Scheduling, running and restoring are not implemented yet, so the sidecar recipe above remains the way to take backups today.
+## Scheduled backups
+
+Mark a database service or a volume with `x-tug.backup` ([Compose extensions](compose.md#backups)) and Tug backs it up on its node, on the schedule you give, to the project's repository. Control runs a scheduler that ticks every 30 seconds (`TUG_BACKUP_TICK_MS`); at each slot it queues a `backup.run` command with a deadline. The agent runs it as a background job, so reconciliation and health checks are never held up by a long backup, and one node runs one backup at a time unless `TUG_BACKUP_CONCURRENCY` says otherwise.
+
+- **Databases** are dumped with the service's own client (`mariadb-dump` or `mysqldump`, from the service's image, on the project network) and streamed into `restic backup --stdin`, so no staging disk is needed. The password reaches the dump only through the container environment. A dump that fails or ends without its completion trailer is never kept: the partial snapshot is forgotten and the run fails. Users and grants are not dumped; they come from the image's init environment.
+- **Volumes** are mounted read-only into the restic container and archived, with your `exclude` patterns. A volume that does not exist on the node fails the run instead of backing up an empty one. Live volumes are crash-consistent, which suits uploads; databases get dumps.
+- **Retention** runs after each successful backup (`restic forget --prune` per node and target). Snapshots tagged `trigger:pre-restore` are kept regardless.
+- **Images** for restic come from `TUG_RESTIC_IMAGE` on control (default `restic/restic:0.17.3`); a digest reference is recommended. Nodes pull it outbound like any published image.
+- **Restic runs in a helper container** with a memory limit, labelled `tug.job`, removed when it finishes. An agent that restarts mid-job removes leftovers and reports the job failed.
+
+### Events and what to watch
+
+`tug events` shows `backup.completed`, `backup.failed`, `backup.missed`, `backup.stale` and `backup.no_destination`. A backup is `missed` when its node did not pick it up before its deadline (`node_offline`) or when control was not running at the slot: a week of downtime produces one missed event and one catch-up run per target, not a burst. A failed scheduled run is retried once after ten minutes. A target with no success for two periods raises `backup.stale` once a day, which catches a destination key that has quietly stopped working. While control is down no backup starts, which is the price of one scheduler; running jobs finish and report when control returns.
+
+`tug backup-run` takes a backup now and `tug backup-list` shows the catalog ([CLI](cli.md#backups)). Restores are not implemented yet: use restic against the project's repository (`tug backup-key` prints its location and password).
 
 ## Control plane backup
 

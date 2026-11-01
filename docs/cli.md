@@ -87,6 +87,8 @@ Node installation and enrollment require an HTTPS control URL unless `--http-onl
 Backup commands are flat like the rest of the CLI, and need an admin token.
 
 - `tug backup-destination-set <url> [--env NAME ...]` sets where backups go, for example `s3:https://s3.example.com/bucket/tug-backups` with `--env AWS_ACCESS_KEY_ID --env AWS_SECRET_ACCESS_KEY`. Each value is read from the environment variable of that name, otherwise from a line on stdin; it is never a command-line argument. S3 needs both AWS variables. Values are stored encrypted on control and released only to a node running a backup. An absolute path is accepted for development, but it is read on each node and is not shared. Setting a destination replaces the previous one.
+- `tug backup-run [targets...] [--no-wait] [--timeout <seconds>]` backs up the named services or volumes now, or every backup target of the project, and waits for the result. It exits nonzero if any backup fails or is missed. Needs the `deploy` role.
+- `tug backup-list [--limit <n>]` shows each backup target with its node, schedule, last success and next run, then the most recent runs. Needs the `read` role.
 - `tug backup-destination-show` prints the URL and the variable names, never values.
 - `tug backup-destination-remove` removes the destination and its credentials. Existing backups stay in the repository.
 - `tug backup-key` prints the project's repository and its password. Each project has its own restic repository at `<destination>/<project>` with a password derived from control's master key, so keep the printed password with the destination credentials: losing the master key loses every repository.
