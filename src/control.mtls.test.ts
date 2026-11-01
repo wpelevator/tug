@@ -256,6 +256,9 @@ test('disable blocks the node key without deleting it; replace brings the node b
       listed.body.nodes.some((n: any) => n.name === 'n1'),
       'disable keeps node metadata',
     );
+    const row = listed.body.nodes.find((n: any) => n.name === 'n1');
+    assert.equal(row.status, 'disabled', 'a disabled node is reported as disabled, not online');
+    assert.ok(row.disabled_at, 'the listing shows when the node was disabled');
     const back = await s.newNode('n1', 'replace');
     assert.equal(
       (await s.call(back.credential, 'GET', '/agent/v1/work')).status,

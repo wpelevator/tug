@@ -297,7 +297,14 @@ program
     else if (cfg.credential) text = JSON.stringify(cfg.credential);
     if (!text) throw new Error('tug init needs a credential file (or - for stdin)');
     const credential = decodeCredential(text);
-    const dir = path.join(os.homedir(), '.config', 'tug', 'credentials');
+    // TUG_CREDENTIALS_DIR keeps scripts and tests out of the real home directory.
+    const dir =
+      process.env.TUG_CREDENTIALS_DIR ||
+      path.join(
+        process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'),
+        'tug',
+        'credentials',
+      );
     const source = path.join(
       dir,
       `${new URL(credential.url).host.replace(/[^A-Za-z0-9.-]/g, '_')}.json`,

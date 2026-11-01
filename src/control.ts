@@ -1431,7 +1431,7 @@ export async function createApp(
       } else {
         if (!existing) return res.status(404).json({ error: 'node not found' });
         db.run(
-          'UPDATE nodes SET key_hash=?,disabled_at=NULL,cert_not_after=?,updated_at=? WHERE id=?',
+          "UPDATE nodes SET key_hash=?,disabled_at=NULL,status='registered',cert_not_after=?,updated_at=? WHERE id=?",
           signed.keyHash,
           signed.notAfter.toISOString(),
           now(),
@@ -1585,7 +1585,7 @@ export async function createApp(
     const node = findNode(req.params.name);
     if (!node) return res.status(404).json({ error: 'node not found' });
     db.run(
-      'UPDATE nodes SET disabled_at=COALESCE(disabled_at,?),updated_at=? WHERE id=?',
+      "UPDATE nodes SET disabled_at=COALESCE(disabled_at,?),status='disabled',updated_at=? WHERE id=?",
       now(),
       now(),
       node.id,
@@ -1603,7 +1603,7 @@ export async function createApp(
   });
   api('get', '/api/v1/nodes', null, async (req, res) => {
     const rows = db.all<NodeRow>(
-      'SELECT id,name,address,public_address,overlay_ip,ingress,ingress_status_json,status,labels_json,last_seen_at,created_at,updated_at FROM nodes ORDER BY name',
+      'SELECT id,name,address,public_address,overlay_ip,ingress,ingress_status_json,status,labels_json,last_seen_at,disabled_at,cert_not_after,created_at,updated_at FROM nodes ORDER BY name',
     );
     res.json({
       nodes: rows.map((row) => {
@@ -2825,7 +2825,7 @@ export async function createApp(
     const staleSeconds = Number(process.env.TUG_STALE_SECONDS || 60);
     const cutoff = new Date(Date.now() - staleSeconds * 1000).toISOString();
     db.run(
-      "UPDATE nodes SET status='stale',updated_at=? WHERE last_seen_at IS NOT NULL AND last_seen_at < ?",
+      "UPDATE nodes SET status='stale',updated_at=? WHERE last_seen_at IS NOT NULL AND last_seen_at < ? AND disabled_at IS NULL",
       now(),
       cutoff,
     );

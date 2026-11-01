@@ -9,6 +9,17 @@ async function readStdin(): Promise<string> {
   return Buffer.concat(chunks).toString('utf8');
 }
 
+const usage = `Usage: tug-runtime <control|agent> [command]
+  control                          run the control plane (needs TUG_PUBLIC_URL)
+  control issue-credential         issue an operator credential on the control-plane host (--name, --role, --replace)
+  agent                            run the node agent
+  agent identity                   print the CSR for this node's pending key
+  agent install-cert               install an identity response read from stdin`;
+if (process.argv.slice(2).some((a) => a === '--help' || a === '-h' || a === 'help')) {
+  console.log(usage);
+  process.exit(0);
+}
+
 switch (role) {
   case 'control': {
     if (command === 'issue-credential') {
