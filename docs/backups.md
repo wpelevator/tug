@@ -118,6 +118,12 @@ The backup service must run on a node where that volume exists, and `backup.sh` 
 
 Scheduling and retention declared per service or volume instead of a sidecar image; running the job on the node that holds each volume without a service per node; database dumps for known engines; a recorded last-success per backup in `tug status`; and restore as a command. Until then the sidecar, the per-node services and the drill below are manual.
 
+## Backup destination
+
+Tug can already hold the destination that scheduled backups will use. Set it once on control with `tug backup-destination-set` and read it with `backup-destination-show` ([CLI](cli.md#backups)). Credentials are encrypted with the master key, are never returned by the API, and are released only to a node that is running a backup command for it. Every project gets its own restic repository at `<destination>/<project>`, so a leaked password exposes one site, and one project's prune never blocks another's backups. The password is derived from the master key; print it with `tug backup-key` and escrow it.
+
+Scheduling, running and restoring are not implemented yet, so the sidecar recipe above remains the way to take backups today.
+
 ## Control plane backup
 
 `tug control-backup` covers the control host only. Take it from a machine that holds an `admin` token, on the control host, and copy the archive off the host. The archive holds the master key and every secret, so treat it like a password vault and store it encrypted. Example `/etc/cron.d/tug-control-backup` on the control host (the runtime image runs the CLI; adjust to how you invoke `tug` there):

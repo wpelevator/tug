@@ -200,6 +200,13 @@ const SAMPLES: Record<string, { path: string; body?: unknown }> = {
   'GET /api/v1/deployments/:id': { path: '/api/v1/deployments/dep_x' },
   'GET /api/v1/volumes': { path: '/api/v1/volumes' },
   'GET /api/v1/secrets': { path: '/api/v1/secrets' },
+  'GET /api/v1/backup/destination': { path: '/api/v1/backup/destination' },
+  'POST /api/v1/backup/destination': {
+    path: '/api/v1/backup/destination',
+    body: { url: '/srv/restic', env: {} },
+  },
+  'DELETE /api/v1/backup/destination': { path: '/api/v1/backup/destination' },
+  'GET /api/v1/backup/key': { path: '/api/v1/backup/key?project=site' },
   'POST /api/v1/projects': { path: '/api/v1/projects', body: { name: 'site' } },
   'POST /api/v1/deployments': {
     path: '/api/v1/deployments',

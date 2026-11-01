@@ -196,7 +196,28 @@ export type DeploymentState =
 // ---- Commands (control -> agent) ---------------------------------------------------------------
 
 export type CommandType =
-  'diagnostics.run' | 'service.restart' | 'logs.fetch' | 'volume.delete' | 'wg.rotate-key';
+  | 'diagnostics.run'
+  | 'service.restart'
+  | 'logs.fetch'
+  | 'volume.delete'
+  | 'wg.rotate-key'
+  | 'backup.check'
+  | 'backup.run'
+  | 'backup.restore'
+  | 'backup.list';
+
+/** Commands whose helper containers need the backup destination's credentials. */
+export const BACKUP_COMMAND_TYPES: readonly CommandType[] = [
+  'backup.check',
+  'backup.run',
+  'backup.restore',
+  'backup.list',
+];
+
+/** `GET /agent/v1/backup/credentials`: environment for the restic helper of one running backup command. */
+export interface BackupCredentialsResponse {
+  env: Record<string, string>;
+}
 
 /** A `commands` table row as delivered in `GET /agent/v1/work`. */
 export interface Command {

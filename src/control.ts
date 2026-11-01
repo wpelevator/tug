@@ -22,6 +22,7 @@ import * as tar from 'tar';
 import { openDb, openSnapshotDb } from './db.ts';
 import { isUniqueViolation } from './db-driver.ts';
 import type {
+  BackupDestinationRow,
   CommandRow,
   DeploymentRow,
   DesiredStateRow,
@@ -61,7 +62,15 @@ import {
   LIVE_MAX_BUFFERED_BYTES,
   LIVE_MAX_SESSIONS,
   LIVE_START_TIMEOUT_MS,
+  BACKUP_COMMAND_TYPES,
 } from './protocol.ts';
+import {
+  BACKUP_SECRET_PROJECT,
+  isReservedProject,
+  parseBackupDestination,
+  projectRepository,
+  repositoryPassword,
+} from './backup-destination.ts';
 import {
   AUTO_ROLLBACK_ACTOR,
   ROUTE_ROLES,
@@ -80,6 +89,7 @@ import {
 } from './tokens.ts';
 import type { Actor, ProjectResolver, RouteRole } from './tokens.ts';
 import type {
+  BackupCredentialsResponse,
   LiveRequest,
   LiveInput,
   OperatorLiveMessage,
@@ -1452,8 +1462,111 @@ export async function createApp(
     res.json({ ok: true, name: req.params.name });
   });
 
+  const backupDestination = () =>
+    db.get<BackupDestinationRow>("SELECT * FROM backup_destination WHERE id='default'");
+  const backupEnv = (): Record<string, string> => {
+    const row = backupDestination();
+    if (!row) return {};
+    const env: Record<string, string> = {};
+    for (const name of JSON.parse(row.env_names_json) as string[]) {
+      const secret = db.get<Pick<SecretRow, 'encrypted_value'>>(
+        'SELECT encrypted_value FROM secrets WHERE project_id=? AND name=?',
+        BACKUP_SECRET_PROJECT,
+        name,
+      );
+      if (secret) env[name] = decrypt(secret.encrypted_value, masterKey);
+    }
+    return env;
+  };
+  api('get', '/api/v1/backup/destination', null, async (_req, res) => {
+    const row = backupDestination();
+    res.json(
+      row
+        ? {
+            configured: true,
+            url: row.url,
+            envNames: JSON.parse(row.env_names_json),
+            checkedAt: row.checked_at,
+            checkResult: row.check_result_json ? JSON.parse(row.check_result_json) : null,
+            updatedAt: row.updated_at,
+          }
+        : { configured: false },
+    );
+  });
+  api('post', '/api/v1/backup/destination', null, async (req, res) => {
+    let parsed;
+    try {
+      parsed = parseBackupDestination(req.body);
+    } catch (e) {
+      return res.status(400).json({ error: errMessage(e) });
+    }
+    const ts = now();
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      db.run('DELETE FROM secrets WHERE project_id=?', BACKUP_SECRET_PROJECT);
+      for (const [name, value] of Object.entries(parsed.env))
+        db.run(
+          'INSERT INTO secrets(id,project_id,name,encrypted_value,version,created_at,updated_at) VALUES(?,?,?,?,?,?,?)',
+          id('sec'),
+          BACKUP_SECRET_PROJECT,
+          name,
+          encrypt(value, masterKey),
+          1,
+          ts,
+          ts,
+        );
+      db.run(
+        `INSERT INTO backup_destination(id,url,env_names_json,checked_at,check_result_json,updated_at) VALUES('default',?,?,NULL,NULL,?)
+        ON CONFLICT(id) DO UPDATE SET url=excluded.url,env_names_json=excluded.env_names_json,checked_at=NULL,check_result_json=NULL,updated_at=excluded.updated_at`,
+        parsed.url,
+        JSON.stringify(Object.keys(parsed.env).sort()),
+        ts,
+      );
+      db.exec('COMMIT');
+    } catch (e) {
+      db.exec('ROLLBACK');
+      throw e;
+    }
+    audit(req.actor!, {
+      type: 'backup.destination_set',
+      message: `backup destination set to ${parsed.url} by ${req.actor!.name}`,
+      metadata: { url: parsed.url, envNames: Object.keys(parsed.env).sort() },
+    });
+    res.json({ ok: true, url: parsed.url, envNames: Object.keys(parsed.env).sort() });
+  });
+  api('delete', '/api/v1/backup/destination', null, async (req, res) => {
+    db.run('DELETE FROM secrets WHERE project_id=?', BACKUP_SECRET_PROJECT);
+    const removed = db.run("DELETE FROM backup_destination WHERE id='default'");
+    if (removed.changes)
+      audit(req.actor!, {
+        type: 'backup.destination_removed',
+        message: `backup destination removed by ${req.actor!.name}`,
+      });
+    res.json({ ok: true, removed: removed.changes > 0 });
+  });
+  api('get', '/api/v1/backup/key', null, async (req, res) => {
+    const project = String(req.query.project || '');
+    if (!PROJECT_NAME_PATTERN.test(project) || isReservedProject(project))
+      return res.status(400).json({ error: 'project is required' });
+    if (!db.get('SELECT 1 FROM projects WHERE id=?', project))
+      return res.status(404).json({ error: `project ${project} not found` });
+    const destination = backupDestination();
+    audit(req.actor!, {
+      type: 'backup.key_read',
+      project,
+      message: `repository password for ${project} read by ${req.actor!.name}`,
+    });
+    res.json({
+      project,
+      repository: destination ? projectRepository(destination.url, project) : null,
+      password: repositoryPassword(masterKey, project),
+    });
+  });
+
   api('post', '/api/v1/secrets', bodyProject, async (req, res) => {
     const { project = 'site', name, value } = req.body;
+    if (isReservedProject(String(project)))
+      return res.status(400).json({ error: `project names starting with _ are reserved` });
     if (!name || value == null) return res.status(400).json({ error: 'name and value required' });
     let lock;
     try {
@@ -1490,15 +1603,19 @@ export async function createApp(
     }
   });
   api('get', '/api/v1/secrets', queryProject, async (req, res) =>
-    res.json({
-      secrets: db.all(
-        'SELECT project_id,name,version,updated_at FROM secrets WHERE project_id=? ORDER BY name',
-        String(req.query.project || 'site'),
-      ),
-    }),
+    isReservedProject(String(req.query.project || 'site'))
+      ? res.status(400).json({ error: 'project names starting with _ are reserved' })
+      : res.json({
+          secrets: db.all(
+            'SELECT project_id,name,version,updated_at FROM secrets WHERE project_id=? ORDER BY name',
+            String(req.query.project || 'site'),
+          ),
+        }),
   );
   api('delete', '/api/v1/secrets/:name', queryProject, async (req, res) => {
     const project = String(req.query.project || 'site');
+    if (isReservedProject(project))
+      return res.status(400).json({ error: 'project names starting with _ are reserved' });
     const removed = db.run(
       'DELETE FROM secrets WHERE project_id=? AND name=?',
       project,
@@ -2628,6 +2745,30 @@ export async function createApp(
         console.error(`event pruning failed: ${errMessage(e)}`);
       }
     res.json({ ok: true });
+  });
+  // Credentials for a backup helper are released only while its command is running on the calling node, and
+  // never ride in the command payload, events or results.
+  get('/agent/v1/backup/credentials', authAgent, async (req, res) => {
+    const command = db.get<Pick<CommandRow, 'node_id' | 'project_id' | 'type' | 'state'>>(
+      'SELECT node_id,project_id,type,state FROM commands WHERE id=?',
+      String(req.query.command || ''),
+    );
+    if (!command) return res.status(404).json({ error: 'command not found' });
+    if (command.node_id !== req.node!.id)
+      return res.status(403).json({ error: 'command belongs to another node' });
+    if (!(BACKUP_COMMAND_TYPES as readonly string[]).includes(command.type))
+      return res.status(403).json({ error: 'command does not use backup credentials' });
+    if (command.state !== 'running')
+      return res.status(409).json({ error: `command is ${command.state}, not running` });
+    if (!command.project_id || !backupDestination())
+      return res.status(409).json({ error: 'no backup destination is configured' });
+    const response: BackupCredentialsResponse = {
+      env: {
+        ...backupEnv(),
+        RESTIC_PASSWORD: repositoryPassword(masterKey, command.project_id),
+      },
+    };
+    res.json(response);
   });
   get('/agent/v1/secrets', authAgent, async (req, res) => {
     const project = String(req.query.project || 'site');

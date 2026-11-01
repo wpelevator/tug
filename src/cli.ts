@@ -91,6 +91,11 @@ async function loadCfg(): Promise<NonNullable<typeof resolvedConfig>> {
   return resolvedConfig!;
 }
 const collect = (v: string, a: string[]): string[] => [...a, v];
+async function readStdin(): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
+  return Buffer.concat(chunks).toString('utf8');
+}
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function request<T = any>(
   method: string,
@@ -638,6 +643,62 @@ program
       ),
     ),
   );
+
+program
+  .command('backup-destination-set <url>')
+  .description(
+    'set where backups go, such as s3:https://s3.example.com/bucket/tug-backups; credentials are stored encrypted on control',
+  )
+  .option(
+    '--env <name>',
+    'credential variable for the backend, such as AWS_ACCESS_KEY_ID (repeatable); each value is read from the variable of that name in your environment, else from a line on stdin',
+    collect,
+    [],
+  )
+  .action(async (url: string, o: { env: string[] }) => {
+    const missing = o.env.filter((name) => process.env[name] === undefined);
+    const lines = missing.length
+      ? (await readStdin()).split(/\r?\n/).filter((line) => line.length > 0)
+      : [];
+    if (lines.length < missing.length)
+      throw new Error(`expected a value on stdin for ${missing.slice(lines.length).join(', ')}`);
+    const env = Object.fromEntries(
+      o.env.map((name) => [name, process.env[name] ?? lines[missing.indexOf(name)]]),
+    );
+    console.log(JSON.stringify(await request('POST', '/api/v1/backup/destination', { url, env })));
+  });
+program
+  .command('backup-destination-show')
+  .description(
+    'show the backup destination and the names of its credential variables, never values',
+  )
+  .action(async () =>
+    console.log(JSON.stringify(await request('GET', '/api/v1/backup/destination'), null, 2)),
+  );
+program
+  .command('backup-destination-remove')
+  .description(
+    'remove the backup destination and its stored credentials; existing backups stay in the repository',
+  )
+  .action(async () =>
+    console.log(JSON.stringify(await request('DELETE', '/api/v1/backup/destination'))),
+  );
+program
+  .command('backup-key')
+  .description(
+    "print the project's repository and its password for offline escrow; anyone holding the password and destination credentials can read the project's backups",
+  )
+  .action(async () => {
+    const c = await loadCfg();
+    const project = c.project || 'site';
+    console.log(
+      JSON.stringify(
+        await request('GET', `/api/v1/backup/key?project=${encodeURIComponent(project)}`),
+        null,
+        2,
+      ),
+    );
+  });
 
 program
   .command('token-create <name>')
