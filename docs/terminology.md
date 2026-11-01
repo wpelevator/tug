@@ -65,7 +65,7 @@ Keep **Tug** and **tug** as product/CLI names. The tugboat explanation is option
 
 ## Recommended order of work
 
-1. Correct authentication and runtime descriptions first. Also reconcile `docs/cli.md`'s token expiry statement: it currently says up to 3650 days/default never, while code and help enforce a maximum/default of 365 days. These factual inconsistencies amplify naming confusion.
+1. Correct authentication and runtime descriptions first. These factual inconsistencies amplify naming confusion.
 2. Apply this vocabulary to help, errors, status descriptions and documentation. Keep literal commands, paths and variables accurate until their implementations change. Example onboarding: “Install the control plane, add a node, then deploy your Compose project. Tug runs an agent on each node.”
 3. Rename misleading interfaces as coherent changes: credential management; node identity recovery; enrollment preparation; hosts-file service names; then address flags and the runtime binary. Update API paths, protocol types, persistence names where relevant, templates, tests, docs and changesets together. This is a greenfield project; prefer direct renames over compatibility aliases or migrations.
 4. Treat command grouping as a separate usability decision. The [current convention](cli.md#cli-architecture-and-naming) is flat kebab-case; `credential-create`, `node-replace-identity` and `node-prepare-enrollment` fit it. Grouping into `tug node install` or `tug credential create` can improve discovery, but does not itself fix ambiguous nouns or verbs.
