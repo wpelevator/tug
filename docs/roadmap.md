@@ -36,11 +36,11 @@ Internet -> ingress node (managed Caddy, TLS)
               | uploads             | SQL / cache
               v                     v
          uploads store         db node (MariaDB), cache (Memcached)
-         (S3-compatible or NFS export of wp-content/uploads only)
+         (S3-compatible or a file server you run, wp-content/uploads only)
 ```
 
 - WordPress code is in the image (Bedrock or Composer style), so every app node runs exactly the deployed version and a rolling rollout or rollback swaps images atomically per node.
-- Only `wp-content/uploads` is shared: preferably on S3-compatible object storage through an offload plugin, otherwise on an `x-tug.type: nfs` volume. PHP code is never served from NFS, which avoids opcache stat latency, mixed versions during a sync and non-atomic rollbacks.
+- Only `wp-content/uploads` is shared: preferably on S3-compatible object storage through an offload plugin, otherwise on a file server you run and mount with plain Compose `driver_opts`. PHP code is never served from a network file system, which avoids opcache stat latency, mixed versions during a sync and non-atomic rollbacks.
 - Each app node serves its own static files with nginx next to php-fpm, and the ingress balances HTTP across app nodes. There is no FastCGI across hosts and no front node that needs the shared filesystem.
 - The database, cache, uploads store and ingress are each single instances. Scaling the app tier adds PHP capacity, not availability; the docs say so, and backups are the recovery story.
 
@@ -86,9 +86,9 @@ Agent-initiated WebSocket with long-poll fallback that wakes agents when work is
 
 Node labels, `placement.labels`, `replicas: N` spread across matching nodes, `global: true` and `tug scale`. Scheduling stays central and simple: spread by count, skip stale nodes, no bin-packing. See [Compose extensions](compose.md).
 
-### M7 — Shared volumes (done, narrowed)
+### M7 — Shared volumes (removed)
 
-`x-tug.type: nfs` volumes: services on the exporter node bind-mount the export and other nodes mount it over NFS, through the mesh when it is on. The exporter must already run an NFS server; one exporter, a documented single point of failure. Its intended use is shared uploads in the [reference topology](#reference-topology), not shared application code. Remaining: Tug installs and configures the NFS server on the exporter node, once a host-level agent helper exists.
+An `x-tug.type: nfs` volume type was built and verified on real hosts, then removed: it mounted a share but could not run the NFS server, so users still prepared the host, and installing and exporting from Tug would make it a host configuration tool. Shared storage is the operator's: S3-compatible object storage, or a file server mounted with plain Compose `driver: local` and `driver_opts` ([Volumes](compose.md#volumes)).
 
 ### M8 — Central API advantages (partly done)
 
@@ -152,7 +152,7 @@ The agent stops running the `docker compose` CLI and reconciles containers throu
 ## Later / only if needed
 
 - Warm-standby control plane (WAL shipping or periodic backup plus promote), see [Positioning](#positioning).
-- A host-level agent helper or standalone agent binary, for work a container should not do: installing the NFS server (M7), host mounts and WireGuard outside Docker. Shares the build with the standalone CLI binary ([Standalone binary](standalone-binary.md)). Decide this before M12.
+- A host-level agent helper or standalone agent binary, for work a container should not do: host mounts and WireGuard outside Docker. Shares the build with the standalone CLI binary ([Standalone binary](standalone-binary.md)). Decide this before M12.
 - A control-hosted OCI image store, mirroring of published images and an agent-local registry endpoint for layer reuse, once whole-image transfers or upstream rate limits hurt. Mirroring is opt-in; it makes control a bandwidth and disk bottleneck and a dependency for every pull.
 - A mandatory mesh with no non-mesh fallback, if the maintenance cost of two networking paths outweighs losing NAT-friendly multi-node setups.
 - Standalone Bun-compiled `tug` binaries and a Homebrew tap, so operators need no Node.js.
@@ -175,9 +175,9 @@ M10 (private-by-default ports) is done.
 
 Dependencies: M10 builds on M2. M11 uses the M5 command channel for job output and M8 webhooks for alerts but needs neither to start. M13 is independent of M14, and M14's config hash uses the pinned image references. M12 depends on M2 and M14, needs the agent-form decision, and changes M3's rollout mechanics, so its spec must keep rollouts zero-downtime. M15's control-on-a-node needs the managed Caddy from M2.
 
-The reference topology also needs a validated example: a scaled WordPress project with code in the image and uploads on S3-compatible storage or an NFS uploads volume, deployed on real hosts once M11 lands (M10 is done).
+The reference topology also needs a validated example: a scaled WordPress project with code in the image and uploads on S3-compatible storage or a file server the operator runs, deployed on real hosts once M11 lands (M10 is done).
 
-Validation so far: [real-host runs](real-host-evaluation.md) on two Ubuntu 24.04 hosts covered SSH install with the Docker bootstrap, the WireGuard mesh, an agent behind bridge NAT, a publicly trusted Let's Encrypt certificate from the managed Caddy, cross-node service names, remote and `--build-local` deploys, rollback from a retained image, a rolling rollout through the public ingress with no failed requests (over 2,200 sampled), a failing version rejected while the old revision kept serving, automatic rollback, and on freshly wiped hosts label placement, `global`, `tug scale`, an NFS volume over the mesh, `ps`/`inspect`/`exec`/`logs -f` and a cloud-init enrolled node behind a deny-all-inbound firewall ([M6, M7 and enrollment](real-host-evaluation.md#m6-m7-and-enrollment-on-fresh-hosts)). Not yet validated on real hosts: a node behind real NAT, certificate renewal, arm64 nodes and dnf-based hosts.
+Validation so far: [real-host runs](real-host-evaluation.md) on two Ubuntu 24.04 hosts covered SSH install with the Docker bootstrap, the WireGuard mesh, an agent behind bridge NAT, a publicly trusted Let's Encrypt certificate from the managed Caddy, cross-node service names, remote and `--build-local` deploys, rollback from a retained image, a rolling rollout through the public ingress with no failed requests (over 2,200 sampled), a failing version rejected while the old revision kept serving, automatic rollback, and on freshly wiped hosts label placement, `global`, `tug scale`, `ps`/`inspect`/`exec`/`logs -f` and a cloud-init enrolled node behind a deny-all-inbound firewall ([M6, M7 and enrollment](real-host-evaluation.md#m6-m7-and-enrollment-on-fresh-hosts)). Not yet validated on real hosts: a node behind real NAT, certificate renewal, arm64 nodes and dnf-based hosts.
 
 The test layers, the metrics milestones are held to and the backlog of mocked tests are in [Testing](testing.md).
 
@@ -194,8 +194,7 @@ The test layers, the metrics milestones are held to and the backlog of mocked te
 - [ ] M5 long-poll wake fallback removed; WebSocket plus periodic poll
 - [ ] M5 remote process termination when an exec session is cancelled or disconnected
 - [x] M6 node labels, label placement, replicas spread, `global` mode, `scale` command, verified on real hosts
-- [x] M7 `nfs` volume type over the mesh (exporter must already run an NFS server), verified on real hosts
-- [ ] M7 Tug installs and configures the NFS server on the exporter node (needs the host-level helper)
+- [x] M7 `nfs` volume type, removed: shared storage is the operator's (S3-compatible storage or `driver_opts`)
 - [x] M8 scoped API tokens, CI deploy example, named operator tokens in the audit trail ([Access control](access-control.md))
 - [ ] M8 outbound webhooks
 - [x] M9 event hygiene ([Architecture](architecture.md#events)) and observability design ([Observability](observability.md))

@@ -72,7 +72,7 @@ The CLI installs the matching `ghcr.io/wpelevator/tug:<version>` image on your h
 - [Architecture](docs/architecture.md): components, reconciliation, workflow diagrams, secrets and runtime paths.
 - [Compose extensions](docs/compose.md): `x-tug` placement, health checks, volumes and limitations.
 - [Control plane](docs/control-plane.md): install, TLS, image delivery, backup and restore.
-- [Backups](docs/backups.md): interim WordPress backup sidecar with restic, per-node and NFS variants, and a restore drill until `x-tug.backup` (M11).
+- [Backups](docs/backups.md): interim WordPress backup sidecar with restic, per-node variants, and a restore drill until `x-tug.backup` (M11).
 - [Access control](docs/access-control.md): scoped API tokens, roles, audit trail and a GitHub Actions deploy example.
 - [Networking](docs/networking.md): WireGuard mesh, service DNS, ingress and TLS, firewall notes.
 - [Nodes](docs/nodes.md): SSH install, self-service enrollment, registration and status.

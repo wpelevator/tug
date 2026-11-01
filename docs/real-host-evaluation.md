@@ -131,7 +131,7 @@ I would not treat this run as evidence for rolling deploys, image build, or roll
 | `global: true` + `placement.labels: [app]` | One `web` replica on each labelled node |
 | `replicas: 1` + labels | One `worker`, on the alphabetically first matching node |
 | `tug scale worker 2` / `1` | Second replica started on `b`, then removed; `0` and unknown services rejected |
-| NFS volume (`x-tug.type: nfs`, exporter `a`) | `b` mounted `10.210.0.1:/srv/tug/shared` over the WireGuard overlay (NFSv3); a file written on `b` appeared on `a`; the exporter bind-mounted the directory |
+| NFS volume (`x-tug.type: nfs`, exporter `a`; the volume type has since been removed) | `b` mounted `10.210.0.1:/srv/tug/shared` over the WireGuard overlay (NFSv3); a file written on `b` appeared on `a`; the exporter bind-mounted the directory |
 | `ps`, `inspect`, `exec`, `logs -f` against real nodes | Worked |
 | `node-enroll --install-docker --mesh` cloud-config on a host with Docker purged | Docker Engine and Compose installed, agent started, node enrolled with its label |
 | Enrolled node with no public address behind `ufw` deny-incoming | WireGuard handshake and overlay ping to `a` worked; NFS mount worked |
@@ -143,7 +143,7 @@ What this does not prove: the cloud-config was applied by re-running cloud-init 
 - **Fixed: dead nodes held rollouts open.** After `b`'s host was repurposed as `c`, the old `b` stayed registered with its labels. The next deploy placed `global` replicas on `b`, which never answered, and the deployment stayed `rolling_out` until cancelled. Label and `global` placement, and `tug scale`, now skip nodes not seen within `TUG_STALE_SECONDS`. `scale` also no longer spreads a labelled service onto nodes that do not match its labels when none match.
 - **Fixed: there was no way to remove a node.** `tug node-remove <node>` now deletes it (refused while a current deployment places something on it, or while its agent still reports, unless `--force`). Run on the hosts: removing the dead `b` succeeded and `a`'s WireGuard peer for it was dropped, while removing `a` was refused with the services placed on it.
 - **Fixed: `control-install` could not enable the mesh.** `TUG_MESH` had to be added to the generated compose file by hand; `control-install --mesh` now does it (unit-tested only).
-- **Open: NFS needs host preparation Tug does not do.** The exporter needs an NFS server and `/etc/exports`; consumers need `nfs-common`.
+- **Closed by removal: NFS needed host preparation Tug does not do.** The exporter needed an NFS server and `/etc/exports`, consumers `nfs-common`. The `nfs` volume type was removed rather than growing a host installer.
 - **Open: `cloud-init clean` regenerates SSH host keys.** Expected, but it makes the next SSH to the host fail strict checking.
 
 ## Pull-once and backup recipe on a fresh host, 31 October 2026

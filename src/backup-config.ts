@@ -359,10 +359,6 @@ export function resolveBackups(compose: ComposeFile, project = ''): Resolved {
       errors.push(
         `${label} needs x-tug.placement.nodes on volume ${name}, since its services are placed by label or global`,
       );
-    if (volumeExt?.type === 'nfs' && placed.length !== 1)
-      errors.push(
-        `${label}: NFS volume ${name} is backed up on its exporter; set x-tug.placement.nodes to that one node`,
-      );
     for (const dbService of backedUpDatabases)
       if (mountedVolumes(compose.services[dbService]).includes(name))
         errors.push(

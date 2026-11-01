@@ -5,7 +5,7 @@ import { validateCompose } from './compose.ts';
 import { normalized } from '../tests/fake-docker.ts';
 import type { ComposeFile } from './protocol.ts';
 
-/** A WordPress site: MariaDB with a dump backup, uploads on an NFS volume exported by `store1`. */
+/** A WordPress site: MariaDB with a dump backup, uploads on a volume pinned to `app1`. */
 function site(overrides: Record<string, unknown> = {}): ComposeFile {
   return normalized({
     'x-tug': { backup: { schedule: '0 3 * * *', retention: { daily: 7 } } },
@@ -28,7 +28,7 @@ function site(overrides: Record<string, unknown> = {}): ComposeFile {
     },
     volumes: {
       'db-data': {},
-      uploads: { 'x-tug': { type: 'nfs', placement: { nodes: ['store1'] }, backup: true } },
+      uploads: { 'x-tug': { placement: { nodes: ['app1'] }, backup: true } },
     },
     ...overrides,
   });
@@ -36,7 +36,7 @@ function site(overrides: Record<string, unknown> = {}): ComposeFile {
 
 const errorsOf = (compose: ComposeFile) => resolveBackups(compose, 'site').errors;
 
-test('a database service and an NFS volume resolve with defaults, inferred type and exporter node', () => {
+test('a database service and a pinned volume resolve with defaults, inferred type and node', () => {
   const { targets, errors } = resolveBackups(site(), 'site');
   assert.deepEqual(errors, [], 'a valid site should have no backup errors');
   const db = targets.find((t) => t.target === 'service:db');
@@ -54,7 +54,7 @@ test('a database service and an NFS volume resolve with defaults, inferred type 
   assert.equal(db?.node, 'app1', 'a literal single placement is the backup node');
   const uploads = targets.find((t) => t.target === 'volume:uploads');
   assert.equal(uploads?.type, 'volume', 'volumes use the volume type');
-  assert.equal(uploads?.node, 'store1', 'an NFS volume is backed up on its exporter');
+  assert.equal(uploads?.node, 'app1', 'a volume is backed up on its placement node');
 });
 
 test('without project defaults the retention falls back to 7 daily, 4 weekly and 6 monthly', () => {
@@ -218,12 +218,6 @@ test('a volume whose services are placed by label needs an explicit pin', () => 
     'x-tug': { placement: { labels: ['role=app'] } },
   } as never;
   assert.match(errorsOf(compose).join('; '), /needs x-tug\.placement\.nodes on volume shared/);
-});
-
-test('an NFS volume backup must name its exporter', () => {
-  const compose = site();
-  delete compose.volumes!.uploads['x-tug']!.placement;
-  assert.match(errorsOf(compose).join('; '), /NFS volume uploads is backed up on its exporter/);
 });
 
 test('a raw copy of the volume holding a backed-up database is rejected', () => {

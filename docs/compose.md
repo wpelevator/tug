@@ -112,7 +112,20 @@ volumes:
 ```
 
 Control records volumes per project. A volume is included in a node's Compose file only when a service on that node uses it and, if the volume has `placement.nodes`, the node is listed. `tug volume-remove` refuses to remove a persistent volume without `--delete-data`, and refuses any volume still referenced by a service in the current deployment. `--delete-data` queues a `docker volume rm` on the volume's placement node.
-Volumes with `x-tug.type: nfs` share a directory exported by their placement node. Tug does not install or start an NFS server, and consuming nodes need the NFS client (`nfs-common` on Debian and Ubuntu): the exporter node must already export `x-tug.export` (default `/srv/tug/<volume>`) to the other nodes, ideally restricted to the mesh. On the exporter, services bind-mount that directory; on every other node using the volume, Tug generates a Compose volume that mounts `<exporter>:<export>` over NFS. Control stamps the exporter's overlay IP (with the mesh) or node address into `x-tug.address` at deploy time unless you set it. The exporter is a single point of failure.
+
+Tug does not manage network file systems. To share a directory between nodes, mount it with the plain Compose `driver: local` and `driver_opts` against a server you run, such as a NAS, a managed export or your own NFS host, and install the NFS client (`nfs-common` on Debian and Ubuntu) on the nodes that use it:
+
+```yaml
+volumes:
+  uploads:
+    driver: local
+    driver_opts:
+      type: nfs
+      o: addr=10.210.0.1,rw,hard
+      device: ":/srv/uploads"
+```
+
+Every node that uses the volume mounts it itself, so the file server is a single point of failure that you operate. Prefer S3-compatible object storage for uploads when the application supports it.
 
 ## Backups
 
@@ -150,7 +163,7 @@ volumes:
 | `exclude` | volume | restic exclude patterns | none |
 | `writers` | both | Services to hold during a restore | discovered from `depends_on` and volume mounts |
 
-Deploy rejects a target that cannot be backed up from one place: a service that is global, replicated or placed on several nodes; a volume used on several nodes without `x-tug.placement.nodes`; an NFS volume without its exporter as placement (the backup always runs on the exporter); and a volume holding the data of a database that has its own backup, since copying a running database's files is not a backup.
+Deploy rejects a target that cannot be backed up from one place: a service that is global, replicated or placed on several nodes; a volume used on several nodes without `x-tug.placement.nodes`; and a volume holding the data of a database that has its own backup, since copying a running database's files is not a backup.
 
 This is the configuration surface for [M11](roadmap.md#m11--backups-restores-and-run-once-jobs). Today Tug validates and records these keys; scheduled execution, the destination and the catalog are not implemented yet, so use the sidecar recipe in [Backups](backups.md) until they land.
 

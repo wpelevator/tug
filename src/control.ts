@@ -1653,22 +1653,6 @@ export async function createApp(
         }
       }
       const nodes = nodeRows.map((row) => ({ name: row.name }));
-      for (const vol of Object.values(compose.volumes || {})) {
-        const xe = vol?.['x-tug'];
-        if (
-          !xe ||
-          (xe.type !== 'nfs' && xe.driver !== 'nfs') ||
-          xe.address ||
-          !xe.placement?.nodes?.[0]
-        )
-          continue;
-        const exporter = db.get<{ address: string | null; overlay_ip: string | null }>(
-          'SELECT address,overlay_ip FROM nodes WHERE name=?',
-          xe.placement.nodes[0],
-        );
-        const addr = (MESH && exporter?.overlay_ip) || exporter?.address;
-        if (addr) xe.address = addr;
-      }
       try {
         validateCompose(
           compose,

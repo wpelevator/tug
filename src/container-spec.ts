@@ -53,7 +53,6 @@ export interface ContainerSpecOptions {
   /** Secret versions by name; they are part of the hash instead of the values. */
   secretVersions?: Record<string, number>;
   endpoints?: Record<string, ServiceEndpoint[]>;
-  nodeAddresses?: Record<string, string>;
   /** Host IP for published ports that name none; without it `ports` stay as written. */
   bind?: PortBind;
 }
@@ -157,13 +156,8 @@ function portMaps(svc: ComposeService, ports: PortObject[]) {
   return { exposed, bindings };
 }
 
-/** Volume definitions this node needs, with NFS volumes mounted from the exporter's directory or address. */
-function volumeSpecs(
-  desired: DesiredState,
-  node: string,
-  used: ReadonlySet<string>,
-  nodeAddresses: Record<string, string>,
-): VolumeSpec[] {
+/** Volume definitions this node needs. */
+function volumeSpecs(desired: DesiredState, node: string, used: ReadonlySet<string>): VolumeSpec[] {
   const out: VolumeSpec[] = [];
   for (const key of [...used].sort()) {
     const def = desired.compose.volumes?.[key] || {};
@@ -185,41 +179,14 @@ function volumeSpecs(
     }
     const name = volumeName(desired.project, key);
     const nodes = xe.placement?.nodes || [];
-    const isNfs =
-      xe.type === 'nfs' || xe.driver === 'nfs' || (xe.type === 'shared' && xe.driver === 'nfs');
-    const plain = (): VolumeSpec => ({
+    if (nodes.length && !nodes.includes(node)) continue;
+    out.push({
       name,
       driver: String(def.driver || 'local'),
       opts: (def.driver_opts as Record<string, string> | undefined) || {},
       labels,
       external: false,
     });
-    if (isNfs) {
-      const exporter = nodes[0];
-      const exportPath = xe.export || `/srv/tug/${key}`;
-      if (!exporter) out.push(plain());
-      else if (nodes.includes(node))
-        // The exporter mounts the exported directory directly; an NFS server on this node must export it.
-        out.push({
-          name,
-          driver: 'local',
-          opts: { type: 'none', o: 'bind', device: exportPath },
-          labels,
-          external: false,
-        });
-      else {
-        const addr = xe.address || nodeAddresses[exporter] || exporter;
-        out.push({
-          name,
-          driver: 'local',
-          opts: { type: 'nfs', o: `addr=${addr},rw,nolock,soft`, device: `:${exportPath}` },
-          labels,
-          external: false,
-        });
-      }
-      continue;
-    }
-    if (!nodes.length || nodes.includes(node)) out.push(plain());
   }
   return out;
 }
@@ -235,13 +202,7 @@ function walkStrings<T>(value: T, fn: (s: string) => string): T {
 export function containerSpecs(
   desired: DesiredState,
   node: string,
-  {
-    secrets = {},
-    secretVersions = {},
-    endpoints = {},
-    nodeAddresses = {},
-    bind,
-  }: ContainerSpecOptions = {},
+  { secrets = {}, secretVersions = {}, endpoints = {}, bind }: ContainerSpecOptions = {},
 ): NodePlan {
   const { project } = desired;
   const network = networkName(project);
@@ -395,7 +356,7 @@ export function containerSpecs(
       dependsOn,
     };
   }
-  return { network, volumes: volumeSpecs(desired, node, usedVolumes, nodeAddresses), specs };
+  return { network, volumes: volumeSpecs(desired, node, usedVolumes), specs };
 }
 
 /** Start order: dependencies first, ties by service name; a cycle is an error. */

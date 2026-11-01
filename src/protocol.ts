@@ -101,10 +101,6 @@ export interface VolumeExtension {
   driver?: string;
   persistent?: boolean;
   placement?: Placement;
-  /** NFS exporter address; control fills in the exporter's overlay IP (or node address) at deploy time. */
-  address?: string;
-  /** Directory exported by the NFS server on the exporter node (default `/srv/tug/<volume>`). */
-  export?: string;
   backup?: BackupConfig;
 }
 

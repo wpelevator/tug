@@ -97,34 +97,9 @@ A database that is not on the node of the backup service is reachable only throu
 
 `placement.labels` with `global: true` runs one backup container on every node carrying a label, which saves repeating the block when all nodes have identically named volumes. It cannot give each node its own `BACKUP_HOST` (Compose cannot interpolate the node name), so the snapshots are told apart only by their paths and container host name. Prefer explicit per-node services when you restore by node.
 
-### NFS volumes
+### Network file systems
 
-A volume with `x-tug.type: nfs` is exported by one node and mounted over NFS by the others (see [Volumes](compose.md#volumes) and [Networking](networking.md)). Back it up from the exporter node, not from a client:
-
-```yaml
-  backup-shared:
-    build: ./backup
-    mem_limit: 256m
-    restart: unless-stopped
-    environment:
-      RESTIC_REPOSITORY: ${RESTIC_REPOSITORY}
-      RESTIC_PASSWORD: ${RESTIC_PASSWORD}
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
-      BACKUP_HOST: nfs-exporter
-      BACKUP_AT_UTC: "05:00"
-      DB_HOST: ""
-      BACKUP_PATHS: /data/shared
-    volumes:
-      - /srv/tug/shared:/data/shared:ro    # the volume's x-tug.export directory on the exporter
-    x-tug:
-      placement:
-        nodes: [nfs-exporter]
-      health:
-        type: docker
-```
-
-Why the exporter: it reads the directory from local disk, so nothing crosses the network or depends on the mesh and the NFS server being up; there is no client-side caching or stale file handle to fight; export options such as `root_squash` do not hide files from the backup; and you store one copy, not one per client. The bind-mount path is the volume's `x-tug.export` (default `/srv/tug/<volume>`).
+Tug does not manage NFS (see [Volumes](compose.md#volumes)). A volume you mount from your own file server is backed up like any other volume, but from the server's own disk rather than through a client mount: run the backup container on the host that owns the files, bind-mount the exported directory read-only and add its path to `BACKUP_PATHS`. That avoids client-side caching and stale file handles, export options such as `root_squash` hiding files, and one copy per client. If the server is not a node Tug manages, run restic there directly.
 
 ### Any other volume
 
