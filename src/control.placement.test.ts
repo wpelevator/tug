@@ -34,16 +34,11 @@ async function post(base: string, route: string, body: unknown) {
   return JSON.parse(text);
 }
 
-test('label placement spreads replicas, scale resizes them and NFS volumes get the exporter address', async () => {
+test('label placement spreads replicas, scale resizes them', async () => {
   const s = await makeServer();
   try {
     await post(s.base, '/api/v1/nodes/register', { name: 'app1', labels: ['app'] });
     await post(s.base, '/api/v1/nodes/register', { name: 'app2', labels: ['app'] });
-    await post(s.base, '/api/v1/nodes/register', {
-      name: 'store',
-      address: '10.0.0.40',
-      labels: ['storage'],
-    });
     const nodes = (await (await fetch(`${s.base}/api/v1/nodes`, { headers: op })).json()) as {
       nodes: Array<{ name: string; labels: string[] }>;
     };
@@ -56,16 +51,9 @@ test('label placement spreads replicas, scale resizes them and NFS volumes get t
       services: {
         web: {
           image: 'nginx',
-          volumes: ['shared:/data'],
           'x-tug': { placement: { labels: ['app'] }, replicas: 1 },
         },
-        nfsd: {
-          image: 'busybox',
-          volumes: ['shared:/data'],
-          'x-tug': { placement: { nodes: ['store'] } },
-        },
       },
-      volumes: { shared: { 'x-tug': { type: 'nfs', placement: { nodes: ['store'] } } } },
     };
     const dep = await post(s.base, '/api/v1/deployments', {
       project: 'site',
@@ -77,11 +65,6 @@ test('label placement spreads replicas, scale resizes them and NFS volumes get t
       svcs.web.placement.nodes,
       ['app1'],
       'replicas: 1 should pick one node among the label matches',
-    );
-    assert.equal(
-      dep.desiredState.compose.volumes.shared['x-tug'].address,
-      '10.0.0.40',
-      'control should stamp the exporter address into the NFS volume',
     );
     const scaled = await post(s.base, '/api/v1/scale', {
       project: 'site',

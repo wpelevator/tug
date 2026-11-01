@@ -275,7 +275,8 @@ test('buildDesiredState global mode selects every matching node', () => {
   );
 });
 
-test('containerSpecs generates an NFS volume on consuming nodes', () => {
+test('a volume with user-supplied NFS driver_opts is passed through to every node using it', () => {
+  const opts = { type: 'nfs', o: 'addr=10.0.0.1,rw', device: ':/srv/uploads' };
   const compose = normalized({
     services: {
       web: {
@@ -284,27 +285,15 @@ test('containerSpecs generates an NFS volume on consuming nodes', () => {
         'x-tug': { placement: { nodes: ['n1', 'n2'] } },
       },
     },
-    volumes: { shared: { 'x-tug': { type: 'nfs', placement: { nodes: ['n1'] } } } },
+    volumes: { shared: { driver: 'local', driver_opts: opts } },
   });
   const ds = buildDesiredState({ project: 'site', version: 'v1', compose });
-  const consumer = containerSpecs(ds, 'n2', { nodeAddresses: { n1: '10.0.0.1' } });
-  const opts = consumer.volumes[0].opts;
-  assert.equal(consumer.volumes[0].name, 'tug_site_shared', 'volumes carry the Tug name');
-  assert.equal(opts.type, 'nfs', 'consumers should get an nfs-typed volume');
-  assert.equal(opts.device, ':/srv/tug/shared', 'nfs device should be the default export path');
-  assert.match(opts.o, /addr=10\.0\.0\.1/, 'consumers should mount the exporter address');
-  assert.deepEqual(
-    consumer.specs.web.body.HostConfig?.Binds,
-    ['tug_site_shared:/data'],
-    'the container mounts the Tug-named volume',
-  );
-  const exporter = containerSpecs(ds, 'n1');
-  assert.equal(
-    exporter.volumes[0].opts.o,
-    'bind',
-    'exporter should bind-mount the exported directory',
-  );
-  assert.equal(exporter.volumes[0].opts.device, '/srv/tug/shared');
+  for (const node of ['n1', 'n2'])
+    assert.deepEqual(
+      containerSpecs(ds, node).volumes[0].opts,
+      opts,
+      `node ${node} should receive the operator's driver_opts unchanged`,
+    );
 });
 
 // ---- supported subset ----------------------------------------------------------------------------
