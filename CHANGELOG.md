@@ -1,5 +1,20 @@
 # @wpelevator/tug
 
+## 0.6.0
+
+### Minor Changes
+
+- 3015c4a: Validate `x-tug.backup` on services (a command whose output is stored) and volumes, with project defaults and single-placement rules, and add a UTC cron parser.
+- 28c4156: Add the backup destination: `backup-destination-set|show|remove` store S3-compatible credentials encrypted on control, `backup-key` prints a project's derived restic repository password, and agents can fetch credentials only for their own running backup command. Backups themselves are not scheduled yet.
+- 8ab3fb1: Add a committable CLI config file (`tug.yml`, YAML or JSON) that records the control URL, default project, `deploy` defaults and the servers to install, where each key is the camelCase of the flag it defaults and flags always win. `node-install --name app1` reads the SSH target and install flags from `nodes.app1`. The API token is no longer read from the tracked config: it lives in the git-ignored `tug.local.yml` overlay (or `TUG_TOKEN`), `tug init` writes it there, and the config key is renamed from `operatorToken` to `token`. Source uploads now also exclude the overlay and the root config file.
+- eae358e: Remove the `x-tug.type: nfs` volume type and its `x-tug.address` and `x-tug.export` keys. Tug never ran the NFS server, so users prepared the exporter anyway; mount a file server you operate with plain Compose `driver: local` and `driver_opts` instead. Backup validation no longer has an NFS exporter rule.
+- 28c4156: Run scheduled backups. `x-tug.backup` on a service names a command run in the service's container whose output is stored (so any database or tool works, with recipes in the docs), and on a volume archives its files. Control schedules them, agents run restic in a helper container, and runs are recorded in a catalog with `backup.completed`, `backup.failed`, `backup.missed`, `backup.stale` and `backup.no_destination` events. Add `backup-run`, `backup-list` and restores (`restore`, `restore-list`, `restore-resume`, `restore-release`): an in-place restore locks the project, stops the services that write to the target, takes a safety backup, restores through the service's own `restore` command or the volume's files, and starts them again; a scratch restore of a volume touches nothing live.
+- 28c4156: Add `tug run SERVICE -- command`: a one-off container with the service's image, environment, secrets, network and mounts, removed afterwards, returning the command's exit code and recorded as a `job.run` event.
+
+### Patch Changes
+
+- a14fb06: Correct node documentation: nodes need only the Docker Engine, not the Compose plugin, and the rollout and ingress descriptions now match the Engine API agent.
+
 ## 0.5.0
 
 ### Minor Changes
