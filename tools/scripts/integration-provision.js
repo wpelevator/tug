@@ -31,8 +31,11 @@ for (let i = 0; i < 120 && !(await exists(`${dataDir}/pki/ca.crt`)); i++)
 if (!(await exists(`${dataDir}/pki/ca.crt`))) throw new Error('control did not create its CA');
 
 await fs.mkdir(identityDir, { recursive: true });
+// The scripts treat root.credential.json as "the stack is ready", so it is published last, after every node is
+// registered. Until then the credential lives in a pending file.
 const rootFile = `${identityDir}/root.credential.json`;
-if (!(await exists(rootFile))) {
+const pendingFile = `${identityDir}/.root.credential.pending.json`;
+if (!(await exists(pendingFile)) && !(await exists(rootFile))) {
   const issued = execFileSync(
     'node',
     ['dist/main.js', 'control', 'issue-credential', '--name', 'root', '--role', 'admin'],
@@ -41,9 +44,11 @@ if (!(await exists(rootFile))) {
       env: { ...process.env, TUG_DATA_DIR: dataDir },
     },
   );
-  await fs.writeFile(rootFile, issued.trim(), { mode: 0o600 });
+  await fs.writeFile(pendingFile, issued.trim(), { mode: 0o600 });
 }
-const root = parseCredential(await fs.readFile(rootFile, 'utf8'));
+const root = parseCredential(
+  await fs.readFile((await exists(pendingFile)) ? pendingFile : rootFile, 'utf8'),
+);
 
 let ready = false;
 for (let i = 0; i < 120; i++) {
@@ -79,3 +84,7 @@ for (const name of nodes) {
     await api(root, control, `/api/v1/nodes/${name}/ingress`, { enabled: true });
   console.log(`registered ${name}`);
 }
+
+// Publish the credential last: its presence now means every node above is registered.
+if (await exists(pendingFile)) await fs.rename(pendingFile, rootFile);
+console.log('ready');
