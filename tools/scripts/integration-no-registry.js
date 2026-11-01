@@ -125,6 +125,8 @@ try {
     '-d',
     ...(process.env.TUG_COMPOSE_BUILD ?? '--build').split(' ').filter(Boolean),
   );
+  // TUG_CONFIG must name an existing file; `tug init` used to create it and no longer runs here.
+  await fs.writeFile(env.TUG_CONFIG, JSON.stringify({ project: 'imagedemo' }));
   ({ credential, file: credentialFile } = await fetchRootCredential(composeArgs, root));
   env.TUG_CREDENTIAL_FILE = credentialFile;
   await wait(() => request('/api/v1/status').then(() => true), 'Control must become reachable');
