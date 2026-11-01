@@ -51,7 +51,7 @@ test('a manual backup flows from the API through the agent protocol to the catal
   try {
     const node = await json(await call(s.base, 'POST', '/api/v1/nodes/register', { name: 'n1' }));
     const agent = {
-      'x-tug-test-node': node.agentToken,
+      'x-tug-test-node': node.nodeId,
       'content-type': 'application/json',
     };
     await call(s.base, 'POST', '/api/v1/secrets', {

@@ -45,8 +45,13 @@ export const testIdentity = (
   }
   const node = h['x-tug-test-node'];
   if (typeof node === 'string') {
-    const row = db.get<{ key_hash: string }>('SELECT key_hash FROM nodes WHERE id=?', node);
-    return { uri: `tug:node:${node}`, keyHash: row?.key_hash ?? 'unknown' };
+    // Tests name a node by its name or its ID; the certificate identity always carries the immutable ID.
+    const row = db.get<{ id: string; key_hash: string }>(
+      'SELECT id,key_hash FROM nodes WHERE id=? OR name=?',
+      node,
+      node,
+    );
+    return { uri: `tug:node:${row?.id ?? node}`, keyHash: row?.key_hash ?? 'unknown' };
   }
   const enroll = h['x-tug-test-enroll'];
   if (typeof enroll === 'string') {
@@ -58,23 +63,23 @@ export const testIdentity = (
   }
   const operator = h['x-tug-test-operator'];
   if (typeof operator === 'string') {
-    const tokenId = `tok_test_${operator}`;
-    if (!db.get('SELECT 1 FROM operator_credentials WHERE id=?', tokenId))
+    const credentialId = `cred_test_${operator}`;
+    if (!db.get('SELECT 1 FROM operator_credentials WHERE id=?', credentialId))
       db.run(
         "INSERT INTO operator_credentials(id,name,key_hash,role,created_at,created_by) VALUES(?,?,?,'admin',?,'test')",
-        tokenId,
+        credentialId,
         operator,
         `test-${operator}`,
         new Date().toISOString(),
       );
-    return { uri: `tug:operator:${tokenId}`, keyHash: `test-${operator}` };
+    return { uri: `tug:operator:${credentialId}`, keyHash: `test-${operator}` };
   }
   return null;
 };
 
 /**
  * Old tests register nodes with `POST /api/v1/nodes/register { name }`. Keep that call shape by generating a key and CSR
- * the way a node would and posting it to the identity endpoint; `agentToken` is the node ID, which `x-tug-test-node` takes.
+ * the way a node would and posting it to the identity endpoint; `nodeId` is the node ID, which `x-tug-test-node` takes.
  */
 const realFetch = globalThis.fetch;
 globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -108,7 +113,7 @@ globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) =>
         headers: { 'content-type': 'application/json', 'x-tug-test-node': out.node.id },
         body: JSON.stringify({ publicKey: body.wgPublicKey }),
       });
-    return new Response(JSON.stringify({ ...out, agentToken: out.node.id }), {
+    return new Response(JSON.stringify({ ...out, nodeId: out.node.id }), {
       status: 200,
       headers: { 'content-type': 'application/json' },
     });

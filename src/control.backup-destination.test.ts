@@ -204,19 +204,19 @@ test('credentials are released only to the owning node for a running backup comm
     insert('cmd_run', 'n1', 'backup.run', 'running');
     insert('cmd_pending', 'n1', 'backup.run', 'pending');
     insert('cmd_other', 'n1', 'service.restart', 'running');
-    const fetchCredentials = (agentToken: string, command: string) =>
+    const fetchCredentials = (nodeId: string, command: string) =>
       fetch(`${s.base}/agent/v1/backup/credentials?command=${command}`, {
-        headers: { 'x-tug-test-node': agentToken },
+        headers: { 'x-tug-test-node': nodeId },
       });
 
     assert.equal(
-      (await fetchCredentials(n1.agentToken, 'cmd_run')).status,
+      (await fetchCredentials(n1.nodeId, 'cmd_run')).status,
       409,
       'no credentials before a destination exists',
     );
     await call(s.base, 'POST', '/api/v1/backup/destination', destination);
 
-    const ok = await fetchCredentials(n1.agentToken, 'cmd_run');
+    const ok = await fetchCredentials(n1.nodeId, 'cmd_run');
     assert.equal(ok.status, 200, 'the running backup command gets its credentials');
     const { env } = await json(ok);
     const key = (await fs.readFile(s.keyFile, 'utf8')).trim();
@@ -228,22 +228,22 @@ test('credentials are released only to the owning node for a running backup comm
     );
 
     assert.equal(
-      (await fetchCredentials(n2.agentToken, 'cmd_run')).status,
+      (await fetchCredentials(n2.nodeId, 'cmd_run')).status,
       403,
       'another node is refused',
     );
     assert.equal(
-      (await fetchCredentials(n1.agentToken, 'cmd_pending')).status,
+      (await fetchCredentials(n1.nodeId, 'cmd_pending')).status,
       409,
       'a pending command is refused',
     );
     assert.equal(
-      (await fetchCredentials(n1.agentToken, 'cmd_other')).status,
+      (await fetchCredentials(n1.nodeId, 'cmd_other')).status,
       403,
       'a non-backup command is refused',
     );
     assert.equal(
-      (await fetchCredentials(n1.agentToken, 'cmd_missing')).status,
+      (await fetchCredentials(n1.nodeId, 'cmd_missing')).status,
       404,
       'an unknown command is refused',
     );

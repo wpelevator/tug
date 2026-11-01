@@ -176,11 +176,11 @@ The final full test run under Node `v26.13.0` reported 417 tests: 305 passed and
 
 The final `npm run typecheck` passed after concurrent working-tree updates. `npm run lint` failed on an unused assignment in `src/cli.ts:303`, with three unused-variable/function warnings. Formatting checks passed for the audit documentation and changeset. These are release readiness observations, not additional proven vulnerabilities. The live mTLS suite, WebSocket transport tests, Docker-backed integration tests, actual Caddy configuration loading, WireGuard packet revocation, container image/OS scanning and real-host filesystem access were not validated here: local TCP listeners are denied and the Docker socket is inaccessible. npm advisory access from the shell also failed. Repository branch protections, deployed firewall rules, cloud IAM, backup-bucket policies and running host/image patch levels were not inspected.
 
-The README and several operational documents still describe pre-mTLS bearer-token installation and authentication. Finish that documentation update with the mTLS work before release; the current code requires credential files and direct mTLS or TLS passthrough. A conventional TLS-terminating proxy cannot substitute for the end-to-end client certificate check implemented here.
+At the time of the audit the README and several operational documents still described pre-mTLS bearer-token installation and authentication; the documentation has since been updated to match the code, which requires credential files and direct mTLS or TLS passthrough. A conventional TLS-terminating proxy cannot substitute for the end-to-end client certificate check implemented here.
 
 ## Remediation order
 
 1. Establish the deployment trust model and stop presenting scoped deploy access as host or secret isolation (SEC-01 and SEC-10). Prevent credentials from entering build inputs (SEC-06).
 2. Validate node reports, bind backup side effects to command ownership, and withdraw disabled nodes from peers and ingress (SEC-02, SEC-03 and SEC-04).
 3. Protect backup directory/archive modes, reserve ingress hosts and update vulnerable dependencies (SEC-05, SEC-07 and SEC-08).
-4. Bound builds, uploads, process output and queue occupancy; finish mTLS documentation and run the full suite in an environment that supports its network and Docker requirements (SEC-09).
+4. Bound builds, uploads, process output and queue occupancy; run the full suite in an environment that supports its network and Docker requirements (SEC-09).

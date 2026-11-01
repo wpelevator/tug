@@ -48,7 +48,7 @@ test('rollback selects previous immutable desired state', async () => {
     const res = await fetch(`${s.base}/agent/v1/status`, {
       method: 'POST',
       headers: {
-        'x-tug-test-node': registered.agentToken,
+        'x-tug-test-node': registered.nodeId,
         'content-type': 'application/json',
       },
       body: JSON.stringify({

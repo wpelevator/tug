@@ -17,7 +17,7 @@ export const ROOT_ACTOR = 'root';
 export const AUTO_ROLLBACK_ACTOR = 'system:auto-rollback';
 export const CREDENTIAL_NAME_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$/;
 export const PROJECT_NAME_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/;
-/** `last_used_at` is refreshed at most this often per token, so reads do not turn into writes. */
+/** `last_used_at` is refreshed at most this often per credential, so reads do not turn into writes. */
 const LAST_USED_INTERVAL_MS = 60_000;
 
 /**
@@ -101,7 +101,7 @@ export interface CredentialInfo {
 /** The principal behind a request, resolved from the client certificate and current database state. */
 export type Identity =
   | { klass: 'node'; node: NodeRow }
-  | { klass: 'operator'; actor: Actor; tokenId: string }
+  | { klass: 'operator'; actor: Actor; credentialId: string }
   | { klass: 'enroll'; row: EnrollmentCredentialRow };
 
 declare module 'express-serve-static-core' {
@@ -189,9 +189,9 @@ export async function createCredential(
   createdBy: string,
   options: { replace?: boolean } = {},
 ): Promise<CredentialInfo & { credential: Credential }> {
-  const tokenId = id('tok');
+  const credentialId = id('cred');
   const lifetime = Math.min(Date.parse(request.expiresAt) - Date.now(), OPERATOR_MAX_LIFETIME_MS);
-  const issued = await pki.issueClient(identityUri('operator', tokenId), lifetime, url);
+  const issued = await pki.issueClient(identityUri('operator', credentialId), lifetime, url);
   const expiresAt = issued.notAfter.toISOString();
   try {
     if (options.replace) {
@@ -202,7 +202,7 @@ export async function createCredential(
       if (existing) {
         db.run(
           'UPDATE operator_credentials SET id=?,key_hash=?,role=?,projects_json=?,created_at=?,created_by=?,last_used_at=NULL,expires_at=?,revoked_at=NULL WHERE name=?',
-          tokenId,
+          credentialId,
           issued.keyHash,
           request.role,
           request.projects ? JSON.stringify(request.projects) : null,
@@ -221,7 +221,7 @@ export async function createCredential(
     }
     db.run(
       'INSERT INTO operator_credentials(id,name,key_hash,role,projects_json,created_at,created_by,expires_at) VALUES(?,?,?,?,?,?,?,?)',
-      tokenId,
+      credentialId,
       request.name,
       issued.keyHash,
       request.role,
@@ -268,8 +268,8 @@ export function revokeCredential(db: Db, name: string): boolean {
  * Resolves an operator certificate identity to an actor from current database state: the principal must exist, the
  * certificate's key must be the stored key, and the credential must be neither revoked nor expired.
  */
-export function authenticate(db: Db, tokenId: string, keyHash: string): Actor | null {
-  const row = db.get<CredentialRow>('SELECT * FROM operator_credentials WHERE id=?', tokenId);
+export function authenticate(db: Db, credentialId: string, keyHash: string): Actor | null {
+  const row = db.get<CredentialRow>('SELECT * FROM operator_credentials WHERE id=?', credentialId);
   if (
     !row ||
     row.key_hash !== keyHash ||
@@ -345,7 +345,7 @@ export function createGuard() {
     };
 }
 
-/** Appends a control-originated audit event naming the acting token. */
+/** Appends a control-originated audit event naming the acting credential. */
 export function recordEvent(
   db: Db,
   event: {

@@ -50,7 +50,7 @@ test('a restore locks the project, holds the writers through the work response, 
   try {
     const node = await json(await call(s.base, 'POST', '/api/v1/nodes/register', { name: 'n1' }));
     const agent = {
-      'x-tug-test-node': node.agentToken,
+      'x-tug-test-node': node.nodeId,
       'content-type': 'application/json',
     };
     const work = async () => json(await call(s.base, 'GET', '/agent/v1/work', undefined, agent));

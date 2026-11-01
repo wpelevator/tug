@@ -152,11 +152,11 @@ test('published images pin once per deployment, rollback and late nodes keep the
       !JSON.stringify(first).includes('private-password'),
       'desired state and deployment responses must never contain registry passwords',
     );
-    await s.report(n1.agentToken, first.desiredState);
+    await s.report(n1.nodeId, first.desiredState);
     s.moveTag();
     const n2 = await s.node('n2');
     await s.post('/api/v1/scale', { project: 'site', service: 'app', replicas: 2 });
-    const late = await json(await s.get('/agent/v1/work', n2.agentToken));
+    const late = await json(await s.get('/agent/v1/work', n2.nodeId));
     assert.equal(
       late.desiredStates[0].services.app.image,
       pin,
@@ -187,10 +187,8 @@ test('resolution failures preserve the previous deployment and private credentia
     const n1 = await s.node('n1');
     const n2 = await s.node('n2');
     const first = await json(await s.deploy('good'));
-    await s.report(n1.agentToken, first.desiredState);
-    const auth = await json(
-      await s.get('/agent/v1/secrets?project=site&services=app', n1.agentToken),
-    );
+    await s.report(n1.nodeId, first.desiredState);
+    const auth = await json(await s.get('/agent/v1/secrets?project=site&services=app', n1.nodeId));
     assert.deepEqual(
       Object.keys(auth.registryAuth),
       ['private.example'],
@@ -206,7 +204,7 @@ test('resolution failures preserve the previous deployment and private credentia
       '?project=site',
       '?project=other&services=app',
     ]) {
-      const denied = await json(await s.get('/agent/v1/secrets' + query, n2.agentToken));
+      const denied = await json(await s.get('/agent/v1/secrets' + query, n2.nodeId));
       assert.equal(
         denied.registryAuth,
         undefined,
@@ -237,7 +235,7 @@ test('resolution failures preserve the previous deployment and private credentia
       !JSON.stringify(await json(failed)).includes('private-password'),
       'resolution errors must not expose registry credentials',
     );
-    const work = await json(await s.get('/agent/v1/work', n1.agentToken));
+    const work = await json(await s.get('/agent/v1/work', n1.nodeId));
     assert.equal(
       work.desiredStates[0].revision,
       first.desiredState.revision,

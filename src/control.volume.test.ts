@@ -61,7 +61,7 @@ test('volume metadata is protected and delete-data queues deletion after unrefer
     let res = await fetch(`${s.base}/agent/v1/status`, {
       method: 'POST',
       headers: {
-        'x-tug-test-node': registered.agentToken,
+        'x-tug-test-node': registered.nodeId,
         'content-type': 'application/json',
       },
       body: JSON.stringify({

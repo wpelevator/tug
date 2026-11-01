@@ -133,9 +133,9 @@ test('ingress follows the port a rolling service reports and keeps the old one w
     const app = await s.register('app', { address: '192.168.1.5' });
     await s.post('/api/v1/nodes/edge/ingress', { enabled: true });
     await s.deploy(stack('web:1'), 'v1');
-    await s.report(app.agentToken, 'app', 'serving', serving(20000));
+    await s.report(app.nodeId, 'app', 'serving', serving(20000));
     const edgeWork = async () =>
-      json(await fetch(`${s.base}/agent/v1/work`, { headers: s.agent(edge.agentToken) }));
+      json(await fetch(`${s.base}/agent/v1/work`, { headers: s.agent(edge.nodeId) }));
     assert.deepEqual(
       (await edgeWork()).ingress.routes[0].upstreams,
       ['192.168.1.5:20000'],
@@ -148,7 +148,7 @@ test('ingress follows the port a rolling service reports and keeps the old one w
       ['192.168.1.5:20000'],
       'while the new revision is starting nothing changes',
     );
-    await s.report(app.agentToken, 'app', 'serving', serving(20001));
+    await s.report(app.nodeId, 'app', 'serving', serving(20001));
     const switched = await edgeWork();
     assert.deepEqual(
       switched.ingress.routes[0].upstreams,
@@ -162,7 +162,7 @@ test('ingress follows the port a rolling service reports and keeps the old one w
     );
 
     await s.deploy(stack('web:3'), 'v3');
-    await s.report(app.agentToken, 'app', 'failed', serving(20001, { rolloutError: 'http 503' }));
+    await s.report(app.nodeId, 'app', 'failed', serving(20001, { rolloutError: 'http 503' }));
     const kept = await edgeWork();
     assert.deepEqual(
       kept.ingress.routes[0].upstreams,
@@ -181,10 +181,8 @@ test('the edge on the app node itself reaches a rolling service on loopback and 
     const app = await s.register('app', { address: '192.168.1.5' });
     await s.post('/api/v1/nodes/app/ingress', { enabled: true });
     await s.deploy(stack('web:1'), 'v1');
-    await s.report(app.agentToken, 'app', 'serving', serving(20007));
-    const w = await json(
-      await fetch(`${s.base}/agent/v1/work`, { headers: s.agent(app.agentToken) }),
-    );
+    await s.report(app.nodeId, 'app', 'serving', serving(20007));
+    const w = await json(await fetch(`${s.base}/agent/v1/work`, { headers: s.agent(app.nodeId) }));
     assert.deepEqual(
       w.ingress.routes[0].upstreams,
       ['127.0.0.1:20007'],
@@ -203,10 +201,8 @@ test('recreated services still route to their declared published port', async ()
     const plain = stack('web:1');
     delete (plain.services.web['x-tug'] as Record<string, unknown>).rollout;
     await s.deploy(plain, 'v1');
-    await s.report(app.agentToken, 'app', 'serving', serving());
-    const w = await json(
-      await fetch(`${s.base}/agent/v1/work`, { headers: s.agent(app.agentToken) }),
-    );
+    await s.report(app.nodeId, 'app', 'serving', serving());
+    const w = await json(await fetch(`${s.base}/agent/v1/work`, { headers: s.agent(app.nodeId) }));
     assert.deepEqual(
       w.ingress.routes[0].upstreams,
       ['127.0.0.1:8080'],
@@ -227,7 +223,7 @@ test('deployment convergence: serving succeeds, a failed node marks the deployme
       'rolling_out',
       'a new deployment is rolling out',
     );
-    await s.report(app.agentToken, 'app', 'serving', serving(20000));
+    await s.report(app.nodeId, 'app', 'serving', serving(20000));
     assert.equal(
       (await s.deployment(v1.deployment.id)).state,
       'succeeded',
@@ -236,7 +232,7 @@ test('deployment convergence: serving succeeds, a failed node marks the deployme
 
     const v2 = await s.deploy(stack('web:2'), 'v2');
     await s.report(
-      app.agentToken,
+      app.nodeId,
       'app',
       'failed',
       serving(20000, { rolloutError: 'http 503' }),
@@ -306,9 +302,9 @@ test('with rollback: auto a failed deployment is rolled back to the previous suc
   try {
     const app = await s.register('app', { address: '192.168.1.5' });
     const v1 = await s.deploy(stack('web:1', { rollback: 'auto' }), 'v1');
-    await s.report(app.agentToken, 'app', 'serving', serving(20000));
+    await s.report(app.nodeId, 'app', 'serving', serving(20000));
     const v2 = await s.deploy(stack('web:2', { rollback: 'auto' }), 'v2');
-    await s.report(app.agentToken, 'app', 'failed', serving(20000, { rolloutError: 'http 503' }));
+    await s.report(app.nodeId, 'app', 'failed', serving(20000, { rolloutError: 'http 503' }));
 
     const event = await s.waitFor('the auto rollback event', async () =>
       (await s.events()).find((e) => e.type === 'deployment.auto_rollback'),
@@ -329,7 +325,7 @@ test('with rollback: auto a failed deployment is rolled back to the previous suc
       'the failed deployment stays failed',
     );
     const work = await json(
-      await fetch(`${s.base}/agent/v1/work`, { headers: s.agent(app.agentToken) }),
+      await fetch(`${s.base}/agent/v1/work`, { headers: s.agent(app.nodeId) }),
     );
     const rollback = work.desiredStates[0];
     assert.equal(rollback.version, 'v1', 'agents now receive the previous desired state');
@@ -365,7 +361,7 @@ test('with rollback: auto a failed deployment is rolled back to the previous suc
       'the automatic rollback deployment records who started it',
     );
 
-    await s.report(app.agentToken, 'app', 'serving', serving(20000));
+    await s.report(app.nodeId, 'app', 'serving', serving(20000));
     assert.equal(
       (await s.deployment(rollback.revision)).state,
       'succeeded',
@@ -381,14 +377,14 @@ test('a failing rollback deployment is never rolled back again', async () => {
   try {
     const app = await s.register('app', { address: '192.168.1.5' });
     await s.deploy(stack('web:1', { rollback: 'auto' }), 'v1');
-    await s.report(app.agentToken, 'app', 'serving', serving(20000));
+    await s.report(app.nodeId, 'app', 'serving', serving(20000));
     await s.deploy(stack('web:2', { rollback: 'auto' }), 'v2');
-    await s.report(app.agentToken, 'app', 'failed', serving(20000));
+    await s.report(app.nodeId, 'app', 'failed', serving(20000));
     await s.waitFor('the first auto rollback', async () =>
       (await s.events()).find((e) => e.type === 'deployment.auto_rollback'),
     );
 
-    await s.report(app.agentToken, 'app', 'failed', serving(20000));
+    await s.report(app.nodeId, 'app', 'failed', serving(20000));
     const skipped = await s.waitFor('the loop guard event', async () =>
       (await s.events()).find((e) => e.type === 'deployment.auto_rollback_skipped'),
     );
@@ -420,7 +416,7 @@ test('auto rollback needs a previous succeeded deployment', async () => {
   try {
     const app = await s.register('app', { address: '192.168.1.5' });
     const v1 = await s.deploy(stack('web:1', { rollback: 'auto' }), 'v1');
-    await s.report(app.agentToken, 'app', 'failed', {});
+    await s.report(app.nodeId, 'app', 'failed', {});
     const skipped = await s.waitFor('the skipped event', async () =>
       (await s.events()).find((e) => e.type === 'deployment.auto_rollback_skipped'),
     );
@@ -444,7 +440,7 @@ test('auto rollback needs a previous succeeded deployment', async () => {
     const v2 = await s.deploy(stack('web:2', { rollback: 'auto' }), 'v2');
     const v3 = await s.deploy(stack('web:3', { rollback: 'auto' }), 'v3').catch(() => null);
     assert.equal(v3, null, 'a deployment is refused while another is still rolling out');
-    await s.report(app.agentToken, 'app', 'failed', {});
+    await s.report(app.nodeId, 'app', 'failed', {});
     await s.waitFor(
       'the second skipped event',
       async () =>
@@ -461,9 +457,9 @@ test('manual rollback still works and deployments cannot use the reserved rollba
   try {
     const app = await s.register('app', { address: '192.168.1.5' });
     await s.deploy(stack('web:1'), 'v1');
-    await s.report(app.agentToken, 'app', 'serving', serving(20000));
+    await s.report(app.nodeId, 'app', 'serving', serving(20000));
     await s.deploy(stack('web:2'), 'v2');
-    await s.report(app.agentToken, 'app', 'failed', serving(20000));
+    await s.report(app.nodeId, 'app', 'failed', serving(20000));
     const rb = await s.post('/api/v1/rollback', { project: 'site' });
     const body = await json(rb);
     assert.equal(rb.status, 200, JSON.stringify(body));

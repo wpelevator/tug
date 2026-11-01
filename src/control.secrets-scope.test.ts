@@ -56,7 +56,7 @@ test('agent secret fetch is scoped to requested assigned services', async () => 
     };
     await post(s.base, '/api/v1/deployments', { project: 'site', version: 'v1', compose });
     const res = await fetch(`${s.base}/agent/v1/secrets?project=site&services=web`, {
-      headers: { 'x-tug-test-node': node.agentToken },
+      headers: { 'x-tug-test-node': node.nodeId },
     });
     assert.equal(res.status, 200);
     const body = await json(res);

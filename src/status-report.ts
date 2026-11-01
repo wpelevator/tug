@@ -151,6 +151,8 @@ export function parseStatusReport(body: unknown): StatusReport {
   if (!isObject(body)) throw new StatusReportError('status report must be an object');
   return {
     node: typeof body.node === 'string' ? body.node : '',
+    ...(typeof body.sentAt === 'string' &&
+      Number.isFinite(Date.parse(body.sentAt)) && { sentAt: body.sentAt }),
     projects: list(body.projects, 'projects').map((p, i) => projectStatus(p, `projects[${i}]`)),
     commandResults: list(body.commandResults, 'commandResults').map((r, i) =>
       commandResult(r, `commandResults[${i}]`),

@@ -564,7 +564,7 @@ test('mutations record the acting token on deployments and events', async () => 
       'ci-bot',
       'the deployment record should store the acting token',
     );
-    await s.call(registered.agentToken, 'POST', '/agent/v1/status', {
+    await s.call(registered.nodeId, 'POST', '/agent/v1/status', {
       projects: [
         {
           project: 'site',

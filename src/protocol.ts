@@ -7,7 +7,6 @@
 export interface Placement {
   nodes?: string[];
   labels?: string[];
-  global?: boolean;
 }
 
 export interface HealthCheck {
@@ -531,6 +530,8 @@ export interface ProjectStatus {
 
 export interface StatusReport {
   node: string;
+  /** The agent clock when it sent the report (ISO 8601); control derives clock skew from it. */
+  sentAt?: string;
   projects: ProjectStatus[];
   commandResults: CommandResult[];
   ingress?: IngressStatus;

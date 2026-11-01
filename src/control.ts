@@ -8,6 +8,7 @@ import {
 } from './registry.ts';
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
 import multer from 'multer';
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
@@ -60,6 +61,7 @@ import {
   serverNames,
   writeFileDurable,
 } from './pki.ts';
+import { EXPIRY_WARN_DAYS, certificateExpiry, diagnoseNode } from './diagnostics.ts';
 import { serverTlsOptions } from './tls-server.ts';
 import {
   DEFAULT_MESH_CIDR,
@@ -535,7 +537,7 @@ const missingService = (project: string, service: string) =>
   `service ${service} not found in project ${project}`;
 
 /** Collapse a node report into the deployment error `tug deploy` prints. Compose failures are multi-line; keep the reason, not the progress log. */
-function deploymentFailureMessage(rows: { node_id: string; status_json: string }[]): string {
+function deploymentFailureMessage(rows: { node: string; status_json: string }[]): string {
   const limit = 500;
   const oneLine = (value: string) => {
     const flat = value.replace(/\s+/g, ' ').trim();
@@ -556,7 +558,7 @@ function deploymentFailureMessage(rows: { node_id: string; status_json: string }
         parts.push(`${service}: ${oneLine(state.rolloutError)}`);
     }
     const detail = parts.join('; ');
-    return detail ? `${row.node_id}: ${detail}` : row.node_id;
+    return detail ? `${row.node}: ${detail}` : row.node;
   });
   return `one or more assigned nodes reported failed health: ${details.join('; ')}`;
 }
@@ -686,7 +688,7 @@ export async function createApp(
     }
     if (parsed.klass === 'operator') {
       const actor = authenticate(db, parsed.id, keyHash);
-      return actor ? { klass: 'operator', actor, tokenId: parsed.id } : null;
+      return actor ? { klass: 'operator', actor, credentialId: parsed.id } : null;
     }
     const row = db.get<EnrollmentCredentialRow>(
       'SELECT * FROM enrollment_credentials WHERE id=?',
@@ -873,16 +875,17 @@ export async function createApp(
     for (const svc of Object.values(state.services || {}))
       for (const node of svc.placement?.nodes || []) required.add(node);
     if (!required.size) return;
+    // Placement names nodes; reports are keyed by the immutable node ID, so join to the current name.
     const statuses = db.all<{
-      node_id: string;
+      node: string;
       observed_version: string;
       health: string;
       status_json: string;
     }>(
-      'SELECT node_id,observed_version,health,status_json FROM node_statuses WHERE project_id=?',
+      'SELECT n.name AS node,s.observed_version,s.health,s.status_json FROM node_statuses s JOIN nodes n ON n.id=s.node_id WHERE s.project_id=?',
       projectId,
     );
-    const byNode = new Map(statuses.map((s) => [s.node_id, s]));
+    const byNode = new Map(statuses.map((s) => [s.node, s]));
     const reportsRevision = (node: string) =>
       state.revision
         ? JSON.parse(byNode.get(node)?.status_json || '{}').observedRevision === state.revision
@@ -1240,7 +1243,7 @@ export async function createApp(
     const composeSvc = state.compose?.services?.[service] || {};
     const ext = composeSvc['x-tug'] || {};
     const placement = ext.placement || {};
-    const global = ext.global === true || placement.global === true;
+    const global = ext.global === true;
     const labels = Array.isArray(placement.labels) ? placement.labels : [];
     const matched = nodeInfos.filter((node) =>
       labels.every((label) => node.labels.includes(label)),
@@ -1349,8 +1352,8 @@ export async function createApp(
 
   const NODE_RENEW_MIN_INTERVAL_MS = () =>
     Number(process.env.TUG_RENEW_MIN_INTERVAL_MS ?? 60 * 60 * 1000);
-  const nodeInfo = (name: string): NodeInfo => {
-    const row = db.get<NodeRow>(NODE_INFO_SQL, name);
+  const nodeInfo = (nodeId: string): NodeInfo => {
+    const row = db.get<NodeRow>(NODE_INFO_SQL, nodeId);
     if (!row) throw httpError(500, 'node not found');
     return {
       id: row.id,
@@ -1367,6 +1370,8 @@ export async function createApp(
   const NODE_NAME = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$/;
   /** Inserts a node bound to a key. Synchronous so the existence check and the write cannot interleave. */
   function insertNode(input: {
+    /** The immutable ID the node's certificates already name. */
+    id: string;
     name: string;
     keyHash: string;
     notAfter: Date;
@@ -1383,7 +1388,7 @@ export async function createApp(
     db.run(
       `INSERT INTO nodes(id,name,address,public_address,status,labels_json,key_hash,cert_not_after,created_at,updated_at)
       VALUES(?,?,?,?,?,?,?,?,?,?)`,
-      input.name,
+      input.id,
       input.name,
       input.address || null,
       input.publicAddress || null,
@@ -1394,12 +1399,12 @@ export async function createApp(
       ts,
       ts,
     );
-    ensureOverlayIp(input.name);
-    syncWgPeer(input.name, input.wgPublicKey);
+    ensureOverlayIp(input.id);
+    syncWgPeer(input.id, input.wgPublicKey);
     wakeAll();
   }
-  const identityResponse = (name: string, cert: string): IdentityResponse => ({
-    node: nodeInfo(name),
+  const identityResponse = (nodeId: string, cert: string): IdentityResponse => ({
+    node: nodeInfo(nodeId),
     certificate: cert,
     ca: pki.caPem,
     url: publicUrl(),
@@ -1410,11 +1415,20 @@ export async function createApp(
     const name = String(req.params.name);
     if (body.mode !== 'create' && body.mode !== 'replace')
       return res.status(400).json({ error: "mode must be 'create' or 'replace'" });
-    const url = publicUrl();
-    void url;
     try {
-      const signed = await pki.signClientCsr(body.csr, identityUri('node', name), NODE_LIFETIME_MS);
+      // The certificate names the immutable node ID: the existing node's, or a fresh one for a new name. A name freed by
+      // node-remove therefore never inherits the old ID, and certificates for the removed node cannot match the new one.
+      let nodeId = db.get<NodeRow>('SELECT * FROM nodes WHERE name=?', name)?.id ?? id('node');
+      let signed = await pki.signClientCsr(body.csr, identityUri('node', nodeId), NODE_LIFETIME_MS);
+      // Signing is asynchronous: re-read, and re-sign once if a concurrent request created the node meanwhile.
+      const current = db.get<NodeRow>('SELECT * FROM nodes WHERE name=?', name);
+      if (current && current.id !== nodeId) {
+        nodeId = current.id;
+        signed = await pki.signClientCsr(body.csr, identityUri('node', nodeId), NODE_LIFETIME_MS);
+      }
       const existing = db.get<NodeRow>('SELECT * FROM nodes WHERE name=?', name);
+      if (existing && existing.id !== nodeId)
+        throw httpError(409, `node ${name} was created concurrently; retry`);
       if (body.mode === 'create') {
         if (existing) {
           if (existing.key_hash !== signed.keyHash)
@@ -1423,6 +1437,7 @@ export async function createApp(
             });
         } else {
           insertNode({
+            id: nodeId,
             name,
             keyHash: signed.keyHash,
             notAfter: signed.notAfter,
@@ -1447,7 +1462,7 @@ export async function createApp(
         });
         reconcileSockets();
       }
-      res.json(identityResponse(name, signed.cert));
+      res.json(identityResponse(nodeId, signed.cert));
     } catch (e) {
       sendError(res, e);
     }
@@ -1485,12 +1500,13 @@ export async function createApp(
       name,
     );
     db.run(
-      'INSERT INTO enrollment_credentials(id,key_hash,name,labels_json,expires_at,created_at) VALUES(?,?,?,?,?,?)',
+      'INSERT INTO enrollment_credentials(id,key_hash,name,labels_json,expires_at,reserved_node_id,created_at) VALUES(?,?,?,?,?,?,?)',
       rowId,
       issued.keyHash,
       name,
       JSON.stringify(labels ?? []),
       expiresAt,
+      id('node'),
       now(),
     );
     reconcileSockets();
@@ -1509,7 +1525,7 @@ export async function createApp(
     try {
       const signed = await pki.signClientCsr(
         body.csr,
-        identityUri('node', row.name),
+        identityUri('node', row.reserved_node_id),
         NODE_LIFETIME_MS,
       );
       // Re-read the row: the checks and writes below are synchronous, so concurrent enrollments cannot both create a node.
@@ -1528,6 +1544,7 @@ export async function createApp(
             .status(409)
             .json({ error: `node ${fresh.name} already exists; a join key cannot replace a node` });
         insertNode({
+          id: fresh.reserved_node_id,
           name: fresh.name,
           keyHash: signed.keyHash,
           notAfter: signed.notAfter,
@@ -1538,7 +1555,7 @@ export async function createApp(
         });
         db.run(
           'UPDATE enrollment_credentials SET node_id=?,node_key_hash=? WHERE id=?',
-          fresh.name,
+          fresh.reserved_node_id,
           signed.keyHash,
           fresh.id,
         );
@@ -1548,7 +1565,7 @@ export async function createApp(
           message: `node ${fresh.name} enrolled`,
         });
       }
-      const enrolled: EnrollResponse = identityResponse(fresh.name, signed.cert);
+      const enrolled: EnrollResponse = identityResponse(fresh.reserved_node_id, signed.cert);
       res.json(enrolled);
     } catch (e) {
       sendError(res, e);
@@ -1657,7 +1674,7 @@ export async function createApp(
     if (!node) return res.status(404).json({ error: 'node not found' });
     res.json({ commandId: queueCommand(node.id, null, 'wg.rotate-key'), nodeId: node.id });
   });
-  // Removes a retired node: its token, WireGuard peer, statuses and queued commands. Refused while a current deployment still places
+  // Removes a retired node: its identity, WireGuard peer, statuses and queued commands. Refused while a current deployment still places
   // something on it (redeploy without it first) or while its agent is still reporting, unless force=true.
   api('delete', '/api/v1/nodes/:name', null, async (req, res) => {
     const node = db.get<Pick<NodeRow, 'id' | 'name' | 'last_seen_at'>>(
@@ -1729,7 +1746,7 @@ export async function createApp(
     const created = await createCredential(db, pki, publicUrl(), request, req.actor!.name);
     audit(req.actor!, {
       type: 'credential.create',
-      message: `token ${created.name} (${created.role}${created.projects ? `, projects: ${created.projects.join(', ')}` : ''}) created by ${req.actor!.name}`,
+      message: `credential ${created.name} (${created.role}${created.projects ? `, projects: ${created.projects.join(', ')}` : ''}) created by ${req.actor!.name}`,
       metadata: {
         name: created.name,
         role: created.role,
@@ -1744,11 +1761,11 @@ export async function createApp(
   );
   api('delete', '/api/v1/credentials/:name', null, async (req, res) => {
     if (!revokeCredential(db, String(req.params.name)))
-      return res.status(404).json({ error: 'token not found' });
+      return res.status(404).json({ error: 'credential not found' });
     reconcileSockets();
     audit(req.actor!, {
       type: 'credential.revoke',
-      message: `token ${String(req.params.name)} revoked by ${req.actor!.name}`,
+      message: `credential ${String(req.params.name)} revoked by ${req.actor!.name}`,
       metadata: { name: String(req.params.name) },
     });
     res.json({ ok: true, name: String(req.params.name) });
@@ -2134,12 +2151,12 @@ export async function createApp(
       // Resolve label-based and global placement into concrete node lists before validation.
       for (const svc of Object.values(compose.services || {})) {
         const ext = (svc['x-tug'] ||= {}) as {
-          placement?: { nodes?: string[]; labels?: string[]; global?: boolean };
+          placement?: { nodes?: string[]; labels?: string[] };
           replicas?: number;
           global?: boolean;
         };
         const placement = ext.placement || {};
-        const global = ext.global === true || placement.global === true;
+        const global = ext.global === true;
         const labels = Array.isArray(placement.labels) ? placement.labels : [];
         if (!placement.nodes?.length && (labels.length || global)) {
           const matched = nodeInfos
@@ -2838,7 +2855,7 @@ export async function createApp(
     );
     const projects = projectScope(req.actor!, 'id');
     const deployments = projectScope(req.actor!, 'project_id');
-    const statuses = projectScope(req.actor!, 'project_id');
+    const statuses = projectScope(req.actor!, 's.project_id');
     res.json({
       projects: db.all(`SELECT * FROM projects WHERE ${projects.where}`, ...projects.args),
       deployments: db.all(
@@ -2846,7 +2863,10 @@ export async function createApp(
         ...deployments.args,
       ),
       nodes: db.all('SELECT id,name,status,last_seen_at FROM nodes'),
-      statuses: db.all(`SELECT * FROM node_statuses WHERE ${statuses.where}`, ...statuses.args),
+      statuses: db.all(
+        `SELECT s.*,n.name AS node FROM node_statuses s LEFT JOIN nodes n ON n.id=s.node_id WHERE ${statuses.where}`,
+        ...statuses.args,
+      ),
     });
   });
   api('get', '/api/v1/events', null, async (req, res) => {
@@ -2879,18 +2899,59 @@ export async function createApp(
     await check('sqlite', async () => ({
       value: db.get<{ count: number }>('SELECT COUNT(*) AS count FROM projects')!.count,
     }));
-    await check('pki', async () => ({
-      caNotAfter: pki.caNotAfter.toISOString(),
-      daysUntilCaExpiry: Math.floor((pki.caNotAfter.getTime() - Date.now()) / 86_400_000),
-    }));
+    await check('certificates', async () => {
+      const nowMs = Date.now();
+      const ca = certificateExpiry(pki.caNotAfter, nowMs, EXPIRY_WARN_DAYS.ca);
+      const saved = JSON.parse(
+        await fs.readFile(path.join(DATA_DIR, 'pki', 'server.json'), 'utf8'),
+      );
+      const server = certificateExpiry(
+        new Date(new crypto.X509Certificate(saved.cert).validTo),
+        nowMs,
+        EXPIRY_WARN_DAYS.server,
+      );
+      const problems = [
+        ...(ca.state === 'expired'
+          ? ['the control CA has expired; see the CA-loss recovery runbook']
+          : []),
+        ...(server.state === 'expired' ? ['the control server certificate has expired'] : []),
+      ];
+      const warnings = [
+        ...(ca.state === 'expiring'
+          ? [`the control CA expires in ${ca.daysLeft} days; plan a CA rotation`]
+          : []),
+        ...(server.state === 'expiring'
+          ? [`the server certificate expires in ${server.daysLeft} days and has not renewed`]
+          : []),
+      ];
+      return {
+        ok: problems.length === 0,
+        ca,
+        server,
+        ...(problems.length && { error: problems.join('; ') }),
+        ...(warnings.length && { warnings }),
+      };
+    });
+    await check('nodes', async () => {
+      const nowMs = Date.now();
+      const staleSeconds = Number(process.env.TUG_STALE_SECONDS || 60);
+      const nodes = db
+        .all<NodeRow>('SELECT * FROM nodes ORDER BY name')
+        .map((n) => diagnoseNode(n, nowMs, staleSeconds));
+      const problems = nodes.flatMap((n) => n.problems.map((p) => `${n.name}: ${p}`));
+      const warnings = nodes.flatMap((n) => n.warnings.map((w) => `${n.name}: ${w}`));
+      return {
+        ok: problems.length === 0,
+        nodes: nodes.map(({ problems: _p, warnings: _w, ...rest }) => rest),
+        ...(problems.length && { error: problems.join('; ') }),
+        ...(warnings.length && { warnings }),
+      };
+    });
     await check('master_key', async () => ({ configured: Boolean(masterKey) }));
     await check('docker', async () => ({
       output: (
         await runCommand('docker', ['version', '--format', '{{.Server.Version}}'])
       ).out.trim(),
-    }));
-    await check('docker_compose', async () => ({
-      output: (await runCommand('docker', ['compose', 'version'])).out.trim(),
     }));
     if (MESH) {
       await check('mesh', async () => {
@@ -3175,6 +3236,13 @@ export async function createApp(
         req.node!.id,
       );
     db.run('UPDATE nodes SET last_seen_at=?,status=? WHERE id=?', ts, 'online', req.node!.id);
+    if (report.sentAt)
+      db.run(
+        'UPDATE nodes SET clock_skew_ms=?,clock_observed_at=? WHERE id=?',
+        Date.parse(report.sentAt) - Date.parse(ts),
+        ts,
+        req.node!.id,
+      );
     try {
       restores.advance();
     } catch (e) {
