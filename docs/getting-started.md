@@ -19,10 +19,10 @@ Everything that talks to the control plane uses a client certificate: you, CI an
 ## 1. Install the control plane
 
 ```bash
-tug control-install root@203.0.113.5 --advertise-url https://203.0.113.5:8443 --install-docker
+tug control-install root@203.0.113.5 --install-docker
 ```
 
-`--advertise-url` is the address clients should connect to by default, as an `https://` origin including the port. It can be an IP or a DNS name. It is written into each credential as the default connect address and added to the server certificate, but it is not the identity: if the address changes you update the setting and clients can override it (see [Moving the control plane](#moving-the-control-plane)). Add `--extra-san <name-or-ip>` for other addresses clients might use, and `--port` to publish a different port.
+Clients need a reachable address for control, which `control-install` takes from the SSH target and the published port (here `https://203.0.113.5:8443`) and prints when it does. Pass `--advertise-url https://control.example.com:8443` when clients should use a different address, for example a DNS name or an SSH alias that only resolves on your machine. It can be an IP or a DNS name. It is written into each credential as the default connect address and added to the server certificate, but it is not the identity: if the address changes you update the setting and clients can override it (see [Moving the control plane](#moving-the-control-plane)). Add `--extra-san <name-or-ip>` for other addresses clients might use, and `--port` to publish a different port.
 
 The command checks the host (Docker, free disk, free port), starts the control container and writes the root credential to `tug-root.credential.json` on your machine with mode `0600`. Keep it safe; it is full admin access. Running the same command later upgrades control in place and does not issue a new root credential.
 
@@ -103,7 +103,7 @@ No credential becomes invalid because the address changed. The control name only
 
 | Situation | What to do |
 | --- | --- |
-| Lost the root credential | `tug control-install <ssh-target> --advertise-url ... --recover-root` |
+| Lost the root credential | `tug control-install <ssh-target> --recover-root` |
 | A CI credential leaked | `tug credential-revoke <name>`; live sessions close within a second |
 | A node is suspect | `tug node-disable <node>` now, then `tug node-replace-identity` |
 | A node's identity is corrupt or expired | `tug node-repair-identity` or `tug node-replace-identity` |
