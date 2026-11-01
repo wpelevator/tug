@@ -26,7 +26,7 @@ Node certificates last 90 days. The agent renews at two thirds of the lifetime p
 
 | Situation | Command |
 | --- | --- |
-| Cut a node off immediately, without SSH or deleting anything | `tug node-disable <node>` |
+| Cut a node off immediately, without SSH or deleting anything | `tug node-disable <node>` (also removes it from other nodes' WireGuard peers, service endpoints, ingress and label-based scheduling; explicit `placement.nodes` entries are left alone) |
 | Certificate expired, key lost or suspected compromised, node disabled, CA loss, or an older backup restored | `tug node-replace <ssh-target> --name <node>` installs a new key (`mode: replace`); the old key's certificates stop working at once and their sockets close |
 | `agent.json` or `agent-pending.json` is corrupt | `tug node-repair <ssh-target> --name <node>` moves the corrupt documents aside (never service volumes or agent event state) and replaces the identity |
 | Every node after a CA loss or older restore | recover root on the control host (`control-install --recover-root`), then `tug node-replace --all` |

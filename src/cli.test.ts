@@ -618,3 +618,52 @@ test('Docker bootstrap preserves a working installation without package-manager 
     await fs.rm(dir, { recursive: true, force: true });
   }
 });
+
+test('source upload applies Docker ignore semantics and never includes credential documents', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-ignore-'));
+  const archive = path.join(os.tmpdir(), `tug-ignore-${path.basename(dir)}.tar.gz`);
+  try {
+    for (const folder of ['private/deep', 'keep', 'nested'])
+      await fs.mkdir(path.join(dir, folder), { recursive: true });
+    for (const file of [
+      'Dockerfile',
+      'key.pem',
+      'nested/other.pem',
+      '.env.production',
+      'private/config.json',
+      'private/deep/x.json',
+      'keep/a.txt',
+      'keep/public.txt',
+      'tug-root.credential.json',
+      'nested/admin.credential.json',
+    ])
+      await fs.writeFile(path.join(dir, file), 'x');
+    await fs.writeFile(
+      path.join(dir, '.dockerignore'),
+      [
+        '*.pem',
+        '.env*',
+        'private/**',
+        'keep/*',
+        '!keep/public.txt',
+        '!tug-root.credential.json',
+      ].join('\n'),
+    );
+    await createSourceArchive(dir, archive, []);
+    const entries: string[] = [];
+    await tar.t({
+      file: archive,
+      onReadEntry: (entry) => {
+        entries.push(entry.path.replace(/^\.\//, ''));
+      },
+    });
+    assert.deepEqual(
+      entries.filter((entry) => entry && !entry.endsWith('/')).sort(),
+      ['.dockerignore', 'Dockerfile', 'keep/public.txt', 'nested/other.pem'],
+      'globs, recursive patterns and negation follow .dockerignore (a root *.pem keeps nested/other.pem) and credential documents are never uploaded',
+    );
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+    await fs.rm(archive, { force: true });
+  }
+});

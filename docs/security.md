@@ -37,6 +37,8 @@ There are ten findings: one critical, seven high and two medium. Severity assume
 
 ### SEC-02: Node-reported ports become Caddyfile syntax
 
+**Status: fixed.** `src/status-report.ts` validates and normalizes every status report before storage (ports must be integers in `1..65535`), control stores only services placed on the reporting node, and `resolveServiceEndpoints` drops any non-port value. Node address validation at registration remains open. The text below describes the original finding.
+
 **Evidence:** `src/control.ts:3062` stores request project reports without runtime schema validation. `src/ingress.ts:71` accepts `serviceState.port` as supplied, and `src/ingress.ts:152` and `src/ingress.ts:193` interpolate it into shared Caddyfile text. The enrollment/identity address fields also lack strict IP/hostname validation before being used as upstream addresses.
 
 **Reproduction:** A node reported its placed service as serving with `port: "8080 {\n\t\theader_down X-Audit injected\n\t\t#"`. An ingress node's subsequent work response contained the injected `header_down` directive. The final `#` consumes the renderer's appended opening brace, leaving the intended block structure available to the attacker. Only configuration generation was exercised; a real Caddy process was not started.
@@ -48,6 +50,8 @@ There are ten findings: one critical, seven high and two medium. Severity assume
 **Regression coverage:** Reject string, object, newline-bearing and out-of-range ports and malformed addresses; reject unplaced projects/services; demonstrate that valid numeric rolling ports still reach ingress.
 
 ### SEC-03: Backup reports bypass ownership and command lifecycle checks
+
+**Status: fixed.** The status handler resolves each command and heartbeat under the authenticated node and only while the command is `running`, before any scheduler call, and results can only be `succeeded` or `failed`, so terminal commands cannot be reopened. The text below describes the original finding.
 
 **Evidence:** `src/control.ts:3075` passes job heartbeats to the scheduler without the calling node. `src/control.ts:3079` calls `backups.onResult` before the SQL update that checks `node_id`. `src/backup-scheduler.ts:577` and `src/backup-scheduler.ts:589` locate runs solely by command ID. The guarded command update accepts arbitrary reported states, including a transition from a terminal state back to `running`; the backup credential endpoint subsequently trusts that stored state without checking current placement.
 
@@ -62,6 +66,8 @@ In a second reproduction, an already-completed backup command belonged to `n1` a
 **Regression coverage:** A foreign command result or heartbeat must leave commands, backup runs, schedules, timeout bookkeeping and audit events unchanged. A terminal command must remain terminal, and a historical command must not release newly configured credentials. Test valid same-node results and repeated terminal results as well.
 
 ### SEC-04: Node disable revokes API identity but not network membership
+
+**Status: fixed for the mesh, endpoints, ingress and label-based scheduling.** Disabled nodes are excluded from peer lists, service endpoints, ingress topology and label/global placement, and `node-disable` wakes healthy peers. Explicit `placement.nodes` entries are deliberately left unchanged, and expired identities are not yet withdrawn from the mesh. The text below describes the original finding.
 
 **Evidence:** `src/control.ts:1560` sets `disabled_at` and reconciles TLS sockets. `src/control.ts:2924` still returns every stored WireGuard peer; `src/control.ts:2904` constructs endpoint views without excluding disabled nodes. Deployment and scale inventory queries likewise omit the disabled flag.
 
@@ -86,6 +92,8 @@ In a second reproduction, an already-completed backup command belonged to `n1` a
 **Regression coverage:** Assert initial directory/archive modes under a permissive umask, including the error path, and verify that cleanup removes staging material after failed backup creation.
 
 ### SEC-06: Root credentials and ignored secrets enter source archives
+
+**Status: fixed for source uploads.** Uploads follow `.dockerignore` glob, recursive and negation semantics and always exclude `*.credential.json`; `.gitignore` covers the default output. The default `--credential-out` location is unchanged. The text below describes the original finding.
 
 **Evidence:** `src/cli.ts:457` defaults control installation output to `tug-root.credential.json` in the working directory. It is not covered by the repository's credential ignore rules or `src/cli-build.ts:19`. `src/cli.ts:1198` excludes only the tracked config and local overlay, omitting the resolved credential file. `src/cli-build.ts:56` reads `.dockerignore` rules, but `sourceArchiveFilter` compares literal paths instead of Docker pattern semantics.
 

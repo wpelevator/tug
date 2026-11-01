@@ -6,6 +6,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { loopbackIngressServices, publishedPort } from './compose.ts';
 import { ensureDir, errMessage } from './util.ts';
+import { isPort } from './status-report.ts';
 import type {
   DesiredState,
   IngressRoute,
@@ -69,7 +70,7 @@ export function resolveServiceEndpoints(
         endpoints.push({
           node: nodeName,
           address,
-          ...(serviceState.port ? { port: serviceState.port } : {}),
+          ...(isPort(serviceState.port) ? { port: serviceState.port } : {}),
         });
       }
       if (endpoints.length)
