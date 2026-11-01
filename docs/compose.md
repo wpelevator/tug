@@ -114,6 +114,46 @@ volumes:
 Control records volumes per project. A volume is included in a node's Compose file only when a service on that node uses it and, if the volume has `placement.nodes`, the node is listed. `tug volume-remove` refuses to remove a persistent volume without `--delete-data`, and refuses any volume still referenced by a service in the current deployment. `--delete-data` queues a `docker volume rm` on the volume's placement node.
 Volumes with `x-tug.type: nfs` share a directory exported by their placement node. Tug does not install or start an NFS server, and consuming nodes need the NFS client (`nfs-common` on Debian and Ubuntu): the exporter node must already export `x-tug.export` (default `/srv/tug/<volume>`) to the other nodes, ideally restricted to the mesh. On the exporter, services bind-mount that directory; on every other node using the volume, Tug generates a Compose volume that mounts `<exporter>:<export>` over NFS. Control stamps the exporter's overlay IP (with the mesh) or node address into `x-tug.address` at deploy time unless you set it. The exporter is a single point of failure.
 
+## Backups
+
+```yaml
+x-tug:
+  backup:
+    schedule: "0 3 * * *"
+    retention: { daily: 7, weekly: 4, monthly: 6 }
+
+services:
+  db:
+    image: mariadb:11.4
+    x-tug:
+      placement: { nodes: [app1] }
+      backup: true
+
+volumes:
+  uploads:
+    x-tug:
+      placement: { nodes: [store1] }
+      backup: "30 3 * * *"
+```
+
+`x-tug.backup` marks a database service or a top-level volume as a backup target. The value is `true` (take everything from the project defaults), a cron string, `false`, or an object. The top-level `x-tug.backup` only holds defaults and enables nothing by itself.
+
+| Key | Applies to | Meaning | Default |
+| --- | --- | --- | --- |
+| `type` | service | `mariadb` or `mysql`, inferred from an image named `mariadb`, `mysql` or `percona` | required when it cannot be inferred |
+| `schedule` | both | Five-field cron in UTC, or `@hourly`, `@daily`, `@weekly`, `@monthly`, `@yearly` | the project default; an error if neither is set |
+| `retention` | both | restic keep policy with `last`, `hourly`, `daily`, `weekly`, `monthly`, `yearly` | the project default, else `daily: 7, weekly: 4, monthly: 6` |
+| `jitter` | both | Seconds of delay after the scheduled minute, 0 to 3600 | a stable per-target value under 15 minutes |
+| `timeout` | both | Hard limit for a run, `1m` to `24h` | `2h` |
+| `databases` | service | Databases to dump | `MARIADB_DATABASE` or `MYSQL_DATABASE` of the service |
+| `user`, `password` | service | Database user and the name of the project secret holding its password | `root` and `MARIADB_ROOT_PASSWORD` or `MYSQL_ROOT_PASSWORD` |
+| `exclude` | volume | restic exclude patterns | none |
+| `writers` | both | Services to hold during a restore | discovered from `depends_on` and volume mounts |
+
+Deploy rejects a target that cannot be backed up from one place: a service that is global, replicated or placed on several nodes; a volume used on several nodes without `x-tug.placement.nodes`; an NFS volume without its exporter as placement (the backup always runs on the exporter); and a volume holding the data of a database that has its own backup, since copying a running database's files is not a backup.
+
+This is the configuration surface for [M11](roadmap.md#m11--backups-restores-and-run-once-jobs). Today Tug validates and records these keys; scheduled execution, the destination and the catalog are not implemented yet, so use the sidecar recipe in [Backups](backups.md) until they land.
+
 ## Secrets in services
 
 Secrets are referenced by variable name and resolved by control at deploy time; the `@@tug:secret:NAME@@` placeholder you may see in a normalized file is internal and never written by hand. Reference secrets with `${NAME}` anywhere Compose interpolates, usually `environment`. `tug deploy` sets every project secret as a variable during `docker compose config`, so a secret wins over a local variable of the same name and `environment: [DB_PASSWORD]` passes it through. Only secrets a service references are released to its node, and a changed secret recreates exactly the services that use it. Secrets are substituted into the container environment; keep them out of `command` unless you accept them showing in `docker inspect`. Deploying a Compose file that references a secret the project does not have is rejected.

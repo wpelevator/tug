@@ -34,6 +34,39 @@ export interface IngressSpec {
   key?: string;
 }
 
+export type BackupType = 'mariadb' | 'mysql' | 'volume';
+
+/** A restic keep policy; at least one key is required. */
+export interface BackupRetention {
+  last?: number;
+  hourly?: number;
+  daily?: number;
+  weekly?: number;
+  monthly?: number;
+  yearly?: number;
+}
+
+/** `x-tug.backup` on a service or top-level volume, as an object. */
+export interface BackupSpec {
+  type?: BackupType;
+  /** Five-field cron in UTC, or `@hourly`, `@daily`, `@weekly`, `@monthly`, `@yearly`. */
+  schedule?: string;
+  retention?: BackupRetention;
+  /** Seconds of deterministic per-target delay after the scheduled minute. */
+  jitter?: number;
+  /** Hard limit for one run, such as `30m` or `2h`. */
+  timeout?: string | number;
+  databases?: string[];
+  user?: string;
+  /** Name of the project secret holding the database user's password. */
+  password?: string;
+  exclude?: string[];
+  writers?: string[];
+}
+
+/** `true`, `false`, a cron string, or the object form. */
+export type BackupConfig = boolean | string | BackupSpec;
+
 export type RolloutStrategy = 'recreate' | 'rolling';
 
 /** `x-tug.rollout`: how a service is replaced on a new deployment. `recreate` (default) is `docker compose up -d`. */
@@ -51,12 +84,15 @@ export interface ServiceExtension {
   health?: HealthCheck;
   ingress?: IngressSpec;
   rollout?: RolloutSpec;
+  backup?: BackupConfig;
 }
 
 /** The top-level `x-tug` extension of a Compose file. */
 export interface ProjectExtension {
   /** `auto` creates a rollback deployment when a deployment fails on health; `manual` (default) only reports it. */
   rollback?: 'auto' | 'manual';
+  /** Defaults for every `x-tug.backup` target; they enable nothing by themselves. */
+  backup?: Pick<BackupSpec, 'schedule' | 'retention'>;
 }
 
 /** The `x-tug` extension on a top-level Compose volume. */
@@ -69,6 +105,7 @@ export interface VolumeExtension {
   address?: string;
   /** Directory exported by the NFS server on the exporter node (default `/srv/tug/<volume>`). */
   export?: string;
+  backup?: BackupConfig;
 }
 
 export type BuildConfig =
