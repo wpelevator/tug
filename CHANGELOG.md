@@ -1,5 +1,19 @@
 # @wpelevator/tug
 
+## 0.8.0
+
+### Minor Changes
+
+- 1918525: Replace HTTP and bearer tokens with one mutual-TLS listener. Control now serves a single TLS 1.3 port (default `8443`) that requires a client certificate from every peer, signed by control's private CA. Nodes, operators and CI authenticate with certificates whose keys are authorized from the database, so revocation, key replacement and `tug node-disable` apply to the next request and close live sessions. `TUG_PUBLIC_URL` is now required; `TUG_OPERATOR_TOKEN`, `TUG_TOKEN`, `TUG_AGENT_TOKEN`, `TUG_TLS_CERT_FILE`, `TUG_TLS_KEY_FILE`, `--token`, `--uses`, `--ca`, `--http-only-dev`, `control-token`, `/healthz` and the plain HTTP listener are removed. New commands: `node-replace-identity`, `node-repair-identity`, `node-disable`, `control-install --recover-root`, `agent identity` and `agent install-cert`; `tug init` imports a credential file. `node-prepare-enrollment` mints single-use, name-bound bootstrap certificates.
+- 1918525: Node IDs are now generated, immutable and never reused: a node has a random `node_...` ID beside its chosen name, certificates name the ID, and a name freed by `node-remove` gets a new ID, so certificates issued for the removed node can never authenticate a node created later with the same name (even with the same key). Enrollment credentials reserve their node ID when minted, and `status` includes each report's node name. `tug doctor` now reports the control CA, server and every node certificate's expiry (warning when renewal is overdue, failing when expired) and each online node's observed clock skew; offline nodes report an unknown skew instead of a stale value. Agents send their clock with status reports. The control-side Compose check is gone from `doctor`. `x-tug.placement.global` is removed in favor of `x-tug.global` and is rejected with a pointer to it. The runtime and fake-VPS images no longer ship the Compose plugin (nodes use the Docker Engine API), and the image smoke test now also verifies certificate issuance and the undici transport on Debian and Alpine. Help and error text, audit messages and the documentation now use operator credential, control plane, node and agent consistently, and no longer describe bearer tokens, plain HTTP, port 8080, `/healthz` or Compose on nodes.
+
+### Patch Changes
+
+- 1918525: Create control backup directories as `0700` and archives as `0600`, removing staging key material when a backup fails; `control-install` now creates the control data directory as `0700`. Refuse a deploy or rollback that claims an ingress hostname another project already routes. Update `multer`, `js-yaml`, `tar`, `express`'s `qs` and `proxy-addr` to patched versions.
+- 1918525: Document security audit findings and clarify the host and secret access granted by deployment credentials.
+- 1918525: Document Tug's core terminology and review naming consistency, confusing interfaces and alignment with established infrastructure tools.
+- 1918525: Harden node reports and source uploads. Control validates every node status report against the protocol schema (rejecting non-numeric or out-of-range ports) and stores only services placed on the reporting node, so a node can no longer inject ingress configuration. Backup results and heartbeats apply only to a running command owned by the calling node. `node-disable` now removes the node from peers, endpoints, ingress and label scheduling immediately. Source uploads follow `.dockerignore` glob, recursive and negation rules and never include `*.credential.json` files.
+
 ## 0.7.0
 
 ### Minor Changes
