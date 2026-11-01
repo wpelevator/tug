@@ -346,6 +346,8 @@ test(
       docker('rm', '-f', 'tug-bkjob-db');
       docker('network', 'rm', network);
       docker('volume', 'rm', '-f', 'tug_bkjob_uploads', 'tug_bkjob_scratch');
+      // restic runs as root in its container, so on Linux the repository is not removable by this user.
+      docker('run', '--rm', '-v', `${dir}:/work`, 'alpine', 'rm', '-rf', '/work/repo');
       await fs.rm(dir, { recursive: true, force: true });
     }
   },
