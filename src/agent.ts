@@ -16,6 +16,7 @@ import { containerSpecs, networkName, volumeName } from './container-spec.ts';
 import { API_VERSION, DockerEngine, isNotFound } from './docker-api.ts';
 import type { ContainerSummary, DockerApi } from './docker-api.ts';
 import type { PortBind } from './compose.ts';
+import { JobRunner } from './agent-jobs.ts';
 import { LIVE_MAX_FRAME_BYTES, LIVE_START_TIMEOUT_MS } from './protocol.ts';
 import type {
   AgentLiveCommand,
@@ -56,6 +57,7 @@ import type {
   EnrollResponse,
   HealthCheck,
   IngressStatus,
+  BackupCredentialsResponse,
   JoinKey,
   ProjectStatus,
   ImageArtifact,
@@ -111,6 +113,26 @@ export function defaultContext(): AgentContext {
     caddyImage: process.env.TUG_CADDY_IMAGE,
     rolloutPorts: process.env.TUG_ROLLOUT_PORTS,
   };
+}
+
+const jobRunners = new Map<string, JobRunner>();
+/** One job runner per state directory, so a background backup outlives the polls that started it. */
+function jobRunnerFor(ctx: AgentContext): JobRunner {
+  let runner = jobRunners.get(ctx.stateDir);
+  if (!runner) {
+    runner = new JobRunner({
+      docker: ctx.docker,
+      stateDir: ctx.stateDir,
+      concurrency: Number(process.env.TUG_BACKUP_CONCURRENCY) || 1,
+      fetchCredentials: (commandId) =>
+        api<BackupCredentialsResponse>(
+          ctx,
+          `/agent/v1/backup/credentials?command=${encodeURIComponent(commandId)}`,
+        ),
+    });
+    jobRunners.set(ctx.stateDir, runner);
+  }
+  return runner;
 }
 
 const dbsByStateDir = new Map<string, Db>();
@@ -1268,7 +1290,13 @@ export async function pollOnce(ctx: AgentContext = defaultContext()): Promise<Pr
     else await removeIngress(ingressCtx).catch(() => false);
   }
   const commandResults: CommandResult[] = [];
+  const jobs = jobRunnerFor(ctx);
   for (const command of work.commands || []) {
+    // Backups can run for an hour, so they run in the background and report through later polls.
+    if (command.type.startsWith('backup.')) {
+      await jobs.start(command);
+      continue;
+    }
     try {
       commandResults.push(await executeCommand(command, ctx));
     } catch (e) {
@@ -1279,7 +1307,11 @@ export async function pollOnce(ctx: AgentContext = defaultContext()): Promise<Pr
       });
     }
   }
+  const jobResults = jobs.pending();
+  commandResults.push(...jobResults);
   const report: StatusReport = { node: ctx.nodeName, projects, commandResults };
+  const running = jobs.statuses();
+  if (running.length) report.jobs = running;
   if (ingress) report.ingress = ingress;
   if (work.retainedImages && projects.every((project) => project.health !== 'failed'))
     await pruneManagedImages(ctx, work.retainedImages);
@@ -1288,6 +1320,7 @@ export async function pollOnce(ctx: AgentContext = defaultContext()): Promise<Pr
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(report),
   });
+  await jobs.acknowledge(jobResults);
   return projects;
 }
 

@@ -264,6 +264,8 @@ export class FakeDocker implements DockerApi {
     const failure = this.failExec?.(cmd);
     return { code: failure?.code ?? 0, out: failure?.out ?? '', err: failure?.err ?? '' };
   }
+  /** Scripts `execStart`: when it returns a result the process writes it and closes with that exit code. */
+  execResponder?: (cmd: string[]) => { code: number; out?: string; err?: string } | undefined;
   execProcesses: AttachedProcess[] = [];
   execOptions: ExecOptions[] = [];
   async execStart(id: string, options: ExecOptions): Promise<AttachedProcess> {
@@ -281,6 +283,15 @@ export class FakeDocker implements DockerApi {
       ...(options.tty ? { resize: () => {} } : {}),
     }) as AttachedProcess;
     this.execProcesses.push(proc);
+    const scripted = this.execResponder?.(options.cmd);
+    if (scripted)
+      setImmediate(() => {
+        if (scripted.out) stdout.write(scripted.out);
+        if (scripted.err) stderr.write(scripted.err);
+        stdout.end();
+        stderr.end();
+        setImmediate(() => proc.emit('close', scripted.code, null));
+      });
     return proc;
   }
 
