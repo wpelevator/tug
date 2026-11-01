@@ -41,7 +41,11 @@ export interface NodeRow {
   ingress_status_json: string | null;
   status: string;
   labels_json: string | null;
-  agent_token_hash: string | null;
+  /** SHA-256 of the node key's SubjectPublicKeyInfo: the identity the node is authorized by. */
+  key_hash: string | null;
+  disabled_at: string | null;
+  cert_not_after: string | null;
+  last_renewed_at: string | null;
   last_seen_at: string | null;
   created_at: string;
   updated_at: string;
@@ -55,10 +59,14 @@ export interface WgPeerRow {
   updated_at: string;
 }
 export interface EnrollTokenRow {
-  token_hash: string;
-  name: string | null;
-  uses_remaining: number;
+  id: string;
+  key_hash: string;
+  name: string;
+  labels_json: string | null;
   expires_at: string;
+  revoked_at: string | null;
+  node_id: string | null;
+  node_key_hash: string | null;
   created_at: string;
 }
 export interface DeploymentRow {
@@ -256,9 +264,9 @@ function initializeControl(db: Db): void {
   db.exec(`
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, name TEXT UNIQUE NOT NULL, current_deployment_id TEXT, created_at TEXT, updated_at TEXT);
-CREATE TABLE IF NOT EXISTS nodes(id TEXT PRIMARY KEY, name TEXT UNIQUE NOT NULL, address TEXT, public_address TEXT, overlay_ip TEXT UNIQUE, ingress INTEGER NOT NULL DEFAULT 0, ingress_status_json TEXT, status TEXT, labels_json TEXT, agent_token_hash TEXT, last_seen_at TEXT, created_at TEXT, updated_at TEXT);
+CREATE TABLE IF NOT EXISTS nodes(id TEXT PRIMARY KEY, name TEXT UNIQUE NOT NULL, address TEXT, public_address TEXT, overlay_ip TEXT UNIQUE, ingress INTEGER NOT NULL DEFAULT 0, ingress_status_json TEXT, status TEXT, labels_json TEXT, key_hash TEXT, disabled_at TEXT, cert_not_after TEXT, last_renewed_at TEXT, last_seen_at TEXT, created_at TEXT, updated_at TEXT);
 CREATE TABLE IF NOT EXISTS wg_peers(node_id TEXT PRIMARY KEY, public_key TEXT NOT NULL UNIQUE, overlay_ip TEXT NOT NULL, endpoint TEXT, allowed_ips TEXT NOT NULL, updated_at TEXT);
-CREATE TABLE IF NOT EXISTS enroll_tokens(token_hash TEXT PRIMARY KEY, name TEXT, uses_remaining INTEGER, expires_at TEXT, created_at TEXT);
+CREATE TABLE IF NOT EXISTS enroll_tokens(id TEXT PRIMARY KEY, key_hash TEXT UNIQUE NOT NULL, name TEXT NOT NULL, labels_json TEXT, expires_at TEXT NOT NULL, revoked_at TEXT, node_id TEXT, node_key_hash TEXT, created_at TEXT);
 CREATE TABLE IF NOT EXISTS deployments(id TEXT PRIMARY KEY, project_id TEXT, version TEXT, state TEXT, created_at TEXT, updated_at TEXT, error_message TEXT, actor TEXT);
 CREATE TABLE IF NOT EXISTS desired_states(id TEXT PRIMARY KEY, project_id TEXT, deployment_id TEXT, version TEXT, state_json TEXT, created_at TEXT);
 CREATE TABLE IF NOT EXISTS node_statuses(id TEXT PRIMARY KEY, node_id TEXT, project_id TEXT, observed_version TEXT, status_json TEXT, health TEXT, updated_at TEXT, UNIQUE(node_id, project_id));
@@ -269,7 +277,7 @@ CREATE TABLE IF NOT EXISTS backups(id TEXT PRIMARY KEY, project_id TEXT, target 
 CREATE TABLE IF NOT EXISTS commands(id TEXT PRIMARY KEY, node_id TEXT, project_id TEXT, type TEXT, state TEXT, payload_json TEXT, result_json TEXT, attempts INTEGER DEFAULT 0, run_after TEXT, deadline TEXT, created_at TEXT, updated_at TEXT);
 CREATE TABLE IF NOT EXISTS events(id TEXT PRIMARY KEY, project_id TEXT, deployment_id TEXT, node_id TEXT, level TEXT, type TEXT, message TEXT, metadata_json TEXT, created_at TEXT, actor TEXT);
 CREATE INDEX IF NOT EXISTS events_project_created ON events(project_id, created_at);
-CREATE TABLE IF NOT EXISTS api_tokens(id TEXT PRIMARY KEY, name TEXT UNIQUE NOT NULL, token_hash TEXT UNIQUE NOT NULL, role TEXT NOT NULL, projects_json TEXT, created_at TEXT, created_by TEXT, last_used_at TEXT, expires_at TEXT, revoked_at TEXT);
+CREATE TABLE IF NOT EXISTS api_tokens(id TEXT PRIMARY KEY, name TEXT UNIQUE NOT NULL, key_hash TEXT UNIQUE NOT NULL, role TEXT NOT NULL, projects_json TEXT, created_at TEXT, created_by TEXT, last_used_at TEXT, expires_at TEXT, revoked_at TEXT);
 CREATE INDEX IF NOT EXISTS events_by_time ON events(created_at);
 CREATE TABLE IF NOT EXISTS locks(name TEXT PRIMARY KEY, owner TEXT, expires_at TEXT, created_at TEXT);
 CREATE TABLE IF NOT EXISTS backup_destination(id TEXT PRIMARY KEY CHECK(id='default'), url TEXT NOT NULL, env_names_json TEXT NOT NULL, checked_at TEXT, check_result_json TEXT, updated_at TEXT);

@@ -43,7 +43,6 @@ async function makeCtx(overrides: Partial<AgentContext> = {}): Promise<AgentCont
     stateDir,
     apply: true,
     controlUrl: 'http://control.test',
-    token: 'tok',
     ...overrides,
   };
 }
@@ -225,7 +224,7 @@ test('a changed secret recreates only the services that reference it, without pu
   assert.deepEqual(d.verbs('pull'), [], 'no pull happens for a secret change');
 });
 
-test('reconcile sends the bearer token to control and fails without one', async () => {
+test('control requests carry no bearer token: the transport authenticates with the client certificate', async () => {
   const seen: (string | null)[] = [];
   const http = (async (_url: string | URL | Request, init?: RequestInit) => {
     seen.push(new Headers(init?.headers).get('authorization'));
@@ -233,10 +232,9 @@ test('reconcile sends the bearer token to control and fails without one', async 
   }) as HttpClient;
   const ctx = await makeCtx({ http, apply: false });
   await reconcile(desired(twoServices), ctx);
-  assert.ok(seen.length > 0 && seen.every((h) => h === 'Bearer tok'));
-  await assert.rejects(
-    reconcile(desired(twoServices, 'v2'), { ...ctx, token: undefined }),
-    /TUG_AGENT_TOKEN required/,
+  assert.ok(
+    seen.length > 0 && seen.every((h) => h === null),
+    'no Authorization header may be sent',
   );
 });
 

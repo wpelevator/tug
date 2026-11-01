@@ -70,7 +70,6 @@ async function fixture(t: test.TestContext, override: Partial<AgentContext> = {}
     stateDir,
     nodeName: 'n1',
     apply: true,
-    token: 'secret',
     controlUrl: 'http://control.test',
     http: fetch,
     docker,

@@ -6,12 +6,12 @@ import path from 'node:path';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from './control.ts';
-import { testImageResolver } from '../tests/helpers.ts';
+import { testImageResolver, testIdentity } from '../tests/helpers.ts';
 import { openDb } from './db.ts';
 import { json } from '../tests/helpers.ts';
 
 const DAY = 86_400_000;
-const op = { Authorization: 'Bearer op-events-token', 'content-type': 'application/json' };
+const op = { 'x-tug-test-operator': 'operator', 'content-type': 'application/json' };
 
 /** Writes events straight into a control database: `name` with a creation time `ageMs` in the past. */
 async function seed(dir: string, events: { name: string; ageMs: number }[]) {
@@ -39,12 +39,15 @@ async function makeServer(
     dir,
     async start() {
       process.env.TUG_DATA_DIR = dir;
-      process.env.TUG_OPERATOR_TOKEN = 'op-events-token';
       for (const [key, value] of Object.entries(env)) {
         if (value === undefined) delete process.env[key];
         else process.env[key] = value;
       }
-      const app = await createApp({ ...options, images: { resolve: testImageResolver } });
+      const app = await createApp({
+        identity: testIdentity,
+        ...options,
+        images: { resolve: testImageResolver },
+      });
       for (const [key, value] of Object.entries(restore)) {
         if (value === undefined) delete process.env[key];
         else process.env[key] = value;
@@ -162,7 +165,7 @@ test('agent reports prune old events, but at most once per interval', async () =
       ]);
       const report = await fetch(`${srv.base}/agent/v1/events`, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${node.agentToken}`, 'content-type': 'application/json' },
+        headers: { 'x-tug-test-node': node.agentToken, 'content-type': 'application/json' },
         body: JSON.stringify({ projectId: 'site', type: 'service.serving', message: 'fresh' }),
       });
       assert.equal(report.status, 200, 'the agent report itself succeeds');

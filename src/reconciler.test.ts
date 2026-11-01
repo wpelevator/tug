@@ -51,7 +51,6 @@ async function makeCtx(
     stateDir,
     apply: true,
     controlUrl: 'http://control.test',
-    token: 'tok',
     ...overrides,
   };
 }

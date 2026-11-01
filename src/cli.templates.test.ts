@@ -4,10 +4,9 @@ import { execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import type { AddressInfo } from 'node:net';
 import { promisify } from 'node:util';
-import { createApp } from './control.ts';
-import { testImageResolver } from '../tests/helpers.ts';
+import { startMtlsControl } from '../tests/helpers.ts';
+import { createCsr, generateKeyPair } from './pki.ts';
 import { defaultImage } from './image.ts';
 import yaml from 'js-yaml';
 
@@ -24,7 +23,7 @@ async function stubSsh(dir: string) {
   await fs.mkdir(bin, { recursive: true });
   await fs.writeFile(
     path.join(bin, 'ssh'),
-    `#!/bin/sh\nfor a in "$@"; do printf '%s\\n' "$a"; done >> "${log}"\nprintf '\\n--END--\\n' >> "${log}"\n`,
+    `#!/bin/sh\nfor a in "$@"; do printf '%s\\n' "$a"; done >> "${log}"\nprintf '\\n--END--\\n' >> "${log}"\ncase "$*" in\n  *"agent identity"*) cat "$TUG_STUB_CSR" ;;\n  *issue-credential*) cat "$TUG_STUB_CREDENTIAL" ;;\nesac\n`,
     { mode: 0o755 },
   );
   return { bin, log };
@@ -32,26 +31,32 @@ async function stubSsh(dir: string) {
 
 test('install commands render the shipped templates (src in dev, dist in the image)', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-cli-tpl-'));
-  process.env.TUG_DATA_DIR = path.join(dir, 'data');
-  process.env.TUG_OPERATOR_TOKEN = 'op-cli-template-token';
-  const app = await createApp({ images: { resolve: testImageResolver } });
-  const server = await new Promise<import('node:http').Server>((resolve) => {
-    const s = app.listen(0, () => resolve(s));
-  });
-  const controlUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const control = await startMtlsControl(path.join(dir, 'data'));
   const ssh = await stubSsh(dir);
+  const csrFile = path.join(dir, 'node.csr');
+  await fs.writeFile(csrFile, await createCsr((await generateKeyPair()).privateKeyPem));
   const env = {
     ...process.env,
+    ...control.env,
     PATH: `${ssh.bin}${path.delimiter}${process.env.PATH}`,
     TUG_CONFIG: path.join(dir, 'cfg.json'),
-    TUG_TOKEN: 'op-cli-template-token',
-    TUG_CONTROL_URL: controlUrl,
+    TUG_STUB_CSR: csrFile,
+    TUG_STUB_CREDENTIAL: control.credentialFile,
   };
   await fs.writeFile(env.TUG_CONFIG, '{}');
   const cli = (...args: string[]) =>
     execFileAsync(process.execPath, [cliEntry, ...args], { env, cwd: dir });
   try {
-    await cli('control-install', 'root@control.test', '--port', '9099');
+    await cli(
+      'control-install',
+      'root@control.test',
+      '--port',
+      '9099',
+      '--public-url',
+      'https://control.test:9099',
+      '--credential-out',
+      path.join(dir, 'root.out.json'),
+    );
     let script = await fs.readFile(ssh.log, 'utf8');
     assert.ok(
       !script.includes('TUG_REGISTRY'),
@@ -70,7 +75,15 @@ test('install commands render the shipped templates (src in dev, dist in the ima
     assert.doesNotMatch(script, unrenderedVariable, 'no unrendered template variables');
 
     await fs.rm(ssh.log);
-    await cli('control-install', 'root@bare.test', '--install-docker');
+    await cli(
+      'control-install',
+      'root@bare.test',
+      '--install-docker',
+      '--public-url',
+      'https://bare.test:8443',
+      '--credential-out',
+      path.join(dir, 'root.out.json'),
+    );
     script = await fs.readFile(ssh.log, 'utf8');
     assert.doesNotMatch(
       script,
@@ -88,7 +101,15 @@ test('install commands render the shipped templates (src in dev, dist in the ima
     );
 
     await fs.rm(ssh.log);
-    await cli('control-install', 'root@mesh.test', '--mesh');
+    await cli(
+      'control-install',
+      'root@mesh.test',
+      '--mesh',
+      '--public-url',
+      'https://mesh.test:8443',
+      '--credential-out',
+      path.join(dir, 'root.out.json'),
+    );
     assert.match(
       await fs.readFile(ssh.log, 'utf8'),
       /TUG_MESH: "true"/,
@@ -96,18 +117,15 @@ test('install commands render the shipped templates (src in dev, dist in the ima
     );
 
     await fs.rm(ssh.log);
-    await cli(
-      'node-install',
-      'root@node.test',
-      '--name',
-      'n-tpl',
-      '--control-url',
-      controlUrl,
-      '--http-only-dev',
-    );
+    await cli('node-install', 'root@node.test', '--name', 'n-tpl', '--no-wait');
     script = await fs.readFile(ssh.log, 'utf8');
     assert.ok(script.includes('TUG_NODE_NAME=n-tpl'), 'agent.env rendered');
-    assert.ok(script.includes(controlUrl), 'agent.env carries the control URL');
+    assert.ok(!script.includes('TUG_AGENT_TOKEN'), 'no bearer token reaches the node');
+    assert.ok(script.includes('agent install-cert'), 'the certificate is installed over SSH');
+    assert.ok(
+      !script.includes('BEGIN CERTIFICATE REQUEST'),
+      'the CSR travels over stdin, never a command line',
+    );
     assert.ok(
       script.includes(defaultImage()),
       'node-install defaults to the published image for the CLI version',
@@ -129,6 +147,7 @@ test('install commands render the shipped templates (src in dev, dist in the ima
       'n-private',
       '--agent-control-url',
       agentControlUrl,
+      '--no-wait',
     );
     script = await fs.readFile(ssh.log, 'utf8');
     assert.ok(
@@ -136,8 +155,8 @@ test('install commands render the shipped templates (src in dev, dist in the ima
       'agent installation should write the separately advertised URL while registration reaches the operator API',
     );
     assert.ok(
-      script.includes(`'${agentControlUrl}'/healthz`),
-      'node preflight should test control reachability using the agent URL',
+      script.includes('/dev/tcp/agent-control.test/443'),
+      'node preflight should test TCP reachability of the agent URL',
     );
     const privateEnroll = JSON.parse(
       (
@@ -151,28 +170,22 @@ test('install commands render the shipped templates (src in dev, dist in the ima
         )
       ).stdout,
     );
+    const joinKey = JSON.parse(Buffer.from(privateEnroll.joinKey, 'base64url').toString());
+    assert.equal(joinKey.v, 2, 'join keys carry the bootstrap credential');
     assert.equal(
-      privateEnroll.controlUrl,
+      joinKey.connectUrl,
       agentControlUrl,
-      'enrollment output should advertise the agent URL',
+      'join key should use the agent URL as the connect target only',
     );
     assert.equal(
-      JSON.parse(Buffer.from(privateEnroll.joinKey, 'base64url').toString()).controlUrl,
-      agentControlUrl,
-      'join key should use the agent URL without changing the operator API request destination',
+      joinKey.credential.url,
+      'https://localhost:8443',
+      'the credential keeps the verified public URL',
     );
+    assert.equal(joinKey.name, 'n-private-enroll', 'the join key is bound to one node name');
 
     await fs.rm(ssh.log);
-    await cli(
-      'node-install',
-      'root@node2.test',
-      '--name',
-      'n-mesh',
-      '--control-url',
-      controlUrl,
-      '--http-only-dev',
-      '--mesh',
-    );
+    await cli('node-install', 'root@node2.test', '--name', 'n-mesh', '--mesh', '--no-wait');
     script = await fs.readFile(ssh.log, 'utf8');
     assert.ok(script.includes('TUG_MESH=true'), '--mesh sets TUG_MESH in agent.env');
     assert.match(
@@ -190,15 +203,7 @@ test('install commands render the shipped templates (src in dev, dist in the ima
     );
     assert.doesNotMatch(script, unrenderedVariable, 'no unrendered template variables');
 
-    const enroll = await cli(
-      'node-enroll',
-      '--name',
-      'n-enr',
-      '--mesh',
-      '--control-url',
-      controlUrl,
-      '--http-only-dev',
-    );
+    const enroll = await cli('node-enroll', '--name', 'n-enr', '--mesh');
     assert.ok(
       enroll.stdout.includes(`'${defaultImage()}' agent`),
       'node-enroll prints a docker run with the published image for the CLI version',
@@ -216,7 +221,6 @@ test('install commands render the shipped templates (src in dev, dist in the ima
       '--install-docker',
       '--mesh',
       '--json',
-      '--http-only-dev',
     );
     const payload = JSON.parse(cloud.stdout);
     assert.match(
@@ -281,6 +285,6 @@ test('install commands render the shipped templates (src in dev, dist in the ima
       'global --version must still print the CLI package version',
     );
   } finally {
-    await new Promise((resolve) => server.close(resolve));
+    await control.close();
   }
 });

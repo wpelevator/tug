@@ -6,8 +6,9 @@ import path from 'node:path';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from './control.ts';
-import { testImageResolver } from '../tests/helpers.ts';
+import { testImageResolver, testIdentity } from '../tests/helpers.ts';
 import { generateWgKeyPair } from './mesh.ts';
+import { createCsr, encodeCredential, generateKeyPair } from './pki.ts';
 import { json } from '../tests/helpers.ts';
 
 const NETWORK_ENV = [
@@ -25,20 +26,21 @@ async function server(env: Record<string, string> = {}) {
     process.env,
     {
       TUG_DATA_DIR: dir,
-      TUG_OPERATOR_TOKEN: 'op-net-token',
     },
     env,
   );
-  const app = await createApp({ images: { resolve: testImageResolver } });
+  const app = await createApp({ identity: testIdentity, images: { resolve: testImageResolver } });
   const srv = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));
   });
   const base = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`;
-  const op = { Authorization: 'Bearer op-net-token', 'content-type': 'application/json' };
+  const op = { 'x-tug-test-operator': 'operator', 'content-type': 'application/json' };
   const post = (route: string, body: unknown, headers: Record<string, string> = op) =>
     fetch(`${base}${route}`, { method: 'POST', headers, body: JSON.stringify(body) });
   const agent = (token: string) => ({
-    Authorization: `Bearer ${token}`,
+    ...(token.startsWith('op-')
+      ? { 'x-tug-test-operator': 'operator' }
+      : { 'x-tug-test-node': token }),
     'content-type': 'application/json',
   });
   const work = async (token: string) =>
@@ -197,13 +199,13 @@ test('mesh allocates stable overlay IPs and each node receives every other node 
     );
 
     // re-registering keeps the overlay address and key
-    const again = await s.register('a', { publicAddress: '203.0.113.50' });
+    const again = await s.register('a');
     assert.equal(again.node.overlay_ip, '10.210.0.1', 're-registration keeps the overlay IP');
     const wB = await s.work(regB.agentToken);
     assert.equal(
       wB.network.peers.find((p: { node: string }) => p.node === 'a').endpoint,
-      '203.0.113.50:51999',
-      'a changed public address updates the peer endpoint',
+      '203.0.113.1:51999',
+      'replacing a node key keeps its metadata, so the peer endpoint is unchanged',
     );
     assert.equal(
       wB.network.peers.find((p: { node: string }) => p.node === 'a').publicKey,
@@ -218,24 +220,21 @@ test('mesh allocates stable overlay IPs and each node receives every other node 
 test('enroll accepts the agent public key and rejects malformed ones', async () => {
   const s = await server({ TUG_MESH: 'true' });
   try {
-    const minted = await json(await s.post('/api/v1/nodes/enroll-token', { uses: 2 }));
-    const bad = await fetch(`${s.base}/agent/v1/enroll`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ enrollToken: minted.enrollToken, name: 'x', wgPublicKey: 'nope' }),
-    });
-    assert.equal(bad.status, 400, 'bad key is a 400');
+    const minted = await json(await s.post('/api/v1/nodes/enroll-token', { name: 'x' }));
+    const bootstrap = {
+      'x-tug-test-credential': encodeCredential(minted.credential),
+      'content-type': 'application/json',
+    };
+    const csr = await createCsr((await generateKeyPair()).privateKeyPem);
+    const enroll = (wgPublicKey: string) =>
+      fetch(`${s.base}/agent/v1/enroll`, {
+        method: 'POST',
+        headers: bootstrap,
+        body: JSON.stringify({ csr, wgPublicKey }),
+      });
+    assert.equal((await enroll('nope')).status, 400, 'bad key is a 400');
     const pair = generateWgKeyPair();
-    const ok = await fetch(`${s.base}/agent/v1/enroll`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        enrollToken: minted.enrollToken,
-        name: 'x',
-        wgPublicKey: pair.publicKey,
-      }),
-    });
-    const enrolled = await json(ok);
+    const enrolled = await json(await enroll(pair.publicKey));
     assert.equal(enrolled.node.overlay_ip, '10.210.0.1');
     const other = await s.register('y', { wgPublicKey: generateWgKeyPair().publicKey });
     const w = await s.work(other.agentToken);

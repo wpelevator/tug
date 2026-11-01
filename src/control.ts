@@ -18,8 +18,10 @@ import https from 'node:https';
 import http from 'node:http';
 import path from 'node:path';
 import { WebSocketServer, WebSocket } from 'ws';
+import type tls from 'node:tls';
 import * as tar from 'tar';
 import { openDb, openSnapshotDb } from './db.ts';
+import type { Db } from './db.ts';
 import { isUniqueViolation } from './db-driver.ts';
 import type {
   BackupDestinationRow,
@@ -43,7 +45,21 @@ import {
 } from './compose.ts';
 import { buildImage, unpackContext, run as runCommand } from './build.ts';
 import { sentinelNames } from './normalize.ts';
-import { ensureDir, errMessage, hashToken, id, now, token } from './util.ts';
+import { ensureDir, errMessage, id, now } from './util.ts';
+import {
+  ENROLL_DEFAULT_TTL_MS,
+  NODE_LIFETIME_MS,
+  Pki,
+  SERVER_LIFETIME_MS,
+  encodeCredential,
+  identityUri,
+  namesKey,
+  parseIdentityUri,
+  peerIdentity,
+  serverNames,
+  writeFileDurable,
+} from './pki.ts';
+import { serverTlsOptions } from './tls-server.ts';
 import {
   DEFAULT_MESH_CIDR,
   DEFAULT_WG_PORT,
@@ -90,7 +106,7 @@ import {
   recordEvent,
   revokeToken,
 } from './tokens.ts';
-import type { Actor, ProjectResolver, RouteRole } from './tokens.ts';
+import type { Actor, Identity, ProjectResolver, RouteRole } from './tokens.ts';
 import type {
   BackupCredentialsResponse,
   LiveRequest,
@@ -108,7 +124,10 @@ import type {
   NetworkConfig,
   NodeInfo,
   PortBinding,
-  RegisterResponse,
+  EnrollTokenResponse,
+  IdentityRequest,
+  IdentityResponse,
+  RenewResponse,
   SecretsResponse,
   ServiceEndpoints,
   StatusReport,
@@ -489,9 +508,10 @@ class LiveHub {
 
 interface StreamRuntime {
   hub: WakeHub;
-  authenticate(token: string): NodeRow | undefined;
-  authenticateOperator(token: string): Actor | null;
+  identify(request: http.IncomingMessage): Identity | null;
+  resolvePrincipal(uri: string, keyHash: string): Identity | null;
   live: LiveHub;
+  isRestoring(): boolean;
 }
 
 const streamRuntimes = new WeakMap<express.Express, StreamRuntime>();
@@ -543,7 +563,7 @@ function deploymentFailureMessage(rows: { node_id: string; status_json: string }
 const ROLLBACK_VERSION_PREFIX = 'rollback-';
 const ACTIVE_STATES_SQL = ACTIVE_DEPLOYMENT_STATES.map((s) => `'${s}'`).join(',');
 
-const PORT = Number(process.env.PORT || 8080);
+const PORT = Number(process.env.PORT || 8443);
 
 export interface ControlImageOperations {
   resolve: typeof resolveImage;
@@ -559,6 +579,12 @@ export async function createApp(
     openDatabase?: typeof openDb;
     /** Minimum time between event prunes triggered by agent reports; default one hour. */ eventPruneIntervalMs?: number;
     /** Override the live open/agent startup timeout in milliseconds. */ liveStartTimeoutMs?: number;
+    /** Credential-free HTTPS origin clients use to reach control; defaults to `TUG_PUBLIC_URL`. */ publicUrl?: string;
+    /**
+     * Replaces certificate-based identity resolution. Only for in-process tests that skip TLS; production never sets it.
+     * It returns the principal URI and key hash a connection would have presented.
+     */
+    identity?: (req: Request, db: Db) => { uri: string; keyHash: string } | null;
   } = {},
 ) {
   const images: ControlImageOperations = {
@@ -632,27 +658,100 @@ export async function createApp(
     console.error(`event pruning failed: ${errMessage(e)}`);
   }
   const masterKey = await loadOrCreateMasterKey(masterKeyFile);
-  const operator = db.get('SELECT value FROM meta WHERE key=?', 'operator_token_hash');
-  if (!operator) {
-    const t = process.env.TUG_OPERATOR_TOKEN || token('tug_op');
-    db.run('INSERT INTO meta(key,value) VALUES(?,?)', 'operator_token_hash', hashToken(t));
-    await fs
-      .writeFile(path.join(DATA_DIR, 'operator.token'), `${t}\n`, { mode: 0o600 })
-      .catch(() => {});
-    console.log(`operator token: ${t}`);
-  }
+  // A CA is created only for a fresh installation; existing state with missing or mismatched CA material is a startup error.
+  const pki = await Pki.load(
+    path.join(DATA_DIR, 'pki'),
+    !db.get('SELECT 1 FROM api_tokens') && !db.get('SELECT 1 FROM nodes'),
+  );
+  const publicUrl = () => {
+    const url = options.publicUrl ?? process.env.TUG_PUBLIC_URL;
+    if (!url) throw httpError(500, 'TUG_PUBLIC_URL is not set');
+    return new URL(url).origin;
+  };
 
   const app = express();
-  const authenticateAgent = (raw: string): NodeRow | undefined =>
-    raw
-      ? db.get<NodeRow>('SELECT * FROM nodes WHERE agent_token_hash=?', hashToken(raw))
-      : undefined;
+  app.locals.pki = pki;
+  app.locals.dataDir = DATA_DIR;
+  /** Resolves a presented certificate (principal URI and key hash) to a principal from current database state. */
+  function resolvePrincipal(uri: string, keyHash: string): Identity | null {
+    const parsed = parseIdentityUri(uri);
+    if (!parsed) return null;
+    if (parsed.klass === 'node') {
+      const node = db.get<NodeRow>('SELECT * FROM nodes WHERE id=?', parsed.id);
+      return node && node.key_hash === keyHash && !node.disabled_at
+        ? { klass: 'node', node }
+        : null;
+    }
+    if (parsed.klass === 'operator') {
+      const actor = authenticate(db, parsed.id, keyHash);
+      return actor ? { klass: 'operator', actor, tokenId: parsed.id } : null;
+    }
+    const row = db.get<EnrollTokenRow>('SELECT * FROM enroll_tokens WHERE id=?', parsed.id);
+    return row && row.key_hash === keyHash && !row.revoked_at && row.expires_at > now()
+      ? { klass: 'enroll', row }
+      : null;
+  }
+  /** Live TLS connections by the identity they presented; closed when the principal's current state no longer authorizes them. */
+  interface LiveSocket {
+    socket: tls.TLSSocket;
+    uri: string;
+    keyHash: string;
+    notAfter: number;
+  }
+  const liveSockets = new Set<LiveSocket>();
+  app.locals.liveSockets = liveSockets;
+  /** Closes connections whose principal is disabled, revoked, replaced, removed or expired. */
+  const reconcileSockets = (): void => {
+    for (const entry of [...liveSockets]) {
+      if (entry.socket.destroyed) liveSockets.delete(entry);
+      else if (entry.notAfter <= Date.now() || !resolvePrincipal(entry.uri, entry.keyHash)) {
+        entry.socket.destroy();
+        liveSockets.delete(entry);
+      }
+    }
+  };
+  const closeAllSockets = (): void => {
+    for (const entry of liveSockets) entry.socket.destroy();
+    liveSockets.clear();
+  };
+  app.locals.reconcileSockets = () => {
+    if (!restartRequired) reconcileSockets();
+  };
+  /** The certificate a request or upgrade arrived with, as a (uri, keyHash) pair; null if none can be established. */
+  const presented = (request: http.IncomingMessage) => {
+    if (options.identity) return options.identity(request as Request, db);
+    const socket = request.socket as tls.TLSSocket;
+    if (typeof socket.getPeerCertificate !== 'function' || socket.isSessionReused()) return null;
+    return peerIdentity(socket);
+  };
+  const identify = (request: http.IncomingMessage): Identity | null => {
+    const cert = presented(request);
+    return cert ? resolvePrincipal(cert.uri, cert.keyHash) : null;
+  };
   let restartRequired = false;
   app.use((_req, res, next) =>
     restartRequired
       ? res.status(503).json({ error: 'control restored; restart required', restartRequired: true })
       : next(),
   );
+  // Route class gate: runs before body parsing and every handler. There is no unauthenticated route.
+  app.use((req, res, next) => {
+    const identity = identify(req);
+    if (!identity) return void res.status(401).json({ error: 'unauthorized' });
+    const enrollRoute = req.method === 'POST' && req.path === '/agent/v1/enroll';
+    const allowed =
+      identity.klass === 'enroll'
+        ? enrollRoute
+        : identity.klass === 'node'
+          ? req.path.startsWith('/agent/v1/') && !enrollRoute
+          : req.path.startsWith('/api/v1/');
+    if (!allowed)
+      return void res
+        .status(403)
+        .json({ error: `forbidden: ${identity.klass} credentials cannot use this route` });
+    req.identity = identity;
+    next();
+  });
   app.use(express.json({ limit: '20mb' }));
   // Hold the writer for the operation lifetime, including after an HTTP disconnect.
   let writer = Promise.resolve();
@@ -701,7 +800,7 @@ export async function createApp(
   const post = (url: string, ...handlers: RequestHandler[]) => route('post', url, handlers);
 
   // Operator-facing routes go through api(): the role table in tokens.ts is the only place a route's access is declared.
-  const guard = createGuard(db);
+  const guard = createGuard();
   const apiRoutes = new Map<string, RouteRole>();
   app.locals.apiRoutes = apiRoutes;
   const api = (
@@ -743,10 +842,9 @@ export async function createApp(
         }
       : { where: '1=1', args: [] as string[] };
   const authAgent = async (req: Request, res: Response, next: NextFunction) => {
-    const raw = (req.headers.authorization || '').replace(/^Bearer /, '');
-    const node = authenticateAgent(raw);
-    if (!node) return res.status(401).json({ error: 'unauthorized' });
-    req.node = node;
+    if (req.identity?.klass !== 'node')
+      return res.status(403).json({ error: 'node credentials required' });
+    req.node = req.identity.node;
     next();
   };
   const wakeAll = (project?: string): void => {
@@ -1016,9 +1114,10 @@ export async function createApp(
   }, options.liveStartTimeoutMs);
   streamRuntimes.set(app, {
     hub: wakeHub,
-    authenticate: authenticateAgent,
-    authenticateOperator: (raw) => authenticate(db, raw),
+    identify,
+    resolvePrincipal,
     live,
+    isRestoring: () => restartRequired,
   });
   api('get', '/api/v1/live', null, (_req, res) => {
     res.status(426).json({ error: 'WebSocket upgrade required' });
@@ -1144,7 +1243,6 @@ export async function createApp(
       nodes: selected.map((node) => node.name),
     });
   });
-  get('/healthz', (req, res) => res.json({ ok: true }));
 
   api(
     'post',
@@ -1221,42 +1319,12 @@ export async function createApp(
     );
   }
 
-  async function registerNode({
-    name,
-    address,
-    publicAddress,
-    wgPublicKey,
-    labels,
-  }: {
-    name: string;
-    address?: string;
-    publicAddress?: string;
-    wgPublicKey?: string;
-    labels?: string[];
-  }): Promise<RegisterResponse> {
-    if (wgPublicKey !== undefined && !isWgKey(wgPublicKey))
-      throw httpError(400, 'wgPublicKey must be a base64 WireGuard public key');
-    const agentToken = token('tug_agent');
-    const ts = now();
-    db.run(
-      `INSERT INTO nodes(id,name,address,public_address,status,labels_json,agent_token_hash,created_at,updated_at)
-      VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,address=excluded.address,public_address=excluded.public_address,labels_json=excluded.labels_json,agent_token_hash=excluded.agent_token_hash,updated_at=excluded.updated_at`,
-      name,
-      name,
-      address || null,
-      publicAddress || null,
-      'registered',
-      JSON.stringify(Array.isArray(labels) ? labels : []),
-      hashToken(agentToken),
-      ts,
-      ts,
-    );
-    ensureOverlayIp(name);
-    syncWgPeer(name, wgPublicKey);
-    wakeAll();
+  const NODE_RENEW_MIN_INTERVAL_MS = () =>
+    Number(process.env.TUG_RENEW_MIN_INTERVAL_MS ?? 60 * 60 * 1000);
+  const nodeInfo = (name: string): NodeInfo => {
     const row = db.get<NodeRow>(NODE_INFO_SQL, name);
-    if (!row) throw httpError(500, 'node not found after registration');
-    const node: NodeInfo = {
+    if (!row) throw httpError(500, 'node not found');
+    return {
       id: row.id,
       name: row.name,
       address: row.address,
@@ -1267,85 +1335,239 @@ export async function createApp(
       created_at: row.created_at,
       updated_at: row.updated_at,
     };
-    return { node, agentToken };
+  };
+  const NODE_NAME = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$/;
+  /** Inserts a node bound to a key. Synchronous so the existence check and the write cannot interleave. */
+  function insertNode(input: {
+    name: string;
+    keyHash: string;
+    notAfter: Date;
+    address?: string;
+    publicAddress?: string;
+    wgPublicKey?: string;
+    labels?: string[];
+  }): void {
+    if (!NODE_NAME.test(input.name))
+      throw httpError(400, 'node name must be 1-63 letters, numbers, dots, underscores or hyphens');
+    if (input.wgPublicKey !== undefined && !isWgKey(input.wgPublicKey))
+      throw httpError(400, 'wgPublicKey must be a base64 WireGuard public key');
+    const ts = now();
+    db.run(
+      `INSERT INTO nodes(id,name,address,public_address,status,labels_json,key_hash,cert_not_after,created_at,updated_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?)`,
+      input.name,
+      input.name,
+      input.address || null,
+      input.publicAddress || null,
+      'registered',
+      JSON.stringify(Array.isArray(input.labels) ? input.labels : []),
+      input.keyHash,
+      input.notAfter.toISOString(),
+      ts,
+      ts,
+    );
+    ensureOverlayIp(input.name);
+    syncWgPeer(input.name, input.wgPublicKey);
+    wakeAll();
   }
-  api('post', '/api/v1/nodes/register', null, async (req, res) => {
-    const name = req.body.name;
-    if (!name) return res.status(400).json({ error: 'name required' });
+  const identityResponse = (name: string, cert: string): IdentityResponse => ({
+    node: nodeInfo(name),
+    certificate: cert,
+    ca: pki.caPem,
+    url: publicUrl(),
+  });
+  // The node generates its key and CSR; an admin posts the CSR here. The private key is never transmitted.
+  api('post', '/api/v1/nodes/:name/identity', null, async (req, res) => {
+    const body: Partial<IdentityRequest> = req.body ?? {};
+    const name = req.params.name;
+    if (body.mode !== 'create' && body.mode !== 'replace')
+      return res.status(400).json({ error: "mode must be 'create' or 'replace'" });
+    const url = publicUrl();
+    void url;
     try {
-      res.json(
-        await registerNode({
-          name,
-          address: req.body.address,
-          publicAddress: req.body.publicAddress,
-          wgPublicKey: req.body.wgPublicKey,
-          labels: req.body.labels,
-        }),
-      );
+      const signed = await pki.signClientCsr(body.csr, identityUri('node', name), NODE_LIFETIME_MS);
+      const existing = db.get<NodeRow>('SELECT * FROM nodes WHERE name=?', name);
+      if (body.mode === 'create') {
+        if (existing) {
+          if (existing.key_hash !== signed.keyHash)
+            return res.status(409).json({
+              error: `node ${name} already exists; use node-replace to install a new key`,
+            });
+        } else {
+          insertNode({
+            name,
+            keyHash: signed.keyHash,
+            notAfter: signed.notAfter,
+            address: body.address,
+            publicAddress: body.publicAddress,
+            labels: body.labels,
+          });
+        }
+      } else {
+        if (!existing) return res.status(404).json({ error: 'node not found' });
+        db.run(
+          'UPDATE nodes SET key_hash=?,disabled_at=NULL,cert_not_after=?,updated_at=? WHERE id=?',
+          signed.keyHash,
+          signed.notAfter.toISOString(),
+          now(),
+          existing.id,
+        );
+        audit(req.actor!, {
+          type: 'node.replaced',
+          message: `node ${name} key replaced by ${req.actor!.name}`,
+          metadata: { node: name },
+        });
+        reconcileSockets();
+      }
+      res.json(identityResponse(name, signed.cert));
     } catch (e) {
       sendError(res, e);
     }
   });
 
-  // Self-service enrollment: operator mints a short-lived, limited-use key; the agent
-  // exchanges it for durable credentials on first boot (Portainer Edge-style join).
+  // Self-enrollment: an admin mints a short-lived, single-use, name-bound bootstrap certificate that reaches one route.
   api('post', '/api/v1/nodes/enroll-token', null, async (req, res) => {
-    const name = req.body.name || null;
-    const ttlSeconds = Math.max(1, Number(req.body.ttlSeconds ?? 3600));
-    const uses = Math.max(1, Number(req.body.uses ?? 1));
-    const enrollToken = token('tug_enroll');
-    const expiresAt = new Date(Date.now() + ttlSeconds * 1000).toISOString();
+    const name = req.body?.name;
+    if (typeof name !== 'string' || !NODE_NAME.test(name))
+      return res
+        .status(400)
+        .json({ error: 'name required: a valid node name to bind the join key to' });
+    const labels = req.body.labels;
+    if (
+      labels !== undefined &&
+      (!Array.isArray(labels) || labels.some((l) => typeof l !== 'string'))
+    )
+      return res.status(400).json({ error: 'labels must be a list of strings' });
+    const ttlSeconds = Math.max(1, Number(req.body.ttlSeconds ?? ENROLL_DEFAULT_TTL_MS / 1000));
+    const rowId = id('enr');
+    const issued = await pki.issueClient(
+      identityUri('enroll', rowId),
+      ttlSeconds * 1000,
+      publicUrl(),
+    );
+    const expiresAt = issued.notAfter.toISOString();
     db.run(
-      'INSERT INTO enroll_tokens(token_hash,name,uses_remaining,expires_at,created_at) VALUES(?,?,?,?,?)',
-      hashToken(enrollToken),
+      'DELETE FROM enroll_tokens WHERE expires_at < ?',
+      new Date(Date.now() - 86_400_000).toISOString(),
+    );
+    // Minting again for a name revokes its previous unconsumed key.
+    db.run(
+      'UPDATE enroll_tokens SET revoked_at=? WHERE name=? AND node_id IS NULL AND revoked_at IS NULL',
+      now(),
       name,
-      uses,
+    );
+    db.run(
+      'INSERT INTO enroll_tokens(id,key_hash,name,labels_json,expires_at,created_at) VALUES(?,?,?,?,?,?)',
+      rowId,
+      issued.keyHash,
+      name,
+      JSON.stringify(labels ?? []),
       expiresAt,
       now(),
     );
-    res.json({ enrollToken, name, usesRemaining: uses, expiresAt });
+    reconcileSockets();
+    const out: EnrollTokenResponse = {
+      credential: issued.credential,
+      name,
+      labels: labels ?? [],
+      expiresAt,
+    };
+    res.json(out);
   });
   post('/agent/v1/enroll', async (req, res) => {
-    const body: EnrollRequest = req.body;
-    const raw = String(
-      body.enrollToken || (req.headers.authorization || '').replace(/^Bearer /, ''),
-    ).trim();
-    if (!raw) return res.status(400).json({ error: 'enrollToken required' });
-    const row = db.get<EnrollTokenRow>(
-      'SELECT * FROM enroll_tokens WHERE token_hash=?',
-      hashToken(raw),
-    );
-    if (!row || row.uses_remaining < 1 || row.expires_at < now()) {
-      if (row) db.run('DELETE FROM enroll_tokens WHERE token_hash=?', hashToken(raw));
-      return res.status(401).json({ error: 'invalid or expired enroll token' });
-    }
-    const name = row.name || body.name;
-    if (!name)
-      return res
-        .status(400)
-        .json({ error: 'node name required (bind one to the enroll token or send name)' });
-    let result: RegisterResponse;
+    const row = req.identity?.klass === 'enroll' ? req.identity.row : null;
+    if (!row) return res.status(403).json({ error: 'bootstrap credentials required' });
+    const body: Partial<EnrollRequest> = req.body ?? {};
     try {
-      result = await registerNode({
-        name,
-        address: body.address,
-        publicAddress: body.publicAddress,
-        wgPublicKey: body.wgPublicKey,
-        labels: body.labels,
-      });
-    } catch (e) {
-      return sendError(res, e);
-    }
-    const remaining = row.uses_remaining - 1;
-    if (remaining < 1) db.run('DELETE FROM enroll_tokens WHERE token_hash=?', hashToken(raw));
-    else
-      db.run(
-        'UPDATE enroll_tokens SET uses_remaining=? WHERE token_hash=?',
-        remaining,
-        hashToken(raw),
+      const signed = await pki.signClientCsr(
+        body.csr,
+        identityUri('node', row.name),
+        NODE_LIFETIME_MS,
       );
-    const enrolled: EnrollResponse = { ...result };
-    res.json(enrolled);
+      // Re-read the row: the checks and writes below are synchronous, so concurrent enrollments cannot both create a node.
+      const fresh = db.get<EnrollTokenRow>('SELECT * FROM enroll_tokens WHERE id=?', row.id);
+      if (!fresh || fresh.revoked_at || fresh.expires_at <= now())
+        return res.status(401).json({ error: 'join key is expired or revoked' });
+      if (fresh.node_id) {
+        if (fresh.node_key_hash !== signed.keyHash)
+          return res.status(403).json({ error: 'join key was already used by a different key' });
+      } else {
+        if (db.get('SELECT 1 FROM nodes WHERE name=?', fresh.name))
+          return res
+            .status(409)
+            .json({ error: `node ${fresh.name} already exists; a join key cannot replace a node` });
+        insertNode({
+          name: fresh.name,
+          keyHash: signed.keyHash,
+          notAfter: signed.notAfter,
+          address: body.address,
+          publicAddress: body.publicAddress,
+          wgPublicKey: body.wgPublicKey,
+          labels: fresh.labels_json ? (JSON.parse(fresh.labels_json) as string[]) : [],
+        });
+        db.run(
+          'UPDATE enroll_tokens SET node_id=?,node_key_hash=? WHERE id=?',
+          fresh.name,
+          signed.keyHash,
+          fresh.id,
+        );
+        recordEvent(db, {
+          actor: `enroll:${fresh.id}`,
+          type: 'node.enrolled',
+          message: `node ${fresh.name} enrolled`,
+        });
+      }
+      const enrolled: EnrollResponse = identityResponse(fresh.name, signed.cert);
+      res.json(enrolled);
+    } catch (e) {
+      sendError(res, e);
+    }
+  });
+  // Same-key renewal: another certificate for the stored key. Nothing is stored beyond an informational expiry.
+  post('/agent/v1/renew', authAgent, async (req, res) => {
+    const node = req.node!;
+    try {
+      const signed = await pki.signClientCsr(
+        req.body?.csr,
+        identityUri('node', node.id),
+        NODE_LIFETIME_MS,
+      );
+      if (signed.keyHash !== node.key_hash)
+        return res.status(403).json({
+          error: 'renewal requires a CSR for the node key; use node-replace to change keys',
+        });
+      const last = node.last_renewed_at ? Date.parse(node.last_renewed_at) : 0;
+      if (Date.now() - last < NODE_RENEW_MIN_INTERVAL_MS())
+        return res.status(429).json({ error: 'certificate renewed too recently' });
+      db.run(
+        'UPDATE nodes SET cert_not_after=?,last_renewed_at=? WHERE id=?',
+        signed.notAfter.toISOString(),
+        now(),
+        node.id,
+      );
+      const renewed: RenewResponse = { certificate: signed.cert };
+      res.json(renewed);
+    } catch (e) {
+      sendError(res, e);
+    }
+  });
+  // Blocks a node's key without deleting its metadata or changing placement. It returns only through node-replace.
+  api('post', '/api/v1/nodes/:name/disable', null, async (req, res) => {
+    const node = findNode(req.params.name);
+    if (!node) return res.status(404).json({ error: 'node not found' });
+    db.run(
+      'UPDATE nodes SET disabled_at=COALESCE(disabled_at,?),updated_at=? WHERE id=?',
+      now(),
+      now(),
+      node.id,
+    );
+    audit(req.actor!, {
+      type: 'node.disabled',
+      message: `node ${node.name} disabled by ${req.actor!.name}`,
+      metadata: { node: node.name },
+    });
+    reconcileSockets();
+    res.json({ ok: true, node: node.name });
   });
   api('get', '/api/v1/nodes', null, async (req, res) => {
     const rows = db.all<NodeRow>(
@@ -1429,6 +1651,12 @@ export async function createApp(
     db.run('DELETE FROM node_statuses WHERE node_id=?', node.id);
     db.run('DELETE FROM wg_peers WHERE node_id=?', node.id);
     db.run('DELETE FROM nodes WHERE id=?', node.id);
+    db.run(
+      'UPDATE enroll_tokens SET revoked_at=COALESCE(revoked_at,?) WHERE name=? AND node_id IS NULL',
+      now(),
+      node.name,
+    );
+    reconcileSockets();
     audit(req.actor!, {
       type: 'node.removed',
       message: `node ${node.name} removed`,
@@ -1463,7 +1691,7 @@ export async function createApp(
   });
   api('post', '/api/v1/tokens', null, async (req, res) => {
     const request = parseTokenRequest(req.body);
-    const created = createToken(db, request, req.actor!.name);
+    const created = await createToken(db, pki, publicUrl(), request, req.actor!.name);
     audit(req.actor!, {
       type: 'token.create',
       message: `token ${created.name} (${created.role}${created.projects ? `, projects: ${created.projects.join(', ')}` : ''}) created by ${req.actor!.name}`,
@@ -1474,12 +1702,13 @@ export async function createApp(
         expiresAt: created.expiresAt,
       },
     });
-    res.json(created);
+    res.json({ ...created, credential: encodeCredential(created.credential) });
   });
   api('get', '/api/v1/tokens', null, async (_req, res) => res.json({ tokens: listTokens(db) }));
   api('delete', '/api/v1/tokens/:name', null, async (req, res) => {
     if (!revokeToken(db, req.params.name))
       return res.status(404).json({ error: 'token not found' });
+    reconcileSockets();
     audit(req.actor!, {
       type: 'token.revoke',
       message: `token ${req.params.name} revoked by ${req.actor!.name}`,
@@ -2352,6 +2581,10 @@ export async function createApp(
       const snapshotPath = path.join(staging, 'tug.db');
       db.run('VACUUM INTO ?', snapshotPath);
       await fs.copyFile(masterKeyFile, path.join(staging, 'master.key'));
+      await fs.cp(path.join(DATA_DIR, 'pki'), path.join(staging, 'pki'), {
+        recursive: true,
+        filter: (src) => path.basename(src) !== 'server.json',
+      });
       await fs.cp(artifactDir, path.join(staging, 'images'), { recursive: true });
       await fs.writeFile(
         path.join(staging, 'metadata.json'),
@@ -2362,6 +2595,7 @@ export async function createApp(
         'tug.db',
         'master.key',
         'metadata.json',
+        'pki',
         'images',
       ]);
       await fs.rm(staging, { recursive: true, force: true });
@@ -2410,8 +2644,9 @@ export async function createApp(
         const integrity = snapshot.get('PRAGMA integrity_check');
         if (integrity?.integrity_check !== 'ok')
           throw new Error('backup database failed integrity check');
-        if (!snapshot.get("SELECT 1 FROM meta WHERE key='operator_token_hash'"))
-          throw new Error('backup database has no operator identity');
+        await Pki.load(path.join(restoreDir, 'pki'), false).catch((e) => {
+          throw new Error(`backup PKI is not usable: ${errMessage(e)}`, { cause: e });
+        });
         for (const secret of snapshot.all<SecretRow>('SELECT * FROM secrets'))
           decrypt(secret.encrypted_value, key);
         const states = snapshot.all<DesiredStateRow>('SELECT * FROM desired_states');
@@ -2450,6 +2685,12 @@ export async function createApp(
         await fs.cp(path.join(restoreDir, 'images'), artifactDir, { recursive: true });
         await fs.copyFile(path.join(restoreDir, 'tug.db'), dbFile);
         await fs.copyFile(path.join(restoreDir, 'master.key'), masterKeyFile);
+        await fs.cp(path.join(restoreDir, 'pki'), path.join(DATA_DIR, 'pki'), {
+          recursive: true,
+          filter: (src) => path.basename(src) !== 'server.json',
+        });
+        // Authorization follows the restored database: older snapshots forget later principals and revive revoked ones.
+        closeAllSockets();
         res.json({ ok: true, restored: true, restartRequired: true });
       } catch (e) {
         try {
@@ -2584,8 +2825,9 @@ export async function createApp(
     await check('sqlite', async () => ({
       value: db.get<{ count: number }>('SELECT COUNT(*) AS count FROM projects')!.count,
     }));
-    await check('operator_token', async () => ({
-      configured: Boolean(db.get('SELECT value FROM meta WHERE key=?', 'operator_token_hash')),
+    await check('pki', async () => ({
+      caNotAfter: pki.caNotAfter.toISOString(),
+      daysUntilCaExpiry: Math.floor((pki.caNotAfter.getTime() - Date.now()) / 86_400_000),
     }));
     await check('master_key', async () => ({ configured: Boolean(masterKey) }));
     await check('docker', async () => ({
@@ -2955,7 +3197,8 @@ export async function createApp(
   return app;
 }
 
-function attachAgentStream(app: express.Express, server: http.Server | https.Server): void {
+/** Attaches the agent and operator WebSocket upgrade handling to `server`; `listen` uses it on the mTLS listener. */
+export function attachAgentStream(app: express.Express, server: http.Server | https.Server): void {
   const runtime = streamRuntimes.get(app);
   if (!runtime) throw new Error('control app is missing its stream runtime');
   const wss = new WebSocketServer({ noServer: true, maxPayload: LIVE_MAX_FRAME_BYTES });
@@ -2969,25 +3212,30 @@ function attachAgentStream(app: express.Express, server: http.Server | https.Ser
       reject(404, 'Not Found');
       return;
     }
-    const raw = String(request.headers.authorization || '').replace(/^Bearer /, '');
     void (async () => {
+      // The same current-state check as every HTTP request.
+      const identity = runtime.isRestoring() ? null : runtime.identify(request);
+      if (!identity) {
+        reject(401, 'Unauthorized');
+        return;
+      }
       if (pathname === '/api/v1/live') {
-        const actor = runtime.authenticateOperator(raw);
-        if (!actor) {
-          reject(401, 'Unauthorized');
-          return;
-        }
-        if (!hasRole(actor, 'deploy')) {
+        if (identity.klass !== 'operator') {
           reject(403, 'Forbidden');
           return;
         }
-        wss.handleUpgrade(request, socket, head, (ws) => runtime.live.operator(actor, ws));
-      } else {
-        const node = runtime.authenticate(raw);
-        if (!node) {
-          reject(401, 'Unauthorized');
+        if (!hasRole(identity.actor, 'deploy')) {
+          reject(403, 'Forbidden');
           return;
         }
+        const actor = identity.actor;
+        wss.handleUpgrade(request, socket, head, (ws) => runtime.live.operator(actor, ws));
+      } else {
+        if (identity.klass !== 'node') {
+          reject(403, 'Forbidden');
+          return;
+        }
+        const node = identity.node;
         wss.handleUpgrade(request, socket, head, (ws) => {
           runtime.live.agent(node.id, ws);
           runtime.hub.connect(node.id, ws);
@@ -2998,29 +3246,128 @@ function attachAgentStream(app: express.Express, server: http.Server | https.Ser
   server.once('close', () => wss.close());
 }
 
-export async function listen(
-  app: express.Express,
-  port = PORT,
-): Promise<http.Server | https.Server> {
-  const certFile = process.env.TUG_TLS_CERT_FILE;
-  const keyFile = process.env.TUG_TLS_KEY_FILE;
-  if (certFile && keyFile) {
-    const [cert, key] = await Promise.all([fs.readFile(certFile), fs.readFile(keyFile)]);
-    const server = https.createServer({ cert, key }, app);
-    attachAgentStream(app, server);
-    return new Promise((resolve) =>
-      server.listen(port, () => {
-        console.log(`tug-control listening on ${port} (tls)`);
-        resolve(server);
-      }),
+/** Loads the persisted server credential, or issues one when it is missing, for different names or two thirds expired. */
+async function ensureServerCredential(
+  pki: Pki,
+  dir: string,
+  names: ReturnType<typeof serverNames>,
+  force = false,
+): Promise<{ cert: string; key: string; renewed: boolean }> {
+  const file = path.join(dir, 'pki', 'server.json');
+  try {
+    const saved = JSON.parse(await fs.readFile(file, 'utf8')) as {
+      cert: string;
+      key: string;
+      names: string;
+    };
+    const x = new (await import('node:crypto')).X509Certificate(saved.cert);
+    const lifetime = Date.parse(x.validTo) - Date.parse(x.validFrom);
+    const age = Date.now() - Date.parse(x.validFrom);
+    const signedByCa = x.verify(
+      new (await import('node:crypto')).X509Certificate(pki.caPem).publicKey,
     );
+    if (!force && signedByCa && saved.names === namesKey(names) && age < (lifetime * 2) / 3)
+      return { cert: saved.cert, key: saved.key, renewed: false };
+  } catch {
+    /* Missing or unreadable: issue a new one. */
   }
-  console.warn('TUG_TLS_CERT_FILE/TUG_TLS_KEY_FILE not set; serving plain HTTP');
-  const server = http.createServer(app);
+  const issued = await pki.issueServer(names);
+  await writeFileDurable(
+    file,
+    JSON.stringify({ cert: issued.cert, key: issued.key, names: namesKey(names) }),
+  );
+  return { cert: issued.cert, key: issued.key, renewed: true };
+}
+
+/**
+ * Starts the single mTLS listener. Chain validation rejects missing or foreign client certificates during the handshake;
+ * the secureConnection gate then checks current database state, and every request checks it again.
+ */
+export async function listen(app: express.Express, port = PORT): Promise<https.Server> {
+  const pki = app.locals.pki as Pki;
+  const dataDir = app.locals.dataDir as string;
+  const publicUrl = process.env.TUG_PUBLIC_URL;
+  if (!publicUrl)
+    throw new Error(
+      'TUG_PUBLIC_URL is required: the credential-free https origin clients connect to',
+    );
+  const url = new URL(publicUrl);
+  if (
+    url.protocol !== 'https:' ||
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash ||
+    url.pathname !== '/'
+  )
+    throw new Error(
+      'TUG_PUBLIC_URL must be a credential-free https origin such as https://control.example.com:8443',
+    );
+  const names = serverNames(publicUrl, (process.env.TUG_EXTRA_SANS || '').split(','));
+  const credential = await ensureServerCredential(pki, dataDir, names);
+  const server = https.createServer(
+    serverTlsOptions({ cert: credential.cert, key: credential.key, ca: pki.caPem }),
+    app,
+  );
+  server.requestTimeout = 5 * 60_000;
+  server.headersTimeout = 30_000;
   attachAgentStream(app, server);
+  const runtime = streamRuntimes.get(app)!;
+  const liveSockets = app.locals.liveSockets as Set<{
+    socket: import('node:tls').TLSSocket;
+    uri: string;
+    keyHash: string;
+    notAfter: number;
+  }>;
+  server.on('tlsClientError', (error) => {
+    console.warn(`tls handshake refused: ${errMessage(error)}`.slice(0, 200));
+  });
+  // Connection authorization gate: after a full handshake, refuse reused sessions and identities the database does not authorize.
+  server.on('secureConnection', (socket) => {
+    const presented = socket.isSessionReused() ? null : peerIdentity(socket);
+    if (!presented || !runtime.resolvePrincipal(presented.uri, presented.keyHash)) {
+      socket.destroy();
+      return;
+    }
+    const entry = { socket, ...presented };
+    liveSockets.add(entry);
+    socket.once('close', () => liveSockets.delete(entry));
+  });
+  // Out-of-process changes (host-side root recovery) are noticed within a second; renewal reloads the secure context.
+  const sweep = setInterval(() => {
+    try {
+      (app.locals.reconcileSockets as () => void)();
+    } catch (e) {
+      console.error(`session sweep failed: ${errMessage(e)}`);
+    }
+  }, 1000);
+  const renew = setInterval(
+    () => {
+      ensureServerCredential(pki, dataDir, names)
+        .then((next) => {
+          if (next.renewed) {
+            server.setSecureContext(
+              serverTlsOptions({ cert: next.cert, key: next.key, ca: pki.caPem }),
+            );
+            console.log('server certificate renewed');
+          }
+          const left = pki.caNotAfter.getTime() - Date.now();
+          if (left < 90 * 86_400_000)
+            console.warn(`control CA expires in ${Math.floor(left / 86_400_000)} days`);
+        })
+        .catch((e) => console.error(`server certificate renewal failed: ${errMessage(e)}`));
+    },
+    Math.min(SERVER_LIFETIME_MS / 90, 3_600_000),
+  );
+  sweep.unref();
+  renew.unref();
+  server.once('close', () => {
+    clearInterval(sweep);
+    clearInterval(renew);
+  });
   return new Promise((resolve) =>
     server.listen(port, () => {
-      console.log(`tug-control listening on ${port}`);
+      console.log(`tug-control listening on ${port} (mTLS)`);
       resolve(server);
     }),
   );

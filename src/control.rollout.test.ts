@@ -6,7 +6,7 @@ import path from 'node:path';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from './control.ts';
-import { testImageResolver } from '../tests/helpers.ts';
+import { testImageResolver, testIdentity } from '../tests/helpers.ts';
 import { json } from '../tests/helpers.ts';
 import type { ComposeFile } from './protocol.ts';
 
@@ -15,16 +15,15 @@ async function server() {
   for (const key of ['TUG_MESH', 'TUG_SERVICE_DNS']) delete process.env[key];
   Object.assign(process.env, {
     TUG_DATA_DIR: dir,
-    TUG_OPERATOR_TOKEN: 'op-rollout-token',
   });
-  const app = await createApp({ images: { resolve: testImageResolver } });
+  const app = await createApp({ identity: testIdentity, images: { resolve: testImageResolver } });
   const srv = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));
   });
   const base = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`;
-  const op = { Authorization: 'Bearer op-rollout-token', 'content-type': 'application/json' };
+  const op = { 'x-tug-test-operator': 'operator', 'content-type': 'application/json' };
   const agent = (token: string) => ({
-    Authorization: `Bearer ${token}`,
+    'x-tug-test-node': token,
     'content-type': 'application/json',
   });
   const post = (route: string, body: unknown, headers: Record<string, string> = op) =>

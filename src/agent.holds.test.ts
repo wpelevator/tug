@@ -21,7 +21,6 @@ async function makeCtx(docker: FakeDocker): Promise<AgentContext> {
     stateDir: await fs.mkdtemp(path.join(os.tmpdir(), 'tug-agent-holds-')),
     apply: true,
     controlUrl: 'http://control.test',
-    token: 'tok',
   };
 }
 

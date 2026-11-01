@@ -15,6 +15,7 @@ import {
   shellQuote as sh,
   HOST_NETWORK_FLAG,
   MESH_RUN_FLAGS,
+  CONTROL_CONTAINER,
   controlPortCheck,
   localImageBuildArgs,
   meshPortCheck,
@@ -29,7 +30,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { composeHash } from './compose.ts';
 import { normalizeCompose } from './normalize.ts';
-import { errMessage, token, loadTemplate } from './util.ts';
+import { errMessage, loadTemplate } from './util.ts';
+import { createTransport } from './agent-credential.ts';
+import { decodeCredential, writeFileDurable } from './pki.ts';
 import { backupCheckProblems } from './backup-check.ts';
 import { PROJECT_NAME_PATTERN, ROLES, TOKEN_NAME_PATTERN } from './tokens.ts';
 import { packageVersion, resolveImage } from './image.ts';
@@ -38,7 +41,7 @@ import type {
   DeploymentState,
   EnrollTokenResponse,
   JoinKey,
-  RegisterResponse,
+  IdentityResponse,
 } from './protocol.ts';
 import { CliLiveError, parseLiveRequest, runCliLive } from './cli-live.ts';
 import type { LiveInput, LiveRequest } from './cli-live.ts';
@@ -85,7 +88,14 @@ program
   .version(packageVersion())
   .enablePositionalOptions()
   .option('--config <file>', CONFIG_HELP)
-  .option('--control-url <url>', 'control API URL (overrides TUG_CONTROL_URL and config)')
+  .option(
+    '--control-url <url>',
+    'connect target for the control API (the credential still verifies its own public URL)',
+  )
+  .option(
+    '--credential <file>',
+    'credential file (overrides TUG_CREDENTIAL, TUG_CREDENTIAL_FILE and config)',
+  )
   .option('--project <name>', 'project (overrides TUG_PROJECT and config; default: site)');
 let resolvedConfig: Awaited<ReturnType<typeof resolveCliConfig>> | undefined;
 async function loadCfg(): Promise<NonNullable<typeof resolvedConfig>> {
@@ -97,6 +107,14 @@ async function readStdin(): Promise<string> {
   for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
   return Buffer.concat(chunks).toString('utf8');
 }
+/** The pinned mTLS transport for the resolved credential; an address override only changes the connect target. */
+async function transportFor(c: NonNullable<typeof resolvedConfig>) {
+  if (!c.credential)
+    throw new Error(
+      'no credential: run `tug init <credential-file>`, set TUG_CREDENTIAL_FILE or pass --credential',
+    );
+  return createTransport(c.credential, c.controlUrl);
+}
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function request<T = any>(
   method: string,
@@ -105,17 +123,20 @@ async function request<T = any>(
   multipart = false,
 ): Promise<T> {
   const c = await loadCfg();
-  const base = c.controlUrl!;
-  const tok = c.token;
-  const headers: Record<string, string> = tok ? { Authorization: `Bearer ${tok}` } : {};
+  const transport = await transportFor(c);
+  const headers: Record<string, string> = {};
   if (!multipart) headers['content-type'] = 'application/json';
-  const res = await fetch(`${base}${route}`, {
-    method,
-    headers,
-    body: multipart ? (body as FormData) : body ? JSON.stringify(body) : undefined,
-  });
-  if (!res.ok) throw new Error(`${method} ${route}: ${res.status} ${await res.text()}`);
-  return res.json() as Promise<T>;
+  try {
+    const res = await transport.http(`${transport.base}${route}`, {
+      method,
+      headers,
+      body: multipart ? (body as FormData) : body ? JSON.stringify(body) : undefined,
+    });
+    if (!res.ok) throw new Error(`${method} ${route}: ${res.status} ${await res.text()}`);
+    return (await res.json()) as T;
+  } finally {
+    void transport.close();
+  }
 }
 function runLocal(cmd: string, args: string[], opts: SpawnSyncOptions = {}): void {
   const result = spawnSync(cmd, args, { stdio: 'inherit', ...opts });
@@ -129,15 +150,6 @@ function runCapture(cmd: string, args: string[], opts: SpawnSyncOptions = {}): s
   if (result.status !== 0)
     throw new Error(`${cmd} ${args.join(' ')} failed\n${result.stderr || ''}`);
   return String(result.stdout);
-}
-function remoteHost(sshTarget: string): string {
-  return sshTarget.replace(/^[^@]+@/, '').split(':')[0];
-}
-function assertHttps(url: string, allowHttp?: boolean): void {
-  if (!allowHttp && !String(url).startsWith('https://'))
-    throw new Error(
-      `${url} must use https:// outside local development (pass --http-only-dev to override)`,
-    );
 }
 function preflightRemote(
   target: string,
@@ -208,8 +220,9 @@ function preflightRemote(
   if (controlUrl)
     checks.push([
       'control.reachable',
-      `curl -fsS ${sh(controlUrl)}/healthz >/dev/null`,
-      'Verify DNS/firewall/TLS for the control URL from the node.',
+      // TCP reachability only: no credential is copied to the host, and real TLS authorization happens when the agent connects.
+      `timeout 5 bash -c ${sh(`exec 3<>/dev/tcp/${new URL(controlUrl).hostname.replace(/^\[|\]$/g, '')}/${new URL(controlUrl).port || 443}`)}`,
+      'Verify DNS and the firewall from the node to the control port (control speaks mTLS only, so only TCP reachability is checked here).',
     ]);
   const script = `set -e
 ${checks.map(([name, cmd, fix]) => `echo "preflight: ${name}"; (${cmd}) || { echo "FAILED ${name}: ${fix}" >&2; exit 20; }`).join('\n')}
@@ -268,40 +281,72 @@ async function waitForDeployment(
 }
 
 program
-  .command('init')
-  .option('--token <token>', 'operator token (prefer TUG_TOKEN to avoid process-list exposure)')
+  .command('init [credentialFile]')
   .description(
-    'create the config file if missing and store the operator token in its git-ignored .local overlay',
+    'create the config file if missing and import a credential (a file, or - for stdin) into a 0600 user-config file that the git-ignored .local overlay points at',
   )
-  .action(async (o: { token?: string }, command: Command) => {
+  .action(async (credentialFile: string | undefined, _o: unknown, command: Command) => {
     const cfg = await loadCfg();
     const { controlUrl, project } = command.optsWithGlobals<{
       controlUrl?: string;
       project?: string;
     }>();
-    for (const file of await writeInitConfig(cfg, o.token || cfg.token || token('tug_op'), {
-      controlUrl,
-      project,
-    }))
+    let text: string | undefined;
+    if (credentialFile === '-') text = await readStdin();
+    else if (credentialFile) text = await fs.readFile(credentialFile, 'utf8');
+    else if (cfg.credential) text = JSON.stringify(cfg.credential);
+    if (!text) throw new Error('tug init needs a credential file (or - for stdin)');
+    const credential = decodeCredential(text);
+    const dir = path.join(os.homedir(), '.config', 'tug', 'credentials');
+    const source = path.join(
+      dir,
+      `${new URL(credential.url).host.replace(/[^A-Za-z0-9.-]/g, '_')}.json`,
+    );
+    await writeFileDurable(source, `${JSON.stringify(credential, null, 2)}\n`, 0o600);
+    for (const file of await writeInitConfig(cfg, source, { controlUrl, project }))
       console.log(`wrote ${file}`);
+    console.log(`imported credential to ${source}`);
   });
 
 program
   .command('node-register <name>')
-  .description('register a node with the control plane')
+  .description(
+    'sign a node-generated CSR and print the identity response (the primitive behind node-install; the private key stays with whoever made the CSR)',
+  )
+  .requiredOption('--csr <file>', 'PEM certificate request generated on the node (- for stdin)')
+  .option('--mode <mode>', 'create a new node or replace an existing node key', 'create')
   .option('--address <addr>')
   .option('--public-address <addr>')
   .option('--label <label>', 'node label (repeatable)', collect, [])
   .action(
-    async (name: string, o: { address?: string; publicAddress?: string; label: string[] }) => {
-      const r = await request('POST', '/api/v1/nodes/register', {
-        name,
-        address: o.address,
-        publicAddress: o.publicAddress,
-        labels: o.label,
-      });
+    async (
+      name: string,
+      o: { csr: string; mode: string; address?: string; publicAddress?: string; label: string[] },
+    ) => {
+      if (o.mode !== 'create' && o.mode !== 'replace')
+        throw new Error("--mode must be 'create' or 'replace'");
+      const csr = o.csr === '-' ? await readStdin() : await fs.readFile(o.csr, 'utf8');
+      const r = await request<IdentityResponse>(
+        'POST',
+        `/api/v1/nodes/${encodeURIComponent(name)}/identity`,
+        { csr, mode: o.mode, address: o.address, publicAddress: o.publicAddress, labels: o.label },
+      );
       console.log(JSON.stringify(r, null, 2));
     },
+  );
+program
+  .command('node-disable <name>')
+  .description(
+    "block a node's key immediately without deleting its metadata or placement (no SSH needed); bring it back with node-replace",
+  )
+  .action(async (name: string) =>
+    console.log(
+      JSON.stringify(
+        await request('POST', `/api/v1/nodes/${encodeURIComponent(name)}/disable`, {}),
+        null,
+        2,
+      ),
+    ),
   );
 program
   .command('node-rotate-wg-key <name>')
@@ -373,14 +418,19 @@ program
     );
   });
 program
-  .command('control-token')
-  .description('print local dev operator token if available')
-  .action(async () => console.log((await fs.readFile('./data/operator.token', 'utf8')).trim()));
-
-program
   .command('control-install <sshTarget>')
   .description(
-    'install the control plane on a Docker-capable host over SSH; front it with your own reverse proxy/TLS if exposing it publicly',
+    'install the control plane on a Docker-capable host over SSH and issue the root credential into a local 0600 file; it listens for mTLS only, so front it with TCP passthrough rather than a terminating proxy',
+  )
+  .requiredOption(
+    '--public-url <url>',
+    'credential-free https origin clients use, including the published port',
+  )
+  .option(
+    '--extra-san <name>',
+    'additional DNS name or IP for the server certificate (repeatable)',
+    collect,
+    [],
   )
   .option(
     '--image <tag>',
@@ -394,8 +444,16 @@ program
     '--build-local-image',
     'build the image from the current checkout and copy it to the host over SSH (tags it tug:local unless --image is set); for development',
   )
-  .option('--token <token>', 'operator token')
-  .option('--port <port>', 'published API port', '8080')
+  .option('--port <port>', 'published mTLS port', '8443')
+  .option(
+    '--credential-out <file>',
+    'where to write the root credential',
+    'tug-root.credential.json',
+  )
+  .option(
+    '--recover-root',
+    "replace root's key from the control host without the API (lost credential); other admins are unaffected",
+  )
   .option(
     '--mesh',
     'enable the WireGuard mesh on control (TUG_MESH=true); install nodes with --mesh too',
@@ -404,12 +462,15 @@ program
     async (
       sshTarget: string,
       o: InstallOpts & {
-        token?: string;
+        publicUrl: string;
+        extraSan: string[];
         port: string;
+        credentialOut: string;
+        recoverRoot?: boolean;
         mesh?: boolean;
       },
     ) => {
-      const operatorToken = o.token || process.env.TUG_TOKEN || token('tug_op');
+      const publicUrl = normalizeControlUrl(o.publicUrl);
       if (o.installDocker) await bootstrapDocker(sshTarget, true);
       preflightRemote(sshTarget, { ports: [Number(o.port)], minDiskMb: 2048, compose: true });
       const image = resolveImage(o.image, o.buildLocalImage);
@@ -417,127 +478,228 @@ program
       const yamlValue = (value: string) => JSON.stringify(value);
       const compose = await loadTemplate(templatesDir, 'control-compose.yml', {
         IMAGE: yamlValue(image),
-        OPERATOR_TOKEN: yamlValue(operatorToken),
+        PUBLIC_URL: yamlValue(new URL(publicUrl).origin),
+        EXTRA_SANS: yamlValue(o.extraSan.join(',')),
         PORT: o.port,
         MESH: yamlValue(o.mesh ? 'true' : 'false'),
       });
       const remote = await loadTemplate(templatesDir, 'control-install.sh', {
         COMPOSE: compose,
-        OPERATOR_TOKEN_SH: sh(operatorToken),
+        CONTAINER_SH: sh(CONTROL_CONTAINER),
       });
       runLocal('ssh', ['--', sshTarget, remote]);
-      console.log(
-        JSON.stringify(
-          {
-            ok: true,
-            sshTarget,
-            operatorToken,
-            url: `http://${remoteHost(sshTarget)}:${o.port}`,
-          },
-          null,
-          2,
-        ),
-      );
+      // Upgrades never reissue root: fresh installs create it, `--recover-root` replaces its key. Output goes straight to a file.
+      const issue = `docker exec ${sh(CONTROL_CONTAINER)} node dist/main.js control issue-credential --name root --role admin${o.recoverRoot ? ' --replace' : ''}`;
+      const out = spawnSync('ssh', ['--', sshTarget, issue], { encoding: 'utf8' });
+      if (out.status !== 0) {
+        if (!o.recoverRoot && /already used/.test(String(out.stderr)))
+          console.error(
+            'control already has a root credential; upgrade complete (pass --recover-root to replace it)',
+          );
+        else throw new Error(`issuing the root credential failed: ${String(out.stderr).trim()}`);
+      } else {
+        decodeCredential(out.stdout);
+        await writeFileDurable(o.credentialOut, `${String(out.stdout).trim()}\n`, 0o600);
+        console.error(
+          `root credential written to ${o.credentialOut}; import it with: tug init ${o.credentialOut}`,
+        );
+      }
+      console.log(JSON.stringify({ ok: true, sshTarget, url: publicUrl }, null, 2));
     },
   );
 
-program
-  .command('node-install [sshTarget]')
-  .description(
-    'register and install an agent container on a Docker-capable host over SSH (the SSH target defaults to nodes.<name>.ssh in the config file)',
-  )
-  .requiredOption('--name <name>')
-  .option('--address <addr>')
-  .option('--public-address <addr>')
-  .option('--label <label>', 'node label (repeatable)', collect, [])
-  .option(
-    '--agent-control-url <url>',
-    'control URL reachable by the agent (default: resolved operator control URL)',
-  )
-  .option('--http-only-dev', 'allow plaintext HTTP control URL for local/private development')
-  .option(
-    '--mesh',
-    'join the WireGuard mesh (agent runs with host networking and NET_ADMIN; control needs TUG_MESH=true)',
-  )
-  .option('--wg-port <port>', 'WireGuard UDP port checked by preflight', '51820')
-  .option(
-    '--image <tag>',
-    "Tug image to run (default: ghcr.io/wpelevator/tug:<this CLI's version>)",
-  )
-  .option(
-    '--install-docker',
-    'install missing Docker Engine and Compose on supported Debian, Ubuntu, Fedora and RHEL-compatible hosts (root required)',
-  )
-  .option(
-    '--build-local-image',
-    'build the image from the current checkout and copy it to the host over SSH (tags it tug:local unless --image is set); for development',
-  )
-  .action(
-    async (
-      sshArgument: string | undefined,
-      o: InstallOpts & {
-        name: string;
-        address?: string;
-        publicAddress?: string;
-        label: string[];
-        agentControlUrl?: string;
-        httpOnlyDev?: boolean;
-        mesh?: boolean;
-        wgPort: string;
-      },
-    ) => {
-      const cfg = await loadCfg();
-      const sshTarget = sshArgument ?? (nodeSettings(cfg, o.name).ssh as string | undefined);
-      if (!sshTarget)
-        throw new Error(
-          `node-install needs an SSH target: pass <ssh-target> or set nodes.${o.name}.ssh in ${cfg.file}`,
-        );
-      const controlUrl = normalizeControlUrl(o.agentControlUrl ?? cfg.controlUrl!);
-      assertHttps(controlUrl, o.httpOnlyDev);
-      if (o.installDocker) await bootstrapDocker(sshTarget);
-      preflightRemote(sshTarget, {
-        controlUrl,
-        mesh: o.mesh,
-        udpPorts: o.mesh ? [Number(o.wgPort)] : [],
-      });
-      const registered = await request<RegisterResponse>('POST', '/api/v1/nodes/register', {
-        name: o.name,
-        address: o.address,
-        publicAddress: o.publicAddress,
-        labels: o.label,
-      });
-      const image = resolveImage(o.image, o.buildLocalImage);
-      if (o.buildLocalImage) await transferTugImage(sshTarget, image);
-      const env =
-        (await loadTemplate(templatesDir, 'agent.env', {
-          CONTROL_URL: controlUrl,
-          NODE_NAME: o.name,
-          AGENT_TOKEN: registered.agentToken,
-        })) + (o.mesh ? 'TUG_MESH=true\n' : '');
-      const remote = await loadTemplate(templatesDir, 'node-install.sh', {
-        ENV: env,
-        IMAGE_SH: sh(image),
-        RUN_FLAGS: `${o.mesh ? MESH_RUN_FLAGS : HOST_NETWORK_FLAG} `,
-      });
-      runLocal('ssh', ['--', sshTarget, remote]);
-      console.log(JSON.stringify({ ok: true, node: registered.node }, null, 2));
-    },
+/** Everything the SSH-assisted node commands share. */
+interface NodeIdentityOpts extends InstallOpts {
+  name?: string;
+  address?: string;
+  publicAddress?: string;
+  label: string[];
+  agentControlUrl?: string;
+  mesh?: boolean;
+  wgPort: string;
+  all?: boolean;
+  wait: boolean;
+}
+const AGENT_STATE = '/var/lib/tug';
+function addNodeIdentityOptions(command: Command): Command {
+  return command
+    .option('--name <name>', 'node name')
+    .option(
+      '--all',
+      'walk every node with an ssh target in the config file, continuing after failures',
+    )
+    .option(
+      '--agent-control-url <url>',
+      'connect-only URL the agent dials (for example a private address); the certificate is still verified against the credential URL',
+    )
+    .option(
+      '--mesh',
+      'join the WireGuard mesh (agent runs with host networking and NET_ADMIN; control needs TUG_MESH=true)',
+    )
+    .option('--wg-port <port>', 'WireGuard UDP port checked by preflight', '51820')
+    .option(
+      '--image <tag>',
+      "Tug image to run (default: ghcr.io/wpelevator/tug:<this CLI's version>)",
+    )
+    .option(
+      '--install-docker',
+      'install missing Docker Engine and Compose on supported Debian, Ubuntu, Fedora and RHEL-compatible hosts (root required)',
+    )
+    .option(
+      '--build-local-image',
+      'build the image from the current checkout and copy it to the host over SSH (tags it tug:local unless --image is set); for development',
+    )
+    .option('--no-wait', 'do not wait for the node to report after the install');
+}
+/**
+ * The SSH-assisted flow: the node makes its own key and CSR, an admin credential authorizes the identity at this moment and
+ * the certificate is installed back over SSH, so no bootstrap secret travels and the private key never leaves the node.
+ */
+async function installNodeIdentity(
+  sshTarget: string,
+  name: string,
+  mode: 'create' | 'replace',
+  o: NodeIdentityOpts,
+  repair = false,
+): Promise<void> {
+  const cfg = await loadCfg();
+  const connectUrl = o.agentControlUrl ? normalizeControlUrl(o.agentControlUrl) : undefined;
+  await transportFor(cfg).then((t) => t.close()); // fail before touching the host when there is no credential
+  if (o.installDocker) await bootstrapDocker(sshTarget);
+  preflightRemote(sshTarget, {
+    controlUrl: connectUrl ?? cfg.credential?.url,
+    mesh: o.mesh,
+    udpPorts: o.mesh ? [Number(o.wgPort)] : [],
+  });
+  const image = resolveImage(o.image, o.buildLocalImage);
+  if (o.buildLocalImage) await transferTugImage(sshTarget, image);
+  const started = new Date().toISOString();
+  if (repair)
+    runLocal('ssh', [
+      '--',
+      sshTarget,
+      `mkdir -p ${AGENT_STATE} && cd ${AGENT_STATE} && for f in agent.json agent-pending.json; do [ -e "$f" ] && mv "$f" "$f.corrupt-$(date +%s)"; done; true`,
+    ]);
+  const agent = (command: string, interactive = false) =>
+    `mkdir -p ${AGENT_STATE} && docker run --rm ${interactive ? '-i ' : ''}-v ${AGENT_STATE}:${AGENT_STATE} ${sh(image)} agent ${command}`;
+  const csr = runCapture('ssh', ['--', sshTarget, agent('identity')]);
+  const response = await request<IdentityResponse>(
+    'POST',
+    `/api/v1/nodes/${encodeURIComponent(name)}/identity`,
+    { csr, mode, address: o.address, publicAddress: o.publicAddress, labels: o.label },
   );
+  runCapture('ssh', ['--', sshTarget, agent('install-cert', true)], {
+    input: JSON.stringify(response),
+  });
+  const env =
+    (await loadTemplate(templatesDir, 'agent.env', {
+      CONTROL_URL_LINE: connectUrl ? `TUG_CONTROL_URL=${connectUrl}\n` : '',
+      NODE_NAME: name,
+    })) + (o.mesh ? 'TUG_MESH=true\n' : '');
+  const remote = await loadTemplate(templatesDir, 'node-install.sh', {
+    ENV: env,
+    IMAGE_SH: sh(image),
+    RUN_FLAGS: `${o.mesh ? MESH_RUN_FLAGS : HOST_NETWORK_FLAG} `,
+  });
+  runLocal('ssh', ['--', sshTarget, remote]);
+  if (o.wait) {
+    // A report from the new identity: wait for a report after the install began, not a replaced node's stale status.
+    for (let i = 0; i < 30; i++) {
+      const { nodes } = await request<{ nodes: { name: string; last_seen_at: string | null }[] }>(
+        'GET',
+        '/api/v1/nodes',
+      );
+      const seen = nodes.find((n) => n.name === name)?.last_seen_at;
+      if (seen && seen > started)
+        return void console.log(JSON.stringify({ ok: true, node: response.node }, null, 2));
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+    console.error(`node ${name} has not reported yet; check \`docker logs tug-agent\` on the host`);
+  }
+  console.log(JSON.stringify({ ok: true, node: response.node }, null, 2));
+}
+async function runNodeIdentity(
+  sshArgument: string | undefined,
+  o: NodeIdentityOpts,
+  mode: 'create' | 'replace',
+  repair = false,
+): Promise<void> {
+  const cfg = await loadCfg();
+  const verb = repair ? 'node-repair' : mode === 'create' ? 'node-install' : 'node-replace';
+  if (o.all) {
+    const results: { node: string; ok: boolean; error?: string }[] = [];
+    for (const [name, settings] of Object.entries(cfg.nodes)) {
+      const target = settings.ssh as string | undefined;
+      if (!target) continue;
+      const merged = { ...o, ...nodeOverrides(settings), name };
+      try {
+        await installNodeIdentity(target, name, mode, merged, repair);
+        results.push({ node: name, ok: true });
+      } catch (e) {
+        results.push({ node: name, ok: false, error: errMessage(e) });
+      }
+    }
+    console.log(JSON.stringify({ results }, null, 2));
+    if (results.some((r) => !r.ok)) process.exitCode = 1;
+    return;
+  }
+  if (!o.name) throw new Error(`${verb} needs --name`);
+  const sshTarget = sshArgument ?? (nodeSettings(cfg, o.name).ssh as string | undefined);
+  if (!sshTarget)
+    throw new Error(
+      `${verb} needs an SSH target: pass <ssh-target> or set nodes.${o.name}.ssh in ${cfg.file}`,
+    );
+  await installNodeIdentity(sshTarget, o.name, mode, o, repair);
+}
+const nodeOverrides = (settings: Record<string, unknown>) => ({
+  ...(settings.address ? { address: settings.address as string } : {}),
+  ...(settings.publicAddress ? { publicAddress: settings.publicAddress as string } : {}),
+  ...(Array.isArray(settings.label) ? { label: settings.label as string[] } : {}),
+  ...(settings.mesh ? { mesh: true } : {}),
+});
+for (const [verb, description, mode, repair] of [
+  [
+    'node-install',
+    'create a node and install its agent over SSH (the SSH target defaults to nodes.<name>.ssh in the config file); safe to rerun after a partial failure',
+    'create',
+    false,
+  ],
+  [
+    'node-replace',
+    'install a new key on an existing node over SSH: for an expired, lost or suspected key, a disabled node, a CA loss or an older restore',
+    'replace',
+    false,
+  ],
+  [
+    'node-repair',
+    'move aside corrupt agent credential documents on the node (never service volumes) and replace its identity',
+    'replace',
+    true,
+  ],
+] as const) {
+  const command = program
+    .command(`${verb} [sshTarget]`)
+    .description(description)
+    .option('--address <addr>')
+    .option('--public-address <addr>')
+    .option('--label <label>', 'node label (repeatable)', collect, []);
+  addNodeIdentityOptions(command).action(
+    async (sshArgument: string | undefined, o: NodeIdentityOpts) =>
+      runNodeIdentity(sshArgument, o, mode, repair),
+  );
+}
 
 program
   .command('node-enroll')
   .description(
-    'mint a single-use enrollment key so a fresh host can self-join with one docker run (no SSH)',
+    'mint a single-use, name-bound join key so a host you cannot SSH to can self-join with one docker run; a saved cloud-init document contains a credential',
   )
-  .option('--name <name>', 'pre-bind the node name (default: the agent uses its own hostname)')
+  .requiredOption('--name <name>', 'the node name the key is bound to; mint one key per instance')
   .option(
     '--agent-control-url <url>',
-    'control URL reachable by the agent (default: resolved operator control URL)',
+    'connect-only URL the agent dials; the certificate is still verified against the credential URL',
   )
-  .option('--ttl <seconds>', 'enrollment key lifetime', '3600')
-  .option('--uses <n>', 'how many hosts may enroll with this key', '1')
-  .option('--ca <file>', 'PEM CA cert to embed so agents trust a private/self-signed control')
-  .option('--http-only-dev', 'allow a plaintext HTTP control URL for local/private development')
+  .option('--ttl <seconds>', 'join key lifetime', '3600')
   .option(
     '--image <tag>',
     "agent image used in the printed docker run (default: ghcr.io/wpelevator/tug:<this CLI's version>)",
@@ -548,34 +710,27 @@ program
   .option('--json', 'print JSON including the command or cloud-init payload')
   .action(
     async (o: {
-      name?: string;
+      name: string;
       agentControlUrl?: string;
       ttl: string;
-      uses: string;
-      ca?: string;
-      httpOnlyDev?: boolean;
       image?: string;
       mesh?: boolean;
       label: string[];
       json?: boolean;
       installDocker?: boolean;
     }) => {
-      const cfg = await loadCfg();
-      const controlUrl = normalizeControlUrl(o.agentControlUrl ?? cfg.controlUrl!);
-      assertHttps(controlUrl, o.httpOnlyDev);
-      const ca = o.ca ? await fs.readFile(o.ca, 'utf8') : undefined;
+      const connectUrl = o.agentControlUrl ? normalizeControlUrl(o.agentControlUrl) : undefined;
       const minted = await request<EnrollTokenResponse>('POST', '/api/v1/nodes/enroll-token', {
-        name: o.name || null,
+        name: o.name,
         ttlSeconds: Number(o.ttl),
-        uses: Number(o.uses),
+        labels: o.label.length ? o.label : undefined,
       });
       const keyPayload: JoinKey = {
-        v: 1,
-        controlUrl,
-        enrollToken: minted.enrollToken,
-        ...(o.label.length ? { labels: o.label } : {}),
+        v: 2,
+        credential: minted.credential,
+        name: minted.name,
+        ...(connectUrl ? { connectUrl } : {}),
       };
-      if (ca) keyPayload.ca = ca;
       const joinKey = Buffer.from(JSON.stringify(keyPayload)).toString('base64url');
       const command = dockerRunSnippet(resolveImage(o.image), joinKey, o.mesh);
       const cloudInit = o.installDocker
@@ -584,7 +739,13 @@ program
       if (o.json) {
         console.log(
           JSON.stringify(
-            { ...minted, controlUrl, joinKey, command, ...(cloudInit ? { cloudInit } : {}) },
+            {
+              name: minted.name,
+              expiresAt: minted.expiresAt,
+              joinKey,
+              command,
+              ...(cloudInit ? { cloudInit } : {}),
+            },
             null,
             2,
           ),
@@ -596,7 +757,7 @@ program
         return;
       }
       console.log(
-        `# Enrollment key valid until ${minted.expiresAt} (${minted.usesRemaining} use(s)). Run on each fresh host:\n`,
+        `# Join key for ${minted.name} valid until ${minted.expiresAt}, single use. Run on the fresh host:\n`,
       );
       console.log(command);
     },
@@ -975,7 +1136,7 @@ program
 program
   .command('token-create <name>')
   .description(
-    'create a named API token for CI or a teammate; the secret is printed once and cannot be shown again',
+    'create a named operator credential for CI or a teammate; it is printed once, control keeps no copy of its private key, and it expires after one year at most',
   )
   .addOption(
     new Option(
@@ -993,7 +1154,10 @@ program
       .default([] as string[], 'all projects')
       .argParser((value: string, previous: string[]) => [...previous, value]),
   )
-  .option('--expires-in-days <n>', 'expire the token after this many days (default: never)')
+  .option(
+    '--expires-in-days <n>',
+    'expire the credential after this many days (default and maximum: 365)',
+  )
   .action(async (name: string, o: { role: string; project: string[]; expiresInDays?: string }) => {
     const created = await request('POST', '/api/v1/tokens', {
       name,
@@ -1002,7 +1166,7 @@ program
       expiresInSeconds: o.expiresInDays ? Number(o.expiresInDays) * 86400 : undefined,
     });
     console.error(
-      'Store this token now (for example as the TUG_TOKEN secret in CI); it is not shown again.',
+      'Store this credential now (for example as the TUG_CREDENTIAL secret in CI); it is not shown again. Replace one by creating a new name, verifying it, then revoking the old name.',
     );
     console.log(JSON.stringify(created, null, 2));
   });
@@ -1269,7 +1433,7 @@ async function runLive(
   const cfg = await loadCfg();
   process.exitCode = await runCliLive(
     parseLiveRequest(operation, { ...input, project: cfg.project || 'site' }),
-    createCliLiveTransport(cfg.controlUrl, cfg.token),
+    createCliLiveTransport(cfg.credential, cfg.controlUrl),
   );
 }
 program
@@ -1399,7 +1563,7 @@ program.hook('preAction', async (_root, command) => {
   const nodeName =
     command.name() === 'node-register'
       ? command.args[0]
-      : ['node-install', 'node-enroll'].includes(command.name())
+      : ['node-install', 'node-replace', 'node-repair', 'node-enroll'].includes(command.name())
         ? (options.name as string | undefined)
         : undefined;
   applyConfigDefaults(command, options, {
@@ -1410,7 +1574,14 @@ program.hook('preAction', async (_root, command) => {
 for (const command of program.commands) {
   command
     .option('--config <file>', CONFIG_HELP)
-    .option('--control-url <url>', 'control API URL (overrides TUG_CONTROL_URL and config)');
+    .option(
+      '--control-url <url>',
+      'connect target for the control API (the credential still verifies its own public URL)',
+    )
+    .option(
+      '--credential <file>',
+      'credential file (overrides TUG_CREDENTIAL, TUG_CREDENTIAL_FILE and config)',
+    );
   if (!command.options.some((option) => option.long === '--project'))
     command.option('--project <name>', 'project (overrides TUG_PROJECT and config; default: site)');
 }

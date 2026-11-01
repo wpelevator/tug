@@ -6,6 +6,7 @@ import path from 'node:path';
 import { execFile, spawnSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { Command } from 'commander';
+import { writeCredentialFile } from '../tests/helpers.ts';
 import {
   CONFIG_NAMES,
   COMMAND_SETTINGS,
@@ -40,7 +41,7 @@ nodeDefaults:
   mesh: true
   wgPort: 51821
   label: [base]
-  ca: certs/ca.pem
+  image: ghcr.io/example/tug:test
 nodes:
   app1:
     ssh: root@203.0.113.7
@@ -98,23 +99,65 @@ test('the default config is found by name in order and more than one candidate i
   });
 });
 
-test('the token is accepted only from the untracked overlay or the environment', async () => {
+test('the credential path is accepted only from the untracked overlay, the environment or a flag', async () => {
   await withDir(async (dir) => {
-    await fs.writeFile(path.join(dir, 'tug.yml'), 'token: committed\n');
+    await fs.writeFile(path.join(dir, 'tug.yml'), 'credential: committed.json\n');
     await assert.rejects(
       resolveCliConfig({}, {}, dir),
-      /token must not be set in a tracked file; put it in .*tug\.local\.yml or TUG_TOKEN/,
-      'a token in the tracked file should be rejected with the overlay name',
+      /credential must not be set in a tracked file; put it in .*tug\.local\.yml/,
+      'a credential path in the tracked file should be rejected with the overlay name',
     );
     await fs.writeFile(path.join(dir, 'tug.yml'), 'project: shop\n');
-    await fs.writeFile(path.join(dir, 'tug.local.yml'), 'token: secret\nproject: mine\n');
+    const overlay = await writeCredentialFile(
+      path.join(dir, 'overlay.json'),
+      'https://overlay.test:8443',
+    );
+    await writeCredentialFile(path.join(dir, 'env.json'), 'https://env.test:8443');
+    await writeCredentialFile(path.join(dir, 'flag.json'), 'https://flag.test:8443');
+    await fs.writeFile(
+      path.join(dir, 'tug.local.yml'),
+      'credential: overlay.json\nproject: mine\n',
+    );
     const local = await resolveCliConfig({}, {}, dir);
-    assert.equal(local.token, 'secret', 'the overlay should supply the token');
+    assert.deepEqual(local.credential, overlay, 'the overlay should supply the credential');
+    assert.equal(
+      local.controlUrl,
+      'https://overlay.test:8443',
+      'the control URL defaults to the credential public URL',
+    );
     assert.equal(local.project, 'mine', 'the overlay should override tracked values per key');
     assert.equal(
-      (await resolveCliConfig({}, { TUG_TOKEN: 'env' }, dir)).token,
-      'env',
-      'TUG_TOKEN should override the overlay token',
+      (await resolveCliConfig({}, { TUG_CREDENTIAL_FILE: 'env.json' }, dir)).credential?.url,
+      'https://env.test:8443',
+      'TUG_CREDENTIAL_FILE should override the overlay',
+    );
+    assert.equal(
+      (
+        await resolveCliConfig(
+          { credential: 'flag.json' },
+          { TUG_CREDENTIAL_FILE: 'env.json' },
+          dir,
+        )
+      ).credential?.url,
+      'https://flag.test:8443',
+      '--credential should override the environment',
+    );
+    const inline = await fs.readFile(path.join(dir, 'env.json'), 'utf8');
+    await assert.rejects(
+      resolveCliConfig({}, { TUG_CREDENTIAL: inline, TUG_CREDENTIAL_FILE: 'env.json' }, dir),
+      /only one of TUG_CREDENTIAL and TUG_CREDENTIAL_FILE/,
+      'conflicting environment credentials should be rejected',
+    );
+    const override = await resolveCliConfig({ controlUrl: 'https://127.0.0.1:18082' }, {}, dir);
+    assert.equal(
+      override.controlUrl,
+      'https://127.0.0.1:18082',
+      'an address override changes the connect target',
+    );
+    assert.equal(
+      override.credential?.url,
+      'https://overlay.test:8443',
+      'the verified public URL stays in the credential',
     );
   });
 });
@@ -212,9 +255,9 @@ test('paths in the file resolve relative to the file, not the working directory'
       'the compose file path should be relative to the config file',
     );
     assert.equal(
-      config.nodeDefaults.ca,
-      path.join(dir, 'infra', 'certs', 'ca.pem'),
-      'the CA path should be relative to the config file',
+      config.nodeDefaults.image,
+      'ghcr.io/example/tug:test',
+      'node defaults should keep their configured values',
     );
   });
 });
@@ -317,14 +360,14 @@ test('init creates the tracked file once, keeps an existing one untouched, and g
       dir,
       true,
     );
-    const written = await writeInitConfig(resolved, 'tok1', {});
+    const written = await writeInitConfig(resolved, path.join(dir, 'cred1.json'), {});
     assert.deepEqual(
       written.map((file) => path.basename(file)),
       ['tug.yml', 'tug.local.yml'],
       'init should write the tracked file and the overlay',
     );
     const tracked = await fs.readFile(path.join(dir, 'tug.yml'), 'utf8');
-    assert.ok(!tracked.includes('tok1'), 'the tracked file should never contain the token');
+    assert.ok(!tracked.includes('cred1.json'), 'the tracked file should never contain the token');
     assert.match(
       tracked,
       /controlUrl: https:\/\/c\.test/,
@@ -343,8 +386,10 @@ test('init creates the tracked file once, keeps an existing one untouched, and g
 
     const edited = `# my comment\n${tracked}nodes:\n  app1:\n    ssh: root@h\n`;
     await fs.writeFile(path.join(dir, 'tug.yml'), edited);
-    const again = await resolveCliConfig({ controlUrl: 'https://other.test' }, {}, dir);
-    await writeInitConfig(again, 'tok2', { controlUrl: 'https://other.test' });
+    const again = await resolveCliConfig({ controlUrl: 'https://other.test' }, {}, dir, true);
+    await writeInitConfig(again, path.join(dir, 'cred2.json'), {
+      controlUrl: 'https://other.test',
+    });
     assert.equal(
       await fs.readFile(path.join(dir, 'tug.yml'), 'utf8'),
       edited,
@@ -355,8 +400,12 @@ test('init creates the tracked file once, keeps an existing one untouched, and g
       'tug.local.yml\n',
       'init should not add the overlay to .gitignore twice',
     );
-    const next = await resolveCliConfig({}, {}, dir);
-    assert.equal(next.token, 'tok2', 'init should replace the overlay token');
+    const next = await resolveCliConfig({}, {}, dir, true);
+    assert.equal(
+      path.basename(next.credentialFile!),
+      'cred2.json',
+      'init should replace the overlay credential path',
+    );
     assert.equal(
       next.controlUrl,
       'https://other.test',
@@ -369,7 +418,7 @@ test('node-install reads the ssh target from the config and reports a missing on
   await withDir(async (dir) => {
     await fs.writeFile(
       path.join(dir, 'tug.yml'),
-      'controlUrl: http://control.test\nnodes:\n  app1:\n    ssh: root@203.0.113.7\n  app2:\n    publicAddress: x.test\n',
+      'controlUrl: https://control.test\nnodes:\n  app1:\n    ssh: root@203.0.113.7\n  app2:\n    publicAddress: x.test\n',
     );
     const run = (...args: string[]) =>
       exec(process.execPath, [entry, ...args], { cwd: dir }).then(
@@ -388,7 +437,13 @@ test('node-install reads the ssh target from the config and reports a missing on
       /nodes\.ghost\.ssh/,
       'an undeclared node without a positional target should name the key to add',
     );
-    const declared = await run('node-install', '--name', 'app1');
+    const declared = await run(
+      'node-install',
+      '--name',
+      'app1',
+      '--agent-control-url',
+      'http://plain.test',
+    );
     assert.doesNotMatch(
       declared.stderr,
       /needs an SSH target/,
@@ -397,7 +452,7 @@ test('node-install reads the ssh target from the config and reports a missing on
     assert.match(
       declared.stderr,
       /must use https/,
-      'with the target resolved, the plaintext control URL check should be the next failure',
+      'with the target resolved, the plaintext connect URL check should be the next failure',
     );
   });
 });

@@ -5,17 +5,17 @@ import os from 'node:os';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { createApp } from './control.ts';
-import { json } from '../tests/helpers.ts';
+import { json, testIdentity } from '../tests/helpers.ts';
 import { resolveImage } from './registry.ts';
 
 async function server() {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-pinning-'));
   process.env.TUG_DATA_DIR = dir;
-  process.env.TUG_OPERATOR_TOKEN = 'pin-op';
   let generation = 1;
   let fail = false;
   const calls: string[] = [];
   const app = await createApp({
+    identity: testIdentity,
     images: {
       resolve: (image, credentials) => {
         calls.push(image);
@@ -41,7 +41,12 @@ async function server() {
   const post = (route: string, body: unknown, token = 'pin-op') =>
     fetch(base + route, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      headers: {
+        ...(token === 'pin-op'
+          ? { 'x-tug-test-operator': 'operator' }
+          : { 'x-tug-test-node': token }),
+        'content-type': 'application/json',
+      },
       body: JSON.stringify(body),
     });
   const node = async (name: string) => json(await post('/api/v1/nodes/register', { name }));
@@ -87,7 +92,7 @@ async function server() {
       token,
     );
   const get = (route: string, token: string) =>
-    fetch(base + route, { headers: { Authorization: `Bearer ${token}` } });
+    fetch(base + route, { headers: { 'x-tug-test-node': token } });
   return {
     dir,
     base,

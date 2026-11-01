@@ -39,12 +39,15 @@
     "test:smoke:image": "node tools/scripts/smoke-runtime-image.js"
   },
   "dependencies": {
+    "@peculiar/x509": "^3.1.0",
     "commander": "^12.1.0",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "js-yaml": "^4.1.0",
     "multer": "^2.2.0",
+    "reflect-metadata": "^0.2.2",
     "tar": "^7.4.3",
+    "undici": "^8.12.3",
     "ws": "^8.22.1"
   },
   "devDependencies": {

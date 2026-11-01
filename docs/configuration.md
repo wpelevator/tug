@@ -7,20 +7,22 @@ CLI options override environment variables, which override the config files and 
 | Variable | Purpose |
 |---|---|
 | `TUG_CONFIG` | Path to the CLI config file (default: `tug.yml`, `tug.yaml`, `tug.json` or `.tug.json` in the current directory). |
-| `TUG_CONTROL_URL` | Control API URL; overrides the config file. |
+| `TUG_CONTROL_URL` | Connect target for the control API (an `https://` URL; for example a tunnel). The credential's public URL is still the verified name; overrides the config file. |
 | `TUG_PROJECT` | Default project; overrides the config file. |
-| `TUG_TOKEN` | Operator token or a scoped API token from `tug token-create`; overrides the `token` in the untracked overlay. |
+| `TUG_CREDENTIAL` | Encoded operator credential (for CI). Conflicts with `TUG_CREDENTIAL_FILE`; overrides the overlay. |
+| `TUG_CREDENTIAL_FILE` | Path of a credential file; overrides the `credential` path in the untracked overlay. |
 
 ## Control plane
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `PORT` | `8080` | API port. |
-| `TUG_DATA_DIR` | `./data` | SQLite database, master key, operator token, image archives, build contexts and backups. |
+| `PORT` | `8443` | The single mTLS port. |
+| `TUG_PUBLIC_URL` | required | Credential-free `https://` origin clients connect to, including the port. Its host becomes the server certificate's primary DNS/IP SAN. |
+| `TUG_EXTRA_SANS` | unset | Comma-separated extra DNS names or IPs for the server certificate. |
+| `TUG_RENEW_MIN_INTERVAL_MS` | `3600000` | Minimum time between certificate renewals per node. |
+| `TUG_DATA_DIR` | `./data` | SQLite database, master key, `pki/` (CA and server certificate), image archives, build contexts and backups. |
 | `TUG_UPLOAD_DIR` | `<data dir>/uploads` | Temporary storage for uploaded source contexts and local image archives. |
-| `TUG_OPERATOR_TOKEN` | generated | Initial operator token, used only when none exists yet. The token is printed and written to `<data dir>/operator.token`. |
 | `TUG_MAX_IMAGE_BYTES` | `5368709120` | Maximum bytes per uploaded file (source context or compressed image); expanded archives are limited to 20 GiB and 100,000 entries. |
-| `TUG_TLS_CERT_FILE`, `TUG_TLS_KEY_FILE` | unset | Serve HTTPS directly instead of plain HTTP. |
 | `TUG_LOCK_TTL_MS` | `600000` | Lease lifetime of per-project operation locks; active builds renew their lease. |
 | `TUG_STALE_SECONDS` | `60` | Seconds without an authenticated work fetch, status report or wake wait before a node is marked `stale`. |
 | `TUG_EVENT_RETENTION_DAYS` | `30` | Events older than this many days are deleted; `0` keeps events regardless of age. Pruning runs at startup and then at most once an hour while agents report events. |
@@ -37,12 +39,11 @@ CLI options override environment variables, which override the config files and 
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `TUG_CONTROL_URL` | `http://localhost:8080` | Control URL; overrides the one in an enrollment key. |
-| `TUG_AGENT_TOKEN` | unset | Agent token for push-installed or manually registered nodes. Takes precedence over persisted credentials. |
-| `TUG_JOIN_KEY` / `TUG_JOIN_KEY_FILE` | unset | Enrollment key (or a file holding it) used when no token is available. |
+| `TUG_CONTROL_URL` | unset | Connect-only override of the control address (for example a private endpoint); the certificate is verified against the credential's public URL. |
+| `TUG_JOIN_KEY` / `TUG_JOIN_KEY_FILE` | unset | Join key (or a `0600` file holding it) used only when the node has no identity yet; ignored once `agent.json` exists. |
 | `TUG_NODE_NAME` | hostname | Node name when not bound by the enrollment key. |
 | `TUG_NODE_ADDRESS`, `TUG_NODE_PUBLIC_ADDRESS` | unset | Addresses reported at enrollment. |
-| `TUG_STATE_DIR` | `/var/lib/tug` | Credentials, applied revisions, managed-image identities, temporary image downloads, WireGuard keys, ingress config and generated project files. |
+| `TUG_STATE_DIR` | `/var/lib/tug` | Identity (`agent.json`, `agent-pending.json`), applied revisions, managed-image identities, temporary image downloads, WireGuard keys, ingress config and generated project files. |
 | `TUG_POLL_INTERVAL_MS` | `5000` | Maximum quiet interval between reconciliations. A WebSocket or long-poll wake can start one sooner. |
 | `TUG_APPLY` | `true` | Set `false` to render files and report without touching Docker. |
 | `TUG_MESH` | `false` | Set `true` to generate a WireGuard key, report it and reconcile `wg0`. Needs `wg`, `ip`, host networking and `NET_ADMIN`. |

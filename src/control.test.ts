@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createApp } from './control.ts';
-import { testImageResolver } from '../tests/helpers.ts';
+import { testImageResolver, testIdentity } from '../tests/helpers.ts';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { json } from '../tests/helpers.ts';
@@ -12,8 +12,7 @@ import { json } from '../tests/helpers.ts';
 async function server() {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-'));
   process.env.TUG_DATA_DIR = dir;
-  process.env.TUG_OPERATOR_TOKEN = 'op-test-token';
-  const app = await createApp({ images: { resolve: testImageResolver } });
+  const app = await createApp({ identity: testIdentity, images: { resolve: testImageResolver } });
   const srv = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));
   });
@@ -21,7 +20,7 @@ async function server() {
   return { base, close: () => new Promise((resolve) => srv.close(resolve)) };
 }
 function op() {
-  return { Authorization: 'Bearer op-test-token', 'content-type': 'application/json' };
+  return { 'x-tug-test-operator': 'operator', 'content-type': 'application/json' };
 }
 
 test('registers node, stores secret, creates desired state, serves agent work', async () => {
@@ -34,7 +33,12 @@ test('registers node, stores secret, creates desired state, serves agent work', 
     });
     assert.equal(res.status, 200);
     const registered = await json(res);
-    assert.match(registered.agentToken, /^tug_agent_/);
+    assert.equal(registered.node.name, 'n1', 'registration returns the node identity');
+    assert.match(
+      registered.certificate,
+      /BEGIN CERTIFICATE/,
+      'registration returns a certificate for the node key',
+    );
 
     res = await fetch(`${s.base}/api/v1/secrets`, {
       method: 'POST',
@@ -54,7 +58,7 @@ test('registers node, stores secret, creates desired state, serves agent work', 
     assert.equal(res.status, 200);
 
     res = await fetch(`${s.base}/agent/v1/work`, {
-      headers: { Authorization: `Bearer ${registered.agentToken}` },
+      headers: { 'x-tug-test-node': registered.agentToken },
     });
     let work = await json(res);
     assert.equal(work.desiredStates[0].version, 'git-a');
@@ -74,7 +78,7 @@ test('registers node, stores secret, creates desired state, serves agent work', 
     assert.equal(res.status, 200);
     const command = await json(res);
     res = await fetch(`${s.base}/agent/v1/work`, {
-      headers: { Authorization: `Bearer ${registered.agentToken}` },
+      headers: { 'x-tug-test-node': registered.agentToken },
     });
     work = await json(res);
     assert.equal(work.commands[0].id, restart.commandId);
@@ -82,7 +86,7 @@ test('registers node, stores secret, creates desired state, serves agent work', 
     res = await fetch(`${s.base}/agent/v1/status`, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${registered.agentToken}`,
+        'x-tug-test-node': registered.agentToken,
         'content-type': 'application/json',
       },
       body: JSON.stringify({
@@ -138,7 +142,7 @@ test('failed node status fails deployment and unblocks future deploys', async ()
     res = await fetch(`${s.base}/agent/v1/status`, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${registered.agentToken}`,
+        'x-tug-test-node': registered.agentToken,
         'content-type': 'application/json',
       },
       body: JSON.stringify({
@@ -149,7 +153,7 @@ test('failed node status fails deployment and unblocks future deploys', async ()
             observedRevision: (
               await json(
                 await fetch(`${s.base}/agent/v1/work`, {
-                  headers: { Authorization: `Bearer ${registered.agentToken}` },
+                  headers: { 'x-tug-test-node': registered.agentToken },
                 }),
               )
             ).desiredStates[0].revision,

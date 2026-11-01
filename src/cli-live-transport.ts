@@ -9,6 +9,8 @@ import type {
   LiveRequest,
 } from './cli-live.ts';
 
+import { clientTlsOptions } from './pki.ts';
+import type { Credential } from './pki.ts';
 import {
   LIVE_MAX_FRAME_BYTES as MAX_FRAME,
   LIVE_MAX_BUFFERED_BYTES as MAX_BUFFERED,
@@ -16,11 +18,14 @@ import {
 } from './protocol.ts';
 const MAX_EVENTS = 1024;
 
-/** Credentials travel only in the upgrade header, never a URL or frame. */
-export function createCliLiveTransport(controlUrl: string, token?: string): CliLiveTransport {
+/** The client certificate authenticates the upgrade; `controlUrl` only picks the connect target, the credential's public URL is verified. */
+export function createCliLiveTransport(
+  credential: Credential | undefined,
+  controlUrl: string,
+): CliLiveTransport {
+  if (!credential) throw new CliLiveError('no credential: run `tug init <credential-file>`');
   const url = new URL(controlUrl);
-  if (url.protocol !== 'http:' && url.protocol !== 'https:')
-    throw new CliLiveError('live control URL must use http or https');
+  if (url.protocol !== 'https:') throw new CliLiveError('live control URL must use https');
   if (url.username || url.password || url.search || url.hash)
     throw new CliLiveError('live control URL must not contain credentials, query or fragment');
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -33,7 +38,8 @@ export function createCliLiveTransport(controlUrl: string, token?: string): CliL
           return;
         }
         const socket = new WebSocket(url, {
-          headers: token ? { Authorization: `Bearer ${token}` } : {},
+          ...(clientTlsOptions(credential) as object),
+          followRedirects: false,
           maxPayload: MAX_FRAME,
           handshakeTimeout: LIVE_START_TIMEOUT_MS,
           perMessageDeflate: false,

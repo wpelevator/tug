@@ -6,7 +6,7 @@ import path from 'node:path';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from './control.ts';
-import { testImageResolver } from '../tests/helpers.ts';
+import { testImageResolver, testIdentity } from '../tests/helpers.ts';
 import { ROLES, ROUTE_ROLES, hasRole } from './tokens.ts';
 import type { Role } from './tokens.ts';
 
@@ -16,8 +16,7 @@ async function makeServer(dir?: string) {
   process.env.TUG_DATA_DIR = data;
   process.env.TUG_CONTROL_BACKUP_DIR = path.join(data, 'control-backups');
   process.env.TUG_CONTROL_RESTORE_DIR = path.join(data, 'control-restore');
-  process.env.TUG_OPERATOR_TOKEN = OPERATOR;
-  const app = await createApp({ images: { resolve: testImageResolver } });
+  const app = await createApp({ identity: testIdentity, images: { resolve: testImageResolver } });
   const srv = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));
   });
@@ -26,7 +25,13 @@ async function makeServer(dir?: string) {
     const res = await fetch(`${base}${route}`, {
       method,
       headers: {
-        ...(bearer ? { Authorization: `Bearer ${bearer}` } : {}),
+        ...(bearer === OPERATOR
+          ? { 'x-tug-test-operator': 'operator' }
+          : bearer && bearer.length > 200
+            ? { 'x-tug-test-credential': bearer }
+            : bearer
+              ? { 'x-tug-test-node': bearer }
+              : {}),
         'content-type': 'application/json',
       },
       body: body === undefined ? undefined : JSON.stringify(body),
@@ -45,7 +50,7 @@ async function makeServer(dir?: string) {
   const mint = async (name: string, role: Role, projects?: string[]) => {
     const res = await call(OPERATOR, 'POST', '/api/v1/tokens', { name, role, projects });
     assert.equal(res.status, 200, `creating token ${name} should succeed: ${res.text}`);
-    return res.body.token as string;
+    return res.body.credential as string;
   };
   return { app, base, data, call, mint, close: () => new Promise((resolve) => srv.close(resolve)) };
 }
@@ -63,9 +68,9 @@ test('named tokens are created once, listed without secrets, unique, validated a
     });
     assert.equal(created.status, 200, 'the operator should be able to create a token');
     assert.match(
-      created.body.token,
-      /^tug_tok_/,
-      'token secrets should carry the recognizable tug_tok_ prefix',
+      created.body.credential,
+      /^[A-Za-z0-9_-]{200,}$/,
+      'operator credentials are returned once as a base64url document',
     );
     assert.deepEqual(
       created.body.projects,
@@ -78,13 +83,17 @@ test('named tokens are created once, listed without secrets, unique, validated a
       'creation should record the acting credential',
     );
     const listed = await s.call(OPERATOR, 'GET', '/api/v1/tokens');
-    assert.equal(listed.body.tokens.length, 1, 'the new token should be listed');
+    assert.equal(
+      listed.body.tokens.filter((t: { name: string }) => t.name !== 'operator').length,
+      1,
+      'the new token should be listed',
+    );
     assert.ok(
-      !listed.text.includes(created.body.token) && !/token_hash|"token"/.test(listed.text),
+      !listed.text.includes(created.body.credential) && !/token_hash|"token"/.test(listed.text),
       'listings must never contain the secret or its hash',
     );
     assert.equal(
-      (await s.call(created.body.token, 'GET', '/api/v1/status')).status,
+      (await s.call(created.body.credential, 'GET', '/api/v1/status')).status,
       200,
       'a fresh token should authenticate',
     );
@@ -97,7 +106,6 @@ test('named tokens are created once, listed without secrets, unique, validated a
     for (const [body, pattern] of [
       [{ name: 'bad name', role: 'read' }, /token name/],
       [{ name: '', role: 'read' }, /token name/],
-      [{ name: 'operator', role: 'read' }, /reserved/],
       [{ name: 'system:auto-rollback', role: 'read' }, /token name/],
       [{ name: 'x', role: 'root' }, /role must be/],
       [{ name: 'x', role: 'admin', projects: ['a'] }, /cannot be limited/],
@@ -124,7 +132,7 @@ test('named tokens are created once, listed without secrets, unique, validated a
       'revoking an existing token should succeed',
     );
     assert.equal(
-      (await s.call(created.body.token, 'GET', '/api/v1/status')).status,
+      (await s.call(created.body.credential, 'GET', '/api/v1/status')).status,
       401,
       'a revoked token must stop working immediately',
     );
@@ -138,7 +146,9 @@ test('named tokens are created once, listed without secrets, unique, validated a
       404,
       'revoking an unknown token should report not found',
     );
-    const after = (await s.call(OPERATOR, 'GET', '/api/v1/tokens')).body.tokens[0];
+    const after = (await s.call(OPERATOR, 'GET', '/api/v1/tokens')).body.tokens.find(
+      (t: { name: string }) => t.name === 'ci-bot',
+    );
     assert.ok(after.revokedAt, 'listings should show when a token was revoked');
     assert.equal(
       (await s.call('tug_tok_unknown', 'GET', '/api/v1/status')).status,
@@ -170,7 +180,7 @@ test('expired tokens are rejected and last_used_at is recorded', async () => {
     });
     assert.ok(res.body.expiresAt, 'a token created with expiry should report it');
     assert.equal(
-      (await s.call(res.body.token, 'GET', '/api/v1/status')).status,
+      (await s.call(res.body.credential, 'GET', '/api/v1/status')).status,
       200,
       'a token works before it expires',
     );
@@ -182,7 +192,7 @@ test('expired tokens are rejected and last_used_at is recorded', async () => {
     assert.ok(lastUsed, 'using a token should record last_used_at without blocking the request');
     await new Promise((r) => setTimeout(r, 1100));
     assert.equal(
-      (await s.call(res.body.token, 'GET', '/api/v1/status')).status,
+      (await s.call(res.body.credential, 'GET', '/api/v1/status')).status,
       401,
       'an expired token must be unauthorized',
     );
@@ -232,7 +242,8 @@ const SAMPLES: Record<string, { path: string; body?: unknown }> = {
   'DELETE /api/v1/volumes/:name': { path: '/api/v1/volumes/x' },
   'DELETE /api/v1/nodes/:name': { path: '/api/v1/nodes/ghost' },
   'GET /api/v1/nodes': { path: '/api/v1/nodes' },
-  'POST /api/v1/nodes/register': { path: '/api/v1/nodes/register', body: {} },
+  'POST /api/v1/nodes/:name/identity': { path: '/api/v1/nodes/x/identity', body: {} },
+  'POST /api/v1/nodes/:name/disable': { path: '/api/v1/nodes/x/disable', body: {} },
   'POST /api/v1/nodes/enroll-token': { path: '/api/v1/nodes/enroll-token', body: {} },
   'POST /api/v1/nodes/:name/rotate-wg-key': { path: '/api/v1/nodes/ghost/rotate-wg-key', body: {} },
   'POST /api/v1/nodes/:name/ingress': { path: '/api/v1/nodes/ghost/ingress', body: {} },
@@ -307,24 +318,24 @@ test('agent endpoints ignore API tokens and the registry auth hook is removed', 
     const admin = await s.mint('a', 'admin');
     assert.equal(
       (await s.call(admin, 'GET', '/agent/v1/work')).status,
-      401,
-      'agent endpoints accept agent tokens only, even admin API tokens are refused',
+      403,
+      'agent endpoints accept node certificates only, even admin operator credentials are refused',
     );
     assert.equal(
       (await s.call(OPERATOR, 'GET', '/agent/v1/secrets?project=site')).status,
-      401,
+      403,
       'the operator token cannot read the agent secrets endpoint',
     );
     assert.equal(
       (await s.call(null, 'POST', '/api/v1/registry/auth', { username: 'n', password: 'p' }))
         .status,
-      404,
-      'the removed registry hook must not accept node or operator credentials',
+      401,
+      'the removed registry hook is unreachable without a certificate',
     );
     assert.equal(
       (await s.call(null, 'GET', '/healthz')).status,
-      200,
-      'health checks stay unauthenticated',
+      401,
+      'there is no unauthenticated route, not even a health check',
     );
   } finally {
     await s.close();
@@ -681,7 +692,7 @@ test('control backup and restore keep tokens working', async () => {
         .map((t: { name: string }) => t.name)
         .sort()
         .join(),
-      'kept,soon-revoked',
+      'kept,operator,soon-revoked',
       'only the tokens from the backup remain',
     );
   } finally {

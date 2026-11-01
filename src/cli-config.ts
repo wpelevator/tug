@@ -2,6 +2,9 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import yaml from 'js-yaml';
+import { decodeCredential } from './pki.ts';
+import type { Credential } from './pki.ts';
+import { errMessage } from './util.ts';
 
 export type SettingType = 'string' | 'boolean' | 'port' | 'list' | 'path';
 export interface Setting {
@@ -20,7 +23,11 @@ export const COMMAND_SETTINGS: Record<string, Setting> = {
 };
 /** Per-node connection data (`nodes.<name>`); `nodeDefaults` takes the subset that is not node-specific. */
 export const NODE_SETTINGS: Record<string, Setting> = {
-  ssh: { type: 'string', flag: '<ssh-target>', commands: ['node-install'] },
+  ssh: {
+    type: 'string',
+    flag: '<ssh-target>',
+    commands: ['node-install', 'node-replace', 'node-repair'],
+  },
   address: { type: 'string', flag: '--address', commands: ['node-install', 'node-register'] },
   publicAddress: {
     type: 'string',
@@ -32,25 +39,31 @@ export const NODE_SETTINGS: Record<string, Setting> = {
     flag: '--label',
     commands: ['node-install', 'node-register', 'node-enroll'],
   },
-  mesh: { type: 'boolean', flag: '--mesh', commands: ['node-install', 'node-enroll'] },
-  wgPort: { type: 'port', flag: '--wg-port', commands: ['node-install'] },
+  mesh: {
+    type: 'boolean',
+    flag: '--mesh',
+    commands: ['node-install', 'node-replace', 'node-repair', 'node-enroll'],
+  },
+  wgPort: {
+    type: 'port',
+    flag: '--wg-port',
+    commands: ['node-install', 'node-replace', 'node-repair'],
+  },
   installDocker: {
     type: 'boolean',
     flag: '--install-docker',
-    commands: ['node-install', 'node-enroll'],
+    commands: ['node-install', 'node-replace', 'node-repair', 'node-enroll'],
   },
-  image: { type: 'string', flag: '--image', commands: ['node-install', 'node-enroll'] },
+  image: {
+    type: 'string',
+    flag: '--image',
+    commands: ['node-install', 'node-replace', 'node-repair', 'node-enroll'],
+  },
   agentControlUrl: {
     type: 'string',
     flag: '--agent-control-url',
-    commands: ['node-install', 'node-enroll'],
+    commands: ['node-install', 'node-replace', 'node-repair', 'node-enroll'],
   },
-  httpOnlyDev: {
-    type: 'boolean',
-    flag: '--http-only-dev',
-    commands: ['node-install', 'node-enroll'],
-  },
-  ca: { type: 'path', flag: '--ca', commands: ['node-enroll'] },
 };
 const NODE_SPECIFIC_KEYS = ['ssh', 'address', 'publicAddress'];
 const SETTINGS: Record<string, Setting> = { ...COMMAND_SETTINGS, ...NODE_SETTINGS };
@@ -61,7 +74,8 @@ export const CONFIG_NAMES = ['tug.yml', 'tug.yaml', 'tug.json', '.tug.json'];
 export type SettingValues = Record<string, string | boolean | string[]>;
 interface ParsedConfig {
   controlUrl?: string;
-  token?: string;
+  /** Path of a credential file; only an untracked overlay may name one. */
+  credential?: string;
   project?: string;
   commandDefaults: SettingValues;
   nodeDefaults: SettingValues;
@@ -71,15 +85,18 @@ export interface ConnectionOptions {
   config?: string;
   controlUrl?: string;
   project?: string;
+  credential?: string;
 }
 export interface ResolvedCliConfig {
   /** The tracked config: selected, discovered, or where `init` creates it. */
   file: string;
   fileExists: boolean;
-  /** The untracked overlay next to `file`, the only place a token may be stored. */
+  /** The untracked overlay next to `file`, the only place a credential path may be stored. */
   localFile: string;
+  /** Where connections go: the credential's public URL unless overridden (an override changes the connect target only). */
   controlUrl: string;
-  token?: string;
+  credential?: Credential;
+  credentialFile?: string;
   project: string;
   commandDefaults: SettingValues;
   nodeDefaults: SettingValues;
@@ -99,7 +116,7 @@ export async function resolveCliConfig(
   cwd: string,
   creating = false,
 ): Promise<ResolvedCliConfig> {
-  for (const key of ['config', 'controlUrl', 'project'] as const)
+  for (const key of ['config', 'controlUrl', 'project', 'credential'] as const)
     if (options[key] !== undefined && (!options[key]!.trim() || /[\r\n\0]/.test(options[key]!)))
       throw new Error(
         `--${key.replace(/[A-Z]/g, (c) => '-' + c.toLowerCase())} must be a nonempty single-line value`,
@@ -112,14 +129,39 @@ export async function resolveCliConfig(
     throw new Error(`Cannot read config ${file}: ENOENT: no such file`);
   const overlay = await readConfigFile(localFile, true);
   const config = mergeConfigs(base ?? emptyConfig(), overlay ?? emptyConfig());
+  if (env.TUG_CREDENTIAL && env.TUG_CREDENTIAL_FILE)
+    throw new Error('set only one of TUG_CREDENTIAL and TUG_CREDENTIAL_FILE');
+  // Precedence: --credential, then the environment, then the untracked overlay's credential path.
+  let credentialFile: string | undefined;
+  let credentialText: string | undefined;
+  if (options.credential) credentialFile = path.resolve(cwd, options.credential);
+  else if (env.TUG_CREDENTIAL) credentialText = env.TUG_CREDENTIAL;
+  else if (env.TUG_CREDENTIAL_FILE) credentialFile = path.resolve(cwd, env.TUG_CREDENTIAL_FILE);
+  else if (config.credential) credentialFile = config.credential;
+  let credential: Credential | undefined;
+  if (credentialFile || credentialText)
+    try {
+      credential = decodeCredential(credentialText ?? (await fs.readFile(credentialFile!, 'utf8')));
+    } catch (e) {
+      if (!creating)
+        throw new Error(
+          `cannot use credential ${credentialFile ?? 'from TUG_CREDENTIAL'}: ${errMessage(e)}`,
+          { cause: e },
+        );
+    }
   const controlUrl =
-    options.controlUrl || env.TUG_CONTROL_URL || config.controlUrl || 'http://localhost:8080';
+    options.controlUrl ||
+    env.TUG_CONTROL_URL ||
+    config.controlUrl ||
+    credential?.url ||
+    'https://localhost:8443';
   return {
     file,
     fileExists: Boolean(base),
     localFile,
     controlUrl: normalizeControlUrl(controlUrl),
-    token: env.TUG_TOKEN || config.token,
+    credential,
+    credentialFile,
     project: options.project || env.TUG_PROJECT || config.project || 'site',
     commandDefaults: config.commandDefaults,
     nodeDefaults: config.nodeDefaults,
@@ -270,12 +312,12 @@ function parseConfig(input: unknown, dir: string, overlay?: string): ParsedConfi
   );
   for (const [key, value] of Object.entries(input)) {
     if (key === 'controlUrl' || key === 'project') config[key] = text(value, key);
-    else if (key === 'token') {
+    else if (key === 'credential') {
       if (overlay)
         throw new Error(
-          `token must not be set in a tracked file; put it in ${overlay} or TUG_TOKEN`,
+          `credential must not be set in a tracked file; put it in ${overlay}, or use TUG_CREDENTIAL_FILE`,
         );
-      config.token = text(value, key);
+      config.credential = path.resolve(dir, text(value, key));
     } else if (COMMAND_SETTINGS[key])
       config.commandDefaults[key] = settingValue(COMMAND_SETTINGS[key], value, key, dir);
     else if (key === 'nodeDefaults')
@@ -293,7 +335,7 @@ function parseConfig(input: unknown, dir: string, overlay?: string): ParsedConfi
       const known = [
         'controlUrl',
         'project',
-        ...(overlay ? [] : ['token']),
+        ...(overlay ? [] : ['credential']),
         ...Object.keys(COMMAND_SETTINGS),
         'nodeDefaults',
         'nodes',
@@ -312,7 +354,7 @@ function mergeConfigs(base: ParsedConfig, overlay: ParsedConfig): ParsedConfig {
   return {
     controlUrl: overlay.controlUrl ?? base.controlUrl,
     project: overlay.project ?? base.project,
-    token: overlay.token ?? base.token,
+    credential: overlay.credential ?? base.credential,
     commandDefaults: { ...base.commandDefaults, ...overlay.commandDefaults },
     nodeDefaults: { ...base.nodeDefaults, ...overlay.nodeDefaults },
     nodes,
@@ -325,13 +367,13 @@ function serialize(file: string, data: Record<string, unknown>, notice?: string)
 }
 
 /**
- * `tug init`: create the tracked file when it is missing and always store the token in the untracked
- * overlay, git-ignoring it. An existing tracked file is never rewritten, so its comments survive;
+ * `tug init`: create the tracked file when it is missing and always point the untracked
+ * overlay at the credential file, git-ignoring it. An existing tracked file is never rewritten, so its comments survive;
  * connection flags passed to `init` are saved to the overlay instead.
  */
 export async function writeInitConfig(
   config: ResolvedCliConfig,
-  token: string,
+  credentialFile: string,
   explicit: ConnectionOptions,
 ): Promise<string[]> {
   const written: string[] = [];
@@ -342,7 +384,7 @@ export async function writeInitConfig(
       serialize(
         config.file,
         { controlUrl: config.controlUrl, project: config.project },
-        `Safe to commit: keep the API token out of this file (use TUG_TOKEN or ${path.basename(config.localFile)}).`,
+        `Safe to commit: keep credentials out of this file (use TUG_CREDENTIAL_FILE or ${path.basename(config.localFile)}).`,
       ),
     );
     written.push(config.file);
@@ -354,7 +396,7 @@ export async function writeInitConfig(
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
   }
-  local.token = token;
+  local.credential = credentialFile;
   if (config.fileExists) {
     if (explicit.controlUrl) local.controlUrl = config.controlUrl;
     if (explicit.project) local.project = config.project;
@@ -391,18 +433,10 @@ export function normalizeControlUrl(value: string): string {
   try {
     url = new URL(value);
   } catch {
-    throw new Error('control URL must be an absolute http:// or https:// URL');
+    throw new Error('control URL must be an absolute https:// URL');
   }
-  if (
-    !['http:', 'https:'].includes(url.protocol) ||
-    url.username ||
-    url.password ||
-    url.search ||
-    url.hash
-  )
-    throw new Error(
-      'control URL must use http:// or https:// without credentials, query or fragment',
-    );
+  if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash)
+    throw new Error('control URL must use https:// without credentials, query or fragment');
   return value.replace(/\/+$/, '');
 }
 

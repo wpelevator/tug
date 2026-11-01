@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createApp } from './control.ts';
-import { testImageResolver } from '../tests/helpers.ts';
+import { testImageResolver, testIdentity } from '../tests/helpers.ts';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { json } from '../tests/helpers.ts';
@@ -12,8 +12,7 @@ import { json } from '../tests/helpers.ts';
 async function makeServer() {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-diag-'));
   process.env.TUG_DATA_DIR = dir;
-  process.env.TUG_OPERATOR_TOKEN = 'op-diag-token';
-  const app = await createApp({ images: { resolve: testImageResolver } });
+  const app = await createApp({ identity: testIdentity, images: { resolve: testImageResolver } });
   const srv = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));
   });
@@ -22,7 +21,7 @@ async function makeServer() {
     close: () => new Promise((resolve) => srv.close(resolve)),
   };
 }
-const op = { Authorization: 'Bearer op-diag-token', 'content-type': 'application/json' };
+const op = { 'x-tug-test-operator': 'operator', 'content-type': 'application/json' };
 
 test('control diagnostics and node diagnostics command queue', async () => {
   const s = await makeServer();
@@ -50,7 +49,7 @@ test('control diagnostics and node diagnostics command queue', async () => {
     const queued = await json(res);
     assert.match(queued.commands[0].commandId, /^cmd_/);
     res = await fetch(`${s.base}/agent/v1/work`, {
-      headers: { Authorization: `Bearer ${node.agentToken}` },
+      headers: { 'x-tug-test-node': node.agentToken },
     });
     assert.equal((await json(res)).commands[0].type, 'diagnostics.run');
     res = await fetch(`${s.base}/api/v1/diagnostics/nodes`, {

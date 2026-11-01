@@ -51,7 +51,6 @@ const makeCtx = async (
   stateDir: await fs.mkdtemp(path.join(os.tmpdir(), 'tug-agent-net-')),
   apply: true,
   controlUrl: 'http://control.test',
-  token: 'tok',
   mesh: true,
   ...overrides,
 });

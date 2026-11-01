@@ -5,36 +5,19 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import type { Server } from 'node:http';
-import type { AddressInfo } from 'node:net';
-import { createApp } from './control.ts';
-import { testImageResolver } from '../tests/helpers.ts';
+import { startMtlsControl } from '../tests/helpers.ts';
 
 const exec = promisify(execFile);
 const entry = path.resolve('src/cli.ts');
 
 test('doctor waits for the node diagnostic instead of returning the queued command id', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-doctor-'));
-  process.env.TUG_DATA_DIR = dir;
-  process.env.TUG_OPERATOR_TOKEN = 'op-doctor-wait';
-  const app = await createApp({ images: { resolve: testImageResolver } });
-  const srv = await new Promise<Server>((resolve) => {
-    const s = app.listen(0, () => resolve(s));
-  });
-  const base = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`;
+  const control = await startMtlsControl(dir);
   try {
-    const registered = await fetch(`${base}/api/v1/nodes/register`, {
-      method: 'POST',
-      headers: { Authorization: 'Bearer op-doctor-wait', 'content-type': 'application/json' },
-      body: JSON.stringify({ name: 'n1' }),
-    });
+    const registered = await control.registerNode('n1');
     assert.equal(registered.status, 200, 'the diagnostic target should register');
     const started = Date.now();
-    const env: NodeJS.ProcessEnv = {
-      ...process.env,
-      TUG_CONTROL_URL: base,
-      TUG_TOKEN: 'op-doctor-wait',
-    };
+    const env: NodeJS.ProcessEnv = { ...process.env, ...control.env };
     delete env.TUG_CONFIG;
     await assert.rejects(
       exec(process.execPath, [entry, 'doctor', '--node', 'n1', '--timeout', '1'], {
@@ -55,7 +38,7 @@ test('doctor waits for the node diagnostic instead of returning the queued comma
       'doctor should wait about the requested timeout instead of returning as soon as the command is queued',
     );
   } finally {
-    await new Promise((resolve) => srv.close(resolve));
+    await control.close();
     await fs.rm(dir, { recursive: true, force: true });
   }
 });
