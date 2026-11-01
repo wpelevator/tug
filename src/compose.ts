@@ -335,6 +335,16 @@ function validateTopLevel(compose: ComposeFile, errors: string[]): void {
   }
 }
 
+/** Lower-cased ingress hostnames a Compose definition claims, by `service` name. */
+export function ingressHostsOf(compose: ComposeFile): Map<string, string> {
+  const hosts = new Map<string, string>();
+  for (const [name, svc] of Object.entries(compose.services || {})) {
+    const host = svc['x-tug']?.ingress?.host;
+    if (typeof host === 'string') hosts.set(host.toLowerCase(), name);
+  }
+  return hosts;
+}
+
 export function validateCompose(
   compose: ComposeFile | undefined,
   nodes: string[] = [],

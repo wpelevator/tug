@@ -1,5 +1,6 @@
 set -eu
 mkdir -p /opt/tug-control /var/lib/tug-control
+chmod 700 /var/lib/tug-control
 cat > /opt/tug-control/docker-compose.yml <<'YAML'
 {{COMPOSE}}YAML
 docker compose -f /opt/tug-control/docker-compose.yml up -d

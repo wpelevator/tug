@@ -39,6 +39,7 @@ import type {
 import { encrypt, decrypt, loadOrCreateMasterKey } from './secrets.ts';
 import {
   buildDesiredState,
+  ingressHostsOf,
   loopbackIngressServices,
   serviceSecretNames,
   validateCompose,
@@ -941,6 +942,25 @@ export async function createApp(
    * new revision. Shared by `POST /api/v1/rollback` and automatic rollback; the caller holds the writer queue.
    * `auto` only considers `succeeded` deployments and requires `failedDeploymentId` to still be current.
    */
+  /**
+   * Ingress hostnames belong to the first project that publishes them: another project's current deployment
+   * that already routes a host blocks any project from taking it, on deploy and on rollback alike.
+   */
+  function assertIngressHostsFree(project: string, compose: ComposeFile): void {
+    const wanted = ingressHostsOf(compose);
+    if (!wanted.size) return;
+    for (const other of currentDesiredStates()) {
+      if (other.project === project) continue;
+      for (const [host, service] of ingressHostsOf(other.compose)) {
+        const mine = wanted.get(host);
+        if (mine)
+          throw httpError(
+            409,
+            `${mine}: ingress.host ${host} is already routed by project ${other.project} (${service})`,
+          );
+      }
+    }
+  }
   function createRollback(
     project: string,
     opts: { actor: string; force?: boolean; auto?: boolean; failedDeploymentId?: string },
@@ -974,6 +994,7 @@ export async function createApp(
       const ts = now();
       const depId = id('dep');
       const previousState: DesiredState = JSON.parse(previousDs.state_json);
+      assertIngressHostsFree(project, previousState.compose);
       previousState.revision = depId;
       db.run(
         'INSERT INTO deployments(id,project_id,version,state,created_at,updated_at,actor) VALUES(?,?,?,?,?,?,?)',
@@ -2133,6 +2154,7 @@ export async function createApp(
       } catch (e) {
         throw httpError(400, errMessage(e));
       }
+      assertIngressHostsFree(project, compose);
       // The CLI interpolates control secrets as sentinels; a reference to a secret that is gone would deploy an empty value.
       const referenced = sentinelNames(compose);
       if (referenced.includes(REGISTRY_AUTH_SECRET))
@@ -2576,33 +2598,44 @@ export async function createApp(
     withWriter(async () => {
       const backupDir =
         process.env.TUG_CONTROL_BACKUP_DIR || path.join(DATA_DIR, 'control-backups');
-      await ensureDir(backupDir);
+      // The archive holds the master key and the CA key, so nothing here is ever readable beyond the control user.
+      await fs.mkdir(backupDir, { recursive: true, mode: 0o700 });
+      await fs.chmod(backupDir, 0o700);
       const ts = now();
       const backupId = id('cbak');
       const staging = path.join(backupDir, `${backupId}-staging`);
-      await fs.rm(staging, { recursive: true, force: true });
-      await ensureDir(staging);
-      const snapshotPath = path.join(staging, 'tug.db');
-      db.run('VACUUM INTO ?', snapshotPath);
-      await fs.copyFile(masterKeyFile, path.join(staging, 'master.key'));
-      await fs.cp(path.join(DATA_DIR, 'pki'), path.join(staging, 'pki'), {
-        recursive: true,
-        filter: (src) => path.basename(src) !== 'server.json',
-      });
-      await fs.cp(artifactDir, path.join(staging, 'images'), { recursive: true });
-      await fs.writeFile(
-        path.join(staging, 'metadata.json'),
-        JSON.stringify({ backupId, createdAt: ts, type: 'control' }, null, 2),
-      );
       const artifactRef = path.resolve(backupDir, `${backupId}.tar.gz`);
-      await tar.c({ gzip: true, file: artifactRef, cwd: staging }, [
-        'tug.db',
-        'master.key',
-        'metadata.json',
-        'pki',
-        'images',
-      ]);
-      await fs.rm(staging, { recursive: true, force: true });
+      try {
+        await fs.rm(staging, { recursive: true, force: true });
+        await fs.mkdir(staging, { mode: 0o700 });
+        const snapshotPath = path.join(staging, 'tug.db');
+        db.run('VACUUM INTO ?', snapshotPath);
+        await fs.chmod(snapshotPath, 0o600);
+        await fs.copyFile(masterKeyFile, path.join(staging, 'master.key'));
+        await fs.chmod(path.join(staging, 'master.key'), 0o600);
+        await fs.cp(path.join(DATA_DIR, 'pki'), path.join(staging, 'pki'), {
+          recursive: true,
+          filter: (src) => path.basename(src) !== 'server.json',
+        });
+        await fs.cp(artifactDir, path.join(staging, 'images'), { recursive: true });
+        await fs.writeFile(
+          path.join(staging, 'metadata.json'),
+          JSON.stringify({ backupId, createdAt: ts, type: 'control' }, null, 2),
+          { mode: 0o600 },
+        );
+        await tar.c({ gzip: true, file: artifactRef, cwd: staging, mode: 0o600 }, [
+          'tug.db',
+          'master.key',
+          'metadata.json',
+          'pki',
+          'images',
+        ]);
+      } catch (error) {
+        await fs.rm(artifactRef, { force: true });
+        throw error;
+      } finally {
+        await fs.rm(staging, { recursive: true, force: true });
+      }
       db.run(
         'INSERT INTO backups(id,project_id,target,node_id,state,artifact_ref,metadata_json,created_at,completed_at) VALUES(?,?,?,?,?,?,?,?,?)',
         backupId,
