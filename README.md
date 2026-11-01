@@ -69,6 +69,7 @@ The CLI installs the matching `ghcr.io/wpelevator/tug:<version>` image on your h
 
 ## Documentation
 
+- [Terminology](docs/terminology.md): core concepts, naming review, industry comparisons and proposed interface improvements.
 - [Architecture](docs/architecture.md): components, reconciliation, workflow diagrams, secrets and runtime paths.
 - [Compose extensions](docs/compose.md): `x-tug` placement, health checks, volumes and limitations.
 - [Control plane](docs/control-plane.md): install, TLS, image delivery, backup and restore.

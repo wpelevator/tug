@@ -433,3 +433,28 @@ test('renewal: the minimum interval is enforced per node', async () => {
     await s.close();
   }
 });
+
+test('control restore answers its caller, then closes every session', async () => {
+  const s = await start();
+  try {
+    const backup = await s.call(s.root, 'POST', '/api/v1/control/backups/run', {});
+    assert.equal(backup.status, 200, 'a control backup runs over mTLS');
+    const restored = await s.call(s.root, 'POST', '/api/v1/control/restore', {
+      artifactRef: backup.body.artifactRef,
+      confirm: true,
+    });
+    assert.equal(
+      restored.status,
+      200,
+      `the restore response must reach the caller: ${JSON.stringify(restored.body)}`,
+    );
+    assert.equal(restored.body.restartRequired, true, 'restore requires a restart');
+    assert.equal(
+      (await s.call(s.root, 'GET', '/api/v1/nodes')).status,
+      0,
+      'sessions are closed after the restore',
+    );
+  } finally {
+    await s.close();
+  }
+});

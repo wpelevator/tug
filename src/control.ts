@@ -2694,7 +2694,8 @@ export async function createApp(
           filter: (src) => path.basename(src) !== 'server.json',
         });
         // Authorization follows the restored database: older snapshots forget later principals and revive revoked ones.
-        closeAllSockets();
+        // Close every session, including this one, but only after the response has been delivered.
+        res.once('finish', closeAllSockets);
         res.json({ ok: true, restored: true, restartRequired: true });
       } catch (e) {
         try {
@@ -3357,8 +3358,16 @@ export async function listen(app: express.Express, port = PORT): Promise<https.S
   });
   // Connection authorization gate: after a full handshake, refuse reused sessions and identities the database does not authorize.
   server.on('secureConnection', (socket) => {
-    const presented = socket.isSessionReused() ? null : peerIdentity(socket);
-    if (!presented || !runtime.resolvePrincipal(presented.uri, presented.keyHash)) {
+    // After a restore the database is closed until restart: refuse everything, and never let the gate throw.
+    let presented: ReturnType<typeof peerIdentity> = null;
+    try {
+      if (!runtime.isRestoring() && !socket.isSessionReused()) presented = peerIdentity(socket);
+      if (presented && !runtime.resolvePrincipal(presented.uri, presented.keyHash))
+        presented = null;
+    } catch {
+      presented = null;
+    }
+    if (!presented) {
       socket.destroy();
       return;
     }
