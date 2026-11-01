@@ -52,7 +52,7 @@ await check('csr round trip (WebCrypto P-256)', async () => {
 });
 
 await check(
-  'undici transport: mTLS with loopback connect override, public name verified',
+  'undici transport: mTLS with a loopback connect override, control name verified',
   async () => {
     const t = createTransport(credential, `https://127.0.0.1:${port}`);
     try {
@@ -64,24 +64,53 @@ await check(
   },
 );
 
-await check('undici transport: wrong public name is refused', async () => {
-  const wrong = { ...credential, url: 'https://other.example.com:8443' };
-  const t = createTransport(wrong, `https://127.0.0.1:${port}`);
-  try {
-    await t.http(`${t.base}/`);
-    throw new Error('connection to a certificate for another name must fail');
-  } catch (e) {
-    if (String(e.message).startsWith('connection to')) throw e;
-    return `refused: ${e.cause?.code || e.message}`;
-  } finally {
-    await t.close();
-  }
-});
+await check(
+  'undici transport: the stored address is only a default, the control name is verified',
+  async () => {
+    const moved = { ...credential, url: 'https://moved.example.com:9443' };
+    const t = createTransport(moved, `https://127.0.0.1:${port}`);
+    try {
+      return await (await t.http(`${t.base}/`)).json();
+    } finally {
+      await t.close();
+    }
+  },
+);
+
+await check(
+  'undici transport: a server certificate without the control name is refused',
+  async () => {
+    const keys = await generateKeyPair();
+    const impostor = await pki.signLeaf({
+      publicKey: keys.publicKey,
+      kind: 'server',
+      names: { dns: ['control.example.com'], ip: ['127.0.0.1'] },
+      lifetimeMs: 86_400_000,
+    });
+    const fake = https.createServer(
+      serverTlsOptions({ cert: impostor.cert, key: keys.privateKeyPem, ca: pki.caPem }),
+      (_req, res) => res.end('{}'),
+    );
+    await new Promise((r) => fake.listen(0, '127.0.0.1', r));
+    const t = createTransport(credential, `https://127.0.0.1:${fake.address().port}`);
+    try {
+      await t.http(`${t.base}/`);
+      throw new Error('a certificate without the control name must fail');
+    } catch (e) {
+      if (String(e.message).startsWith('a certificate')) throw e;
+      return `refused: ${e.cause?.code || e.message}`;
+    } finally {
+      await t.close();
+      fake.close();
+      fake.closeAllConnections?.();
+    }
+  },
+);
 
 await check('no client certificate fails the handshake', async () => {
   return await new Promise((resolve, reject) => {
     const req = https.request(
-      { host: '127.0.0.1', port, ca: pki.caPem, servername: 'control.example.com' },
+      { host: '127.0.0.1', port, ca: pki.caPem, servername: pki.controlName },
       () => reject(new Error('request without a client certificate was served')),
     );
     req.on('error', (e) => resolve(`refused: ${e.code || e.message}`));
