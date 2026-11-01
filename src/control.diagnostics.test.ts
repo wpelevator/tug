@@ -49,7 +49,7 @@ test('control diagnostics and node diagnostics command queue', async () => {
     const queued = await json(res);
     assert.match(queued.commands[0].commandId, /^cmd_/);
     res = await fetch(`${s.base}/agent/v1/work`, {
-      headers: { 'x-tug-test-node': node.agentToken },
+      headers: { 'x-tug-test-node': node.nodeId },
     });
     assert.equal((await json(res)).commands[0].type, 'diagnostics.run');
     res = await fetch(`${s.base}/api/v1/diagnostics/nodes`, {

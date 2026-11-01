@@ -22,7 +22,7 @@ async function server() {
   const call = (method: string, route: string, body?: unknown, headers = operator) =>
     fetch(`${base}${route}`, { method, headers, body: body ? JSON.stringify(body) : undefined });
   const reg = await json(await call('POST', '/api/v1/nodes/register', { name: 'n1' }));
-  const node = { 'x-tug-test-node': reg.agentToken, 'content-type': 'application/json' };
+  const node = { 'x-tug-test-node': reg.nodeId, 'content-type': 'application/json' };
   return {
     deploy: (project: string, version: string, host: string) =>
       call('POST', '/api/v1/deployments', {

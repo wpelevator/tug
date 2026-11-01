@@ -535,7 +535,7 @@ const missingService = (project: string, service: string) =>
   `service ${service} not found in project ${project}`;
 
 /** Collapse a node report into the deployment error `tug deploy` prints. Compose failures are multi-line; keep the reason, not the progress log. */
-function deploymentFailureMessage(rows: { node_id: string; status_json: string }[]): string {
+function deploymentFailureMessage(rows: { node: string; status_json: string }[]): string {
   const limit = 500;
   const oneLine = (value: string) => {
     const flat = value.replace(/\s+/g, ' ').trim();
@@ -556,7 +556,7 @@ function deploymentFailureMessage(rows: { node_id: string; status_json: string }
         parts.push(`${service}: ${oneLine(state.rolloutError)}`);
     }
     const detail = parts.join('; ');
-    return detail ? `${row.node_id}: ${detail}` : row.node_id;
+    return detail ? `${row.node}: ${detail}` : row.node;
   });
   return `one or more assigned nodes reported failed health: ${details.join('; ')}`;
 }
@@ -871,16 +871,17 @@ export async function createApp(
     for (const svc of Object.values(state.services || {}))
       for (const node of svc.placement?.nodes || []) required.add(node);
     if (!required.size) return;
+    // Placement names nodes; reports are keyed by the immutable node ID, so join to the current name.
     const statuses = db.all<{
-      node_id: string;
+      node: string;
       observed_version: string;
       health: string;
       status_json: string;
     }>(
-      'SELECT node_id,observed_version,health,status_json FROM node_statuses WHERE project_id=?',
+      'SELECT n.name AS node,s.observed_version,s.health,s.status_json FROM node_statuses s JOIN nodes n ON n.id=s.node_id WHERE s.project_id=?',
       projectId,
     );
-    const byNode = new Map(statuses.map((s) => [s.node_id, s]));
+    const byNode = new Map(statuses.map((s) => [s.node, s]));
     const reportsRevision = (node: string) =>
       state.revision
         ? JSON.parse(byNode.get(node)?.status_json || '{}').observedRevision === state.revision
@@ -1346,8 +1347,8 @@ export async function createApp(
 
   const NODE_RENEW_MIN_INTERVAL_MS = () =>
     Number(process.env.TUG_RENEW_MIN_INTERVAL_MS ?? 60 * 60 * 1000);
-  const nodeInfo = (name: string): NodeInfo => {
-    const row = db.get<NodeRow>(NODE_INFO_SQL, name);
+  const nodeInfo = (nodeId: string): NodeInfo => {
+    const row = db.get<NodeRow>(NODE_INFO_SQL, nodeId);
     if (!row) throw httpError(500, 'node not found');
     return {
       id: row.id,
@@ -1364,6 +1365,8 @@ export async function createApp(
   const NODE_NAME = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$/;
   /** Inserts a node bound to a key. Synchronous so the existence check and the write cannot interleave. */
   function insertNode(input: {
+    /** The immutable ID the node's certificates already name. */
+    id: string;
     name: string;
     keyHash: string;
     notAfter: Date;
@@ -1380,7 +1383,7 @@ export async function createApp(
     db.run(
       `INSERT INTO nodes(id,name,address,public_address,status,labels_json,key_hash,cert_not_after,created_at,updated_at)
       VALUES(?,?,?,?,?,?,?,?,?,?)`,
-      input.name,
+      input.id,
       input.name,
       input.address || null,
       input.publicAddress || null,
@@ -1391,12 +1394,12 @@ export async function createApp(
       ts,
       ts,
     );
-    ensureOverlayIp(input.name);
-    syncWgPeer(input.name, input.wgPublicKey);
+    ensureOverlayIp(input.id);
+    syncWgPeer(input.id, input.wgPublicKey);
     wakeAll();
   }
-  const identityResponse = (name: string, cert: string): IdentityResponse => ({
-    node: nodeInfo(name),
+  const identityResponse = (nodeId: string, cert: string): IdentityResponse => ({
+    node: nodeInfo(nodeId),
     certificate: cert,
     ca: pki.caPem,
     url: publicUrl(),
@@ -1407,11 +1410,20 @@ export async function createApp(
     const name = req.params.name;
     if (body.mode !== 'create' && body.mode !== 'replace')
       return res.status(400).json({ error: "mode must be 'create' or 'replace'" });
-    const url = publicUrl();
-    void url;
     try {
-      const signed = await pki.signClientCsr(body.csr, identityUri('node', name), NODE_LIFETIME_MS);
+      // The certificate names the immutable node ID: the existing node's, or a fresh one for a new name. A name freed by
+      // node-remove therefore never inherits the old ID, and certificates for the removed node cannot match the new one.
+      let nodeId = db.get<NodeRow>('SELECT * FROM nodes WHERE name=?', name)?.id ?? id('node');
+      let signed = await pki.signClientCsr(body.csr, identityUri('node', nodeId), NODE_LIFETIME_MS);
+      // Signing is asynchronous: re-read, and re-sign once if a concurrent request created the node meanwhile.
+      const current = db.get<NodeRow>('SELECT * FROM nodes WHERE name=?', name);
+      if (current && current.id !== nodeId) {
+        nodeId = current.id;
+        signed = await pki.signClientCsr(body.csr, identityUri('node', nodeId), NODE_LIFETIME_MS);
+      }
       const existing = db.get<NodeRow>('SELECT * FROM nodes WHERE name=?', name);
+      if (existing && existing.id !== nodeId)
+        throw httpError(409, `node ${name} was created concurrently; retry`);
       if (body.mode === 'create') {
         if (existing) {
           if (existing.key_hash !== signed.keyHash)
@@ -1420,6 +1432,7 @@ export async function createApp(
             });
         } else {
           insertNode({
+            id: nodeId,
             name,
             keyHash: signed.keyHash,
             notAfter: signed.notAfter,
@@ -1444,7 +1457,7 @@ export async function createApp(
         });
         reconcileSockets();
       }
-      res.json(identityResponse(name, signed.cert));
+      res.json(identityResponse(nodeId, signed.cert));
     } catch (e) {
       sendError(res, e);
     }
@@ -1482,12 +1495,13 @@ export async function createApp(
       name,
     );
     db.run(
-      'INSERT INTO enrollment_credentials(id,key_hash,name,labels_json,expires_at,created_at) VALUES(?,?,?,?,?,?)',
+      'INSERT INTO enrollment_credentials(id,key_hash,name,labels_json,expires_at,reserved_node_id,created_at) VALUES(?,?,?,?,?,?,?)',
       rowId,
       issued.keyHash,
       name,
       JSON.stringify(labels ?? []),
       expiresAt,
+      id('node'),
       now(),
     );
     reconcileSockets();
@@ -1506,7 +1520,7 @@ export async function createApp(
     try {
       const signed = await pki.signClientCsr(
         body.csr,
-        identityUri('node', row.name),
+        identityUri('node', row.reserved_node_id),
         NODE_LIFETIME_MS,
       );
       // Re-read the row: the checks and writes below are synchronous, so concurrent enrollments cannot both create a node.
@@ -1525,6 +1539,7 @@ export async function createApp(
             .status(409)
             .json({ error: `node ${fresh.name} already exists; a join key cannot replace a node` });
         insertNode({
+          id: fresh.reserved_node_id,
           name: fresh.name,
           keyHash: signed.keyHash,
           notAfter: signed.notAfter,
@@ -1535,7 +1550,7 @@ export async function createApp(
         });
         db.run(
           'UPDATE enrollment_credentials SET node_id=?,node_key_hash=? WHERE id=?',
-          fresh.name,
+          fresh.reserved_node_id,
           signed.keyHash,
           fresh.id,
         );
@@ -1545,7 +1560,7 @@ export async function createApp(
           message: `node ${fresh.name} enrolled`,
         });
       }
-      const enrolled: EnrollResponse = identityResponse(fresh.name, signed.cert);
+      const enrolled: EnrollResponse = identityResponse(fresh.reserved_node_id, signed.cert);
       res.json(enrolled);
     } catch (e) {
       sendError(res, e);
@@ -2831,7 +2846,7 @@ export async function createApp(
     );
     const projects = projectScope(req.actor!, 'id');
     const deployments = projectScope(req.actor!, 'project_id');
-    const statuses = projectScope(req.actor!, 'project_id');
+    const statuses = projectScope(req.actor!, 's.project_id');
     res.json({
       projects: db.all(`SELECT * FROM projects WHERE ${projects.where}`, ...projects.args),
       deployments: db.all(
@@ -2839,7 +2854,10 @@ export async function createApp(
         ...deployments.args,
       ),
       nodes: db.all('SELECT id,name,status,last_seen_at FROM nodes'),
-      statuses: db.all(`SELECT * FROM node_statuses WHERE ${statuses.where}`, ...statuses.args),
+      statuses: db.all(
+        `SELECT s.*,n.name AS node FROM node_statuses s LEFT JOIN nodes n ON n.id=s.node_id WHERE ${statuses.where}`,
+        ...statuses.args,
+      ),
     });
   });
   api('get', '/api/v1/events', null, async (req, res) => {

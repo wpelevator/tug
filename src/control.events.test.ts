@@ -165,7 +165,7 @@ test('agent reports prune old events, but at most once per interval', async () =
       ]);
       const report = await fetch(`${srv.base}/agent/v1/events`, {
         method: 'POST',
-        headers: { 'x-tug-test-node': node.agentToken, 'content-type': 'application/json' },
+        headers: { 'x-tug-test-node': node.nodeId, 'content-type': 'application/json' },
         body: JSON.stringify({ projectId: 'site', type: 'service.serving', message: 'fresh' }),
       });
       assert.equal(report.status, 200, 'the agent report itself succeeds');

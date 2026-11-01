@@ -58,7 +58,7 @@ test('registers node, stores secret, creates desired state, serves agent work', 
     assert.equal(res.status, 200);
 
     res = await fetch(`${s.base}/agent/v1/work`, {
-      headers: { 'x-tug-test-node': registered.agentToken },
+      headers: { 'x-tug-test-node': registered.nodeId },
     });
     let work = await json(res);
     assert.equal(work.desiredStates[0].version, 'git-a');
@@ -78,7 +78,7 @@ test('registers node, stores secret, creates desired state, serves agent work', 
     assert.equal(res.status, 200);
     const command = await json(res);
     res = await fetch(`${s.base}/agent/v1/work`, {
-      headers: { 'x-tug-test-node': registered.agentToken },
+      headers: { 'x-tug-test-node': registered.nodeId },
     });
     work = await json(res);
     assert.equal(work.commands[0].id, restart.commandId);
@@ -86,7 +86,7 @@ test('registers node, stores secret, creates desired state, serves agent work', 
     res = await fetch(`${s.base}/agent/v1/status`, {
       method: 'POST',
       headers: {
-        'x-tug-test-node': registered.agentToken,
+        'x-tug-test-node': registered.nodeId,
         'content-type': 'application/json',
       },
       body: JSON.stringify({
@@ -142,7 +142,7 @@ test('failed node status fails deployment and unblocks future deploys', async ()
     res = await fetch(`${s.base}/agent/v1/status`, {
       method: 'POST',
       headers: {
-        'x-tug-test-node': registered.agentToken,
+        'x-tug-test-node': registered.nodeId,
         'content-type': 'application/json',
       },
       body: JSON.stringify({
@@ -153,7 +153,7 @@ test('failed node status fails deployment and unblocks future deploys', async ()
             observedRevision: (
               await json(
                 await fetch(`${s.base}/agent/v1/work`, {
-                  headers: { 'x-tug-test-node': registered.agentToken },
+                  headers: { 'x-tug-test-node': registered.nodeId },
                 }),
               )
             ).desiredStates[0].revision,

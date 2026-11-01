@@ -152,7 +152,7 @@ test('registry-free builds stream only to assigned nodes, preserve rollback imag
       'saved images must have a Tug-owned immutable reference',
     );
     const url = `${s.base}/agent/v1/images/${artifact.buildId}`;
-    const downloaded = await fetch(url, { headers: { 'x-tug-test-node': n1.agentToken } });
+    const downloaded = await fetch(url, { headers: { 'x-tug-test-node': n1.nodeId } });
     assert.equal(downloaded.status, 200, 'an assigned node must be able to download its image');
     assert.deepEqual(
       Buffer.from(await downloaded.arrayBuffer()),
@@ -160,12 +160,12 @@ test('registry-free builds stream only to assigned nodes, preserve rollback imag
       'the download must preserve exact compressed bytes',
     );
     assert.equal(
-      (await fetch(url, { headers: { 'x-tug-test-node': n2.agentToken } })).status,
+      (await fetch(url, { headers: { 'x-tug-test-node': n2.nodeId } })).status,
       404,
       'an unassigned node must not read another node image',
     );
     assert.equal((await fetch(url)).status, 401, 'image downloads must require a live node token');
-    await s.report(n1.agentToken, first.desiredState);
+    await s.report(n1.nodeId, first.desiredState);
     const second = await json(await s.deploy('v1'));
     assert.notEqual(
       second.desiredState.revision,
@@ -177,7 +177,7 @@ test('registry-free builds stream only to assigned nodes, preserve rollback imag
       first.desiredState.services.app.image,
       'reusing a version must not overwrite its prior image',
     );
-    await s.report(n1.agentToken, first.desiredState);
+    await s.report(n1.nodeId, first.desiredState);
     const pending = await json(
       await fetch(`${s.base}/api/v1/deployments/${second.deployment.id}`, {
         headers: { 'x-tug-test-operator': 'operator' },
@@ -200,7 +200,7 @@ test('registry-free builds stream only to assigned nodes, preserve rollback imag
       'rollback must publish a new revision',
     );
     assert.equal(
-      (await fetch(url, { headers: { 'x-tug-test-node': n1.agentToken } })).status,
+      (await fetch(url, { headers: { 'x-tug-test-node': n1.nodeId } })).status,
       200,
       'retained rollback artifacts must survive subsequent publication and cleanup',
     );
@@ -231,7 +231,7 @@ test('local uploads import without a remote build and failed builds keep the pre
       !s.calls.some((call) => call.startsWith('build ')),
       'local uploads must never rebuild sources on control',
     );
-    await s.report(n1.agentToken, local.desiredState);
+    await s.report(n1.nodeId, local.desiredState);
     s.failBuild();
     assert.equal(
       (await s.deploy('broken')).status,
@@ -240,7 +240,7 @@ test('local uploads import without a remote build and failed builds keep the pre
     );
     const work = await json(
       await fetch(`${s.base}/agent/v1/work`, {
-        headers: { 'x-tug-test-node': n1.agentToken },
+        headers: { 'x-tug-test-node': n1.nodeId },
       }),
     );
     assert.equal(
@@ -603,7 +603,7 @@ test('publication failure rolls back desired state and keeps the previous deploy
   try {
     const node = await s.node('n1');
     const first = await json(await s.deploy('first'));
-    await s.report(node.agentToken, first.desiredState);
+    await s.report(node.nodeId, first.desiredState);
     failPublication = true;
     const response = await s.deploy('failed');
     assert.equal(response.status, 500, 'publication failures must be returned as server errors');

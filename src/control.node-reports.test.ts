@@ -32,7 +32,7 @@ async function server() {
         wgPublicKey: generateWgKeyPair().publicKey,
       }),
     );
-    const headers = { 'x-tug-test-node': reg.agentToken, 'content-type': 'application/json' };
+    const headers = { 'x-tug-test-node': reg.nodeId, 'content-type': 'application/json' };
     return {
       work: async () => json(await call('GET', '/agent/v1/work', undefined, headers)),
       status: (body: unknown) => call('POST', '/agent/v1/status', body, headers),

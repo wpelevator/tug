@@ -96,13 +96,13 @@ test('stale nodes are skipped by label placement and scale, and scale never fall
     for (const node of [live, dead])
       await fetch(`${s.base}/agent/v1/status`, {
         method: 'POST',
-        headers: { 'x-tug-test-node': node.agentToken, 'content-type': 'application/json' },
+        headers: { 'x-tug-test-node': node.nodeId, 'content-type': 'application/json' },
         body: JSON.stringify({ projects: [] }),
       });
     await new Promise((resolve) => setTimeout(resolve, 1300));
     await fetch(`${s.base}/agent/v1/status`, {
       method: 'POST',
-      headers: { 'x-tug-test-node': live.agentToken, 'content-type': 'application/json' },
+      headers: { 'x-tug-test-node': live.nodeId, 'content-type': 'application/json' },
       body: JSON.stringify({ projects: [] }),
     });
     const compose = {
@@ -158,7 +158,7 @@ test('node-remove deletes a retired node but refuses placed or still-reporting n
     for (const node of [keep, old])
       await fetch(`${s.base}/agent/v1/status`, {
         method: 'POST',
-        headers: { 'x-tug-test-node': node.agentToken, 'content-type': 'application/json' },
+        headers: { 'x-tug-test-node': node.nodeId, 'content-type': 'application/json' },
         body: JSON.stringify({ projects: [] }),
       });
     assert.equal((await del('ghost')).status, 404, 'removing an unknown node should be 404');

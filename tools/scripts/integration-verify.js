@@ -34,7 +34,7 @@ while (Date.now() - started < timeoutMs) {
         (s) =>
           s.observed_version === deployment?.version && ['serving', 'skipped'].includes(s.health),
       )
-      .map((s) => s.node_id),
+      .map((s) => s.node),
   );
   if (deployment && nodes.every((n) => seenNodes.has(n))) {
     for (const service of ['web', 'worker', 'cache']) {

@@ -111,9 +111,10 @@ test('status and events: reports are recorded against the authenticated node, wh
     assert.ok(seen.n2, 'the report is attributed to n2');
     const listed = (await json(await s.call('GET', '/api/v1/events?project=site', s.op))).events;
     const mine = listed.find((e: { message: string }) => e.message === 'from n2');
+    const n2 = nodes.find((n: { name: string }) => n.name === 'n2');
     assert.equal(
       mine.node_id,
-      'n2',
+      n2.id,
       'the event carries the authenticated node, not the claimed one',
     );
     const command = await json(await s.call('GET', `/api/v1/commands/${s.commandId}`, s.op));

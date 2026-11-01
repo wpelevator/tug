@@ -237,6 +237,54 @@ test('node identity: create is idempotent for the same key, replace cuts off the
   }
 });
 
+test('node IDs are immutable and never reused: a removed node name gets a new ID that old certificates cannot match', async () => {
+  const s = await start();
+  try {
+    const node = await s.newNode('n1');
+    const listed = async () =>
+      (
+        (await s.call(s.root, 'GET', '/api/v1/nodes')).body.nodes as { id: string; name: string }[]
+      ).find((n) => n.name === 'n1');
+    const first = (await listed())!;
+    assert.notEqual(first.id, 'n1', 'the node ID is generated, not derived from the node name');
+    assert.match(first.id, /^node_/, 'node IDs carry the node_ prefix');
+    const replaced = await s.newNode('n1', 'replace');
+    assert.equal((await listed())!.id, first.id, 'replacing the identity keeps the node ID');
+    assert.equal(
+      (await s.call(replaced.credential, 'GET', '/agent/v1/work')).body.nodeId,
+      first.id,
+      'the agent work response names the immutable node ID',
+    );
+    const removed = await s.call(s.root, 'DELETE', '/api/v1/nodes/n1?force=true');
+    assert.equal(removed.status, 200, 'node-remove deletes an unplaced node');
+    assert.equal(
+      (await s.call(replaced.credential, 'GET', '/agent/v1/work')).status,
+      0,
+      'a removed node certificate stops working',
+    );
+    // The same name and even the same key come back as a different node: the old certificate names the old ID.
+    const again = await s.newNode('n1', 'create', replaced.keyPem);
+    const second = (await listed())!;
+    assert.notEqual(
+      second.id,
+      first.id,
+      'a name freed by node-remove never gets the old node ID back',
+    );
+    assert.equal(
+      (await s.call(again.credential, 'GET', '/agent/v1/work')).status,
+      200,
+      'the re-created node authenticates with its own certificate',
+    );
+    assert.equal(
+      (await s.call(replaced.credential, 'GET', '/agent/v1/work')).status,
+      0,
+      'a certificate issued for the removed node ID is not accepted for the re-created node even with the same key',
+    );
+  } finally {
+    await s.close();
+  }
+});
+
 test('disable blocks the node key without deleting it; replace brings the node back', async () => {
   const s = await start();
   try {
@@ -284,10 +332,16 @@ test('self-enrollment is single-use, name-bound, create-only and retried by key'
     });
     assert.equal(first.status, 200, `enrollment succeeds: ${JSON.stringify(first.body)}`);
     assert.equal(first.body.node.name, 'e1', 'the name comes from the key row, never the request');
+    assert.match(
+      first.body.node.id,
+      /^node_/,
+      'enrollment creates the node with a generated immutable ID',
+    );
     assert.deepEqual(first.body.node.labels, ['app'], 'labels come from the key row');
     const retry = await s.call(bootstrap, 'POST', '/agent/v1/enroll', { csr, address: '10.9.9.9' });
     assert.equal(retry.status, 200, 'a retry with the same key signs another certificate');
     assert.equal(retry.body.node.address, '10.0.0.9', 'a retry changes no stored value');
+    assert.equal(retry.body.node.id, first.body.node.id, 'a retry keeps the ID the key reserved');
     const stranger = await generateKeyPair();
     const other = await s.call(bootstrap, 'POST', '/agent/v1/enroll', {
       csr: await createCsr(stranger.privateKeyPem),
