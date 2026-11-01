@@ -52,6 +52,54 @@ test('creates control-plane backup and requires confirmation for restore', async
   }
 });
 
+test('control backups are private to the control user even under a permissive umask', async () => {
+  const s = await makeServer();
+  const backupDir = path.join(s.dir, 'control-backups');
+  delete process.env.TUG_CONTROL_BACKUP_DIR;
+  const previousUmask = process.umask(0);
+  try {
+    await fs.mkdir(backupDir, { mode: 0o755 });
+    const res = await fetch(`${s.base}/api/v1/control/backups/run`, {
+      method: 'POST',
+      headers: op,
+      body: '{}',
+    });
+    assert.equal(res.status, 200, 'the backup should succeed');
+    const backup = await json(res);
+    assert.equal(
+      (await fs.stat(backup.artifactRef)).mode & 0o777,
+      0o600,
+      'the archive holds the master key and CA key, so only its owner may read it',
+    );
+    assert.equal(
+      (await fs.stat(backupDir)).mode & 0o777,
+      0o700,
+      'a pre-existing backup directory is tightened to owner-only access',
+    );
+    assert.deepEqual(
+      (await fs.readdir(backupDir)).filter((name) => name.endsWith('-staging')),
+      [],
+      'staging copies of the keys are removed after a backup',
+    );
+
+    await fs.rm(path.join(s.dir, 'master.key'));
+    const failed = await fetch(`${s.base}/api/v1/control/backups/run`, {
+      method: 'POST',
+      headers: op,
+      body: '{}',
+    });
+    assert.notEqual(failed.status, 200, 'a backup that cannot copy the master key fails');
+    assert.deepEqual(
+      (await fs.readdir(backupDir)).filter((name) => name !== path.basename(backup.artifactRef)),
+      [],
+      'a failed backup leaves neither staging key material nor a partial archive',
+    );
+  } finally {
+    process.umask(previousUmask);
+    await s.close();
+  }
+});
+
 test('bound snapshot destinations preserve apostrophes in backup directory names', async () => {
   const s = await makeServer();
   process.env.TUG_CONTROL_BACKUP_DIR = path.join(s.dir, "backups 'quoted'");

@@ -81,6 +81,8 @@ In a second reproduction, an already-completed backup command belonged to `n1` a
 
 ### SEC-05: Control backup archives are readable beyond the control user
 
+**Status: fixed.** Control creates the backup directory as `0700` (tightening an existing one), the staging directory as `0700` and the archive as `0600` from its first write, and removes staging key material and any partial archive when a backup fails. `control-install` creates `/var/lib/tug-control` as `0700`; archives made before this change remain sensitive and installs made before it keep their old directory mode until `control-install` is run again. The text below describes the original finding.
+
 **Evidence:** `src/control.ts:2584` copies the master key, and `src/control.ts:2585` copies PKI material into the backup. `src/control.ts:2595` writes the gzip archive without a restrictive creation mode. The control installer creates `/var/lib/tug-control` without a private directory mode.
 
 **Reproduction:** With the audit process's ordinary `0022` umask, the backup API produced a `0644` `.tar.gz` in a `0755` backup directory. Archive entries included `master.key` and `pki/ca.key`. The temporary audit root itself was private, so no other user actually read the test keys.
@@ -107,6 +109,8 @@ In a second reproduction, an already-completed backup command belonged to `n1` a
 
 ### SEC-07: Ingress host ownership is not authorized across projects
 
+**Status: fixed for publication.** A deploy or rollback is refused with `409` when another project's current deployment already routes the hostname (compared case-insensitively). Hostnames must be fully qualified, so wildcard overlap does not arise. An administrator-managed per-project hostname allowlist is not implemented, so a `deploy` credential can still claim any unused hostname. The text below describes the original finding.
+
 **Evidence:** `src/compose.ts:145` validates hostname duplication only within the submitted Compose definition. `src/ingress.ts:139` sorts all project/service routes; `src/ingress.ts:144` gives a duplicate host to the first route and only warns about the skipped project.
 
 **Reproduction:** Desired states for `victim` and the lexically earlier project `alpha` both claimed `alpha.example.com`. Route generation selected `alpha` and warned that `victim` was skipped. Input order did not preserve the earlier owner's route. This reproduction exercised route selection, not public traffic.
@@ -118,6 +122,8 @@ In a second reproduction, an already-completed backup command belonged to `n1` a
 **Regression coverage:** A scoped project cannot take an existing hostname through deploy, scale-related regeneration or rollback; the existing route remains selected. Test normalized names, wildcard policy and explicit release/reassignment.
 
 ### SEC-08: Published dependency vulnerabilities remain in the lockfile
+
+**Status: fixed.** The lockfile now resolves `multer` 2.5.0, `js-yaml` 4.3.2 and `tar` 7.5.22, and `npm audit --omit=dev` reports no vulnerabilities (the audit also flagged `express`'s `qs` and `proxy-addr`, now updated). Build-time bounds on YAML and tar input and a CI dependency and container scan are still open. The text below describes the original finding.
 
 The attempted `npm audit --json --fetch-retries=0 --fetch-timeout=15000` could not reach `registry.npmjs.org` because DNS/network access is restricted. Maintainer advisories were checked through web retrieval instead. This is a targeted advisory review, not an exhaustive clean dependency scan.
 
