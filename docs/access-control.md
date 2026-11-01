@@ -86,7 +86,7 @@ The project column says how a scoped token's allowed projects are checked: the p
 
 ## Failures
 
-- `401` means the certificate is unknown, revoked, expired, disabled or its key is not the stored one. A missing or foreign certificate never gets this far: the TLS handshake fails.
+- `401` means the certificate is unknown, expired, disabled or its key is not the stored one. A missing or foreign certificate never gets this far: the TLS handshake fails. A revoked credential or disabled node that is already connected has its socket closed, and a new connection is reset after the handshake, so clients see a connection error (`fetch failed`, `ECONNRESET`) instead of a `401`.
 - `403` means the token is valid but its role is too low (`forbidden: this action requires the deploy role`) or the project is outside its scope (`forbidden: this token may not access that project`). The project message is identical whether the other project exists, whether a deployment or command ID exists, or whether the project name is valid, so a scoped token cannot probe for projects or IDs.
 
 ## Projects and scoping
@@ -108,7 +108,7 @@ tug credential-revoke ci-site
 ```
 
 - Names are 1 to 64 letters, numbers, dots, underscores or hyphens. A revoked credential keeps its name so audit entries stay unambiguous; choose a new name to replace it.
-- `credential-create` prints the credential once, on stdout; a note on stderr reminds you to store it. Only the key hash is stored, so a lost credential cannot be recovered, only replaced.
+- `credential-create` prints the credential once, on stdout as JSON (the `credential` field is the value to store as `TUG_CREDENTIAL`); a note on stderr reminds you to store it. Only the key hash is stored, so a lost credential cannot be recovered, only replaced.
 - `credential-list` shows name, role, projects, creator, creation, last use, expiry and revocation time, never secrets.
 - Revocation applies to the next request. Expired tokens are refused with `401` the same way. `last_used_at` is refreshed at most once a minute in the background, so it is approximate and bookkeeping never delays or fails a request.
 - Tokens live in the control database, so they are part of `tug control-backup` and come back with `tug control-restore`; a restore returns the token set (including revocations) to the backup's state.
