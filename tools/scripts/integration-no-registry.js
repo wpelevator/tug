@@ -133,7 +133,7 @@ try {
   await wait(
     async () =>
       (await request('/api/v1/status')).nodes.some(
-        (node) => node.id === 'image-node' && node.status === 'online',
+        (node) => node.name === 'image-node' && node.status === 'online',
       ),
     'The isolated node must register and poll',
   );
