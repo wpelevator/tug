@@ -69,7 +69,7 @@ sequenceDiagram
     participant Agent as Agent container
 
     Op->>CLI: node-install root@host --name app1
-    CLI->>Host: SSH preflight (docker, compose, paths, disk, control reachable)
+    CLI->>Host: SSH preflight (docker, paths, disk, control reachable)
     CLI->>Ctrl: POST /api/v1/nodes/register
     Ctrl->>DB: insert node, generate agentToken
     Ctrl-->>CLI: { node, agentToken }
@@ -132,7 +132,7 @@ sequenceDiagram
     loop poll interval
         Agent->>Ctrl: GET /agent/v1/work
         Ctrl-->>Agent: matching desiredStates for this node
-        Agent->>Agent: fetch secrets, write compose+.env, pull, up -d, health checks
+        Agent->>Agent: fetch secrets, pull or load images, recreate containers whose config hash changed, health checks
         Agent->>Ctrl: POST /agent/v1/status (observedVersion, observedRevision, health)
         Ctrl->>DB: upsert node_statuses, check convergence
     end
@@ -183,7 +183,7 @@ sequenceDiagram
     A->>Ctrl: GET /agent/v1/work (desired state v2)
     A->>A: hash the rendered service + its secret versions (new revision?)
     A->>A: allocate a free host port, persist candidate in rollout.json
-    A->>A: docker compose -p proj-web-HASH up -d (old revision untouched)
+    A->>A: create and start container tug-proj-web-HASH via the Engine API (old revision untouched)
     A->>A: health check the new container
     alt healthy
         A->>A: active = new, old revision scheduled to drain

@@ -15,7 +15,7 @@ This registers the node with control (issuing one agent token), runs SSH preflig
 
 Built application images are downloaded directly from control. Published images are pulled by their stored digest from upstream registries, with private credentials released through control when needed. No node registry login is required.
 
-Preflight checks fail early, with a fix hint, unless the host has Docker Engine accessible to the SSH user, Docker Compose v2, writable `/opt`, `/var/lib` and `/etc/tug` paths, at least 1024 MB free under `/var/lib`, and can reach `<control-url>/healthz`. The control URL must be `https://` unless you pass `--http-only-dev` for local or private development.
+Preflight checks fail early, with a fix hint, unless the host has Docker Engine accessible to the SSH user, writable `/opt`, `/var/lib` and `/etc/tug` paths, at least 1024 MB free under `/var/lib`, and can reach `<control-url>/healthz`. The control URL must be `https://` unless you pass `--http-only-dev` for local or private development.
 
 The global `--control-url` selects the operator's API connection. When agents must use a different address, pass `--agent-control-url` to `node-install` or `node-enroll`; it controls node preflight and the address stored in the agent environment/enrollment key, while API requests keep using the operator endpoint. Without the option, agents use the resolved operator URL. For a local SSH tunnel to control and a private endpoint for nodes: `tug --control-url http://127.0.0.1:18082 node-install root@app1.example.com --name app1 --agent-control-url http://10.110.0.3:8080 --http-only-dev`. Prefer HTTPS for the advertised URL; the explicit HTTP override is needed for this private-network example.
 
