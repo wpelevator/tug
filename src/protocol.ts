@@ -7,7 +7,6 @@
 export interface Placement {
   nodes?: string[];
   labels?: string[];
-  global?: boolean;
 }
 
 export interface HealthCheck {

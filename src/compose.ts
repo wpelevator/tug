@@ -359,7 +359,9 @@ export function validateCompose(
     const placement = lp.placement || {};
     const selected = placement.nodes || [];
     const hasLabels = Array.isArray(placement.labels) && placement.labels.length > 0;
-    const isGlobal = lp.global === true || placement.global === true;
+    const isGlobal = lp.global === true;
+    if ('global' in placement)
+      errors.push(`${name}: x-tug.placement.global is not supported; use x-tug.global`);
     if (nodes.length > 1 && selected.length === 0 && !hasLabels && !isGlobal)
       errors.push(
         `${name}: multi-node deployments require x-tug.placement.nodes or placement.labels`,
@@ -402,7 +404,7 @@ export function buildDesiredState({
   for (const [name, src] of Object.entries(compose.services || {})) {
     const lp = src['x-tug'] || {};
     let placement = lp.placement || (defaultNode ? { nodes: [defaultNode] } : {});
-    const global = lp.global === true || placement.global === true;
+    const global = lp.global === true;
     const labels = placement.labels || [];
     if (nodes && (!placement.nodes || !placement.nodes.length) && (labels.length || global)) {
       const matched = nodes

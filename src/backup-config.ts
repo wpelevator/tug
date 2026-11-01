@@ -160,7 +160,7 @@ function serviceNodes(svc: ComposeService): {
   return {
     nodes: placement.nodes || [],
     dynamic: Array.isArray(placement.labels) && placement.labels.length > 0,
-    global: lp.global === true || placement.global === true,
+    global: lp.global === true,
   };
 }
 

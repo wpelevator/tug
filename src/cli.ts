@@ -84,7 +84,7 @@ const CONFIG_HELP =
 const program = new Command();
 program
   .name('tug')
-  .description('Portable VPS deployments with Docker Compose')
+  .description('Deploy Docker Compose applications to your own servers')
   .version(packageVersion())
   .enablePositionalOptions()
   .option('--config <file>', CONFIG_HELP)
@@ -370,9 +370,9 @@ program
 program
   .command('node-remove <name>')
   .description(
-    'remove a retired node from control (its agent token, WireGuard peer and queued commands)',
+    'remove a retired node from the control plane (its identity, WireGuard peer, statuses and queued commands); stop its agent and remove its containers on the host yourself',
   )
-  .option('--force', 'remove even if the agent is still reporting')
+  .option('--force', 'remove even if the node is still reporting')
   .action(async (name: string, o: { force?: boolean }) => {
     console.log(
       JSON.stringify(
@@ -1160,7 +1160,7 @@ program
   .addOption(
     new Option(
       '--project <name>',
-      'limit a read or deploy token to this project; repeat for several',
+      'limit a read or deploy credential to this project; repeat for several',
     )
       .default([] as string[], 'all projects')
       .argParser((value: string, previous: string[]) => [...previous, value]),
@@ -1413,13 +1413,17 @@ program
   });
 program
   .command('control-backup')
-  .description('create a control-plane SQLite/master-key backup')
+  .description(
+    'create a control-plane backup (state, PKI, master key and retained image archives; not workload volumes)',
+  )
   .action(async () =>
     console.log(JSON.stringify(await request('POST', '/api/v1/control/backups/run', {}), null, 2)),
   );
 program
   .command('control-restore <artifactRef>')
-  .description('restore a control-plane backup; requires control restart')
+  .description(
+    'restore a control-plane backup on the control-plane host; requires a control restart',
+  )
   .option('--confirm')
   .action(async (artifactRef: string, o: { confirm?: boolean }) =>
     console.log(
@@ -1506,7 +1510,7 @@ program
   });
 program
   .command('logs <service>')
-  .description('fetch logs from the assigned node agent')
+  .description('fetch service container logs from the node that runs the service')
   .option('--tail <n>', 'number of lines', '200')
   .option('-f, --follow', 'follow live logs')
   .option('--node <name>', 'select a node for followed logs')

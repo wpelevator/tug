@@ -63,16 +63,16 @@ export const testIdentity = (
   }
   const operator = h['x-tug-test-operator'];
   if (typeof operator === 'string') {
-    const tokenId = `tok_test_${operator}`;
-    if (!db.get('SELECT 1 FROM operator_credentials WHERE id=?', tokenId))
+    const credentialId = `cred_test_${operator}`;
+    if (!db.get('SELECT 1 FROM operator_credentials WHERE id=?', credentialId))
       db.run(
         "INSERT INTO operator_credentials(id,name,key_hash,role,created_at,created_by) VALUES(?,?,?,'admin',?,'test')",
-        tokenId,
+        credentialId,
         operator,
         `test-${operator}`,
         new Date().toISOString(),
       );
-    return { uri: `tug:operator:${tokenId}`, keyHash: `test-${operator}` };
+    return { uri: `tug:operator:${credentialId}`, keyHash: `test-${operator}` };
   }
   return null;
 };

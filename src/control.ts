@@ -688,7 +688,7 @@ export async function createApp(
     }
     if (parsed.klass === 'operator') {
       const actor = authenticate(db, parsed.id, keyHash);
-      return actor ? { klass: 'operator', actor, tokenId: parsed.id } : null;
+      return actor ? { klass: 'operator', actor, credentialId: parsed.id } : null;
     }
     const row = db.get<EnrollmentCredentialRow>(
       'SELECT * FROM enrollment_credentials WHERE id=?',
@@ -1241,7 +1241,7 @@ export async function createApp(
     const composeSvc = state.compose?.services?.[service] || {};
     const ext = composeSvc['x-tug'] || {};
     const placement = ext.placement || {};
-    const global = ext.global === true || placement.global === true;
+    const global = ext.global === true;
     const labels = Array.isArray(placement.labels) ? placement.labels : [];
     const matched = nodeInfos.filter((node) =>
       labels.every((label) => node.labels.includes(label)),
@@ -1671,7 +1671,7 @@ export async function createApp(
     if (!node) return res.status(404).json({ error: 'node not found' });
     res.json({ commandId: queueCommand(node.id, null, 'wg.rotate-key'), nodeId: node.id });
   });
-  // Removes a retired node: its token, WireGuard peer, statuses and queued commands. Refused while a current deployment still places
+  // Removes a retired node: its identity, WireGuard peer, statuses and queued commands. Refused while a current deployment still places
   // something on it (redeploy without it first) or while its agent is still reporting, unless force=true.
   api('delete', '/api/v1/nodes/:name', null, async (req, res) => {
     const node = db.get<Pick<NodeRow, 'id' | 'name' | 'last_seen_at'>>(
@@ -1743,7 +1743,7 @@ export async function createApp(
     const created = await createCredential(db, pki, publicUrl(), request, req.actor!.name);
     audit(req.actor!, {
       type: 'credential.create',
-      message: `token ${created.name} (${created.role}${created.projects ? `, projects: ${created.projects.join(', ')}` : ''}) created by ${req.actor!.name}`,
+      message: `credential ${created.name} (${created.role}${created.projects ? `, projects: ${created.projects.join(', ')}` : ''}) created by ${req.actor!.name}`,
       metadata: {
         name: created.name,
         role: created.role,
@@ -1758,11 +1758,11 @@ export async function createApp(
   );
   api('delete', '/api/v1/credentials/:name', null, async (req, res) => {
     if (!revokeCredential(db, req.params.name))
-      return res.status(404).json({ error: 'token not found' });
+      return res.status(404).json({ error: 'credential not found' });
     reconcileSockets();
     audit(req.actor!, {
       type: 'credential.revoke',
-      message: `token ${req.params.name} revoked by ${req.actor!.name}`,
+      message: `credential ${req.params.name} revoked by ${req.actor!.name}`,
       metadata: { name: req.params.name },
     });
     res.json({ ok: true, name: req.params.name });
@@ -2148,12 +2148,12 @@ export async function createApp(
       // Resolve label-based and global placement into concrete node lists before validation.
       for (const svc of Object.values(compose.services || {})) {
         const ext = (svc['x-tug'] ||= {}) as {
-          placement?: { nodes?: string[]; labels?: string[]; global?: boolean };
+          placement?: { nodes?: string[]; labels?: string[] };
           replicas?: number;
           global?: boolean;
         };
         const placement = ext.placement || {};
-        const global = ext.global === true || placement.global === true;
+        const global = ext.global === true;
         const labels = Array.isArray(placement.labels) ? placement.labels : [];
         if (!placement.nodes?.length && (labels.length || global)) {
           const matched = nodeInfos

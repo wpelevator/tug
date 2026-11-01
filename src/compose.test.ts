@@ -231,6 +231,20 @@ test('validateCompose accepts label and global placement without explicit nodes'
   );
 });
 
+test('validateCompose rejects x-tug.placement.global so global has exactly one location', () => {
+  assert.throws(
+    () =>
+      validateCompose(
+        {
+          services: { web: { image: 'nginx', 'x-tug': { placement: { global: true } as never } } },
+        },
+        ['n1', 'n2'],
+      ),
+    /web: x-tug\.placement\.global is not supported; use x-tug\.global/,
+    'the removed alternative location should fail with the supported spelling',
+  );
+});
+
 test('buildDesiredState resolves label placement when nodes are provided', () => {
   const compose = {
     services: { web: { image: 'nginx', 'x-tug': { placement: { labels: ['app'] }, replicas: 1 } } },
