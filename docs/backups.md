@@ -118,4 +118,8 @@ To rehearse a database restore without touching the live one, copy the project i
 - Live volumes are crash-consistent, not application-consistent. Use a command backup for anything with its own consistency (databases).
 - A volume is backed up from the one node that holds it. A volume you mount from a file server with `driver_opts` is read through that node's mount; back up the file server's own disk where you can.
 - Repository maintenance (`restic check`, a read-verify of the data) and SFTP destinations are not built yet.
+- `tug restore` finishes when the writers are released, not when they are healthy again. WordPress needed several more seconds before it answered, so a script that restores and then probes the site should wait for the service to serve (`tug status`) rather than assume. Making `restore` wait for the writers to be serving, or say that it does not, is open.
+- A scratch restore leaves its volume (`<project>_restore-<id>`) behind, and the safety snapshot of every in-place restore is kept for ever. There is no command to list or remove either yet: remove scratch volumes with `docker volume rm` on the node, and safety snapshots with `restic forget` using the repository from `tug backup-key`.
+- The restic helper container has a fixed 512 MB memory limit. On a 1 GB host that is half the machine, and it cannot be changed from `x-tug.backup`.
+- Failures are only visible in `tug events` and `tug backup-list`. There is no way for cron or a monitor to ask "is anything stale or failing?" with an exit code yet.
 - Cancelling `tug exec` does not stop the remote process.

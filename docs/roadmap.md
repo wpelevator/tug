@@ -207,6 +207,13 @@ The test layers, the metrics milestones are held to and the backlog of mocked te
 - [x] M11 `tug run` one-off containers
 - [ ] M11 `x-tug.release` run-once hooks
 - [ ] M11 weekly maintenance (`restic check`, prune), restore drill, `backup-destination-test`, SFTP
+- [ ] M11 `restore` waits for the restored writers to be serving again (or says it does not); today it returns when they are released and a site needed several more seconds
+- [ ] M11 list and remove scratch-restore volumes, and expire safety snapshots (they accumulate for ever and only `restic forget` removes them)
+- [ ] M11 `backup-list --check`: exit nonzero when any target is stale, failed or missed, as an interim for cron and monitors until webhooks (M8) exist
+- [ ] M11 a key under `x-tug.backup` for the restic helper's memory limit (fixed at 512 MB, which is half of a 1 GB host)
+- [ ] `doctor` detects an agent that runs outside Docker (for example as a host process on macOS) and says why health checks to container IPs fail; today a failed deploy reports only "tcp timeout 172.21.0.2:3306"
+- [ ] `TUG_ROLE=agent` has no effect in the runtime image: it sets `CMD ["control"]`, so `argv[2]` is always `control` and wins over the variable. Either let the variable win or drop the default `CMD` and document the argument form
+- [ ] A `tug run` option to start without the service's volumes (`--no-volumes`), and a decision on whether it should take the project lock
 - [ ] M11 `tug move` for stateful services
 - [ ] M12 spec written (subnets, resolver, rollout changes, MTU, IPv6, network recreation)
 - [ ] M12 per-node container subnets over WireGuard and per-node service DNS, mesh stays opt-in

@@ -52,4 +52,4 @@ CLI options override environment variables, which override the config files and 
 
 ## Entrypoint
 
-`TUG_ROLE=control|agent` selects the role when `src/main.ts` (`dist/main.js` in the image, whose entrypoint is `node dist/main.js`) is started without an argument.
+`TUG_ROLE=control|agent` selects the role when `src/main.ts` (`dist/main.js` in the image, whose entrypoint is `node dist/main.js`) is started without an argument. An argument always wins over the variable, and the runtime image's default command is `control`, so setting `TUG_ROLE=agent` on the image starts control: pass the argument instead (`docker run ... tug agent`).
