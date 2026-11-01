@@ -8,22 +8,56 @@ A positional argument names the primary target: the SSH host for `node-install`,
 
 | Global option | Environment | Config key | Default |
 |---|---|---|---|
-| `--config <file>` | `TUG_CONFIG` | — | `.tug.json` in the current directory |
+| `--config <file>` | `TUG_CONFIG` | — | `tug.yml`, `tug.yaml`, `tug.json` or `.tug.json` in the current directory |
 | `--control-url <url>` (operator API endpoint) | `TUG_CONTROL_URL` | `controlUrl` | `http://localhost:8080` |
 | `--project <name>` | `TUG_PROJECT` | `project` | `site` |
-| `--token <token>` on `init`/`control-install` | `TUG_TOKEN` | `operatorToken` for API calls | No API token; `init`/`control-install` generate one if needed |
+| `--token <token>` on `init`/`control-install` | `TUG_TOKEN` | `token`, only in the untracked overlay | No API token; `init`/`control-install` generate one if needed |
 
-Global options can appear before or after a command. Explicit options take precedence over environment variables, then the selected config, then defaults. Relative config paths resolve from the working directory. A missing default `.tug.json` is allowed; an explicitly selected missing file, invalid JSON or invalid known setting is an error. `init` can create a new selected file. `--project` applies only to project-scoped operations; status and node operations retain their control-wide scope.
+Global options can appear before or after a command. Explicit options take precedence over environment variables, then the overlay, then the tracked config, then defaults. Relative `--config` paths resolve from the working directory. A missing default config is allowed; an explicitly selected missing file, invalid YAML or JSON, an unknown key or an invalid value is an error. `init` can create a new selected file. `--project` applies only to project-scoped operations; status and node operations retain their control-wide scope.
 
 Most commands print the API result as JSON. `init` prints the written config path, `control-token` prints a token, `exec` and `logs` write container output to stdout/stderr, and enrollment prints a runnable command or cloud-init document. `ps` and `inspect` print live Docker data as JSON. `node-enroll --json` returns JSON with `command`, and also `cloudInit` with `--install-docker`; its stdout contains no explanatory prose. There is no global `--json` flag. Install preflight and image-transfer tools may also print progress. Errors go to stderr and exit nonzero.
 
-Prefer `TUG_TOKEN` to a token argument, since arguments can appear in process listings and shell history. `secret-set --value` has the same exposure; omit it to read the value from stdin. Config files contain the operator token and should be kept private and out of version control.
+Prefer `TUG_TOKEN` to a token argument, since arguments can appear in process listings and shell history. `secret-set --value` has the same exposure; omit it to read the value from stdin. The token belongs in the untracked overlay (see below), never in the tracked config.
 
-Remote source uploads always exclude `.tug.json` files and the selected CLI config inside the source directory, even if an ignore rule attempts to include them. Local builds use Docker's own context and `.dockerignore`; exclude `.tug.json` and any custom credential-config path there before using a broad `COPY . .` instruction.
+Remote source uploads always exclude the overlay files (`tug.local.yml`, `tug.local.yaml`, `tug.local.json`, `.tug.local.json`) and `.tug.json` at any depth, the tracked config names (`tug.yml`, `tug.yaml`, `tug.json`) at the source root, and the selected config and overlay, even if an ignore rule attempts to include them. A nested `tug.json` that belongs to your application is kept. Local builds use Docker's own context and `.dockerignore`; exclude the overlay names and any custom credential-config path there before using a broad `COPY . .` instruction.
+
+## Config file
+
+The CLI reads a YAML or JSON file, `tug.yml` by convention, so a repository can record how to reach its control plane and which servers it uses. [`examples/tug.yml`](../examples/tug.yml) is a complete sample.
+
+- **Lookup.** `--config` or `TUG_CONFIG` select a file, which must exist. Otherwise the working directory is searched for `tug.yml`, `tug.yaml`, `tug.json` and `.tug.json`; more than one is an error, and none is fine. The format follows the extension (`.json` is JSON, anything else YAML, which also reads JSON). Only the working directory is searched, not its parents.
+- **Overlay.** `tug.local.yml` next to `tug.yml` (`.tug.local.json` next to `.tug.json`, `<name>.local<ext>` in general) holds what must not be committed. It has the same keys plus `token`, and its values win key by key, including inside `nodeDefaults` and each node. `token` in the tracked file is an error. `tug init` writes the tracked file only when it is missing (an existing one keeps its comments), stores the token in the overlay with mode `0600`, and adds the overlay to `.gitignore` in a git checkout. Connection flags given to `init` for an existing tracked file are saved in the overlay.
+- **Strict keys.** Unknown keys, wrong types and out-of-range values fail with the file and key in the message. Paths in the file (`file`, `ca`) resolve relative to the file, not the working directory.
+
+Each key is the camelCase of the long flag it supplies a default for, with the same value type. A repeatable flag takes a list (`label: [web, db]`; a single string is a one-item list), and a negated flag maps to the positive key set to `false` (`--no-wait` is `wait: false`). A flag on the command line always wins over the file; a list from the file is replaced by flags, not appended to. A key applies only to the commands listed for it.
+
+| Key | Flag | Commands |
+|---|---|---|
+| `controlUrl` | `--control-url` | all |
+| `project` | `--project` | project-scoped commands |
+| `token` (overlay only) | `--token`, `TUG_TOKEN` | all |
+| `file` | `-f, --file` | `deploy` |
+| `buildLocal` | `--build-local` | `deploy` |
+| `wait` | `--no-wait` | `deploy`, `rollback` |
+| `nodes.<name>.ssh` | `<ssh-target>` | `node-install` |
+| `nodes.<name>.address` | `--address` | `node-install`, `node-register` |
+| `nodes.<name>.publicAddress` | `--public-address` | `node-install`, `node-register` |
+| `label` | `--label` | `node-install`, `node-register`, `node-enroll` |
+| `mesh` | `--mesh` | `node-install`, `node-enroll` |
+| `wgPort` | `--wg-port` | `node-install` |
+| `installDocker` | `--install-docker` | `node-install`, `node-enroll` |
+| `image` | `--image` | `node-install`, `node-enroll` |
+| `agentControlUrl` | `--agent-control-url` | `node-install`, `node-enroll` |
+| `httpOnlyDev` | `--http-only-dev` | `node-install`, `node-enroll` |
+| `ca` | `--ca` | `node-enroll` |
+
+The rows from `label` down are node keys: set them under `nodes.<name>`, or once for every node under `nodeDefaults` (everything except `ssh`, `address` and `publicAddress`). Secrets and per-invocation choices have no key: `--value`, `--force`, `--confirm`, `--version`, `--ttl`, `--uses`, `--timeout`, `--build-local-image` and the like.
+
+The file is not desired state and Tug never reconciles against it. Only `node-install`, `node-register` and `node-enroll` read `nodes`, as defaults for flags; every other command asks the control plane. See [Nodes](nodes.md#declaring-nodes-in-the-config-file).
 
 ## Setup
 
-- `tug init [--token <token>]` writes the selected config with the resolved control URL, project and token. Use global `--control-url`, `--project` or `--config` to select them.
+- `tug init [--token <token>]` creates the config file with the resolved control URL and project when it is missing and stores the token in the git-ignored overlay next to it; see [Config file](#config-file). Use global `--control-url`, `--project` or `--config` to select them.
 - `tug control-install <ssh-target> [--mesh] [--install-docker] [--token <token>] [--port <port>] [--image <tag>] [--build-local-image]` installs control over SSH. The API port defaults to `8080`. Control stores built images and agents download them directly. See [Control plane](control-plane.md).
 - `tug control-token` prints the local development operator token from `./data/operator.token`.
 
@@ -31,7 +65,7 @@ Remote source uploads always exclude `.tug.json` files and the selected CLI conf
 
 ## Nodes
 
-- `tug node-install <ssh-target> --name <node> [--agent-control-url <url>] [--install-docker] [--address <ip>] [--public-address <ip>] [--label <label>]... [--mesh] [--wg-port <port>] [--image <tag>] [--build-local-image] [--http-only-dev]` registers a node and installs its agent. `--mesh` enables host networking and `NET_ADMIN` and adds WireGuard kernel and UDP-port checks; `--wg-port` defaults to `51820`.
+- `tug node-install [<ssh-target>] --name <node> [--agent-control-url <url>] [--install-docker] [--address <ip>] [--public-address <ip>] [--label <label>]... [--mesh] [--wg-port <port>] [--image <tag>] [--build-local-image] [--http-only-dev]` registers a node and installs its agent. Without `<ssh-target>` the target is `nodes.<node>.ssh` from the [config file](#config-file). `--mesh` enables host networking and `NET_ADMIN` and adds WireGuard kernel and UDP-port checks; `--wg-port` defaults to `51820`.
 - `tug node-enroll [--name <node>] [--agent-control-url <url>] [--install-docker] [--label <label>]... [--ttl <seconds>] [--uses <n>] [--ca <ca.pem>] [--image <tag>] [--mesh] [--json] [--http-only-dev]` mints an enrollment key and prints a Docker command, or cloud-init with `--install-docker`. TTL defaults to `3600` seconds and uses to `1`. Without `--name`, the host uses its hostname. The printed image must be pullable by the new host; a development `tug:local` override must already be loaded there.
 - `tug node-remove <node> [--force]` removes a retired node: its agent token, WireGuard peer, statuses and queued commands. It is refused while a current deployment still places a service or volume on the node (deploy without it first) and while its agent is still reporting, unless `--force`. Stop the agent and remove its containers on the host yourself.
 - `tug node-register <node> [--address <ip>] [--public-address <ip>] [--label <label>]...` registers a node and prints its tokens without installing it.

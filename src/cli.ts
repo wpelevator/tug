@@ -1,7 +1,14 @@
 #!/usr/bin/env node
 import { Command, Option } from 'commander';
 import { openAsBlob } from 'node:fs';
-import { resolveCliConfig, integerOption, normalizeControlUrl } from './cli-config.ts';
+import {
+  applyConfigDefaults,
+  integerOption,
+  normalizeControlUrl,
+  nodeSettings,
+  resolveCliConfig,
+  writeInitConfig,
+} from './cli-config.ts';
 import {
   dockerRunSnippet,
   enrollmentCloudInit,
@@ -41,11 +48,6 @@ import { createCliLiveTransport } from './cli-live-transport.ts';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const templatesDir = path.join(__dirname, 'templates');
 
-interface Config {
-  controlUrl?: string;
-  operatorToken?: string;
-  project?: string;
-}
 interface DeploymentRecord {
   id: string;
   state: DeploymentState;
@@ -72,24 +74,23 @@ interface InstallOpts {
   installDocker?: boolean;
 }
 
+const CONFIG_HELP =
+  'CLI config file, YAML or JSON (default: TUG_CONFIG, else tug.yml, tug.yaml, tug.json or .tug.json)';
+
 const program = new Command();
 program
   .name('tug')
   .description('Portable VPS deployments with Docker Compose')
   .version(packageVersion())
   .enablePositionalOptions()
-  .option('--config <file>', 'CLI JSON config file (default: TUG_CONFIG or .tug.json)')
+  .option('--config <file>', CONFIG_HELP)
   .option('--control-url <url>', 'control API URL (overrides TUG_CONTROL_URL and config)')
   .option('--project <name>', 'project (overrides TUG_PROJECT and config; default: site)');
 let resolvedConfig: Awaited<ReturnType<typeof resolveCliConfig>> | undefined;
-const cfgPath = () => resolvedConfig!.file;
-async function loadCfg(): Promise<Config> {
+async function loadCfg(): Promise<NonNullable<typeof resolvedConfig>> {
   return resolvedConfig!;
 }
 const collect = (v: string, a: string[]): string[] => [...a, v];
-async function saveCfg(c: Config): Promise<void> {
-  await fs.writeFile(cfgPath(), JSON.stringify(c, null, 2), { mode: 0o600 });
-}
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function request<T = any>(
   method: string,
@@ -99,7 +100,7 @@ async function request<T = any>(
 ): Promise<T> {
   const c = await loadCfg();
   const base = c.controlUrl!;
-  const tok = c.operatorToken;
+  const tok = c.token;
   const headers: Record<string, string> = tok ? { Authorization: `Bearer ${tok}` } : {};
   if (!multipart) headers['content-type'] = 'application/json';
   const res = await fetch(`${base}${route}`, {
@@ -263,11 +264,20 @@ async function waitForDeployment(
 program
   .command('init')
   .option('--token <token>', 'operator token (prefer TUG_TOKEN to avoid process-list exposure)')
-  .action(async (o: { token?: string }) => {
+  .description(
+    'create the config file if missing and store the operator token in its git-ignored .local overlay',
+  )
+  .action(async (o: { token?: string }, command: Command) => {
     const cfg = await loadCfg();
-    const operatorToken = o.token || cfg.operatorToken || token('tug_op');
-    await saveCfg({ controlUrl: cfg.controlUrl, operatorToken, project: cfg.project });
-    console.log(`wrote ${cfgPath()}`);
+    const { controlUrl, project } = command.optsWithGlobals<{
+      controlUrl?: string;
+      project?: string;
+    }>();
+    for (const file of await writeInitConfig(cfg, o.token || cfg.token || token('tug_op'), {
+      controlUrl,
+      project,
+    }))
+      console.log(`wrote ${file}`);
   });
 
 program
@@ -426,8 +436,10 @@ program
   );
 
 program
-  .command('node-install <sshTarget>')
-  .description('register and install an agent container on a Docker-capable host over SSH')
+  .command('node-install [sshTarget]')
+  .description(
+    'register and install an agent container on a Docker-capable host over SSH (the SSH target defaults to nodes.<name>.ssh in the config file)',
+  )
   .requiredOption('--name <name>')
   .option('--address <addr>')
   .option('--public-address <addr>')
@@ -456,7 +468,7 @@ program
   )
   .action(
     async (
-      sshTarget: string,
+      sshArgument: string | undefined,
       o: InstallOpts & {
         name: string;
         address?: string;
@@ -469,6 +481,11 @@ program
       },
     ) => {
       const cfg = await loadCfg();
+      const sshTarget = sshArgument ?? (nodeSettings(cfg, o.name).ssh as string | undefined);
+      if (!sshTarget)
+        throw new Error(
+          `node-install needs an SSH target: pass <ssh-target> or set nodes.${o.name}.ssh in ${cfg.file}`,
+        );
       const controlUrl = normalizeControlUrl(o.agentControlUrl ?? cfg.controlUrl!);
       assertHttps(controlUrl, o.httpOnlyDev);
       if (o.installDocker) await bootstrapDocker(sshTarget);
@@ -676,7 +693,10 @@ program
 async function makeContext(): Promise<string> {
   const tmp = path.join(os.tmpdir(), `tug-${Date.now()}.tgz`);
   try {
-    await createSourceArchive(process.cwd(), tmp, [cfgPath()]);
+    await createSourceArchive(process.cwd(), tmp, [
+      resolvedConfig!.file,
+      resolvedConfig!.localFile,
+    ]);
   } catch (error) {
     await fs.rm(tmp, { force: true });
     throw error;
@@ -916,7 +936,7 @@ async function runLive(
   const cfg = await loadCfg();
   process.exitCode = await runCliLive(
     parseLiveRequest(operation, { ...input, project: cfg.project || 'site' }),
-    createCliLiveTransport(cfg.controlUrl!, cfg.operatorToken),
+    createCliLiveTransport(cfg.controlUrl, cfg.token),
   );
 }
 program
@@ -1030,10 +1050,22 @@ program.hook('preAction', async (_root, command) => {
     process.cwd(),
     command.name() === 'init',
   );
+  // Config values are defaults for options not given on the command line; nodes are only read by the
+  // commands that create or register one, never by commands that talk to an existing node.
+  const nodeName =
+    command.name() === 'node-register'
+      ? command.args[0]
+      : ['node-install', 'node-enroll'].includes(command.name())
+        ? (options.name as string | undefined)
+        : undefined;
+  applyConfigDefaults(command, options, {
+    ...resolvedConfig.commandDefaults,
+    ...(command.name().startsWith('node-') ? nodeSettings(resolvedConfig, nodeName) : {}),
+  });
 });
 for (const command of program.commands) {
   command
-    .option('--config <file>', 'CLI JSON config file (default: TUG_CONFIG or .tug.json)')
+    .option('--config <file>', CONFIG_HELP)
     .option('--control-url <url>', 'control API URL (overrides TUG_CONTROL_URL and config)');
   if (!command.options.some((option) => option.long === '--project'))
     command.option('--project <name>', 'project (overrides TUG_PROJECT and config; default: site)');

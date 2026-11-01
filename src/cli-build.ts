@@ -5,6 +5,7 @@ import * as tar from 'tar';
 import { buildImage, run } from './build.ts';
 import { saveImageArchive } from './artifacts.ts';
 import type { ComposeFile, LocalImageUpload } from './protocol.ts';
+import { CONFIG_NAMES } from './cli-config.ts';
 
 export interface LocalBuildDependencies {
   build: typeof buildImage;
@@ -14,7 +15,17 @@ export interface LocalBuildDependencies {
   cleanupWarning?: (message: string) => void;
 }
 
-/** Credential exclusions are mandatory and cannot be re-included by source ignore rules. */
+/** At any depth: the git directory and every file that can hold a token (the untracked config overlays). */
+const ALWAYS_EXCLUDED = [
+  '.git',
+  '.tug.json',
+  '.tug.local.json',
+  'tug.local.yml',
+  'tug.local.yaml',
+  'tug.local.json',
+];
+
+/** Credential exclusions are mandatory and cannot be re-included by source ignore rules. The tracked config names are excluded at the context root only, so an app's own nested `tug.json` is kept. */
 export function sourceArchiveFilter(
   entry: string,
   configPaths: string[],
@@ -24,7 +35,9 @@ export function sourceArchiveFilter(
     .replaceAll('\\', '/')
     .replace(/^(\.\/)+/, '')
     .replace(/\/$/, '');
-  if (relative.split('/').some((part) => ['.git', '.tug.json'].includes(part))) return false;
+  const parts = relative.split('/');
+  if (parts.some((part) => ALWAYS_EXCLUDED.includes(part))) return false;
+  if (parts.length === 1 && CONFIG_NAMES.includes(relative)) return false;
   return ![...configPaths, ...ignores].some(
     (ignore) => relative === ignore || relative.startsWith(`${ignore}/`),
   );

@@ -19,6 +19,25 @@ Preflight checks fail early, with a fix hint, unless the host has Docker Engine 
 
 The global `--control-url` selects the operator's API connection. When agents must use a different address, pass `--agent-control-url` to `node-install` or `node-enroll`; it controls node preflight and the address stored in the agent environment/enrollment key, while API requests keep using the operator endpoint. Without the option, agents use the resolved operator URL. For a local SSH tunnel to control and a private endpoint for nodes: `tug --control-url http://127.0.0.1:18082 node-install root@app1.example.com --name app1 --agent-control-url http://10.110.0.3:8080 --http-only-dev`. Prefer HTTPS for the advertised URL; the explicit HTTP override is needed for this private-network example.
 
+## Declaring nodes in the config file
+
+A repository can record its servers in the [config file](cli.md#config-file) so nobody has to remember `root@203.0.113.7`:
+
+```yaml
+# tug.yml
+nodeDefaults:
+  installDocker: true
+nodes:
+  app1:
+    ssh: root@203.0.113.7
+    publicAddress: 203.0.113.7
+    label: [web, ingress]
+```
+
+`tug node-install --name app1` then runs as if `root@203.0.113.7 --address ... --label web --label ingress --install-docker` had been typed; `tug node-register app1` and `tug node-enroll --name app1` read the same entry. Flags override the file key by key, and a `label` list on the command line replaces the file's list. An `<ssh-target>` argument overrides `ssh`; without one, a node with no `ssh` in the file is an error that names the missing key. The argument is never guessed to be a node name, because `app1` is also a valid hostname. `nodeDefaults` apply to every node, declared or not.
+
+The control plane stays the source of truth. Only `node-install`, `node-register` and `node-enroll` read `nodes`, as flag defaults; `status`, `deploy`, `scale`, `ps`, `logs`, `exec`, `node-remove` and every other command ask control and never consult the file. Registering a node is an upsert that overwrites its stored addresses and labels and issues a new agent token, so re-running `node-install` after editing the file updates control, last write wins. Editing the file without re-running it changes nothing in control.
+
 ## Self-service enrollment (`node-enroll`)
 
 A pull-based alternative modeled on Portainer Edge agents: the operator never needs SSH to the host. Mint an enrollment key, then run the printed `docker run` on the fresh host or put it in cloud-init/user-data so the host enrolls on first boot. The agent dials out to control, so this works behind NAT and firewalls.

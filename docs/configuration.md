@@ -2,14 +2,14 @@
 
 ## CLI
 
-CLI options override environment variables, which override the selected config file and documented fallback. Use `--config` (or `TUG_CONFIG`) to select a file. `tug init` writes `.tug.json` in the current directory with the control URL, operator token and default project, so later commands don't need them repeated.
+CLI options override environment variables, which override the config files and documented fallback. The config is a YAML or JSON file that is safe to commit: it holds the control URL, default project, defaults for a few command options and the servers you install. The operator token is never read from it. See [Config file](cli.md#config-file) for the keys and how they map to flags, and [Nodes](nodes.md#declaring-nodes-in-the-config-file) for the `nodes` section.
 
 | Variable | Purpose |
 |---|---|
-| `TUG_CONFIG` | Path to the CLI config file (default `./.tug.json`). |
+| `TUG_CONFIG` | Path to the CLI config file (default: `tug.yml`, `tug.yaml`, `tug.json` or `.tug.json` in the current directory). |
 | `TUG_CONTROL_URL` | Control API URL; overrides the config file. |
 | `TUG_PROJECT` | Default project; overrides the config file. |
-| `TUG_TOKEN` | Operator token or a scoped API token from `tug token-create`; overrides the config file. |
+| `TUG_TOKEN` | Operator token or a scoped API token from `tug token-create`; overrides the `token` in the untracked overlay. |
 
 ## Control plane
 
