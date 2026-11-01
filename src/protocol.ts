@@ -34,7 +34,8 @@ export interface IngressSpec {
   key?: string;
 }
 
-export type BackupType = 'mariadb' | 'mysql' | 'volume';
+/** What a backup captures: the output of a command run in a service, or the files of a volume. */
+export type BackupType = 'command' | 'volume';
 
 /** A restic keep policy; at least one key is required. */
 export interface BackupRetention {
@@ -48,7 +49,6 @@ export interface BackupRetention {
 
 /** `x-tug.backup` on a service or top-level volume, as an object. */
 export interface BackupSpec {
-  type?: BackupType;
   /** Five-field cron in UTC, or `@hourly`, `@daily`, `@weekly`, `@monthly`, `@yearly`. */
   schedule?: string;
   retention?: BackupRetention;
@@ -56,15 +56,20 @@ export interface BackupSpec {
   jitter?: number;
   /** Hard limit for one run, such as `30m` or `2h`. */
   timeout?: string | number;
-  databases?: string[];
-  user?: string;
-  /** Name of the project secret holding the database user's password. */
-  password?: string;
+  /** Services only: run in the service's container; its standard output is the backup. A string runs through `sh -c`. */
+  command?: string | string[];
+  /** Services only: run in the service container to restore; the stored file arrives on its standard input. */
+  restore?: string | string[];
+  /** Services only: name of the file inside the snapshot (default `<service>.out`). */
+  filename?: string;
+  /** Services only: text that must appear in the last 4 KiB of output, so a command cut short is not kept as a good backup. */
+  verify?: string;
+  /** Volumes only: restic exclude patterns. */
   exclude?: string[];
+  /** Services to hold during a restore. */
   writers?: string[];
 }
 
-/** `true`, `false`, a cron string, or the object form. */
 export type BackupConfig = boolean | string | BackupSpec;
 
 export type RolloutStrategy = 'recreate' | 'rolling';
@@ -196,7 +201,88 @@ export type DeploymentState =
 // ---- Commands (control -> agent) ---------------------------------------------------------------
 
 export type CommandType =
-  'diagnostics.run' | 'service.restart' | 'logs.fetch' | 'volume.delete' | 'wg.rotate-key';
+  | 'diagnostics.run'
+  | 'service.restart'
+  | 'logs.fetch'
+  | 'volume.delete'
+  | 'wg.rotate-key'
+  | 'backup.check'
+  | 'backup.run'
+  | 'backup.restore'
+  | 'backup.list';
+
+/** Commands whose helper containers need the backup destination's credentials. */
+export const BACKUP_COMMAND_TYPES: readonly CommandType[] = [
+  'backup.check',
+  'backup.run',
+  'backup.restore',
+  'backup.list',
+];
+
+/** `GET /agent/v1/backup/credentials`: environment for the restic helper of one running backup command. */
+export interface BackupCredentialsResponse {
+  env: Record<string, string>;
+}
+
+/** Why a command may be refused or a run marked missed; recorded on the run. */
+export type BackupMissReason = 'node_offline' | 'control_down' | 'deadline';
+
+export type JobPhase =
+  'queued' | 'pulling' | 'checking' | 'dumping' | 'uploading' | 'forgetting' | 'restoring';
+
+/** Payload of `backup.check`, `backup.run` and `backup.restore`. Restic credentials are never in a payload. */
+export interface BackupJobPayload {
+  runId: string;
+  project: string;
+  /** `service:db` or `volume:uploads`; empty for `backup.check`. */
+  target: string;
+  type: BackupType;
+  /** The project's restic repository, `<destination>/<project>`. */
+  repository: string;
+  resticImage: string;
+  /** Used as restic's `--host`, so each node keeps its own snapshot chain. */
+  node: string;
+  tags: string[];
+  retention?: BackupRetention;
+  /** Command targets: what to run in the service's container, and how to name and check its output. */
+  command?: {
+    service: string;
+    argv: string[];
+    filename: string;
+    verify?: string;
+    /** Run in the service container with the snapshot's file on stdin when restoring. */
+    restoreArgv?: string[];
+  };
+  /** Volume targets: the Docker volume to mount read-only; it must already exist on the node. */
+  volume?: {
+    name: string;
+    dockerVolume: string;
+    exclude?: string[];
+  };
+  limits: { memory: string; timeoutSec: number };
+  restore?: { snapshotId: string; mode: 'in-place' | 'scratch'; scratchVolume?: string };
+}
+
+export interface BackupJobResult {
+  runId: string;
+  snapshotId?: string;
+  addedBytes?: number;
+  totalBytes?: number;
+  durationMs: number;
+  resticVersion?: string;
+  /** Repository state for `backup.check`. */
+  repository?: 'ok' | 'initialized';
+  warnings?: string[];
+}
+
+/** Live jobs in `StatusReport.jobs`, so control can tell "running" from "lost". */
+export interface JobStatus {
+  commandId: string;
+  runId: string;
+  phase: JobPhase;
+  startedAt: string;
+  bytes?: number;
+}
 
 /** A `commands` table row as delivered in `GET /agent/v1/work`. */
 export interface Command {
@@ -232,6 +318,7 @@ export type CommandResultPayload =
   | { stdout: string; stderr: string }
   | { project: string; volume: string; deleted: true }
   | { publicKey: string }
+  | BackupJobResult
   | { error: string };
 
 export interface CommandResult {
@@ -263,6 +350,8 @@ export type LiveRequest =
       tty: boolean;
       columns?: number;
       rows?: number;
+      /** Run the command in a new container cloned from the service's, instead of in the running one. */
+      oneOff?: boolean;
     }
   | {
       operation: 'logs';
@@ -326,6 +415,8 @@ export interface WorkResponse {
   ingress?: IngressWork;
   /** Host addresses for published ports that name no host IP. */
   ports?: PortBinding;
+  /** Per project, services that must stay stopped because a restore is rewriting their data. */
+  holds?: Record<string, string[]>;
 }
 
 /**
@@ -405,7 +496,14 @@ export interface IngressStatus {
 // ---- POST /agent/v1/status ---------------------------------------------------------------------
 
 export type ProjectHealth = 'serving' | 'skipped' | 'failed';
-export type RolloutState = 'pending' | 'pulling' | 'starting' | 'health_checking' | 'serving';
+export type RolloutState =
+  | 'pending'
+  | 'pulling'
+  | 'starting'
+  | 'health_checking'
+  | 'serving'
+  /** Stopped on purpose while a restore rewrites its data. */
+  | 'held';
 
 export interface ServiceState {
   rolloutState: RolloutState;
@@ -434,6 +532,8 @@ export interface StatusReport {
   projects: ProjectStatus[];
   commandResults: CommandResult[];
   ingress?: IngressStatus;
+  /** Backup jobs still running on this node; absent when none. */
+  jobs?: JobStatus[];
 }
 
 // ---- GET /agent/v1/secrets ---------------------------------------------------------------------

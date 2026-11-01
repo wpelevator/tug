@@ -65,7 +65,7 @@ The CLI installs the matching `ghcr.io/wpelevator/tug:<version>` image on your h
 3. Set the secrets your services need: `tug secret-set DB_PASSWORD`.
 4. Add nodes with `tug node-install root@app1.example.com --name app1 --install-docker`, or `tug node-enroll --name app1` and run the printed Docker command. For a bare cloud host, `tug node-enroll --name app1 --install-docker` prints cloud-init user-data.
 5. Deploy: `tug deploy -f docker-compose.yml`. It waits until every node reports the new version healthy.
-6. Operate with `tug status`, `events`, `exec`, `logs`, `ps`, `inspect`, `restart`, `rollback` and `doctor`.
+6. Operate with `tug status`, `events`, `exec`, `run`, `logs`, `ps`, `inspect`, `restart`, `rollback`, `backup-run`, `restore` and `doctor`.
 
 ## Documentation
 

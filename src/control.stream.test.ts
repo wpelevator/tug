@@ -834,3 +834,49 @@ test('live logs follow the validated service and reject stdin without allowing t
     await s.close();
   }
 });
+
+test('a one-off run is routed to the placed agent as a non-interactive exec and audited', async () => {
+  const s = await liveFixture();
+  const operator = await socket(s.base, '/api/v1/live', OPERATOR);
+  try {
+    const run = {
+      operation: 'exec',
+      project: 'site',
+      service: 'web',
+      command: ['wp', 'core', 'update-db'],
+      interactive: false,
+      tty: false,
+      oneOff: true,
+    };
+    operator.send({ v: 1, type: 'live.open', request: run });
+    const open = await s.agent.next();
+    assert.deepEqual(open.request, run, 'the one-off flag reaches the agent with the request');
+    s.agent.send({ v: 1, type: 'live.started', sessionId: open.sessionId });
+    await operator.next();
+    s.agent.send({
+      v: 1,
+      type: 'live.exit',
+      sessionId: open.sessionId,
+      code: 0,
+      signal: null,
+      cancelled: false,
+    });
+    assert.equal((await operator.next()).code, 0, 'the exit code of the command is returned');
+    const events = JSON.stringify(
+      await (await s.call('GET', '/api/v1/events?project=site')).json(),
+    );
+    assert.ok(
+      events.includes('job.run') && events.includes('wp core update-db'),
+      'the run is audited with its command',
+    );
+
+    const second = await socket(s.base, '/api/v1/live', OPERATOR);
+    second.send({ v: 1, type: 'live.open', request: { ...run, interactive: true } });
+    assert.equal((await second.next()).type, 'live.error', 'a one-off run cannot take stdin');
+    second.ws.terminate();
+  } finally {
+    operator.ws.terminate();
+    s.agent.ws.terminate();
+    await s.close();
+  }
+});

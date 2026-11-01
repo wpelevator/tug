@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { LIVE_MAX_FRAME_BYTES } from './protocol.ts';
+import { LABEL_JOB } from './container-spec.ts';
 import type { DockerApi } from './docker-api.ts';
 import type { Readable, Writable } from 'node:stream';
 
@@ -21,6 +22,8 @@ export type LiveRequest =
       tty?: boolean;
       columns?: number;
       rows?: number;
+      /** `container` is only the template: run the command in a new container with its image, environment and mounts. */
+      oneOff?: boolean;
     }
   | { operation: 'logs'; sessionId: string; container: string; tail?: number; timestamps?: boolean }
   | { operation: 'ps'; sessionId: string; projects: string[] }
@@ -87,6 +90,8 @@ function validate(value: unknown): asserts value is LiveRequest {
       value.command[0].length === 0
     )
       throw new Error('Invalid exec command');
+    if (value.oneOff !== undefined && typeof value.oneOff !== 'boolean')
+      throw new Error('Invalid one-off flag');
     if (value.interactive !== undefined && typeof value.interactive !== 'boolean')
       throw new Error('Invalid interactive flag');
     if (value.tty !== undefined && typeof value.tty !== 'boolean')
@@ -260,6 +265,8 @@ export class LiveOperationEngine {
         tail: request.tail ?? 100,
         timestamps: request.timestamps,
       });
+    if (request.operation === 'exec' && request.oneOff)
+      return startOneOff(docker, request.container, request.command);
     const proc = await docker.execStart(request.container, {
       cmd: request.command,
       stdin: request.interactive !== false,
@@ -346,5 +353,85 @@ export class LiveOperationEngine {
       cancelled,
       ...(error ? { error: error.slice(0, 4096) } : {}),
     });
+  }
+}
+
+/**
+ * Runs `command` in a new container cloned from `template`: the same image, environment (secrets included),
+ * user, working directory, network and mounts, with no published ports and none of the service's labels, so
+ * reconciliation never mistakes it for the service. The container is removed when the command ends.
+ */
+export async function startOneOff(
+  docker: DockerApi,
+  template: string,
+  command: string[],
+): Promise<LiveProcess> {
+  const source = await docker.inspectContainer(template);
+  const image = source.Config?.Image;
+  if (!image) throw new Error('the service container has no image to run from');
+  const host = source.HostConfig ?? {};
+  const name = `tug-run-${Math.random().toString(36).slice(2, 10)}`;
+  const id = await docker.createContainer(name, {
+    Image: image,
+    Env: source.Config?.Env,
+    User: source.Config?.User || undefined,
+    WorkingDir: source.Config?.WorkingDir || undefined,
+    // Bypass the image's entrypoint script, like `docker exec`, so the command is exactly what was typed.
+    Entrypoint: command,
+    Cmd: [],
+    Labels: { [LABEL_JOB]: 'run' },
+    HostConfig: {
+      NetworkMode: host.NetworkMode,
+      ...(host.Binds?.length ? { Binds: host.Binds } : {}),
+      ...(host.Mounts?.length ? { Mounts: host.Mounts } : {}),
+    },
+  });
+  const remove = () => docker.removeContainer(id).catch(() => {});
+  try {
+    await docker.startContainer(id);
+    const logs = await docker.logs(id, { follow: true });
+    let killed = false;
+    const proc = Object.assign(new EventEmitter(), {
+      stdin: null,
+      stdout: logs.stdout,
+      stderr: logs.stderr,
+      kill: () => {
+        killed = true;
+        logs.kill();
+        void remove();
+        return true;
+      },
+    }) as LiveProcess;
+    const drained = (stream: Readable) =>
+      new Promise<void>((resolve) => {
+        if (stream.readableEnded || stream.destroyed) return resolve();
+        stream.once('end', resolve);
+        stream.once('close', resolve);
+      });
+    // The exit code comes from the container, not from the log stream, which only ends once it is consumed.
+    void (async () => {
+      let code = -1;
+      while (!killed) {
+        const state = (await docker.inspectContainer(id).catch(() => undefined))?.State;
+        if (!state) break;
+        if (!state.Running && state.Status !== 'created') {
+          code = state.ExitCode ?? -1;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      if (killed) return;
+      // Give the consumer a moment to read the last output before the container goes away.
+      await Promise.race([
+        Promise.all([drained(logs.stdout), drained(logs.stderr)]),
+        new Promise((resolve) => setTimeout(resolve, 1500)),
+      ]);
+      await remove();
+      proc.emit('close', code, null);
+    })();
+    return proc;
+  } catch (error) {
+    await remove();
+    throw error;
   }
 }

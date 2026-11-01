@@ -8,6 +8,8 @@ import type { ComposeService, DesiredState, ServiceEndpoint } from './protocol.t
 import type { PortBind } from './compose.ts';
 
 export const LABEL_PROJECT = 'tug.project';
+/** Labels helper containers (backup jobs, one-off runs) so a restarted agent can clean up after them. */
+export const LABEL_JOB = 'tug.job';
 export const LABEL_SERVICE = 'tug.service';
 export const LABEL_REVISION = 'tug.revision';
 export const LABEL_HASH = 'tug.config-hash';

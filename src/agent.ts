@@ -12,10 +12,17 @@ import dns from 'node:dns/promises';
 import { WebSocket } from 'ws';
 import { createHash } from 'node:crypto';
 import { addressBoundServices, isRolling, serviceSecretVersions } from './compose.ts';
-import { containerSpecs, networkName, volumeName } from './container-spec.ts';
+import {
+  LABEL_PROJECT,
+  LABEL_SERVICE,
+  containerSpecs,
+  networkName,
+  volumeName,
+} from './container-spec.ts';
 import { API_VERSION, DockerEngine, isNotFound } from './docker-api.ts';
 import type { ContainerSummary, DockerApi } from './docker-api.ts';
 import type { PortBind } from './compose.ts';
+import { JobRunner } from './agent-jobs.ts';
 import { LIVE_MAX_FRAME_BYTES, LIVE_START_TIMEOUT_MS } from './protocol.ts';
 import type {
   AgentLiveCommand,
@@ -56,6 +63,7 @@ import type {
   EnrollResponse,
   HealthCheck,
   IngressStatus,
+  BackupCredentialsResponse,
   JoinKey,
   ProjectStatus,
   ImageArtifact,
@@ -111,6 +119,28 @@ export function defaultContext(): AgentContext {
     caddyImage: process.env.TUG_CADDY_IMAGE,
     rolloutPorts: process.env.TUG_ROLLOUT_PORTS,
   };
+}
+
+const jobRunners = new Map<string, JobRunner>();
+/** One job runner per state directory, so a background backup outlives the polls that started it. */
+function jobRunnerFor(ctx: AgentContext): JobRunner {
+  let runner = jobRunners.get(ctx.stateDir);
+  if (!runner) {
+    runner = new JobRunner({
+      docker: ctx.docker,
+      stateDir: ctx.stateDir,
+      concurrency: Number(process.env.TUG_BACKUP_CONCURRENCY) || 1,
+      fetchCredentials: (commandId) =>
+        api<BackupCredentialsResponse>(
+          ctx,
+          `/agent/v1/backup/credentials?command=${encodeURIComponent(commandId)}`,
+        ),
+    });
+    jobRunners.set(ctx.stateDir, runner);
+    // Clear helper containers a previous agent process left behind, before any live session can start one.
+    void runner.warm();
+  }
+  return runner;
 }
 
 const dbsByStateDir = new Map<string, Db>();
@@ -522,6 +552,7 @@ export class AgentLiveOperations {
           container,
           command: request.command,
           interactive: request.interactive,
+          oneOff: (request as { oneOff?: boolean }).oneOff,
           tty: request.tty,
           columns: request.columns,
           rows: request.rows,
@@ -946,11 +977,20 @@ export async function resolveBindAddress(
 // Last public-port warning per project, so the event is sent when it changes rather than on every poll.
 const publicPortWarnings = new Map<string, string>();
 
+/** Stops every running container of a service, including the revisions of a rolling service. */
+async function stopService(docker: DockerApi, project: string, service: string): Promise<void> {
+  const running = await docker.listContainers({
+    label: [`${LABEL_PROJECT}=${project}`, `${LABEL_SERVICE}=${service}`],
+  });
+  for (const container of running) await docker.stopContainer(container.Id);
+}
+
 export async function reconcile(
   desiredState: DesiredState,
   ctx: AgentContext = defaultContext(),
   endpoints: Record<string, ServiceEndpoint[]> = {},
   ports: PortBinding = { address: null, loopback: {} },
+  held: string[] = [],
 ): Promise<ProjectStatus> {
   const dir = path.join(ctx.stateDir, 'projects', desiredState.project);
   await ensureDir(dir);
@@ -1001,11 +1041,16 @@ export async function reconcile(
     'SELECT version, revision FROM applied_state WHERE project = ?',
     desiredState.project,
   );
-  const rolling = serviceNames.filter((service) =>
-    isRolling(desiredState.compose.services[service]),
+  // A held service is stopped and left alone (a restore is rewriting its data) until control drops the hold.
+  const heldSet = new Set(held.filter((service) => serviceNames.includes(service)));
+  for (const service of heldSet) serviceStates[service].rolloutState = 'held';
+  const rolling = serviceNames.filter(
+    (service) => !heldSet.has(service) && isRolling(desiredState.compose.services[service]),
   );
   const rollingSet = new Set(rolling);
-  const mainServices = serviceNames.filter((service) => !rollingSet.has(service));
+  const mainServices = serviceNames.filter(
+    (service) => !rollingSet.has(service) && !heldSet.has(service),
+  );
   // Published images are pulled only for a new desired revision. Pulling on every poll would let a tag that moved
   // upstream (`mariadb:11`) recreate the container without a deploy.
   const sameDesiredVersion = previousRow
@@ -1089,6 +1134,7 @@ export async function reconcile(
     try {
       await ensureProjectResources(ctx.docker, desiredState.project, plan);
       await sweepOrphans(ctx.docker, desiredState.project, new Set(serviceNames));
+      for (const service of heldSet) await stopService(ctx.docker, desiredState.project, service);
       if (mainServices.length)
         await reconcileRecreate(
           ctx.docker,
@@ -1249,7 +1295,13 @@ export async function pollOnce(ctx: AgentContext = defaultContext()): Promise<Pr
   for (const desired of work.desiredStates || (work.desiredState ? [work.desiredState] : [])) {
     try {
       projects.push(
-        await reconcile(desired, ctx, work.serviceEndpoints?.[desired.project], work.ports),
+        await reconcile(
+          desired,
+          ctx,
+          work.serviceEndpoints?.[desired.project],
+          work.ports,
+          work.holds?.[desired.project],
+        ),
       );
     } catch (e) {
       projects.push({
@@ -1268,7 +1320,13 @@ export async function pollOnce(ctx: AgentContext = defaultContext()): Promise<Pr
     else await removeIngress(ingressCtx).catch(() => false);
   }
   const commandResults: CommandResult[] = [];
+  const jobs = jobRunnerFor(ctx);
   for (const command of work.commands || []) {
+    // Backups can run for an hour, so they run in the background and report through later polls.
+    if (command.type.startsWith('backup.')) {
+      await jobs.start(command);
+      continue;
+    }
     try {
       commandResults.push(await executeCommand(command, ctx));
     } catch (e) {
@@ -1279,7 +1337,11 @@ export async function pollOnce(ctx: AgentContext = defaultContext()): Promise<Pr
       });
     }
   }
+  const jobResults = jobs.pending();
+  commandResults.push(...jobResults);
   const report: StatusReport = { node: ctx.nodeName, projects, commandResults };
+  const running = jobs.statuses();
+  if (running.length) report.jobs = running;
   if (ingress) report.ingress = ingress;
   if (work.retainedImages && projects.every((project) => project.health !== 'failed'))
     await pruneManagedImages(ctx, work.retainedImages);
@@ -1288,6 +1350,7 @@ export async function pollOnce(ctx: AgentContext = defaultContext()): Promise<Pr
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(report),
   });
+  await jobs.acknowledge(jobResults);
   return projects;
 }
 

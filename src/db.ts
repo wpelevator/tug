@@ -88,6 +88,80 @@ export interface NodeStatusRow {
   health: string;
   updated_at: string;
 }
+export interface BackupScheduleRow {
+  id: string;
+  project_id: string;
+  target: string;
+  type: string;
+  node_id: string | null;
+  config_json: string;
+  schedule: string;
+  jitter_seconds: number;
+  next_run_at: string;
+  last_run_at: string | null;
+  last_success_at: string | null;
+  last_status: string | null;
+  stale_notified_at: string | null;
+  deployment_id: string | null;
+  enabled: number;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface BackupRunRow {
+  id: string;
+  schedule_id: string | null;
+  project_id: string;
+  target: string;
+  type: string;
+  node_id: string | null;
+  command_id: string | null;
+  trigger: string;
+  state: string;
+  scheduled_for: string | null;
+  queued_at: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  snapshot_id: string | null;
+  size_bytes: number | null;
+  added_bytes: number | null;
+  duration_ms: number | null;
+  restic_version: string | null;
+  error: string | null;
+  actor: string | null;
+  deployment_version: string | null;
+  metadata_json: string | null;
+}
+
+export interface RestoreRunRow {
+  id: string;
+  project_id: string;
+  target: string;
+  node_id: string | null;
+  snapshot_id: string;
+  mode: 'in-place' | 'scratch';
+  scratch_volume: string | null;
+  safety_backup: number;
+  safety_run_id: string | null;
+  writers_json: string;
+  state: string;
+  command_id: string | null;
+  actor: string | null;
+  started_at: string | null;
+  state_changed_at: string | null;
+  finished_at: string | null;
+  error: string | null;
+}
+
+export interface BackupDestinationRow {
+  id: 'default';
+  url: string;
+  env_names_json: string;
+  checked_at: string | null;
+  check_result_json: string | null;
+  updated_at: string;
+}
+
 export interface SecretRow {
   id: string;
   project_id: string;
@@ -198,6 +272,13 @@ CREATE INDEX IF NOT EXISTS events_project_created ON events(project_id, created_
 CREATE TABLE IF NOT EXISTS api_tokens(id TEXT PRIMARY KEY, name TEXT UNIQUE NOT NULL, token_hash TEXT UNIQUE NOT NULL, role TEXT NOT NULL, projects_json TEXT, created_at TEXT, created_by TEXT, last_used_at TEXT, expires_at TEXT, revoked_at TEXT);
 CREATE INDEX IF NOT EXISTS events_by_time ON events(created_at);
 CREATE TABLE IF NOT EXISTS locks(name TEXT PRIMARY KEY, owner TEXT, expires_at TEXT, created_at TEXT);
+CREATE TABLE IF NOT EXISTS backup_destination(id TEXT PRIMARY KEY CHECK(id='default'), url TEXT NOT NULL, env_names_json TEXT NOT NULL, checked_at TEXT, check_result_json TEXT, updated_at TEXT);
+CREATE TABLE IF NOT EXISTS backup_schedules(id TEXT PRIMARY KEY, project_id TEXT NOT NULL, target TEXT NOT NULL, type TEXT NOT NULL, node_id TEXT, config_json TEXT NOT NULL, schedule TEXT NOT NULL, jitter_seconds INTEGER NOT NULL, next_run_at TEXT NOT NULL, last_run_at TEXT, last_success_at TEXT, last_status TEXT, stale_notified_at TEXT, deployment_id TEXT, enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT, updated_at TEXT, UNIQUE(project_id, target));
+CREATE TABLE IF NOT EXISTS backup_runs(id TEXT PRIMARY KEY, schedule_id TEXT, project_id TEXT NOT NULL, target TEXT NOT NULL, type TEXT NOT NULL, node_id TEXT, command_id TEXT, trigger TEXT NOT NULL, state TEXT NOT NULL, scheduled_for TEXT, queued_at TEXT, started_at TEXT, finished_at TEXT, snapshot_id TEXT, size_bytes INTEGER, added_bytes INTEGER, duration_ms INTEGER, restic_version TEXT, error TEXT, actor TEXT, deployment_version TEXT, metadata_json TEXT);
+CREATE TABLE IF NOT EXISTS restore_runs(id TEXT PRIMARY KEY, project_id TEXT NOT NULL, target TEXT NOT NULL, node_id TEXT, snapshot_id TEXT NOT NULL, mode TEXT NOT NULL, scratch_volume TEXT, safety_backup INTEGER NOT NULL DEFAULT 1, safety_run_id TEXT, writers_json TEXT NOT NULL DEFAULT '[]', state TEXT NOT NULL, command_id TEXT, actor TEXT, started_at TEXT, state_changed_at TEXT, finished_at TEXT, error TEXT);
+CREATE TABLE IF NOT EXISTS service_holds(project_id TEXT NOT NULL, service TEXT NOT NULL, reason TEXT NOT NULL, restore_id TEXT, created_at TEXT, PRIMARY KEY(project_id, service));
+CREATE UNIQUE INDEX IF NOT EXISTS backup_runs_slot ON backup_runs(schedule_id, scheduled_for) WHERE trigger='schedule';
+CREATE INDEX IF NOT EXISTS backup_runs_target ON backup_runs(project_id, target, finished_at);
 `);
   const row = db.get('SELECT value FROM meta WHERE key = ?', 'schema_created_at');
   if (!row) db.run('INSERT INTO meta(key,value) VALUES(?,?)', 'schema_created_at', now());

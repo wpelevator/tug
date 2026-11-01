@@ -1,27 +1,34 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { defaultJitterSeconds, parseBackupTimeout, resolveBackups } from './backup-config.ts';
+import {
+  commandArgv,
+  defaultJitterSeconds,
+  parseBackupTimeout,
+  resolveBackups,
+} from './backup-config.ts';
 import { validateCompose } from './compose.ts';
 import { normalized } from '../tests/fake-docker.ts';
 import type { ComposeFile } from './protocol.ts';
 
-/** A WordPress site: MariaDB with a dump backup, uploads on a volume pinned to `app1`. */
+/** A site: one service backed up by a command, and uploads backed up as files. Nothing here is specific to a database. */
 function site(overrides: Record<string, unknown> = {}): ComposeFile {
   return normalized({
     'x-tug': { backup: { schedule: '0 3 * * *', retention: { daily: 7 } } },
     services: {
       db: {
         image: 'mariadb:11.4',
-        environment: {
-          MARIADB_DATABASE: 'wordpress',
-          MARIADB_ROOT_PASSWORD: '${DB_ROOT_PASSWORD}',
-        },
         volumes: ['db-data:/var/lib/mysql'],
-        'x-tug': { placement: { nodes: ['app1'] }, backup: true },
+        'x-tug': {
+          placement: { nodes: ['app1'] },
+          backup: {
+            command: 'mariadb-dump -u root -p"$MARIADB_ROOT_PASSWORD" --databases wordpress',
+            filename: 'wordpress.sql',
+            verify: '-- Dump completed',
+          },
+        },
       },
       web: {
         image: 'wordpress:6',
-        depends_on: { db: { condition: 'service_started' } },
         volumes: ['uploads:/var/www/html/wp-content/uploads'],
         'x-tug': { placement: { nodes: ['app1'] } },
       },
@@ -35,67 +42,74 @@ function site(overrides: Record<string, unknown> = {}): ComposeFile {
 }
 
 const errorsOf = (compose: ComposeFile) => resolveBackups(compose, 'site').errors;
+const backupOf = (compose: ComposeFile) =>
+  compose.services.db['x-tug']!.backup as Record<string, unknown>;
 
-test('a database service and a pinned volume resolve with defaults, inferred type and node', () => {
+test('a service resolves to its command and a volume to its files, with project defaults', () => {
   const { targets, errors } = resolveBackups(site(), 'site');
   assert.deepEqual(errors, [], 'a valid site should have no backup errors');
   const db = targets.find((t) => t.target === 'service:db');
-  assert.equal(db?.type, 'mariadb', 'the type is inferred from the mariadb image');
-  assert.deepEqual(db?.databases, ['wordpress'], 'databases default to MARIADB_DATABASE');
-  assert.equal(db?.user, 'root', 'the user defaults to root');
-  assert.equal(
-    db?.passwordSecret,
-    'MARIADB_ROOT_PASSWORD',
-    'the password secret defaults to the root password variable',
+  assert.equal(db?.type, 'command', 'a service backup stores command output');
+  assert.deepEqual(
+    db?.command,
+    ['sh', '-c', 'mariadb-dump -u root -p"$MARIADB_ROOT_PASSWORD" --databases wordpress'],
+    'a string command runs through sh -c in the service container',
   );
+  assert.equal(db?.filename, 'wordpress.sql');
+  assert.equal(db?.verify, '-- Dump completed');
   assert.equal(db?.schedule, '0 3 * * *', 'the project schedule is the default');
   assert.deepEqual(db?.retention, { daily: 7 }, 'the project retention is the default');
   assert.equal(db?.timeoutSec, 7200, 'the timeout defaults to two hours');
   assert.equal(db?.node, 'app1', 'a literal single placement is the backup node');
   const uploads = targets.find((t) => t.target === 'volume:uploads');
-  assert.equal(uploads?.type, 'volume', 'volumes use the volume type');
+  assert.equal(uploads?.type, 'volume', 'volumes store their files');
   assert.equal(uploads?.node, 'app1', 'a volume is backed up on its placement node');
+});
+
+test('the filename defaults to the service name and a list command is used as written', () => {
+  const compose = site();
+  backupOf(compose).command = ['pg_dump', '-U', 'app', 'appdb'];
+  delete backupOf(compose).filename;
+  delete backupOf(compose).verify;
+  const db = resolveBackups(compose, 'site').targets.find((t) => t.name === 'db');
+  assert.deepEqual(db?.command, ['pg_dump', '-U', 'app', 'appdb']);
+  assert.equal(db?.filename, 'db.out');
+  assert.equal(db?.verify, undefined, 'verification is optional');
 });
 
 test('without project defaults the retention falls back to 7 daily, 4 weekly and 6 monthly', () => {
   const compose = site();
   delete compose['x-tug'];
-  compose.services.db['x-tug']!.backup = '@daily';
+  backupOf(compose).schedule = '@daily';
   const db = resolveBackups(compose, 'site').targets.find((t) => t.name === 'db');
   assert.deepEqual(
     db?.retention,
     { daily: 7, weekly: 4, monthly: 6 },
     'built-in retention applies',
   );
-  assert.equal(db?.schedule, '@daily', 'a string is the schedule');
+  assert.equal(db?.schedule, '@daily');
 });
 
-test('mysql and percona images infer the mysql type and the MySQL variables', () => {
+test('a cron string on a volume is its schedule and false disables a target', () => {
   const compose = site();
-  compose.services.db.image = 'docker.io/percona/percona-server:8.0@sha256:abc';
-  delete compose.services.db.environment;
-  compose.services.db.environment = { MYSQL_DATABASE: 'blog' };
-  compose.services.db['x-tug']!.backup = { type: 'mysql' };
-  const db = resolveBackups(compose, 'site').targets.find((t) => t.name === 'db');
-  assert.equal(db?.passwordSecret, 'MYSQL_ROOT_PASSWORD', 'mysql uses MYSQL_ROOT_PASSWORD');
-  assert.deepEqual(db?.databases, ['blog'], 'databases come from MYSQL_DATABASE');
-  const inferred = site();
-  inferred.services.db.image = 'mysql:8';
+  compose.volumes!.uploads['x-tug']!.backup = '30 4 * * *';
   assert.equal(
-    resolveBackups(inferred, 'site').targets.find((t) => t.name === 'db')?.type,
-    'mysql',
+    resolveBackups(compose, 'site').targets.find((t) => t.name === 'uploads')?.schedule,
+    '30 4 * * *',
   );
+  compose.volumes!.uploads['x-tug']!.backup = false;
+  compose.services.db['x-tug']!.backup = false;
+  assert.deepEqual(resolveBackups(compose, 'site'), { targets: [], errors: [] });
 });
 
-test('false disables a target and leaves no schedule', () => {
+test('a service backup needs an explicit command: Tug does not guess what a service is', () => {
   const compose = site();
-  compose.services.db['x-tug']!.backup = false;
-  compose.volumes!.uploads['x-tug']!.backup = false;
-  assert.deepEqual(
-    resolveBackups(compose, 'site'),
-    { targets: [], errors: [] },
-    'false should opt out quietly',
-  );
+  compose.services.db['x-tug']!.backup = true;
+  assert.match(errorsOf(compose).join('; '), /db: x-tug\.backup\.command is required/);
+  compose.services.db['x-tug']!.backup = { command: '' };
+  assert.match(errorsOf(compose).join('; '), /command must be a non-empty string or list/);
+  compose.services.db['x-tug']!.backup = { command: [] };
+  assert.match(errorsOf(compose).join('; '), /command must be a non-empty string or list/);
 });
 
 test('a target without a schedule and without a project default is rejected', () => {
@@ -107,6 +121,7 @@ test('a target without a schedule and without a project default is rejected', ()
 test('unknown keys, bad crons, empty retention, bad jitter and bad timeout are each rejected', () => {
   const cases: [Record<string, unknown>, RegExp][] = [
     [{ colour: 'red' }, /x-tug\.backup\.colour is not supported/],
+    [{ type: 'mariadb' }, /x-tug\.backup\.type is not supported/],
     [{ schedule: '61 * * * *' }, /x-tug\.backup\.schedule: minute 61/],
     [{ retention: {} }, /retention is empty/],
     [{ retention: { daily: 0 } }, /retention\.daily must be a whole number of at least 1/],
@@ -115,14 +130,17 @@ test('unknown keys, bad crons, empty retention, bad jitter and bad timeout are e
     [{ timeout: '10s' }, /timeout must be a duration from 1m to 24h/],
     [{ timeout: '48h' }, /timeout must be a duration from 1m to 24h/],
     [{ timeout: 'soon' }, /timeout must be a duration from 1m to 24h/],
+    [{ filename: '../etc/passwd' }, /filename must be a plain file name/],
+    [{ verify: '' }, /verify must be text that appears at the end of the output/],
+    [{ exclude: ['cache/'] }, /exclude is not supported on a service/],
   ];
-  for (const [spec, message] of cases) {
+  for (const [change, message] of cases) {
     const compose = site();
-    compose.services.db['x-tug']!.backup = spec as never;
+    Object.assign(backupOf(compose), change);
     assert.match(
       errorsOf(compose).join('; '),
       message,
-      `${JSON.stringify(spec)} should be rejected`,
+      `${JSON.stringify(change)} should be rejected`,
     );
   }
 });
@@ -135,26 +153,6 @@ test('project defaults reject unknown keys and bad values', () => {
   assert.throws(() => validateCompose(compose), /x-tug\.backup\.retention is empty/);
 });
 
-test('a database image that cannot be inferred needs an explicit type, and a volume type is refused on a service', () => {
-  const compose = site();
-  compose.services.db.image = 'ghcr.io/acme/custom-db:1';
-  assert.match(errorsOf(compose).join('; '), /db: x-tug\.backup\.type is required/);
-  compose.services.db['x-tug']!.backup = { type: 'volume' };
-  assert.match(errorsOf(compose).join('; '), /type volume is declared on the top-level volume/);
-});
-
-test('database targets need database names, a password secret and no volume-only options', () => {
-  const noDb = site();
-  delete noDb.services.db.environment;
-  assert.match(errorsOf(noDb).join('; '), /db: x-tug\.backup\.databases must list database names/);
-  const user = site();
-  user.services.db['x-tug']!.backup = { user: 'backup' };
-  assert.match(errorsOf(user).join('; '), /password is required when user is not root/);
-  const exclude = site();
-  exclude.services.db['x-tug']!.backup = { exclude: ['cache/'] };
-  assert.match(errorsOf(exclude).join('; '), /exclude only applies to volume backups/);
-});
-
 test('a service backup must be a single instance', () => {
   const cases: [Record<string, unknown>, string][] = [
     [{ global: true }, 'global'],
@@ -163,7 +161,7 @@ test('a service backup must be a single instance', () => {
   ];
   for (const [change, label] of cases) {
     const compose = site();
-    Object.assign(compose.services.db['x-tug']!, { backup: true }, change);
+    Object.assign(compose.services.db['x-tug']!, change);
     assert.match(
       errorsOf(compose).join('; '),
       /needs a single instance/,
@@ -179,16 +177,16 @@ test('a service placed by label is accepted and left without a literal node', ()
   assert.equal(db?.node, undefined, 'label placement resolves at deploy time');
 });
 
-test('volume options: service-only keys, wrong type and bad excludes are rejected', () => {
+test('volume options: command keys and bad excludes are rejected', () => {
   const compose = site();
   compose.volumes!.uploads['x-tug']!.backup = {
-    databases: ['x'],
-    type: 'mariadb',
+    command: 'tar c /data',
+    filename: 'x.tar',
     exclude: [''],
   } as never;
   const message = errorsOf(compose).join('; ');
-  assert.match(message, /type must be volume for a volume/);
-  assert.match(message, /databases only applies to database service backups/);
+  assert.match(message, /command is not supported on a volume; a volume backup archives its files/);
+  assert.match(message, /filename is not supported on a volume/);
   assert.match(message, /exclude must be a list of restic exclude patterns/);
 });
 
@@ -220,29 +218,31 @@ test('a volume whose services are placed by label needs an explicit pin', () => 
   assert.match(errorsOf(compose).join('; '), /needs x-tug\.placement\.nodes on volume shared/);
 });
 
-test('a raw copy of the volume holding a backed-up database is rejected', () => {
+test('a volume and a command backup may cover the same data: Tug does not second-guess the operator', () => {
   const compose = site();
   compose.volumes!['db-data'] = { 'x-tug': { backup: true } };
-  assert.match(
-    errorsOf(compose).join('; '),
-    /volume db-data holds the data of db, which has its own database backup/,
-  );
+  assert.deepEqual(errorsOf(compose), [], 'no service-specific rule rejects this');
 });
 
 test('writers must name services', () => {
   const compose = site();
-  compose.services.db['x-tug']!.backup = { writers: ['web', 'ghost'] };
+  Object.assign(backupOf(compose), { writers: ['web', 'ghost'] });
   assert.match(errorsOf(compose).join('; '), /writers: ghost is not a service/);
 });
 
 test('validateCompose reports backup errors with the rest of the file', () => {
   const compose = site();
-  compose.services.db['x-tug']!.backup = { schedule: 'x' };
+  Object.assign(backupOf(compose), { schedule: 'x' });
   assert.throws(() => validateCompose(compose), /db: x-tug\.backup\.schedule/);
-  assert.doesNotThrow(
-    () => validateCompose(site()),
-    'a valid backup configuration should pass validation',
-  );
+  assert.doesNotThrow(() => validateCompose(site()), 'a valid backup configuration should pass');
+});
+
+test('commands normalize to an argv', () => {
+  assert.deepEqual(commandArgv('echo hi'), ['sh', '-c', 'echo hi']);
+  assert.deepEqual(commandArgv(['a', 'b']), ['a', 'b']);
+  assert.equal(commandArgv('  '), null);
+  assert.equal(commandArgv(['a', '']), null);
+  assert.equal(commandArgv(42), null);
 });
 
 test('timeouts parse seconds, minutes and hours and reject everything else', () => {

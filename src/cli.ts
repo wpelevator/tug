@@ -91,6 +91,11 @@ async function loadCfg(): Promise<NonNullable<typeof resolvedConfig>> {
   return resolvedConfig!;
 }
 const collect = (v: string, a: string[]): string[] => [...a, v];
+async function readStdin(): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
+  return Buffer.concat(chunks).toString('utf8');
+}
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function request<T = any>(
   method: string,
@@ -639,6 +644,322 @@ program
     ),
   );
 
+interface BackupRunRecord {
+  id: string;
+  target: string;
+  node_id: string | null;
+  trigger: string;
+  state: string;
+  snapshot_id: string | null;
+  size_bytes: number | null;
+  added_bytes: number | null;
+  finished_at: string | null;
+  queued_at: string | null;
+  error: string | null;
+}
+interface BackupListing {
+  destinationConfigured: boolean;
+  targets: {
+    target: string;
+    node: string | null;
+    schedule: string;
+    enabled: boolean;
+    nextRunAt: string;
+    lastSuccessAt: string | null;
+    lastStatus: string | null;
+  }[];
+  runs: BackupRunRecord[];
+}
+const formatBytes = (bytes: number | null): string =>
+  bytes === null
+    ? '-'
+    : bytes < 1024 ** 2
+      ? `${Math.ceil(bytes / 1024)} KiB`
+      : `${(bytes / 1024 ** 2).toFixed(1)} MiB`;
+const BACKUP_TERMINAL = ['succeeded', 'failed', 'missed', 'cancelled'];
+
+program
+  .command('backup-run [targets...]')
+  .description(
+    'back up the named services or volumes now, or every backup target of the project; waits and exits nonzero if any backup fails',
+  )
+  .option('--no-wait', 'return once the backups are queued')
+  .option('--timeout <seconds>', 'give up waiting after this many seconds', '3600')
+  .action(async (targets: string[], o: { wait: boolean; timeout: string }) => {
+    const project = (await loadCfg()).project || 'site';
+    const queued = await request<{ runs: { runId: string; target: string }[]; errors: string[] }>(
+      'POST',
+      '/api/v1/backups/run',
+      { project, targets: targets.length ? targets : undefined },
+    );
+    for (const message of queued.errors) console.error(message);
+    for (const run of queued.runs) console.log(`queued ${run.target} as ${run.runId}`);
+    let failed = queued.errors.length > 0;
+    if (o.wait) {
+      const deadline = Date.now() + Number(o.timeout) * 1000;
+      const pending = new Set(queued.runs.map((run) => run.runId));
+      while (pending.size && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        const listing = await request<BackupListing>(
+          'GET',
+          `/api/v1/backups?project=${encodeURIComponent(project)}&limit=200`,
+        );
+        for (const run of listing.runs)
+          if (pending.has(run.id) && BACKUP_TERMINAL.includes(run.state)) {
+            pending.delete(run.id);
+            const ok = run.state === 'succeeded';
+            failed ||= !ok;
+            console.log(
+              ok
+                ? `${run.target}: snapshot ${run.snapshot_id?.slice(0, 8)}, ${formatBytes(run.added_bytes)} added`
+                : `${run.target}: ${run.state}${run.error ? ` (${run.error})` : ''}`,
+            );
+          }
+      }
+      if (pending.size) {
+        console.error(
+          `timed out waiting for ${pending.size} backup(s); they keep running on the node`,
+        );
+        failed = true;
+      }
+    }
+    if (failed) process.exitCode = 1;
+  });
+program
+  .command('backup-list')
+  .description('show each backup target with its last success and next run, then recent runs')
+  .option('--limit <n>', 'number of recent runs to show', '20')
+  .action(async (o: { limit: string }) => {
+    const project = (await loadCfg()).project || 'site';
+    const listing = await request<BackupListing>(
+      'GET',
+      `/api/v1/backups?project=${encodeURIComponent(project)}&limit=${encodeURIComponent(o.limit)}`,
+    );
+    if (!listing.destinationConfigured)
+      console.error('no backup destination is configured; run tug backup-destination-set');
+    if (!listing.targets.length)
+      console.log('no backup targets; add x-tug.backup to a database service or volume');
+    for (const t of listing.targets)
+      console.log(
+        `${t.target}\t${t.node ?? '-'}\t${t.schedule}\tlast success ${t.lastSuccessAt ?? 'never'}\tnext ${t.enabled ? t.nextRunAt : 'disabled'}`,
+      );
+    for (const r of listing.runs)
+      console.log(
+        `${r.finished_at ?? r.queued_at}\t${r.target}\t${r.trigger}\t${r.state}\t${r.snapshot_id?.slice(0, 8) ?? '-'}\t${formatBytes(r.size_bytes)}${r.error ? `\t${r.error}` : ''}`,
+      );
+  });
+interface RestorePlanView {
+  target: string;
+  node: string;
+  snapshotId: string;
+  snapshotTime: string | null;
+  mode: string;
+  scratchVolume?: string;
+  writers: string[];
+  safetyBackup: boolean;
+}
+interface RestoreRecord {
+  id: string;
+  target: string;
+  state: string;
+  mode: string;
+  snapshot_id: string;
+  scratch_volume: string | null;
+  error: string | null;
+  started_at: string | null;
+}
+
+program
+  .command('restore <target>')
+  .description(
+    'restore a service or volume from a backup. Without --confirm it only prints the plan. An in-place restore locks the project, stops the services that write to the target, takes a safety backup, restores, then starts them again',
+  )
+  .option('--from <id>', 'backup run id, restic snapshot id, or latest', 'latest')
+  .option(
+    '--scratch',
+    'restore a volume into a new volume next to the live one, touching nothing live',
+  )
+  .option(
+    '--no-safety-backup',
+    'skip the backup of the current data taken before an in-place restore',
+  )
+  .option(
+    '--writers <service>',
+    'service to stop during the restore, instead of discovering them (repeatable)',
+    collect,
+    [],
+  )
+  .option('--no-writers', 'restore without stopping any service')
+  .option('--confirm', 'perform the restore')
+  .option('--timeout <seconds>', 'give up waiting after this many seconds', '3600')
+  .action(
+    async (
+      target: string,
+      o: {
+        from: string;
+        scratch?: boolean;
+        safetyBackup: boolean;
+        writers: string[] | false;
+        confirm?: boolean;
+        timeout: string;
+      },
+    ) => {
+      const project = (await loadCfg()).project || 'site';
+      const explicit = Array.isArray(o.writers) && o.writers.length > 0 ? o.writers : undefined;
+      const result = await request<{
+        confirmed: boolean;
+        plan: RestorePlanView;
+        restoreId?: string;
+      }>('POST', '/api/v1/restores', {
+        project,
+        target,
+        from: o.from,
+        scratch: o.scratch === true,
+        safetyBackup: o.safetyBackup,
+        writers: explicit,
+        noWriters: o.writers === false,
+        confirm: o.confirm === true,
+      });
+      const plan = result.plan;
+      console.log(`target:   ${plan.target} on ${plan.node}`);
+      console.log(
+        `snapshot: ${plan.snapshotId}${plan.snapshotTime ? ` (${plan.snapshotTime})` : ''}`,
+      );
+      console.log(
+        `mode:     ${plan.mode}${plan.scratchVolume ? ` into new volume ${plan.scratchVolume}` : ''}`,
+      );
+      if (plan.mode === 'in-place') {
+        console.log(`stops:    ${plan.writers.length ? plan.writers.join(', ') : 'nothing'}`);
+        console.log(
+          `safety:   ${plan.safetyBackup ? 'a backup of the current data is taken first' : 'none (--no-safety-backup)'}`,
+        );
+      }
+      if (!result.confirmed) {
+        console.log('\nNothing was changed. Run again with --confirm to restore.');
+        return;
+      }
+      const deadline = Date.now() + Number(o.timeout) * 1000;
+      for (;;) {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        const { restores } = await request<{ restores: RestoreRecord[] }>(
+          'GET',
+          `/api/v1/restores?project=${encodeURIComponent(project)}`,
+        );
+        const restore = restores.find((item) => item.id === result.restoreId);
+        if (restore?.state === 'succeeded') {
+          console.log(
+            `restore ${restore.id} completed${restore.scratch_volume ? `; files are in volume ${restore.scratch_volume}` : ''}`,
+          );
+          return;
+        }
+        if (restore && ['failed', 'interrupted', 'released'].includes(restore.state)) {
+          console.error(`restore ${restore.id} ${restore.state}: ${restore.error ?? ''}`);
+          if (restore.state === 'interrupted')
+            console.error(
+              `the services stay stopped; run tug restore-resume ${restore.id} to try again or tug restore-release ${restore.id} to start them (data may be partly restored)`,
+            );
+          process.exitCode = 1;
+          return;
+        }
+        if (Date.now() > deadline) {
+          console.error(
+            `timed out waiting; restore ${result.restoreId} continues on control (tug restore-list)`,
+          );
+          process.exitCode = 1;
+          return;
+        }
+      }
+    },
+  );
+program
+  .command('restore-list')
+  .description('show recent restores and their state')
+  .action(async () => {
+    const project = (await loadCfg()).project || 'site';
+    const { restores } = await request<{ restores: RestoreRecord[] }>(
+      'GET',
+      `/api/v1/restores?project=${encodeURIComponent(project)}`,
+    );
+    if (!restores.length) console.log('no restores');
+    for (const r of restores)
+      console.log(
+        `${r.started_at}\t${r.id}\t${r.target}\t${r.mode}\t${r.state}\t${r.snapshot_id.slice(0, 8)}${r.error ? `\t${r.error}` : ''}`,
+      );
+  });
+program
+  .command('restore-resume <id>')
+  .description('run an interrupted restore again; the stopped services stay stopped meanwhile')
+  .action(async (id: string) =>
+    console.log(
+      JSON.stringify(await request('POST', `/api/v1/restores/${encodeURIComponent(id)}/resume`)),
+    ),
+  );
+program
+  .command('restore-release <id>')
+  .description(
+    'start the services an interrupted restore stopped and unlock the project; the data may be partly restored',
+  )
+  .action(async (id: string) =>
+    console.log(
+      JSON.stringify(await request('POST', `/api/v1/restores/${encodeURIComponent(id)}/release`)),
+    ),
+  );
+program
+  .command('backup-destination-set <url>')
+  .description(
+    'set where backups go, such as s3:https://s3.example.com/bucket/tug-backups; credentials are stored encrypted on control',
+  )
+  .option(
+    '--env <name>',
+    'credential variable for the backend, such as AWS_ACCESS_KEY_ID (repeatable); each value is read from the variable of that name in your environment, else from a line on stdin',
+    collect,
+    [],
+  )
+  .action(async (url: string, o: { env: string[] }) => {
+    const missing = o.env.filter((name) => process.env[name] === undefined);
+    const lines = missing.length
+      ? (await readStdin()).split(/\r?\n/).filter((line) => line.length > 0)
+      : [];
+    if (lines.length < missing.length)
+      throw new Error(`expected a value on stdin for ${missing.slice(lines.length).join(', ')}`);
+    const env = Object.fromEntries(
+      o.env.map((name) => [name, process.env[name] ?? lines[missing.indexOf(name)]]),
+    );
+    console.log(JSON.stringify(await request('POST', '/api/v1/backup/destination', { url, env })));
+  });
+program
+  .command('backup-destination-show')
+  .description(
+    'show the backup destination and the names of its credential variables, never values',
+  )
+  .action(async () =>
+    console.log(JSON.stringify(await request('GET', '/api/v1/backup/destination'), null, 2)),
+  );
+program
+  .command('backup-destination-remove')
+  .description(
+    'remove the backup destination and its stored credentials; existing backups stay in the repository',
+  )
+  .action(async () =>
+    console.log(JSON.stringify(await request('DELETE', '/api/v1/backup/destination'))),
+  );
+program
+  .command('backup-key')
+  .description(
+    "print the project's repository and its password for offline escrow; anyone holding the password and destination credentials can read the project's backups",
+  )
+  .action(async () => {
+    const c = await loadCfg();
+    const project = c.project || 'site';
+    console.log(
+      JSON.stringify(
+        await request('GET', `/api/v1/backup/key?project=${encodeURIComponent(project)}`),
+        null,
+        2,
+      ),
+    );
+  });
+
 program
   .command('token-create <name>')
   .description(
@@ -954,6 +1275,17 @@ program
       await runLive('exec', { service, command, ...o });
     },
   );
+program
+  .command('run <service> [command...]')
+  .description(
+    "run a one-off command in a new container from the service: same image, environment, secrets, network and mounts, removed afterwards (for example: tug run web -- wp core update-db). Exits with the command's exit code",
+  )
+  .option('--node <name>', 'select the node when a service has multiple placements')
+  .action(async (service: string, command: string[], o: { node?: string }) => {
+    if (!command.length)
+      throw new Error('run needs a command, such as: tug run web -- wp core update-db');
+    await runLive('exec', { service, command, node: o.node, oneOff: true });
+  });
 program
   .command('ps')
   .description('print per-container state as JSON')

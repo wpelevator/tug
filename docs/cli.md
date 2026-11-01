@@ -82,6 +82,19 @@ Node installation and enrollment require an HTTPS control URL unless `--http-onl
 - `tug secret-list` lists names and versions, without values.
 - `tug secret-remove <name>` deletes a secret.
 
+## Backups
+
+Backup commands are flat like the rest of the CLI, and need an admin token.
+
+- `tug backup-destination-set <url> [--env NAME ...]` sets where backups go, for example `s3:https://s3.example.com/bucket/tug-backups` with `--env AWS_ACCESS_KEY_ID --env AWS_SECRET_ACCESS_KEY`. Each value is read from the environment variable of that name, otherwise from a line on stdin; it is never a command-line argument. S3 needs both AWS variables. Values are stored encrypted on control and released only to a node running a backup. An absolute path is accepted for development, but it is read on each node and is not shared. Setting a destination replaces the previous one.
+- `tug backup-run [targets...] [--no-wait] [--timeout <seconds>]` backs up the named services or volumes now, or every backup target of the project, and waits for the result. It exits nonzero if any backup fails or is missed. Needs the `deploy` role.
+- `tug backup-list [--limit <n>]` shows each backup target with its node, schedule, last success and next run, then the most recent runs. Needs the `read` role.
+- `tug restore <target> [--from <id|latest>] [--scratch] [--no-safety-backup] [--writers <service>...] [--no-writers] [--confirm]` restores a service or volume. Without `--confirm` it prints the plan and changes nothing. `--from` takes a backup run id, a restic snapshot id or `latest`. See [Restore](backups.md#restore). Needs an admin token.
+- `tug restore-list` shows recent restores; `tug restore-resume <id>` runs an interrupted one again; `tug restore-release <id>` starts the services it stopped and unlocks the project.
+- `tug backup-destination-show` prints the URL and the variable names, never values.
+- `tug backup-destination-remove` removes the destination and its credentials. Existing backups stay in the repository.
+- `tug backup-key` prints the project's repository and its password. Each project has its own restic repository at `<destination>/<project>` with a password derived from control's master key, so keep the printed password with the destination credentials: losing the master key loses every repository.
+
 These operations use the resolved project.
 
 ## Deployments
@@ -110,7 +123,8 @@ Use a created token anywhere `TUG_TOKEN` works, for example `TUG_TOKEN=tug_tok_.
 
 - `tug restart <service> [--timeout <seconds>]` restarts a service and waits for the result; timeout defaults to `60` seconds.
 - `tug scale <service> <replicas>` changes how many matching nodes run a service, spreading by count over nodes that carry the service's `placement.labels` (all nodes without labels), and updates the current desired state without a new deployment. `global` services run on every matching node and are scaled to that set. The next `deploy` re-resolves placement from the Compose file.
-- `tug exec <service> [-i, --interactive] [-t, --tty] [--node <name>] [-- <command> ...]` executes a command in the current service container, defaulting to `sh`. Arguments are passed directly without a shell. `-i` forwards stdin. `-t` requires a local terminal but currently fails explicitly because the agent runtime has no PTY backend; use non-TTY `-i` for interactive programs until PTY support lands. Use `--node` when a service has more than one placement.
+- `tug exec <service> [-i, --interactive] [-t, --tty] [--node <name>] [-- <command> ...]` executes a command in the current service container, defaulting to `sh`. Arguments are passed directly without a shell. `-i` forwards stdin. `-t` allocates a terminal (with resize) and requires a local terminal. Use `--node` when a service has more than one placement.
+- `tug run <service> [--node <name>] -- <command> ...` runs a one-off command in a new container instead of the running one: the service's image, environment (secrets included), user, working directory, network and volume mounts, no published ports, removed when it ends. It is for jobs that should not run inside the live container, such as `tug run web -- wp core update-db`. It is non-interactive, exits with the command's exit code, needs the `deploy` role and is recorded as a `job.run` event with its command line. Mounts are shared with the service, so a destructive command is the operator's responsibility; the one-off container does not take the project lock.
 - `tug logs <service> [--tail <n>] [-f, --follow] [--node <name>]` fetches recent service logs through the durable command queue, or follows them live with `-f`; the default is `200` lines. `--node` applies to followed logs and is required when the service has more than one eligible node.
 - `tug ps [--node <name>]` prints live per-container state as JSON. Without `--node`, the project must resolve to exactly one eligible connected node.
 - `tug inspect <service> [--node <name>]` prints the live Docker inspection object as JSON. It can include container environment variables, so it requires the `deploy` role and should be handled as sensitive output. Use `--node` when a service has more than one placement.

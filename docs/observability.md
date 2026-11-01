@@ -172,7 +172,7 @@ Outbound webhooks (M8) are the lightweight alternative for operators without Pro
 
 Status: non-TTY container commands built in M5; agent/daemon logs and `top` remain proposed.
 
-`tug logs <service>` keeps its durable tail through the command queue, while `-f` follows the current container over the live channel. `tug exec`, `tug ps` and `tug inspect <service>` use that channel too; true TTY allocation remains pending a PTY-capable agent adapter. Agent and daemon log streams are still proposed for troubleshooting. These commands answer what is happening right now on a node and complement metrics, which answer what has been happening. An optional `tug top` would render the agent-reported stats as a refreshing table of CPU, memory and restarts per service, reading `GET /metrics` or a read-only JSON view rather than a new data path.
+`tug logs <service>` keeps its durable tail through the command queue, while `-f` follows the current container over the live channel. `tug exec`, `tug run`, `tug ps` and `tug inspect <service>` use that channel too. Agent and daemon log streams are still proposed for troubleshooting. These commands answer what is happening right now on a node and complement metrics, which answer what has been happening. An optional `tug top` would render the agent-reported stats as a refreshing table of CPU, memory and restarts per service, reading `GET /metrics` or a read-only JSON view rather than a new data path.
 
 ### Test gate
 

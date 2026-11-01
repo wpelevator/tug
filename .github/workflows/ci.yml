@@ -51,6 +51,15 @@ jobs:
       - run: npm run test:smoke:image
       - run: npm run test:integration
 
+  integration-backups:
+    name: Integration (backups and one-off runs)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+      - run: npm run test:integration:backups
+
   integration-network:
     name: Integration (WireGuard mesh)
     runs-on: ubuntu-latest

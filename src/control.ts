@@ -22,6 +22,7 @@ import * as tar from 'tar';
 import { openDb, openSnapshotDb } from './db.ts';
 import { isUniqueViolation } from './db-driver.ts';
 import type {
+  BackupDestinationRow,
   CommandRow,
   DeploymentRow,
   DesiredStateRow,
@@ -61,7 +62,18 @@ import {
   LIVE_MAX_BUFFERED_BYTES,
   LIVE_MAX_SESSIONS,
   LIVE_START_TIMEOUT_MS,
+  BACKUP_COMMAND_TYPES,
 } from './protocol.ts';
+import {
+  BACKUP_SECRET_PROJECT,
+  isReservedProject,
+  parseBackupDestination,
+  projectRepository,
+  repositoryPassword,
+  redactSecrets,
+} from './backup-destination.ts';
+import { createBackupService } from './backup-scheduler.ts';
+import { createRestoreService } from './backup-restore.ts';
 import {
   AUTO_ROLLBACK_ACTOR,
   ROUTE_ROLES,
@@ -80,6 +92,7 @@ import {
 } from './tokens.ts';
 import type { Actor, ProjectResolver, RouteRole } from './tokens.ts';
 import type {
+  BackupCredentialsResponse,
   LiveRequest,
   LiveInput,
   OperatorLiveMessage,
@@ -220,7 +233,18 @@ function parseLiveRequest(value: unknown): LiveRequest {
     return value as unknown as LiveRequest;
   if (
     value.operation === 'exec' &&
-    frameKeys(value, [...common, 'service', 'command', 'interactive', 'tty', 'columns', 'rows']) &&
+    frameKeys(value, [
+      ...common,
+      'service',
+      'command',
+      'interactive',
+      'tty',
+      'columns',
+      'rows',
+      'oneOff',
+    ]) &&
+    (value.oneOff === undefined || value.oneOff === true) &&
+    (value.oneOff !== true || (value.interactive === false && value.tty === false)) &&
     Array.isArray(value.command) &&
     value.command.length > 0 &&
     value.command.length <= 256 &&
@@ -977,6 +1001,17 @@ export async function createApp(
       throw httpError(400, 'operation requires --node because placement is ambiguous');
     const node = nodes.find((node) => node.name === (request.node || [...eligible][0]));
     if (!node) throw httpError(404, 'no eligible node for this operation');
+    if (request.operation === 'exec' && request.oneOff)
+      audit(actor, {
+        type: 'job.run',
+        project: request.project,
+        message: `${actor.name} ran a one-off ${request.service} container on ${node.name}: ${request.command.join(' ').slice(0, 200)}`,
+        metadata: {
+          service: request.service,
+          node: node.name,
+          command: request.command.slice(0, 64),
+        },
+      });
     return node;
   }, options.liveStartTimeoutMs);
   streamRuntimes.set(app, {
@@ -1335,6 +1370,7 @@ export async function createApp(
     projectId: string | null,
     type: CommandType,
     payload: Record<string, unknown> = {},
+    deadline: string | null = null,
   ): string {
     const commandId = id('cmd');
     const ts = now();
@@ -1348,7 +1384,7 @@ export async function createApp(
       JSON.stringify(payload),
       0,
       ts,
-      null,
+      deadline,
       ts,
       ts,
     );
@@ -1452,8 +1488,207 @@ export async function createApp(
     res.json({ ok: true, name: req.params.name });
   });
 
+  const backupDestination = () =>
+    db.get<BackupDestinationRow>("SELECT * FROM backup_destination WHERE id='default'");
+  const backupEnv = (): Record<string, string> => {
+    const row = backupDestination();
+    if (!row) return {};
+    const env: Record<string, string> = {};
+    for (const name of JSON.parse(row.env_names_json) as string[]) {
+      const secret = db.get<Pick<SecretRow, 'encrypted_value'>>(
+        'SELECT encrypted_value FROM secrets WHERE project_id=? AND name=?',
+        BACKUP_SECRET_PROJECT,
+        name,
+      );
+      if (secret) env[name] = decrypt(secret.encrypted_value, masterKey);
+    }
+    return env;
+  };
+  const backups = createBackupService({
+    db,
+    queueCommand,
+    resticImage: process.env.TUG_RESTIC_IMAGE,
+    // Defensive: the agent already redacts, but a stored error must never carry a destination credential.
+    redact: (text) => redactSecrets(text, Object.values(backupEnv())),
+  });
+  app.locals.backups = backups;
+  const restores = createRestoreService({ db, backups, wake: (project) => wakeAll(project) });
+  app.locals.restores = restores;
+  const backupTickMs = Number(process.env.TUG_BACKUP_TICK_MS) || 30_000;
+  const backupTimer = setInterval(() => {
+    try {
+      backups.tick();
+      restores.advance();
+    } catch (e) {
+      console.error(`backup scheduler failed: ${errMessage(e)}`);
+    }
+  }, backupTickMs);
+  backupTimer.unref();
+  try {
+    backups.tick(); // catch up on slots missed while control was down
+    restores.advance(); // re-adopt unfinished restores and keep their projects locked
+  } catch (e) {
+    console.error(`backup scheduler failed: ${errMessage(e)}`);
+  }
+  api('post', '/api/v1/backups/run', bodyProject, async (req, res) => {
+    const project = String(req.body.project || 'site');
+    const targets = req.body.targets;
+    if (
+      targets !== undefined &&
+      (!Array.isArray(targets) || targets.some((t) => typeof t !== 'string'))
+    )
+      return res.status(400).json({ error: 'targets must be a list of service or volume names' });
+    if (!db.get('SELECT 1 FROM projects WHERE id=?', project))
+      return res.status(404).json({ error: `project ${project} not found` });
+    const result = backups.runNow(project, targets, req.actor!.name);
+    if (!result.runs.length)
+      return res.status(result.errors.length ? 409 : 404).json({
+        error: result.errors.join('; ') || `project ${project} has no backup targets`,
+      });
+    res.json(result);
+  });
+  api('post', '/api/v1/restores', bodyProject, async (req, res) => {
+    const body = req.body ?? {};
+    const project = String(body.project || 'site');
+    if (typeof body.target !== 'string' || !body.target)
+      return res
+        .status(400)
+        .json({ error: 'target is required, such as service:db or volume:uploads' });
+    const target = body.target.includes(':')
+      ? body.target
+      : (db.get<{ target: string }>(
+          'SELECT target FROM backup_schedules WHERE project_id=? AND enabled=1 AND target LIKE ?',
+          project,
+          `%:${body.target}`,
+        )?.target ?? body.target);
+    const request = {
+      project,
+      target,
+      from: typeof body.from === 'string' ? body.from : undefined,
+      scratch: body.scratch === true,
+      safetyBackup: body.safetyBackup !== false,
+      writers: Array.isArray(body.writers) ? body.writers.map(String) : undefined,
+      noWriters: body.noWriters === true,
+      actor: req.actor!.name,
+    };
+    const plan = restores.plan(request);
+    if ('error' in plan) return res.status(plan.status).json({ error: plan.error });
+    if (body.confirm !== true) return res.json({ confirmed: false, plan });
+    const started = restores.start(request, plan);
+    if ('error' in started) return res.status(started.status).json({ error: started.error });
+    res.json({ confirmed: true, plan, ...started });
+  });
+  api('get', '/api/v1/restores', queryProject, async (req, res) =>
+    res.json({ restores: restores.list(String(req.query.project || 'site')) }),
+  );
+  api('post', '/api/v1/restores/:id/release', null, async (req, res) => {
+    const result = restores.releaseInterrupted(req.params.id);
+    if ('error' in result) return res.status(result.status).json({ error: result.error });
+    res.json(result);
+  });
+  api('post', '/api/v1/restores/:id/resume', null, async (req, res) => {
+    const result = restores.resume(req.params.id);
+    if ('error' in result) return res.status(result.status).json({ error: result.error });
+    res.json(result);
+  });
+  api('get', '/api/v1/backups', queryProject, async (req, res) => {
+    const project = String(req.query.project || 'site');
+    const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 500);
+    res.json({
+      project,
+      destinationConfigured: Boolean(backupDestination()),
+      ...backups.list(project, limit),
+    });
+  });
+  api('get', '/api/v1/backup/destination', null, async (_req, res) => {
+    const row = backupDestination();
+    res.json(
+      row
+        ? {
+            configured: true,
+            url: row.url,
+            envNames: JSON.parse(row.env_names_json),
+            checkedAt: row.checked_at,
+            checkResult: row.check_result_json ? JSON.parse(row.check_result_json) : null,
+            updatedAt: row.updated_at,
+          }
+        : { configured: false },
+    );
+  });
+  api('post', '/api/v1/backup/destination', null, async (req, res) => {
+    let parsed;
+    try {
+      parsed = parseBackupDestination(req.body);
+    } catch (e) {
+      return res.status(400).json({ error: errMessage(e) });
+    }
+    const ts = now();
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      db.run('DELETE FROM secrets WHERE project_id=?', BACKUP_SECRET_PROJECT);
+      for (const [name, value] of Object.entries(parsed.env))
+        db.run(
+          'INSERT INTO secrets(id,project_id,name,encrypted_value,version,created_at,updated_at) VALUES(?,?,?,?,?,?,?)',
+          id('sec'),
+          BACKUP_SECRET_PROJECT,
+          name,
+          encrypt(value, masterKey),
+          1,
+          ts,
+          ts,
+        );
+      db.run(
+        `INSERT INTO backup_destination(id,url,env_names_json,checked_at,check_result_json,updated_at) VALUES('default',?,?,NULL,NULL,?)
+        ON CONFLICT(id) DO UPDATE SET url=excluded.url,env_names_json=excluded.env_names_json,checked_at=NULL,check_result_json=NULL,updated_at=excluded.updated_at`,
+        parsed.url,
+        JSON.stringify(Object.keys(parsed.env).sort()),
+        ts,
+      );
+      db.exec('COMMIT');
+    } catch (e) {
+      db.exec('ROLLBACK');
+      throw e;
+    }
+    audit(req.actor!, {
+      type: 'backup.destination_set',
+      message: `backup destination set to ${parsed.url} by ${req.actor!.name}`,
+      metadata: { url: parsed.url, envNames: Object.keys(parsed.env).sort() },
+    });
+    res.json({ ok: true, url: parsed.url, envNames: Object.keys(parsed.env).sort() });
+  });
+  api('delete', '/api/v1/backup/destination', null, async (req, res) => {
+    db.run('DELETE FROM secrets WHERE project_id=?', BACKUP_SECRET_PROJECT);
+    const removed = db.run("DELETE FROM backup_destination WHERE id='default'");
+    if (removed.changes)
+      audit(req.actor!, {
+        type: 'backup.destination_removed',
+        message: `backup destination removed by ${req.actor!.name}`,
+      });
+    res.json({ ok: true, removed: removed.changes > 0 });
+  });
+  api('get', '/api/v1/backup/key', null, async (req, res) => {
+    const project = String(req.query.project || '');
+    if (!PROJECT_NAME_PATTERN.test(project) || isReservedProject(project))
+      return res.status(400).json({ error: 'project is required' });
+    if (!db.get('SELECT 1 FROM projects WHERE id=?', project))
+      return res.status(404).json({ error: `project ${project} not found` });
+    const destination = backupDestination();
+    audit(req.actor!, {
+      type: 'backup.key_read',
+      project,
+      message: `repository password for ${project} read by ${req.actor!.name}`,
+    });
+    res.json({
+      project,
+      repository: destination ? projectRepository(destination.url, project) : null,
+      password: repositoryPassword(masterKey, project),
+    });
+  });
+
   api('post', '/api/v1/secrets', bodyProject, async (req, res) => {
     const { project = 'site', name, value } = req.body;
+    if (isReservedProject(String(project)))
+      return res.status(400).json({ error: `project names starting with _ are reserved` });
     if (!name || value == null) return res.status(400).json({ error: 'name and value required' });
     let lock;
     try {
@@ -1490,15 +1725,19 @@ export async function createApp(
     }
   });
   api('get', '/api/v1/secrets', queryProject, async (req, res) =>
-    res.json({
-      secrets: db.all(
-        'SELECT project_id,name,version,updated_at FROM secrets WHERE project_id=? ORDER BY name',
-        String(req.query.project || 'site'),
-      ),
-    }),
+    isReservedProject(String(req.query.project || 'site'))
+      ? res.status(400).json({ error: 'project names starting with _ are reserved' })
+      : res.json({
+          secrets: db.all(
+            'SELECT project_id,name,version,updated_at FROM secrets WHERE project_id=? ORDER BY name',
+            String(req.query.project || 'site'),
+          ),
+        }),
   );
   api('delete', '/api/v1/secrets/:name', queryProject, async (req, res) => {
     const project = String(req.query.project || 'site');
+    if (isReservedProject(project))
+      return res.status(400).json({ error: 'project names starting with _ are reserved' });
     const removed = db.run(
       'DELETE FROM secrets WHERE project_id=? AND name=?',
       project,
@@ -2522,6 +2761,13 @@ export async function createApp(
         (svc) => (svc.placement?.nodes || []).includes(node.name) || !svc.placement?.nodes?.length,
       ),
     );
+    // A command past its deadline is never delivered late; the backup scheduler turns it into a missed run.
+    db.run(
+      "UPDATE commands SET state='expired',updated_at=? WHERE node_id=? AND state='pending' AND deadline IS NOT NULL AND deadline<?",
+      now(),
+      node.id,
+      now(),
+    );
     const commands = db.all<CommandRow>(
       'SELECT * FROM commands WHERE node_id=? AND state=?',
       node.id,
@@ -2556,6 +2802,8 @@ export async function createApp(
     const network = networkFor(node);
     if (network) work.network = network;
     work.ports = portBindingFor(node, desiredStates);
+    const holds = restores.holds();
+    if (Object.keys(holds).length) work.holds = holds;
     if (SERVICE_DNS) {
       const all = endpointsFor(allStates);
       work.serviceEndpoints = Object.fromEntries(
@@ -2581,8 +2829,11 @@ export async function createApp(
       );
       updateDeploymentConvergence(st.project);
     }
+    if (report.jobs?.length) backups.onHeartbeat(report.jobs);
     for (const cr of (report.commandResults || []) as Partial<CommandResult>[]) {
       const result = cr.result || {};
+      if (cr.commandId && cr.state)
+        backups.onResult(cr.commandId, cr.state, result as CommandResult['result']);
       db.run(
         'UPDATE commands SET state=?,result_json=?,updated_at=? WHERE id=? AND node_id=?',
         cr.state || 'succeeded',
@@ -2599,6 +2850,11 @@ export async function createApp(
         req.node!.id,
       );
     db.run('UPDATE nodes SET last_seen_at=?,status=? WHERE id=?', ts, 'online', req.node!.id);
+    try {
+      restores.advance();
+    } catch (e) {
+      console.error(`restore failed to advance: ${errMessage(e)}`);
+    }
     const nextEndpointSnapshot = JSON.stringify(endpointsFor(currentDesiredStates()));
     if (nextEndpointSnapshot !== endpointSnapshot) {
       endpointSnapshot = nextEndpointSnapshot;
@@ -2628,6 +2884,30 @@ export async function createApp(
         console.error(`event pruning failed: ${errMessage(e)}`);
       }
     res.json({ ok: true });
+  });
+  // Credentials for a backup helper are released only while its command is running on the calling node, and
+  // never ride in the command payload, events or results.
+  get('/agent/v1/backup/credentials', authAgent, async (req, res) => {
+    const command = db.get<Pick<CommandRow, 'node_id' | 'project_id' | 'type' | 'state'>>(
+      'SELECT node_id,project_id,type,state FROM commands WHERE id=?',
+      String(req.query.command || ''),
+    );
+    if (!command) return res.status(404).json({ error: 'command not found' });
+    if (command.node_id !== req.node!.id)
+      return res.status(403).json({ error: 'command belongs to another node' });
+    if (!(BACKUP_COMMAND_TYPES as readonly string[]).includes(command.type))
+      return res.status(403).json({ error: 'command does not use backup credentials' });
+    if (command.state !== 'running')
+      return res.status(409).json({ error: `command is ${command.state}, not running` });
+    if (!command.project_id || !backupDestination())
+      return res.status(409).json({ error: 'no backup destination is configured' });
+    const response: BackupCredentialsResponse = {
+      env: {
+        ...backupEnv(),
+        RESTIC_PASSWORD: repositoryPassword(masterKey, command.project_id),
+      },
+    };
+    res.json(response);
   });
   get('/agent/v1/secrets', authAgent, async (req, res) => {
     const project = String(req.query.project || 'site');

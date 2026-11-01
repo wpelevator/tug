@@ -118,6 +118,76 @@ The backup service must run on a node where that volume exists, and `backup.sh` 
 
 Scheduling and retention declared per service or volume instead of a sidecar image; running the job on the node that holds each volume without a service per node; database dumps for known engines; a recorded last-success per backup in `tug status`; and restore as a command. Until then the sidecar, the per-node services and the drill below are manual.
 
+## Backup destination
+
+Tug can already hold the destination that scheduled backups will use. Set it once on control with `tug backup-destination-set` and read it with `backup-destination-show` ([CLI](cli.md#backups)). Credentials are encrypted with the master key, are never returned by the API, and are released only to a node that is running a backup command for it. Every project gets its own restic repository at `<destination>/<project>`, so a leaked password exposes one site, and one project's prune never blocks another's backups. The password is derived from the master key; print it with `tug backup-key` and escrow it.
+
+## Scheduled backups
+
+Mark a service or a volume with `x-tug.backup` ([Compose extensions](compose.md#backups)) and Tug backs it up on its node, on the schedule you give, to the project's repository. Control runs a scheduler that ticks every 30 seconds (`TUG_BACKUP_TICK_MS`); at each slot it queues a `backup.run` command with a deadline. The agent runs it as a background job, so reconciliation and health checks are never held up by a long backup, and one node runs one backup at a time unless `TUG_BACKUP_CONCURRENCY` says otherwise.
+
+- **Services** run your `command` through an exec in the running container and stream its output into `restic backup --stdin`, so no staging disk is needed. The command sees the container's own environment, including its secrets, so passwords are read from the environment (`$MARIADB_ROOT_PASSWORD`) and never appear in Tug's configuration, payloads or events. A command that fails, writes nothing or lacks the `verify` text is never kept: the partial snapshot is forgotten and the run fails. The service must be running on the node.
+- **Volumes** are mounted read-only into the restic container and archived, with your `exclude` patterns. A volume that does not exist on the node fails the run instead of backing up an empty one. Live volumes are crash-consistent, which suits uploads and static files.
+- **Retention** runs after each successful backup (`restic forget --prune` per node and target). Snapshots tagged `trigger:pre-restore` are kept regardless.
+- **Images** for restic come from `TUG_RESTIC_IMAGE` on control (default `restic/restic:0.17.3`); a digest reference is recommended. Nodes pull it outbound like any published image.
+- **Restic runs in a helper container** with a memory limit, labelled `tug.job`, removed when it finishes. An agent that restarts mid-job removes leftovers and reports the job failed.
+
+## Recipes
+
+Tug has no database support of its own; each recipe is just a `command` for the service container. Read the password from the container's environment, write the data to standard output, and give `verify` the line the tool prints on success.
+
+```yaml
+# MariaDB (use mysqldump and MYSQL_ROOT_PASSWORD for MySQL)
+backup:
+  command: mariadb-dump -u root -p"$MARIADB_ROOT_PASSWORD" --single-transaction --quick --routines --events --triggers --add-drop-database --databases wordpress
+  filename: wordpress.sql
+  verify: "-- Dump completed"
+
+# PostgreSQL
+backup:
+  command: pg_dump -U "$POSTGRES_USER" --clean --if-exists "$POSTGRES_DB"
+  filename: app.sql
+  verify: "PostgreSQL database dump complete"
+
+# SQLite file in a volume mounted into the service
+backup:
+  command: sqlite3 /data/app.db .dump
+  filename: app.sql
+  verify: COMMIT
+
+# A directory as a tar stream
+backup:
+  command: tar -C /var/www/html -cf - wp-content/themes
+  filename: themes.tar
+```
+
+`mariadb-dump` and `mysqldump` do not dump users and grants; they come from the image's init environment. A service has one backup command, so to include PostgreSQL roles chain them: `sh -c 'pg_dumpall --globals-only; pg_dump ...'`. Restore with the same tool: `restic dump <snapshot> wordpress.sql | mariadb ...`.
+
+### Events and what to watch
+
+`tug events` shows `backup.completed`, `backup.failed`, `backup.missed`, `backup.stale` and `backup.no_destination`. A backup is `missed` when its node did not pick it up before its deadline (`node_offline`) or when control was not running at the slot: a week of downtime produces one missed event and one catch-up run per target, not a burst. A failed scheduled run is retried once after ten minutes. A target with no success for two periods raises `backup.stale` once a day, which catches a destination key that has quietly stopped working. While control is down no backup starts, which is the price of one scheduler; running jobs finish and report when control returns.
+
+`tug backup-run` takes a backup now and `tug backup-list` shows the catalog ([CLI](cli.md#backups)). ### Restore
+
+```bash
+tug restore db                       # prints the plan, changes nothing
+tug restore db --confirm             # latest backup of the db service
+tug restore uploads --scratch --confirm   # files into a new volume, touching nothing live
+```
+
+Restores are as generic as backups. A service is restored by running its `x-tug.backup.restore` command in the running container with the stored file on standard input (`restic dump` piped in), so a MariaDB service uses `restore: sh -c 'mariadb -uroot -p"$MARIADB_ROOT_PASSWORD"'`. A volume is emptied and filled from the snapshot, or restored into a new volume with `--scratch`. A service without a `restore` command is refused rather than guessed at.
+
+An in-place restore is deliberately careful:
+
+1. It **locks the project**, so a deploy, rollback or secret change gets a clear refusal while it runs.
+2. It **stops the writers**: the `writers` you named, or discovered from `depends_on` (for a service) or volume mounts (for a volume), including everything that depends on them. If none are found it refuses unless you pass `--writers` or `--no-writers`, because an app that reaches the database without `depends_on` is the hole in discovery and the plan makes you look.
+3. It takes a **safety backup** of the current data, tagged `trigger:pre-restore` and exempt from retention (skip with `--no-safety-backup`). If that fails, nothing has changed: the writers start again and the lock is dropped.
+4. It restores, then starts the writers and unlocks.
+
+Only a snapshot this target produced can be restored into it (its `project:` and `target:` tags are checked). If the restore itself fails, the writers stay stopped and the project locked, because a half-restored database serving traffic is worse than an outage. The restore is `interrupted`; `tug restore-resume <id>` tries again and `tug restore-release <id>` starts the services anyway. Scheduled backups of a target are skipped while it is being restored. A restore is recorded with `restore.started`, `restore.completed`, `restore.failed` and `restore.released` events.
+
+A scratch restore of a volume is also the restore drill: it proves a backup can be read without touching anything live. Databases are the same drill by hand: `restic dump <snapshot> wordpress.sql` into a throwaway container.
+
 ## Control plane backup
 
 `tug control-backup` covers the control host only. Take it from a machine that holds an `admin` token, on the control host, and copy the archive off the host. The archive holds the master key and every secret, so treat it like a password vault and store it encrypted. Example `/etc/cron.d/tug-control-backup` on the control host (the runtime image runs the CLI; adjust to how you invoke `tug` there):

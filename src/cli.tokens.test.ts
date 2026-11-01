@@ -153,3 +153,63 @@ test('token-create, token-list and token-revoke work against control and a scope
     await fs.rm(data, { recursive: true, force: true });
   }
 });
+
+test('backup commands are listed in help', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-backup-help-'));
+  const env = { ...process.env, TUG_CONFIG: path.join(dir, 'missing.json') };
+  const help = (await exec(process.execPath, [entry, '--help'], { env, cwd: dir })).stdout;
+  for (const name of [
+    'backup-run',
+    'backup-list',
+    'backup-destination-set',
+    'backup-key',
+    'restore',
+    'restore-list',
+    'restore-resume',
+    'restore-release',
+    'run',
+  ])
+    assert.ok(help.includes(name), `help should list ${name}`);
+});
+
+test('backup destination commands set, show and remove the destination without echoing secrets', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-backup-cli-'));
+  process.env.TUG_DATA_DIR = dir;
+  process.env.TUG_OPERATOR_TOKEN = OPERATOR;
+  const app = await createApp({ images: { resolve: testImageResolver } });
+  const srv = await new Promise<Server>((resolve) => {
+    const s = app.listen(0, () => resolve(s));
+  });
+  const env = {
+    ...process.env,
+    TUG_CONTROL_URL: `http://127.0.0.1:${(srv.address() as AddressInfo).port}`,
+    TUG_TOKEN: OPERATOR,
+    AWS_ACCESS_KEY_ID: 'AKIAEXAMPLE',
+    AWS_SECRET_ACCESS_KEY: 'cli-secret-value',
+  };
+  delete (env as Record<string, unknown>).TUG_CONFIG;
+  const run = (...args: string[]) => exec(process.execPath, [entry, ...args], { env, cwd: dir });
+  try {
+    const set = await run(
+      'backup-destination-set',
+      's3:https://s3.example.com/bucket/tug',
+      '--env',
+      'AWS_ACCESS_KEY_ID',
+      '--env',
+      'AWS_SECRET_ACCESS_KEY',
+    );
+    assert.ok(!set.stdout.includes('cli-secret-value'), 'set should not print the secret');
+    const shown = JSON.parse((await run('backup-destination-show')).stdout);
+    assert.equal(shown.url, 's3:https://s3.example.com/bucket/tug', 'show prints the url');
+    assert.deepEqual(shown.envNames, ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY']);
+    await assert.rejects(
+      run('backup-destination-set', 's3:https://s3.example.com/bucket/tug'),
+      /need AWS_ACCESS_KEY_ID/,
+      'a destination without its credentials is refused by control',
+    );
+    const removed = JSON.parse((await run('backup-destination-remove')).stdout);
+    assert.equal(removed.removed, true, 'remove deletes the destination');
+  } finally {
+    await new Promise((resolve) => srv.close(resolve));
+  }
+});
