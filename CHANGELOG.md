@@ -1,5 +1,15 @@
 # @wpelevator/tug
 
+## 0.9.0
+
+### Minor Changes
+
+- dd93b02: Verify the control plane by a generated name instead of its address. Control's server certificate now carries `control-<hash>.tug`, derived from its CA, and clients recompute it from the CA they pin, so credentials no longer depend on the IP or DNS name control is reached at: bare-IP installs work, and moving control needs no new credentials. `TUG_PUBLIC_URL` and `--public-url` are renamed `TUG_ADVERTISE_URL` and `--advertise-url`; the value is now only the default connect address written into credentials. Adds a Getting started guide.
+
+### Patch Changes
+
+- fa55912: Close security audit findings: node `address`/`publicAddress` are validated, backup credentials are released only while the project is placed on the node, deployments refuse disabled or unknown placement nodes, wildcard ingress hostnames conflict with other projects' hosts, source uploads exclude the resolved credential file and support `.dockerignore` character classes, `tug inspect` redacts environment values, and child processes have a deadline and bounded output.
+
 ## 0.8.0
 
 ### Minor Changes
