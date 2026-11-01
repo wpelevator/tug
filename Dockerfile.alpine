@@ -16,4 +16,3 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY tools/scripts ./tools/scripts
 ENTRYPOINT ["node", "dist/main.js"]
-CMD ["control"]

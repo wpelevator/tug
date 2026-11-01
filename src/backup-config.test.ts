@@ -237,6 +237,28 @@ test('validateCompose reports backup errors with the rest of the file', () => {
   assert.doesNotThrow(() => validateCompose(site()), 'a valid backup configuration should pass');
 });
 
+test('the helper memory limit defaults to 512m and can be lowered for small hosts', () => {
+  const compose = site();
+  assert.equal(
+    resolveBackups(compose, 'site').targets.find((t) => t.name === 'db')?.memory,
+    '512m',
+  );
+  Object.assign(backupOf(compose), { memory: '256M' });
+  compose.volumes!.uploads['x-tug']!.backup = { memory: '1g' };
+  const { targets, errors } = resolveBackups(compose, 'site');
+  assert.deepEqual(errors, []);
+  assert.equal(targets.find((t) => t.name === 'db')?.memory, '256m', 'case is normalized');
+  assert.equal(targets.find((t) => t.name === 'uploads')?.memory, '1g', 'volumes take it too');
+  for (const bad of ['64m', '32g', 'lots', '512 MB', '']) {
+    Object.assign(backupOf(compose), { memory: bad });
+    assert.match(
+      errorsOf(compose).join('; '),
+      /memory must be a size from 128m to 16g/,
+      `${bad} is rejected`,
+    );
+  }
+});
+
 test('commands normalize to an argv', () => {
   assert.deepEqual(commandArgv('echo hi'), ['sh', '-c', 'echo hi']);
   assert.deepEqual(commandArgv(['a', 'b']), ['a', 'b']);

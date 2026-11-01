@@ -203,10 +203,17 @@ The test layers, the metrics milestones are held to and the backlog of mocked te
 - [ ] M9 `/readyz`, sample alert rules, and the metrics documentation test gate
 - [x] M10 published ports bound to the overlay, loopback or node address by default; `doctor` reports public listeners
 - [x] M11 spec written
-- [x] M11 `x-tug.backup` (generic: a command in a service, or a volume's files), scheduled backups to S3-compatible storage with restic, catalog, `backup-run`, `backup-list`, `restore` (verified against real Docker; not yet on real hosts or a real bucket)
+- [x] M11 `x-tug.backup` (generic: a command in a service, or a volume's files), scheduled backups to S3-compatible storage with restic, catalog, `backup-run`, `backup-list`, `restore` (verified against real Docker and on two real hosts with an S3-compatible server and a scheduled run: [Real-host evaluation](real-host-evaluation.md#generic-backups-restore-and-tug-run-on-fresh-hosts-1-november-2026); not yet against AWS S3)
 - [x] M11 `tug run` one-off containers
 - [ ] M11 `x-tug.release` run-once hooks
 - [ ] M11 weekly maintenance (`restic check`, prune), restore drill, `backup-destination-test`, SFTP
+- [x] M11 `restore` waits for the restored writers to be serving again (five minutes, then it finishes with a warning)
+- [ ] M11 list and remove scratch-restore volumes, and expire safety snapshots (they accumulate for ever and only `restic forget` removes them)
+- [x] M11 `backup-list --check`: exit nonzero when any target is stale, failed or missed, as an interim for cron and monitors until webhooks (M8) exist
+- [x] M11 `memory` under `x-tug.backup` for the restic helper's memory limit
+- [x] A failed health check says when the agent runs outside a container (`doctor` does not check it separately)
+- [x] `TUG_ROLE=agent` works in the runtime image: it no longer sets a default command
+- [ ] A `tug run` option to start without the service's volumes (`--no-volumes`), and a decision on whether it should take the project lock
 - [ ] M11 `tug move` for stateful services
 - [ ] M12 spec written (subnets, resolver, rollout changes, MTU, IPv6, network recreation)
 - [ ] M12 per-node container subnets over WireGuard and per-node service DNS, mesh stays opt-in

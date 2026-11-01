@@ -123,3 +123,7 @@ npm run test:integration:network
 ```
 
 Layers `docker-compose.integration-network.yml` over the same stack with `TUG_MESH=true` on control and all agents and `vps-c` marked as an ingress node, deploys `docker-compose.network-sample.yml` (`web` on `vps-a`, `client` on `vps-b`) and runs `tools/scripts/integration-verify-network.js`: node-to-node pings and a WireGuard handshake over the overlay, a container on `vps-b` fetching `http://web:8080` by name, Caddy on `vps-c` serving `Host: app.test` from `vps-a`, and mesh connectivity again after `node-rotate-wg-key`. It uses the compose project `tug-it-net` and the same ports as the plain integration test, so run them one at a time. The Docker host's kernel must support WireGuard (Linux 5.6+, Docker Desktop's VM included).
+
+## Running the agent outside Docker
+
+Run the agent in a container, as the installers do (`--network host`, the Docker socket mounted). An agent started as a plain host process, for example `node src/main.ts agent` on macOS, can create containers but cannot reach their IP addresses, so every TCP or HTTP health check times out and the deploy fails with a message such as `tcp timeout 172.21.0.2:3306` that does not mention where the agent runs. On Docker Desktop the Docker daemon lives in a VM, so container addresses are only reachable from inside it. When the agent is not in a container, a failed TCP or HTTP health check says so in its error and points at `docker run`; `doctor` does not check it separately.

@@ -7,6 +7,10 @@ import type { ComposeFile, DesiredState, ProjectStatus } from './protocol.ts';
 const MINUTE = 60_000;
 const LOCK_TTL_MS = 15 * MINUTE;
 const HOLD_TIMEOUT_MS = 5 * MINUTE;
+/** How long a finished restore waits for its writers to serve again before it reports that they did not. */
+const VERIFY_TIMEOUT_MS = 5 * MINUTE;
+/** Restore states in which the project must stay locked. */
+const LOCKED_STATES = ['locking', 'holding', 'safety_backup', 'restoring', 'interrupted'];
 const TERMINAL = ['succeeded', 'failed', 'released'];
 
 export interface RestoreRequest {
@@ -129,9 +133,10 @@ export function createRestoreService(deps: RestoreDeps) {
     const latest = !from || from === 'latest';
     if (!latest && !from.startsWith('bkr_')) return { snapshotId: from, time: null };
     const run = latest
-      ? db.get<BackupRunRow>(
+      ? // A safety snapshot records the state just before a restore, often a damaged one, so it is never "the latest backup".
+        db.get<BackupRunRow>(
           `SELECT * FROM backup_runs WHERE project_id=? AND target=? AND state='succeeded' AND snapshot_id IS NOT NULL
-           ORDER BY finished_at DESC LIMIT 1`,
+           AND trigger != 'pre-restore' ORDER BY finished_at DESC LIMIT 1`,
           project,
           target,
         )
@@ -315,7 +320,12 @@ export function createRestoreService(deps: RestoreDeps) {
     };
   }
 
-  const heldOnNodes = (restore: RestoreRunRow, writers: string[]): boolean => {
+  /** True when every writer reports `rolloutState` on every node it is placed on. */
+  const writersReport = (
+    restore: RestoreRunRow,
+    writers: string[],
+    rolloutState: string,
+  ): boolean => {
     const desired = deployed(restore.project_id);
     if (!desired) return false;
     return writers.every((service) => {
@@ -327,7 +337,7 @@ export function createRestoreService(deps: RestoreDeps) {
           restore.project_id,
         );
         const status = row ? (JSON.parse(row.status_json) as ProjectStatus) : undefined;
-        return status?.serviceStates?.[service]?.rolloutState === 'held';
+        return status?.serviceStates?.[service]?.rolloutState === rolloutState;
       });
     });
   };
@@ -373,11 +383,11 @@ export function createRestoreService(deps: RestoreDeps) {
         clock().getTime() -
         new Date(restore.state_changed_at ?? restore.started_at ?? stamp()).getTime();
       // Keep the project locked while a restore is unfinished, across a control restart.
-      if (restore.mode === 'in-place') lock(restore);
+      if (restore.mode === 'in-place' && LOCKED_STATES.includes(restore.state)) lock(restore);
       const writers = JSON.parse(restore.writers_json) as string[];
       switch (restore.state) {
         case 'holding': {
-          if (!heldOnNodes(restore, writers)) {
+          if (!writersReport(restore, writers, 'held')) {
             if (age > HOLD_TIMEOUT_MS) fail(restore, 'the writers did not stop in time', false);
             break;
           }
@@ -423,14 +433,9 @@ export function createRestoreService(deps: RestoreDeps) {
           if (!command || ['pending', 'running'].includes(command.state)) break;
           if (command.state === 'succeeded') {
             if (restore.mode === 'in-place') release(restore);
-            move(restore, 'succeeded');
-            event(
-              'info',
-              'restore.completed',
-              restore,
-              `restore of ${restore.target} completed${restore.scratch_volume ? ` into volume ${restore.scratch_volume}` : ''}`,
-              { scratchVolume: restore.scratch_volume },
-            );
+            // The data is back; the restore is done when the services that were stopped are serving again.
+            if (restore.mode === 'in-place' && writers.length) move(restore, 'verifying');
+            else complete(restore);
           } else {
             const error =
               (JSON.parse(command.result_json ?? '{}') as { error?: string }).error ??
@@ -439,9 +444,29 @@ export function createRestoreService(deps: RestoreDeps) {
           }
           break;
         }
+        case 'verifying': {
+          if (writersReport(restore, writers, 'serving')) complete(restore);
+          else if (age > VERIFY_TIMEOUT_MS)
+            complete(
+              restore,
+              `the data was restored, but ${writers.join(', ')} did not report serving within ${VERIFY_TIMEOUT_MS / MINUTE} minutes; check tug status`,
+            );
+          break;
+        }
         default:
       }
     }
+  }
+
+  function complete(restore: RestoreRunRow, warning?: string): void {
+    move(restore, 'succeeded', warning ? { error: warning } : {});
+    event(
+      warning ? 'warn' : 'info',
+      'restore.completed',
+      restore,
+      `restore of ${restore.target} completed${restore.scratch_volume ? ` into volume ${restore.scratch_volume}` : ''}${warning ? `, but ${warning}` : ''}`,
+      { scratchVolume: restore.scratch_volume, ...(warning ? { warning } : {}) },
+    );
   }
 
   /** Drops the holds and the lock of an interrupted restore; the data may be partly restored. */

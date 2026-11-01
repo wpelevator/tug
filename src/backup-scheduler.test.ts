@@ -159,6 +159,7 @@ test('a due slot queues exactly one backup command, and repeated ticks do not qu
     's3:https://s3.example.com/bucket/tug/site',
     'one repository per project',
   );
+  assert.equal(job.payload.limits.memory, '512m', 'the restic helper defaults to 512m');
   assert.deepEqual(
     job.payload.command,
     {
@@ -179,6 +180,43 @@ test('a due slot queues exactly one backup command, and repeated ticks do not qu
   );
   assert.equal(f.schedule().next_run_at, '2026-11-02T03:00:00.000Z', 'the next slot is tomorrow');
   assert.equal(f.runs().filter((r) => r.target === 'service:db').length, 1, 'one run row per slot');
+});
+
+test('a target reports why it needs attention, and a healthy one reports nothing', async () => {
+  const f = await fixture();
+  f.service.tick(at('2026-11-01T00:00:00Z'));
+  const problems = () =>
+    Object.fromEntries(f.service.list('site').targets.map((t) => [t.target, t.problem]));
+  assert.deepEqual(
+    problems(),
+    { 'service:db': null, 'volume:uploads': null },
+    'a new target is healthy',
+  );
+
+  f.set('2026-11-01T03:00:30Z');
+  f.service.tick(at('2026-11-01T03:00:30Z'));
+  const job = f.queued.find((q) => q.payload.target === 'service:db')!;
+  f.service.onResult(job.id, 'failed', { error: 'bucket unreachable' });
+  assert.equal(problems()['service:db'], 'the last run failed', 'a failed last run is a problem');
+
+  const retry = () => f.queued.filter((q) => q.payload.target === 'service:db').at(-1)!;
+  f.set('2026-11-01T03:12:00Z');
+  f.service.tick(at('2026-11-01T03:12:00Z'));
+  f.service.onResult(retry().id, 'succeeded', {
+    runId: retry().payload.runId,
+    snapshotId: 'ok',
+    durationMs: 1,
+  });
+  assert.equal(problems()['service:db'], null, 'a later success clears it');
+
+  f.set('2026-11-04T12:00:00Z');
+  assert.match(
+    problems()['service:db']!,
+    /no successful backup since 2026-11-01T03:12/,
+    'two silent days is stale',
+  );
+  f.db.run("UPDATE backup_schedules SET enabled=0 WHERE target='service:db'");
+  assert.equal(problems()['service:db'], null, 'a disabled target is not a problem');
 });
 
 test('a completed result records the snapshot, updates the schedule and emits an event', async () => {

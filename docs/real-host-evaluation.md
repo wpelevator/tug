@@ -174,3 +174,33 @@ The store was RustFS in a container on the second node with random credentials, 
 - **Fixed: health checks cannot reach containers from a bridge-networked agent.** `node-install` starts the agent on the default bridge. On Docker 29.9.2 it cannot dial the container IPs of a project's Compose network, so every TCP or HTTP health check timed out (`tcp timeout 172.19.0.2:3306`) while MariaDB was ready, and the first deploy failed. Restarting the agent with `--network host` (what mesh mode already does) fixed it. Earlier runs on older Docker did not hit this. `node-install` and `node-enroll` now start the agent with `--network host` always, not only with `--mesh`.
 - **Open: `--build-local-image` builds for the CLI machine's architecture.** On an arm64 Mac it produced an arm64 image that the amd64 host could not run (`exec format error`). It should build for the target's architecture.
 - **Open: a deploy that fails health leaves the project half-up.** The containers kept running after the failed deployment, which hid the real cause until the agent's view was checked.
+
+## Generic backups, restore and `tug run` on fresh hosts, 1 November 2026
+
+The `examples/wordpress` project on two freshly reimaged 1 GB droplets, with the runtime built from the branch (`tug:local`, amd64) and nothing else on the hosts. The hosts were Ubuntu 26.04.1 LTS, newer than the 24.04 of earlier runs. Control and node `app` ran on `tug-1` and node `app2` on `tug-2`. The same example was deployed twice: as project `blog` on `app` and as project `shop` on `app2`, each with its own database and uploads volume. Backups went to an S3-compatible server (`rustfs`) that Tug itself deployed as a third project (`storage`) on `app`, reachable only on the private network. This is an operator trial, not a CI job.
+
+### What ran, and the result
+
+| Step | Result on both sites |
+|---|---|
+| `control-install --install-docker --build-local-image`, `node-install` for both nodes | Worked on Ubuntu 26.04: Docker CE 29.9.2 came from Docker's own `resolute` suite, control and both agents came up, nodes registered online |
+| `tug deploy` of the example | Converged with health checks passing; WordPress answered `302` to its installer, then served after a scripted install |
+| `backup-run` | Database dump (`mariadb-dump` run in the container, 107 KiB) and the uploads volume (14.1 MiB) both succeeded in about ten seconds |
+| `backup-list --check` | Exit 0 with a healthy target list |
+| Damage: update the site title in the database, delete the active theme, create a stray file | The site rendered a blank page, as expected |
+| `restore db --confirm` | Completed in about 17 to 19 seconds: WordPress stopped, safety backup, dump loaded, WordPress started |
+| `restore wp-content --confirm` | Completed; the site title was present **immediately** when the command returned, with no sleep. The theme was back and the stray file gone |
+| `restore wp-content --scratch --confirm` | New volume with the files, the live volume untouched; it restored the last real backup, not the safety snapshot taken a moment earlier |
+| Scheduled runs | `shop` was redeployed with a two-minute schedule: the scheduler noticed the change within its 30-second tick and started both targets by itself at the next slot (trigger `schedule`); both succeeded. Redeploying the nightly schedule put the next run at 03:00 UTC again |
+| `tug run wordpress -- ...` | Saw the service's environment (`WORDPRESS_DB_HOST=db`); exit codes 0 and 7 were returned; no helper containers were left on either node |
+| Repository contents | Each project has its own repository (`tug-wp/blog`, `tug-wp/shop`), four snapshots each (two backups, two safety snapshots), hosts `app` and `app2`; `restic check` passed when run from the *other* server, a machine that never held the data |
+| Memory | `tug-1` (control, agent, S3, MariaDB, WordPress) used 508 of 956 MB; `tug-2` used 420 MB; no out-of-memory events |
+
+### Findings
+
+- **The updater can starve a small host.** On the earlier installs Ubuntu's `unattended-upgrades` and `apt-check` had run for over an hour on `tug-1`, holding it at load 16 until Docker commands timed out. The fresh hosts had the apt timers disabled before anything else was installed. This is now noted in [Nodes](nodes.md).
+- **Control and a node on one host compete for port 8080.** The example publishes `8080:80`, control publishes `8080`, so the copy for `tug-1` used `8081`. Control on a runtime node is [M15](roadmap.md#m15--flexible-node-roles).
+- **Named volumes need no ownership fixing.** The S3 server runs as uid 10001. As a bind mount it failed with `Permission denied`; as a named volume deployed by Tug it started cleanly.
+- **Scratch-restore volumes are left behind**, as documented. They were removed by hand.
+
+Not covered by this run: a real AWS S3 bucket (the S3 server is `rustfs`, which speaks the same protocol), a failing backup on a real host (`backup-list --check` was only seen exiting 0 here; its failing path is covered by unit tests), a control restart or a long control outage, a node behind NAT, ingress and certificates (the hosts had no DNS names, so the sites were reached on their private addresses), and a project that spans both nodes.
