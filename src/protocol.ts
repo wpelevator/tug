@@ -217,6 +217,68 @@ export const BACKUP_COMMAND_TYPES: readonly CommandType[] = [
 /** `GET /agent/v1/backup/credentials`: environment for the restic helper of one running backup command. */
 export interface BackupCredentialsResponse {
   env: Record<string, string>;
+  /** The project secret named by the job's database password, when it has one. */
+  secrets: Record<string, string>;
+}
+
+/** Why a command may be refused or a run marked missed; recorded on the run. */
+export type BackupMissReason = 'node_offline' | 'control_down' | 'deadline';
+
+export type JobPhase =
+  'queued' | 'pulling' | 'checking' | 'dumping' | 'uploading' | 'forgetting' | 'restoring';
+
+/** Payload of `backup.check`, `backup.run` and `backup.restore`. Restic credentials are never in a payload. */
+export interface BackupJobPayload {
+  runId: string;
+  project: string;
+  /** `service:db` or `volume:uploads`; empty for `backup.check`. */
+  target: string;
+  type: BackupType;
+  /** The project's restic repository, `<destination>/<project>`. */
+  repository: string;
+  resticImage: string;
+  /** Used as restic's `--host`, so each node keeps its own snapshot chain. */
+  node: string;
+  tags: string[];
+  retention?: BackupRetention;
+  /** Database targets: the service container's image, the Docker network and what to dump. */
+  service?: {
+    name: string;
+    image: string;
+    network: string;
+    databases: string[];
+    user: string;
+    passwordSecret: string;
+  };
+  /** Volume targets: the Docker volume (or an NFS exporter's directory) to mount read-only. */
+  volume?: {
+    name: string;
+    mount: { kind: 'volume'; name: string } | { kind: 'bind'; path: string };
+    exclude?: string[];
+  };
+  limits: { memory: string; timeoutSec: number };
+  restore?: { snapshotId: string; mode: 'in-place' | 'scratch'; scratchVolume?: string };
+}
+
+export interface BackupJobResult {
+  runId: string;
+  snapshotId?: string;
+  addedBytes?: number;
+  totalBytes?: number;
+  durationMs: number;
+  resticVersion?: string;
+  /** Repository state for `backup.check`. */
+  repository?: 'ok' | 'initialized';
+  warnings?: string[];
+}
+
+/** Live jobs in `StatusReport.jobs`, so control can tell "running" from "lost". */
+export interface JobStatus {
+  commandId: string;
+  runId: string;
+  phase: JobPhase;
+  startedAt: string;
+  bytes?: number;
 }
 
 /** A `commands` table row as delivered in `GET /agent/v1/work`. */
@@ -253,6 +315,7 @@ export type CommandResultPayload =
   | { stdout: string; stderr: string }
   | { project: string; volume: string; deleted: true }
   | { publicKey: string }
+  | BackupJobResult
   | { error: string };
 
 export interface CommandResult {
@@ -455,6 +518,8 @@ export interface StatusReport {
   projects: ProjectStatus[];
   commandResults: CommandResult[];
   ingress?: IngressStatus;
+  /** Backup jobs still running on this node; absent when none. */
+  jobs?: JobStatus[];
 }
 
 // ---- GET /agent/v1/secrets ---------------------------------------------------------------------
