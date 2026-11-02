@@ -102,6 +102,7 @@ import {
   revokeCredential,
 } from './credentials.ts';
 import type { Actor, Identity, ProjectResolver, RouteRole } from './credentials.ts';
+import { privilegedComposeFeatures, privilegedServiceFeatures } from './deployment-policy.ts';
 import type {
   BackupCredentialsResponse,
   LiveRequest,
@@ -956,7 +957,13 @@ export async function createApp(
   }
   function createRollback(
     project: string,
-    opts: { actor: string; force?: boolean; auto?: boolean; failedDeploymentId?: string },
+    opts: {
+      actor: string;
+      allowPrivileged: boolean;
+      force?: boolean;
+      auto?: boolean;
+      failedDeploymentId?: string;
+    },
   ): { deployment: DeploymentRow | undefined; desiredState: DesiredState } {
     let lock;
     try {
@@ -987,6 +994,12 @@ export async function createApp(
       const ts = now();
       const depId = id('dep');
       const previousState: DesiredState = JSON.parse(previousDs.state_json);
+      const privileged = privilegedComposeFeatures(previousState.compose);
+      if (!opts.allowPrivileged && privileged.length)
+        throw httpError(
+          403,
+          `rollback target requires an admin credential: ${privileged.join(', ')}`,
+        );
       assertIngressHostsFree(project, previousState.compose);
       previousState.revision = depId;
       db.run(
@@ -1053,6 +1066,13 @@ export async function createApp(
             actor: AUTO_ROLLBACK_ACTOR,
             auto: true,
             failedDeploymentId: deploymentId,
+            allowPrivileged:
+              !!failed?.actor &&
+              !!db.get(
+                "SELECT 1 FROM operator_credentials WHERE name=? AND role='admin' AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>?)",
+                failed.actor,
+                now(),
+              ),
           }),
         );
         recordAutoRollbackEvent(
@@ -1104,6 +1124,18 @@ export async function createApp(
         404,
         missingService(request.project, 'service' in request ? request.service : ''),
       );
+    if (actor.role !== 'admin' && request.operation === 'exec') {
+      const privileged = retainedStates().some((state) => {
+        if (state.project !== request.project) return false;
+        const service = state.compose.services[request.service];
+        return !!service && privilegedServiceFeatures(state.compose, service).length > 0;
+      });
+      if (privileged)
+        throw httpError(
+          403,
+          'exec and run for a service with retained privileged revisions require an admin credential',
+        );
+    }
     for (const service of services)
       for (const node of nodes)
         if (!service.placement?.nodes?.length || service.placement.nodes.includes(node.name))
@@ -1214,6 +1246,8 @@ export async function createApp(
     const dsRow = currentDesired(project);
     if (!dsRow) throw httpError(404, `project ${project} has no desired state`);
     const state: DesiredState = JSON.parse(dsRow.state_json);
+    if (req.actor!.role !== 'admin' && privilegedComposeFeatures(state.compose).length)
+      throw httpError(403, 'scaling a privileged workload requires an admin credential');
     if (!state.services?.[service])
       throw httpError(404, `service ${service} not found in project ${project}`);
     const nodeRows = db.all<NodeRow>(
@@ -2117,6 +2151,11 @@ export async function createApp(
         throw httpError(400, errMessage(e));
       }
       assertIngressHostsFree(project, compose);
+      if (req.actor!.role !== 'admin') {
+        const privileged = privilegedComposeFeatures(compose);
+        if (privileged.length)
+          throw httpError(403, `deployment requires an admin credential: ${privileged.join(', ')}`);
+      }
       // The CLI interpolates control secrets as sentinels; a reference to a secret that is gone would deploy an empty value.
       const referenced = sentinelNames(compose);
       if (referenced.includes(REGISTRY_AUTH_SECRET))
@@ -2489,6 +2528,7 @@ export async function createApp(
       try {
         const out = createRollback(project, {
           actor: req.actor!.name,
+          allowPrivileged: req.actor!.role === 'admin',
           force: Boolean(req.body.force),
         });
         audit(req.actor!, {

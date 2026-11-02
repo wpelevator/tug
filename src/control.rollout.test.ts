@@ -301,6 +301,39 @@ test('logs and restart name the project when the service is not in it', async ()
   }
 });
 
+test('automatic rollback cannot restore an admin-only workload after a deploy credential fails', async () => {
+  const s = await server();
+  try {
+    const node = await s.register('app');
+    const first = stack('web:1', { rollback: 'auto' });
+    first.services.web.volumes = [
+      { type: 'bind', source: '/var/run/docker.sock', target: '/sock' },
+    ];
+    await s.deploy(first, 'v1');
+    await s.report(node.nodeId, 'app', 'serving', serving(20000));
+    const issued = await json(
+      await s.post('/api/v1/credentials', { name: 'ci', role: 'deploy', projects: ['site'] }),
+    );
+    const second = await s.post(
+      '/api/v1/deployments',
+      { project: 'site', version: 'v2', compose: stack('web:2', { rollback: 'auto' }) },
+      { 'x-tug-test-credential': issued.credential, 'content-type': 'application/json' },
+    );
+    assert.equal(second.status, 200, 'the deploy credential can publish the unprivileged revision');
+    await s.report(node.nodeId, 'app', 'failed', serving(20000));
+    const event = await s.waitFor('the denied automatic rollback', async () =>
+      (await s.events()).find((e) => e.type === 'deployment.auto_rollback_skipped'),
+    );
+    assert.match(
+      event.message,
+      /admin credential/,
+      'the automatic rollback must explain why its privileged target was refused',
+    );
+  } finally {
+    await s.close();
+  }
+});
+
 test('with rollback: auto a failed deployment is rolled back to the previous succeeded one and recorded', async () => {
   const s = await server();
   try {

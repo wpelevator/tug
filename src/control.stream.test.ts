@@ -317,6 +317,67 @@ const execRequest = {
   rows: 24,
 };
 
+test('deploy credentials cannot exec or run a privileged revision', async () => {
+  const s = await server();
+  try {
+    const deployed = await s.call('POST', '/api/v1/deployments', {
+      project: 'site',
+      version: 'v1',
+      compose: {
+        services: {
+          web: {
+            image: 'nginx',
+            volumes: [{ type: 'bind', source: '/var/run/docker.sock', target: '/sock' }],
+          },
+        },
+      },
+    });
+    assert.equal(deployed.status, 200, 'an administrator can deploy the privileged revision');
+    const credential = await json(
+      await s.call('POST', '/api/v1/credentials', {
+        name: 'ci',
+        role: 'deploy',
+        projects: ['site'],
+      }),
+    );
+    for (const oneOff of [false, true]) {
+      const operator = await socket(s.base, '/api/v1/live', credential.credential);
+      try {
+        operator.send({
+          v: 1,
+          type: 'live.open',
+          request: oneOff
+            ? {
+                operation: 'exec',
+                project: 'site',
+                service: 'web',
+                command: ['sh'],
+                interactive: false,
+                tty: false,
+                oneOff: true,
+              }
+            : execRequest,
+        });
+        const error = await operator.next();
+        assert.equal(
+          error.type,
+          'live.error',
+          `${oneOff ? 'run' : 'exec'} must fail before contacting an agent`,
+        );
+        assert.match(
+          String(error.message),
+          /admin credential/,
+          'the error must explain the privilege requirement',
+        );
+      } finally {
+        operator.ws.terminate();
+      }
+    }
+  } finally {
+    await s.close();
+  }
+});
+
 async function rejectedUpgrade(base: string, token: string): Promise<number> {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(base.replace(/^http/, 'ws') + '/api/v1/live', {

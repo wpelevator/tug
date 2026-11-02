@@ -62,6 +62,109 @@ const compose = (node = 'n1') => ({
   services: { web: { image: 'nginx:alpine', 'x-tug': { placement: { nodes: [node] } } } },
 });
 
+test('deploy credentials cannot publish host-sensitive workloads', async () => {
+  const s = await makeServer();
+  try {
+    const node = (await s.call(OPERATOR, 'POST', '/api/v1/nodes/register', { name: 'n1' })).body;
+    const deploy = await s.mint('limited', 'deploy', ['site']);
+    const variants = [
+      {
+        services: {
+          web: {
+            image: 'nginx',
+            volumes: [{ type: 'bind', source: '/var/run/docker.sock', target: '/sock' }],
+          },
+        },
+      },
+      { services: { web: { image: 'nginx', cap_add: ['SYS_ADMIN'] } } },
+      {
+        services: {
+          web: { image: 'nginx', volumes: [{ type: 'volume', source: 'data', target: '/data' }] },
+        },
+        volumes: { data: { external: true, name: 'foreign' } },
+      },
+      {
+        services: {
+          web: { image: 'nginx', volumes: [{ type: 'volume', source: 'data', target: '/data' }] },
+        },
+        volumes: {
+          data: { driver: 'local', driver_opts: { type: 'none', o: 'bind', device: '/' } },
+        },
+      },
+      { services: { web: { image: 'nginx', logging: { driver: 'syslog' } } } },
+    ];
+    for (const definition of variants) {
+      const res = await s.call(deploy, 'POST', '/api/v1/deployments', {
+        project: 'site',
+        version: 'v1',
+        compose: definition,
+      });
+      assert.equal(res.status, 403, `host-sensitive deployment must be refused: ${res.text}`);
+    }
+    const allowed = await s.call(OPERATOR, 'POST', '/api/v1/deployments', {
+      project: 'site',
+      version: 'v1',
+      compose: variants[0],
+    });
+    assert.equal(
+      allowed.status,
+      200,
+      `an admin can deploy a host-sensitive service: ${allowed.text}`,
+    );
+    const scaled = await s.call(deploy, 'POST', '/api/v1/scale', {
+      project: 'site',
+      service: 'web',
+      replicas: 1,
+    });
+    assert.equal(
+      scaled.status,
+      403,
+      'deploy credentials must not scale an admin-created privileged workload',
+    );
+    const reported = await s.call(node.nodeId, 'POST', '/agent/v1/status', {
+      projects: [
+        {
+          project: 'site',
+          observedVersion: 'v1',
+          observedRevision: allowed.body.desiredState.revision,
+          health: 'serving',
+        },
+      ],
+    });
+    assert.equal(reported.status, 200, 'the privileged revision must be marked serving');
+    const safe = await s.call(deploy, 'POST', '/api/v1/deployments', {
+      project: 'site',
+      version: 'v2',
+      compose: compose(),
+    });
+    assert.equal(
+      safe.status,
+      200,
+      'a deploy credential may replace the privileged revision with an ordinary workload',
+    );
+    const rollback = await s.call(deploy, 'POST', '/api/v1/rollback', {
+      project: 'site',
+      force: true,
+    });
+    assert.equal(
+      rollback.status,
+      403,
+      'a deploy credential cannot roll back to a privileged revision',
+    );
+    const adminRollback = await s.call(OPERATOR, 'POST', '/api/v1/rollback', {
+      project: 'site',
+      force: true,
+    });
+    assert.equal(
+      adminRollback.status,
+      200,
+      'an admin can deliberately roll back to a privileged revision',
+    );
+  } finally {
+    await s.close();
+  }
+});
+
 test('named credentials are created once, listed without secrets, unique, validated and revocable immediately', async () => {
   const s = await makeServer();
   try {

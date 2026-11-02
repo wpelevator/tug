@@ -31,7 +31,9 @@ Roles are cumulative.
 
 A `deploy` credential must be trusted with its workloads' secrets: live `inspect` redacts environment values to avoid accidental disclosure, but `exec` can read them, and deployed code can disclose any secret it receives. Setting and deleting secrets is `admin` only; listing secret names is `read`. The deploy role can trigger project backups, while control backups and restores require `admin`.
 
-Project scope limits API access to project records; it does not isolate hosts or co-located projects. Current deployments can select shared nodes and request host bind mounts, external volumes, volume driver options and added capabilities. Treat deployment authors as administrators of the nodes they can select. Use separate hosts or control planes for mutually untrusted authors. See the [security audit](security.md) for the demonstrated boundaries and outstanding fixes.
+Host bind mounts, external volumes, non-local drivers, volume driver options, added capabilities, non-default logging and secrets outside service environments require an `admin` deployment. A `deploy` credential cannot scale or roll back to a privileged workload, or use `exec` or `run` on a service with any privileged revision still retained in project history. This conservative history check protects against an older privileged container still serving during reconciliation. An administrator can perform these operations deliberately. Automatic rollback to a privileged revision requires the failed deployment's actor to still hold an active admin credential.
+
+Project scope limits API access to project records; it does not yet control which shared nodes a project can select or isolate co-located projects. Treat deployment authors as administrators of the nodes they can select. Use separate hosts or control planes for mutually untrusted authors. See the [security audit](security.md) for the demonstrated boundaries and outstanding fixes.
 
 ## Endpoint table
 
