@@ -55,7 +55,7 @@ The project column says how a scoped credential's allowed projects are checked: 
 | `POST /api/v1/restart` | `deploy` | Body |
 | `POST /api/v1/logs` | `deploy` | Body |
 | `GET /api/v1/live` | `deploy` | First WebSocket frame |
-| `GET /api/v1/commands/:id` | `deploy` | Command's project; commands without a project (diagnostics, key rotation) need `admin` |
+| `GET /api/v1/commands/:id` | `deploy` | Command's project; commands without a project (diagnostics) need `admin` |
 | `POST /api/v1/backups/run` | `deploy` | Body `project` |
 | `GET /api/v1/backups` | `read` | Query `project` |
 | `POST /api/v1/restores` | `admin` | Body `project`; without `confirm` it only returns the plan |
@@ -72,8 +72,8 @@ The project column says how a scoped credential's allowed projects are checked: 
 | `GET /api/v1/nodes` | `admin` | Control-wide |
 | `POST /api/v1/nodes/:name/identity` | `admin` | Control-wide |
 | `POST /api/v1/nodes/:name/disable` | `admin` | Control-wide |
+| `POST /api/v1/nodes/:name/address` | `admin` | Control-wide |
 | `POST /api/v1/nodes/enrollment-credential` | `admin` | Control-wide |
-| `POST /api/v1/nodes/:name/rotate-wg-key` | `admin` | Control-wide |
 | `POST /api/v1/nodes/:name/ingress` | `admin` | Control-wide |
 | `DELETE /api/v1/nodes/:name` | `admin` | Control-wide |
 | `POST /api/v1/control/backups/run` | `admin` | Control-wide |

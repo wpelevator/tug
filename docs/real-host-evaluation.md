@@ -6,7 +6,7 @@ Two WordPress sites on the existing test hosts, using the current CLI against th
 
 Both sites are installed and serving over public HTTPS.
 
-**Version context.** The trial ran on the earlier runtime. Its control API was plain HTTP on port 8080 with bearer tokens, `/healthz` was unauthenticated, agents applied each project by running `docker compose up` on the node, and cross-node names were called service DNS. The current implementation differs: control serves a single mutual-TLS port (`8443`) with certificates from its own CA and no unauthenticated route, agents use the Docker Engine API with no Compose plugin on nodes, and the feature is called cross-node service names (hosts-file entries). Statements below about HTTP, port 8080, tokens, Compose behavior and `/healthz` describe the trial hosts, not the current product; [Control plane](control-plane.md), [Nodes](nodes.md) and [Architecture](architecture.md) describe the current one. Findings are kept as evidence, not rewritten.
+**Version context.** The trial ran on the earlier runtime. Its control API was plain HTTP on port 8080 with bearer tokens, `/healthz` was unauthenticated, agents applied each project by running `docker compose up` on the node, and cross-node names were called service DNS. The current implementation differs: control serves a single mutual-TLS port (`8443`) with certificates from its own CA and no unauthenticated route, agents use the Docker Engine API with no Compose plugin on nodes, and the feature is called cross-node service names (hosts-file entries). Statements below about HTTP, port 8080, tokens, Compose behavior and `/healthz` describe the trial hosts, not the current product; [Control plane](control-plane.md), [Nodes](nodes.md) and [Architecture](architecture.md) describe the current one. All references to WireGuard, mesh membership, overlay addresses, `--mesh`, `TUG_MESH` and `node-rotate-wg-key` likewise describe the removed Tug-owned mesh implementation, retained only as historical evidence; they are not current capabilities or tests that still apply. Findings are kept as evidence, not rewritten.
 
 This document preserves what the installed `m4-amd64` hosts did during the trial. Since then, current `main` has made `tug deploy` include the node's apply error, made `doctor --node` wait for its queued result, kept lifecycle events quiet after the first change, and added an outbound agent wake channel so deployments and queued commands do not normally wait for the next periodic poll. The remaining findings are still open unless a paragraph says otherwise.
 
@@ -125,6 +125,8 @@ I would not treat this run as evidence for rolling deploys, image build, or roll
 
 ## M6, M7 and enrollment on fresh hosts
 
+**Removed mesh implementation:** the commands, flags, environment variables, overlay addresses and packet-path results in this section are historical. Tug no longer provides that mesh, and these mesh checks are not a current validation baseline.
+
 31 October 2026, on the same two Ubuntu 24.04 droplets (1 vCPU, 1 GB, amd64, a shared VPC), after wiping both: containers, volumes, images, `wg0` and all Tug state. Control ran on 142.93.140.20 with `TUG_MESH=true`. The Tug image was built for amd64 from the branch and loaded with `docker save`.
 
 | Check | Result |
@@ -173,7 +175,7 @@ The store was RustFS in a container on the second node with random credentials, 
 
 ### Findings
 
-- **Fixed: health checks cannot reach containers from a bridge-networked agent.** `node-install` starts the agent on the default bridge. On Docker 29.9.2 it cannot dial the container IPs of a project's Compose network, so every TCP or HTTP health check timed out (`tcp timeout 172.19.0.2:3306`) while MariaDB was ready, and the first deploy failed. Restarting the agent with `--network host` (what mesh mode already does) fixed it. Earlier runs on older Docker did not hit this. `node-install` and `node-prepare-enrollment` now start the agent with `--network host` always, not only with `--mesh`.
+- **Fixed: health checks cannot reach containers from a bridge-networked agent.** At the time, `node-install` started the agent on the default bridge. On Docker 29.9.2 it could not dial the container IPs of a project's Compose network, so every TCP or HTTP health check timed out (`tcp timeout 172.19.0.2:3306`) while MariaDB was ready, and the first deploy failed. Restarting the agent with `--network host` fixed it. Earlier runs on older Docker did not hit this. Current `node-install` and `node-prepare-enrollment` always start the agent with `--network host` for these health checks; no added network capability is required.
 - **Open: `--build-local-image` builds for the CLI machine's architecture.** On an arm64 Mac it produced an arm64 image that the amd64 host could not run (`exec format error`). It should build for the target's architecture.
 - **Open: a deploy that fails health leaves the project half-up.** The containers kept running after the failed deployment, which hid the real cause until the agent's view was checked.
 

@@ -13,7 +13,6 @@ wait: true
 nodeDefaults:
   installDocker: true # --install-docker
   # image: ghcr.io/wpelevator/tug:0.5.0
-  # mesh: true
 
 # Read only by node-install, node-replace-identity, node-repair-identity, node-register and
 # node-prepare-enrollment, as if typed on the command line:
@@ -21,7 +20,7 @@ nodeDefaults:
 nodes:
   app1:
     ssh: root@203.0.113.7
-    publicAddress: 203.0.113.7
+    address: 10.0.0.7 # private inter-node address on your network
     label: [web, ingress]
   app2:
     ssh: root@203.0.113.8

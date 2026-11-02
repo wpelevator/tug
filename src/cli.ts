@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { isNodeHost } from './node-address.ts';
 import { Command, Option } from 'commander';
 import { openAsBlob } from 'node:fs';
 import {
@@ -14,12 +15,10 @@ import {
   enrollmentCloudInit,
   shellQuote as sh,
   HOST_NETWORK_FLAG,
-  MESH_RUN_FLAGS,
   CONTROL_CONTAINER,
   defaultControlUrl,
   controlPortCheck,
   localImageBuildArgs,
-  meshPortCheck,
 } from './cli-install.ts';
 import { createSourceArchive, prepareLocalImages } from './cli-build.ts';
 import { saveImageArchive } from './artifacts.ts';
@@ -157,16 +156,12 @@ function preflightRemote(
   {
     controlUrl,
     ports = [],
-    udpPorts = [],
     minDiskMb = 1024,
-    mesh = false,
     compose = false,
   }: {
     controlUrl?: string;
     ports?: number[];
-    udpPorts?: number[];
     minDiskMb?: number;
-    mesh?: boolean;
     /** Requires the Compose plugin; only the control host runs Compose, nodes need the Docker Engine alone. */
     compose?: boolean;
   } = {},
@@ -202,20 +197,6 @@ function preflightRemote(
       `port.${port}.free`,
       controlPortCheck(port),
       `Port ${port} is already in use on the target host by something other than the Tug control container; stop the conflicting service or choose another port.`,
-    ]);
-  }
-  if (mesh) {
-    checks.push([
-      'wireguard.kernel',
-      'ip link add tugwgtest type wireguard && ip link del tugwgtest || modprobe -n wireguard 2>/dev/null',
-      'Install WireGuard (kernel 5.6+ has it built in; older kernels need the wireguard-dkms package) and ensure iproute2 is present.',
-    ]);
-  }
-  for (const port of udpPorts) {
-    checks.push([
-      `udp.${port}.free`,
-      meshPortCheck(port),
-      `UDP port ${port} is in use by something other than this node's running Tug mesh agent (or the ss tool is missing). Stop the conflicting service, or choose another port with --wg-port and set TUG_WG_PORT on control.`,
     ]);
   }
   if (controlUrl)
@@ -324,24 +305,32 @@ program
   .requiredOption('--csr <file>', 'PEM certificate request generated on the node (- for stdin)')
   .option('--mode <mode>', 'create a new node or replace an existing node key', 'create')
   .option('--address <addr>')
-  .option('--public-address <addr>')
   .option('--label <label>', 'node label (repeatable)', collect, [])
   .action(
-    async (
-      name: string,
-      o: { csr: string; mode: string; address?: string; publicAddress?: string; label: string[] },
-    ) => {
+    async (name: string, o: { csr: string; mode: string; address?: string; label: string[] }) => {
       if (o.mode !== 'create' && o.mode !== 'replace')
         throw new Error("--mode must be 'create' or 'replace'");
       const csr = o.csr === '-' ? await readStdin() : await fs.readFile(o.csr, 'utf8');
       const r = await request<IdentityResponse>(
         'POST',
         `/api/v1/nodes/${encodeURIComponent(name)}/identity`,
-        { csr, mode: o.mode, address: o.address, publicAddress: o.publicAddress, labels: o.label },
+        { csr, mode: o.mode, address: o.address, labels: o.label },
       );
       console.log(JSON.stringify(r, null, 2));
     },
   );
+program
+  .command('node-address <name> <address>')
+  .description("update a node's inter-node address")
+  .action(async (name: string, address: string) => {
+    console.log(
+      JSON.stringify(
+        await request('POST', `/api/v1/nodes/${encodeURIComponent(name)}/address`, { address }),
+        null,
+        2,
+      ),
+    );
+  });
 program
   .command('node-disable <name>')
   .description(
@@ -357,28 +346,9 @@ program
     ),
   );
 program
-  .command('node-rotate-wg-key <name>')
-  .description(
-    'generate a new WireGuard keypair on the node; peers pick up the new public key on their next poll',
-  )
-  .option('--timeout <seconds>', 'wait timeout', '60')
-  .action(async (name: string, o: { timeout: string }) => {
-    const created = await request(
-      'POST',
-      `/api/v1/nodes/${encodeURIComponent(name)}/rotate-wg-key`,
-      {},
-    );
-    const cmd = await waitForCommand(created.commandId, Number(o.timeout));
-    if (cmd.state === 'failed')
-      throw new Error(JSON.parse(cmd.result_json || '{}').error || 'key rotation failed');
-    console.log(
-      JSON.stringify({ ok: true, node: name, ...JSON.parse(cmd.result_json || '{}') }, null, 2),
-    );
-  });
-program
   .command('node-remove <name>')
   .description(
-    'remove a retired node from the control plane (its identity, WireGuard peer, statuses and queued commands); stop its agent and remove its containers on the host yourself',
+    'remove a retired node from the control plane (its identity, statuses and queued commands); stop its agent and remove its containers on the host yourself',
   )
   .option('--force', 'remove even if the node is still reporting')
   .action(async (name: string, o: { force?: boolean }) => {
@@ -458,10 +428,6 @@ program
     '--recover-root',
     "replace root's key from the control host without the API (lost credential); other admins are unaffected",
   )
-  .option(
-    '--mesh',
-    'enable the WireGuard mesh on control (TUG_MESH=true); install nodes with --mesh too',
-  )
   .action(
     async (
       sshTarget: string,
@@ -470,7 +436,6 @@ program
         port: string;
         credentialOut: string;
         recoverRoot?: boolean;
-        mesh?: boolean;
       },
     ) => {
       const cfg = await loadCfg();
@@ -490,7 +455,6 @@ program
         CONTROL_URL: yamlValue(new URL(controlUrl).origin),
         EXTRA_SANS: yamlValue(o.extraSan.join(',')),
         PORT: o.port,
-        MESH: yamlValue(o.mesh ? 'true' : 'false'),
       });
       const remote = await loadTemplate(templatesDir, 'control-install.sh', {
         COMPOSE: compose,
@@ -521,11 +485,8 @@ program
 interface NodeIdentityOpts extends InstallOpts {
   name?: string;
   address?: string;
-  publicAddress?: string;
   label: string[];
   agentControlUrl?: string;
-  mesh?: boolean;
-  wgPort: string;
   all?: boolean;
   wait: boolean;
 }
@@ -541,11 +502,6 @@ function addNodeIdentityOptions(command: Command): Command {
       '--agent-control-url <url>',
       'connect-only URL the agent dials (for example a private address); the certificate is still verified against the credential URL',
     )
-    .option(
-      '--mesh',
-      'join the WireGuard mesh (agent runs with host networking and NET_ADMIN; control needs TUG_MESH=true)',
-    )
-    .option('--wg-port <port>', 'WireGuard UDP port checked by preflight', '51820')
     .option(
       '--image <tag>',
       "Tug image to run (default: ghcr.io/wpelevator/tug:<this CLI's version>)",
@@ -579,8 +535,6 @@ async function installNodeIdentity(
   if (o.installDocker) await bootstrapDocker(sshTarget);
   preflightRemote(sshTarget, {
     controlUrl: connectUrl ?? cfg.credential?.url,
-    mesh: o.mesh,
-    udpPorts: o.mesh ? [Number(o.wgPort)] : [],
   });
   const image = resolveImage(o.image, o.buildLocalImage);
   if (o.buildLocalImage) await transferTugImage(sshTarget, image);
@@ -597,20 +551,19 @@ async function installNodeIdentity(
   const response = await request<IdentityResponse>(
     'POST',
     `/api/v1/nodes/${encodeURIComponent(name)}/identity`,
-    { csr, mode, address: o.address, publicAddress: o.publicAddress, labels: o.label },
+    { csr, mode, address: o.address, labels: o.label },
   );
   runCapture('ssh', ['--', sshTarget, agent('install-cert', true)], {
     input: JSON.stringify(response),
   });
-  const env =
-    (await loadTemplate(templatesDir, 'agent.env', {
-      CONTROL_URL_LINE: connectUrl ? `TUG_CONTROL_URL=${connectUrl}\n` : '',
-      NODE_NAME: name,
-    })) + (o.mesh ? 'TUG_MESH=true\n' : '');
+  const env = await loadTemplate(templatesDir, 'agent.env', {
+    CONTROL_URL_LINE: connectUrl ? `TUG_CONTROL_URL=${connectUrl}\n` : '',
+    NODE_NAME: name,
+  });
   const remote = await loadTemplate(templatesDir, 'node-install.sh', {
     ENV: env,
     IMAGE_SH: sh(image),
-    RUN_FLAGS: `${o.mesh ? MESH_RUN_FLAGS : HOST_NETWORK_FLAG} `,
+    RUN_FLAGS: `${HOST_NETWORK_FLAG} `,
   });
   runLocal('ssh', ['--', sshTarget, remote]);
   if (o.wait) {
@@ -694,7 +647,6 @@ for (const [verb, description, mode, repair] of [
     .command(`${verb} [sshTarget]`)
     .description(description)
     .option('--address <addr>')
-    .option('--public-address <addr>')
     .option('--label <label>', 'node label (repeatable)', collect, []);
   addNodeIdentityOptions(command).action(
     async (sshArgument: string | undefined, o: NodeIdentityOpts, command: Command) =>
@@ -708,6 +660,7 @@ program
     'mint a single-use, name-bound join key so a host you cannot SSH to can self-join with one docker run; a saved cloud-init document contains a credential',
   )
   .requiredOption('--name <name>', 'the node name the key is bound to; mint one key per instance')
+  .option('--address <addr>', 'private inter-node address for this node')
   .option(
     '--agent-control-url <url>',
     'connect-only URL the agent dials; the certificate is still verified against the credential URL',
@@ -717,7 +670,6 @@ program
     '--image <tag>',
     "agent image used in the printed docker run (default: ghcr.io/wpelevator/tug:<this CLI's version>)",
   )
-  .option('--mesh', 'print a docker run that joins the WireGuard mesh (host networking, NET_ADMIN)')
   .option('--label <label>', 'node label (repeatable)', collect, [])
   .option('--install-docker', 'print cloud-init that installs Docker and starts the agent')
   .option('--json', 'print JSON including the command or cloud-init payload')
@@ -725,13 +677,15 @@ program
     async (o: {
       name: string;
       agentControlUrl?: string;
+      address?: string;
       ttl: string;
       image?: string;
-      mesh?: boolean;
       label: string[];
       json?: boolean;
       installDocker?: boolean;
     }) => {
+      if (o.address !== undefined && !isNodeHost(o.address))
+        throw new Error('address must be an IP address or hostname without a port');
       const connectUrl = o.agentControlUrl ? normalizeControlUrl(o.agentControlUrl) : undefined;
       const minted = await request<EnrollmentCredentialResponse>(
         'POST',
@@ -749,7 +703,7 @@ program
         ...(connectUrl ? { connectUrl } : {}),
       };
       const joinKey = Buffer.from(JSON.stringify(keyPayload)).toString('base64url');
-      const command = dockerRunSnippet(resolveImage(o.image), joinKey, o.mesh);
+      const command = dockerRunSnippet(resolveImage(o.image), joinKey, o.address);
       const cloudInit = o.installDocker
         ? enrollmentCloudInit(await dockerBootstrap(), command)
         : undefined;
@@ -1550,7 +1504,6 @@ program.hook('preAction', async (_root, command) => {
   const options = command.opts();
   for (const [key, min, max] of [
     ['port', 1, 65535],
-    ['wgPort', 1, 65535],
     ['timeout', 1, 86400],
     ['ttl', 1, 31536000],
     ['uses', 1, 1000000],

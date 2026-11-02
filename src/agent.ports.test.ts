@@ -78,8 +78,8 @@ test('resolveBindAddress uses loopback without an address, IPs as given and reso
     'a node without an address binds published ports to loopback',
   );
   assert.equal(
-    await resolveBindAddress('10.210.0.4'),
-    '10.210.0.4',
+    await resolveBindAddress('192.168.50.4'),
+    '192.168.50.4',
     'an IPv4 address is used as is',
   );
   assert.equal(
@@ -105,7 +105,7 @@ test('resolveBindAddress uses loopback without an address, IPs as given and reso
 
 test('reconcile renders ports on the bind address control sends, with the loopback ingress port on 127.0.0.1', async () => {
   const { ctx, events } = await makeCtx();
-  await reconcile(desired(), ctx, {}, { address: '10.210.0.4', loopback: { proj: ['web'] } });
+  await reconcile(desired(), ctx, {}, { address: '192.168.50.4', loopback: { proj: ['web'] } });
   assert.deepEqual(
     published(ctx, 'web'),
     ['127.0.0.1:8080->80/tcp'],
@@ -113,8 +113,8 @@ test('reconcile renders ports on the bind address control sends, with the loopba
   );
   assert.deepEqual(
     published(ctx, 'db'),
-    ['10.210.0.4:3306->3306/tcp', '0.0.0.0:3307->3307/tcp'],
-    'other ports listen on the overlay address and an explicit 0.0.0.0 is left as written',
+    ['192.168.50.4:3306->3306/tcp', '0.0.0.0:3307->3307/tcp'],
+    'other ports listen on the private node address and an explicit 0.0.0.0 is left as written',
   );
   assert.equal(
     events.some((e) => e.type === 'ports.public'),
@@ -151,10 +151,15 @@ test('a public bind address raises one ports.public warning until it changes', a
     /listen on public address 203\.0\.113\.7/,
     'the message names the public address',
   );
+  assert.match(
+    warnings[0].message || '',
+    /give the node a private address/,
+    'the message directs the operator to use a private node address',
+  );
   assert.deepEqual(
     published(ctx, 'db'),
     ['203.0.113.7:3306->3306/tcp', '0.0.0.0:3307->3307/tcp'],
-    'without the mesh ports bind to the node address even when it is public',
+    'ports bind to the node address even when it is public',
   );
 
   await reconcile(desired(), ctx, {}, { address: '203.0.113.7', loopback: { proj: ['web'] } });
@@ -206,7 +211,7 @@ test('publicListeners finds Tug project containers listening on all interfaces o
       { IP: '::', PrivatePort: 3306, PublicPort: 3306, Type: 'tcp' },
     ]),
     container('proj', 'tug-proj-cache-1', [
-      { IP: '10.210.0.4', PrivatePort: 6379, PublicPort: 6379, Type: 'tcp' },
+      { IP: '192.168.50.4', PrivatePort: 6379, PublicPort: 6379, Type: 'tcp' },
     ]),
     container('proj', 'tug-proj-web-1', [
       { IP: '127.0.0.1', PrivatePort: 80, PublicPort: 20001, Type: 'tcp' },
@@ -226,7 +231,7 @@ test('publicListeners finds Tug project containers listening on all interfaces o
       { project: 'proj', container: 'tug-proj-db-1', listen: '[::]:3306->3306/tcp' },
       { project: 'proj', container: 'tug-proj-api-1', listen: '203.0.113.7:20002->8080/tcp' },
     ],
-    'all-interface and public listeners of Tug projects are reported; overlay, loopback, unpublished and non-Tug containers are not',
+    'all-interface and public listeners of Tug projects are reported; private-node, loopback, unpublished and non-Tug containers are not',
   );
 });
 
@@ -251,6 +256,11 @@ test('diagnostics report public listeners as a warning that does not fail the ch
     check?.warning || '',
     /1 published port of Tug projects listens on a public address/,
     'the warning counts the public listeners',
+  );
+  assert.match(
+    check?.warning || '',
+    /127\.0\.0\.1 or a private node address/,
+    'the warning directs the operator to loopback or a private node address',
   );
   assert.match(
     check?.stdout || '',

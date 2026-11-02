@@ -4,14 +4,14 @@
 // does: the node's own `agent identity` makes the key and CSR, the identity endpoint signs it and `agent install-cert`
 // installs the result into /tokens/<node>, which the fake VPS copies into its state volume.
 import { execFileSync } from 'node:child_process';
+import { lookup } from 'node:dns/promises';
 import fs from 'node:fs/promises';
 import { api, parseCredential } from './mtls-fetch.js';
 
 const control = process.env.TUG_CONTROL_URL || 'https://control:8443';
 const dataDir = process.env.TUG_DATA_DIR || '/data';
 const identityDir = process.env.TUG_TOKEN_DIR || '/tokens';
-// Networking scenario: advertise each node's name as its WireGuard endpoint and mark ingress nodes.
-const publicFromName = process.env.TUG_PUBLIC_ADDRESS_FROM_NAME === 'true';
+// Networking scenario: resolve Compose service names to numeric node addresses and mark ingress nodes.
 const ingressNodes = (process.env.TUG_INGRESS_NODES || '')
   .split(',')
   .map((s) => s.trim())
@@ -20,12 +20,33 @@ const nodes = (process.env.TUG_NODES || 'vps-a,vps-b,vps-c')
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean);
+// Optional Compose DNS aliases in the same order, for a control node name that differs from its service name.
+const dnsNames = (process.env.TUG_NODE_DNS_NAMES || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+if (dnsNames.length && dnsNames.length !== nodes.length)
+  throw new Error('TUG_NODE_DNS_NAMES must have one Compose DNS name per TUG_NODES entry');
 
 const exists = (file) =>
   fs.access(file).then(
     () => true,
     () => false,
   );
+
+async function resolveNodeAddress(name) {
+  let lastError;
+  for (let attempt = 0; attempt < 60; attempt++) {
+    try {
+      return (await lookup(name, { family: 4 })).address;
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  throw new Error(`could not resolve a numeric private address for ${name}`, { cause: lastError });
+}
+
 for (let i = 0; i < 120 && !(await exists(`${dataDir}/pki/ca.crt`)); i++)
   await new Promise((r) => setTimeout(r, 1000));
 if (!(await exists(`${dataDir}/pki/ca.crt`))) throw new Error('control did not create its CA');
@@ -61,7 +82,7 @@ for (let i = 0; i < 120; i++) {
 }
 if (!ready) throw new Error(`control did not become ready at ${control}`);
 
-for (const name of nodes) {
+for (const [index, name] of nodes.entries()) {
   const stateDir = `${identityDir}/${name}`;
   if (!(await exists(`${stateDir}/agent.json`))) {
     const env = { ...process.env, TUG_STATE_DIR: stateDir };
@@ -72,8 +93,7 @@ for (const name of nodes) {
     const response = await api(root, control, `/api/v1/nodes/${name}/identity`, {
       csr,
       mode: 'create',
-      address: name,
-      publicAddress: publicFromName ? name : undefined,
+      address: await resolveNodeAddress(dnsNames[index] || name),
     });
     execFileSync('node', ['dist/main.js', 'agent', 'install-cert'], {
       input: JSON.stringify(response),

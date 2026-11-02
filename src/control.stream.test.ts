@@ -626,7 +626,7 @@ test('live rejects foreign session spoofing and malformed/binary operator frames
   assert.equal(
     (await s.agent.next()).type,
     'work-available',
-    'registering a mesh peer should preserve agent wake notifications',
+    'registering a node should preserve agent wake notifications',
   );
   const foreign = await socket(s.base, '/agent/v1/stream', other.nodeId);
   await foreign.next();

@@ -15,8 +15,8 @@ Deploy Docker Compose applications to one or more ordinary Linux VPSes through a
 - Deployment convergence, per-project operation locks, cancellation, rollback, per-service rollout events and log fetching through the agents.
 - Opt-in zero-downtime rolling rollouts for ingress-fronted services (`x-tug.rollout`) and automatic rollback of failed deployments (`x-tug.rollback: auto`). See [Compose extensions](docs/compose.md#rolling-rollouts).
 - Private published images use encrypted project credentials for digest resolution and Engine API pulls.
-- Optional WireGuard mesh between nodes, health-aware cross-node service names (hosts-file entries injected into containers) and a managed Caddy ingress with automatic HTTPS, each opt-in. See [Networking](docs/networking.md).
-- Private-by-default published ports: generated Compose binds them to the overlay IP, loopback or the node address, never every interface unless you write `0.0.0.0`. See [Networking](docs/networking.md#published-ports-private-by-default).
+- Health-aware cross-node service names (hosts-file entries injected into containers), on by default with a `TUG_SERVICE_NAMES=false` opt-out, and an optional managed Caddy ingress with automatic HTTPS. Both use each node's private `address` on your existing network. See [Networking](docs/networking.md).
+- Private-by-default published ports: agent-generated container definitions bind them to the node address or loopback, never every interface unless you write `0.0.0.0`. Tug does not encrypt node-to-node workload traffic; your network owns reachability, firewalling and encryption. See [Networking](docs/networking.md#published-ports-private-by-default).
 - Workload backups of service commands and volumes with restic, a separate control-plane backup and restore, and `tug doctor` diagnostics for certificate expiry, node connectivity and clock skew.
 
 ## How it fits together
@@ -38,17 +38,19 @@ Deploy Docker Compose applications to one or more ordinary Linux VPSes through a
        |                       |
 +------+------------+   +------+------------------+
 | Node app1         |   | Node app2 (ingress node)|
-|   Agent           |<->|   Agent                 |
+|   Agent           |   |   Agent                 |
 |   Docker Engine   |   |   Docker Engine         |
 |   services        |   |   services              |
 |                   |   |   managed Caddy ingress |
 +-------------------+   +-------------------------+
-        <-> optional WireGuard mesh between nodes
+        \_________________________/
+          workload traffic between node addresses
+          over the operator's private network
 
   SSH is used only by the CLI to install the control plane and nodes.
 ```
 
-Operators and CI talk to the control API. The control plane stores desired state and builds images; each agent dials out to fetch the work for its node, applies it through the Docker Engine API and reports health back, so nodes behind NAT need no inbound ports. SSH is used only to install the control plane and its nodes. The optional WireGuard mesh and Caddy ingress are described in [Networking](docs/networking.md), and every flow in detail in [Architecture](docs/architecture.md).
+Operators and CI talk to the control API. The control plane stores desired state and builds images; each agent dials out to fetch the work for its node, applies it through the Docker Engine API and reports health back, so the control channel works through NAT without inbound ports. SSH is used only to install the control plane and its nodes. Cross-node service names and Caddy ingress use each node's `address` over the operator's private network; Tug provides no overlay or encryption for that workload traffic. See [Networking](docs/networking.md), and [Architecture](docs/architecture.md) for every flow in detail.
 
 ## Quick start
 
@@ -58,7 +60,7 @@ Install the CLI (Node >= 22.18), or run it without installing through `npx @wpel
 npm install -g @wpelevator/tug
 tug control-install root@203.0.113.5 --install-docker
 tug init tug-root.credential.json
-tug node-install root@198.51.100.7 --name app1 --install-docker
+tug node-install root@198.51.100.7 --name app1 --address 10.0.0.7 --install-docker
 tug deploy -f docker-compose.yml
 ```
 
@@ -78,7 +80,7 @@ The full walkthrough, including nodes you cannot SSH to (`tug node-prepare-enrol
 - [Backups](docs/backups.md): scheduled workload backups with `x-tug.backup` (restic), restore, recipes for common databases, and a restore drill. See also the [WordPress example](examples/wordpress/README.md).
 - [Access control](docs/access-control.md): certificate identity classes, scoped operator credentials, roles, audit trail and a GitHub Actions deploy example.
 - [Security](docs/security.md): deployment trust boundaries, security audit findings and validation limits.
-- [Networking](docs/networking.md): WireGuard mesh, cross-node service names, ingress and TLS, firewall notes.
+- [Networking](docs/networking.md): bring-your-own private networking, cross-node service names, ingress and TLS, firewall notes.
 - [Nodes](docs/nodes.md): node names and IDs, SSH install, self-service enrollment, certificate renewal and recovery, registration and status.
 - [CLI reference](docs/cli.md): every `tug` command and option.
 - [Configuration](docs/configuration.md): CLI, control and agent environment variables.

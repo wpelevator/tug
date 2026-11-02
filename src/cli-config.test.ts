@@ -38,14 +38,11 @@ buildLocal: true
 wait: false
 nodeDefaults:
   installDocker: true
-  mesh: true
-  wgPort: 51821
   label: [base]
   image: ghcr.io/example/tug:test
 nodes:
   app1:
     ssh: root@203.0.113.7
-    publicAddress: 203.0.113.7
     label: [web, ingress]
   app2:
     ssh: root@203.0.113.8
@@ -185,9 +182,19 @@ test('unknown keys, wrong types and bad values fail naming the file and the key'
       ],
       ['controlUrl: ""', /controlUrl must be a nonempty single-line string/, 'empty control URL'],
       [
-        'nodes:\n  a:\n    wgPort: 70000',
-        /nodes\.a\.wgPort must be an integer from 1 to 65535/,
-        'port out of range',
+        'nodes:\n  a:\n    mesh: true',
+        /nodes\.a\.mesh is not a known setting/,
+        'removed mesh setting',
+      ],
+      [
+        'nodes:\n  a:\n    wgPort: 51820',
+        /nodes\.a\.wgPort is not a known setting/,
+        'removed WireGuard port setting',
+      ],
+      [
+        'nodes:\n  a:\n    publicAddress: 203.0.113.7',
+        /nodes\.a\.publicAddress is not a known setting/,
+        'removed public address setting',
       ],
       ['nodes:\n  a:\n    sshh: x', /nodes\.a\.sshh is not a known setting/, 'unknown node key'],
       ['nodes:\n  a b:\n    ssh: x', /nodes\.a b must be a node name/, 'node name with a space'],
@@ -229,7 +236,6 @@ test('nodeDefaults sit under each node key by key, a node list replaces a defaul
     const config = await resolveCliConfig({}, {}, dir);
     const app1 = nodeSettings(config, 'app1');
     assert.equal(app1.installDocker, true, 'a node should inherit nodeDefaults');
-    assert.equal(app1.wgPort, '51821', 'a numeric port should be normalized to the option string');
     assert.deepEqual(
       app1.label,
       ['web', 'ingress'],
@@ -248,7 +254,7 @@ test('nodeDefaults sit under each node key by key, a node list replaces a defaul
       'the overlay may declare a node the tracked file lacks',
     );
     assert.equal(
-      nodeSettings(config, 'unlisted').mesh,
+      nodeSettings(config, 'unlisted').installDocker,
       true,
       'nodeDefaults should apply to a node that is not declared',
     );
@@ -283,14 +289,11 @@ function demoCommand(
     .option('-f, --file <file>', 'compose file', 'docker-compose.yml')
     .option('--build-local')
     .option('--address <addr>')
-    .option('--public-address <addr>')
     .option('--install-docker')
     .option('--image <tag>')
     .option('--agent-control-url <url>')
     .option('--no-wait')
-    .option('--mesh')
     .option('--label <label>', 'label', (v: string, a: string[]) => [...a, v], [] as string[])
-    .option('--wg-port <port>', 'port', '51820')
     .action(() => {});
   program.parse([name, ...source], { from: 'user' });
   return { command, opts: command.opts() };
@@ -301,32 +304,26 @@ test('config values are defaults that never override a flag, and only reach comm
     file: '/abs/prod.yml',
     buildLocal: true,
     wait: false,
-    mesh: true,
     label: ['web'],
-    wgPort: '51821',
   };
   const fromConfig = demoCommand('deploy');
   applyConfigDefaults(fromConfig.command, fromConfig.opts, defaults);
   assert.equal(fromConfig.opts.file, '/abs/prod.yml', 'file should replace the option default');
   assert.equal(fromConfig.opts.buildLocal, true, 'buildLocal: true should enable --build-local');
   assert.equal(fromConfig.opts.wait, false, 'wait: false should behave like --no-wait');
-  assert.equal(fromConfig.opts.mesh, undefined, 'a key deploy does not list should be ignored');
-  assert.equal(fromConfig.opts.wgPort, '51820', 'a node key should not reach deploy');
 
   const fromFlags = demoCommand('deploy', ['-f', 'cli.yml', '--no-wait']);
   applyConfigDefaults(fromFlags.command, fromFlags.opts, { ...defaults, wait: true });
   assert.equal(fromFlags.opts.file, 'cli.yml', 'a flag should win over the config file');
   assert.equal(fromFlags.opts.wait, false, 'an explicit --no-wait should win over wait: true');
 
-  const node = demoCommand('node-install', ['--wg-port', '60000']);
+  const node = demoCommand('node-install');
   applyConfigDefaults(node.command, node.opts, defaults);
-  assert.equal(node.opts.mesh, true, 'a node key should apply to node-install');
   assert.deepEqual(
     node.opts.label,
     ['web'],
     'label from the file should replace the empty default',
   );
-  assert.equal(node.opts.wgPort, '60000', 'a flag should win over a node setting');
   assert.equal(
     node.opts.file,
     'docker-compose.yml',
@@ -347,18 +344,11 @@ test('every supported option setting reaches its commands and explicit flags tak
     buildLocal: { configured: false, flags: ['--build-local'], expected: true },
     wait: { configured: true, flags: ['--no-wait'], expected: false },
     address: { configured: '10.0.0.1', flags: ['--address', '10.0.0.2'], expected: '10.0.0.2' },
-    publicAddress: {
-      configured: 'config.test',
-      flags: ['--public-address', 'cli.test'],
-      expected: 'cli.test',
-    },
     label: {
       configured: ['config'],
       flags: ['--label', 'one', '--label', 'two'],
       expected: ['one', 'two'],
     },
-    mesh: { configured: false, flags: ['--mesh'], expected: true },
-    wgPort: { configured: '51821', flags: ['--wg-port', '60000'], expected: '60000' },
     installDocker: { configured: false, flags: ['--install-docker'], expected: true },
     image: { configured: 'config:tag', flags: ['--image', 'cli:tag'], expected: 'cli:tag' },
     agentControlUrl: {
@@ -499,7 +489,7 @@ test('node-install reads the ssh target from the config and reports a missing on
   await withDir(async (dir) => {
     await fs.writeFile(
       path.join(dir, 'tug.yml'),
-      'controlUrl: https://control.test\nnodes:\n  app1:\n    ssh: root@203.0.113.7\n  app2:\n    publicAddress: x.test\n',
+      'controlUrl: https://control.test\nnodes:\n  app1:\n    ssh: root@203.0.113.7\n  app2:\n    address: x.test\n',
     );
     const run = (...args: string[]) =>
       exec(process.execPath, [entry, ...args], { cwd: dir }).then(

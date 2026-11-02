@@ -30,8 +30,7 @@ const CADDY_ETC = '/etc/caddy';
 
 export interface NodeView {
   name: string;
-  /** Reachable mesh address; null when the mesh is off or the node has not reported a key yet. */
-  overlayIp: string | null;
+  /** Operator-provided address other nodes use to reach this node's published ports. */
   address: string | null;
   lastSeenAt: string | null;
 }
@@ -60,7 +59,7 @@ export function resolveServiceEndpoints(
       const endpoints: ServiceEndpoint[] = [];
       for (const nodeName of spec.placement?.nodes || []) {
         const node = byName.get(nodeName);
-        const address = node && (node.overlayIp || node.address);
+        const address = node?.address;
         if (!node || !address || !node.lastSeenAt || node.lastSeenAt < staleBefore) continue;
         const serviceState = reported.get(`${nodeName}\0${state.project}`)?.serviceStates?.[
           service

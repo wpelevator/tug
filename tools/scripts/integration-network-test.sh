@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# End-to-end check of the WireGuard mesh, service DNS and Caddy ingress across three privileged
-# fake VPSes. Needs a Docker host whose kernel supports WireGuard (e.g. Docker Desktop, any Linux 5.6+).
+# End-to-end check of cross-node service DNS, private port binding and Caddy ingress across three
+# privileged fake VPSes connected by the Compose network.
 set -euo pipefail
 
 # CI prebuilds the images with a layer cache and sets TUG_COMPOSE_BUILD="" to skip the rebuild.

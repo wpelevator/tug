@@ -2,7 +2,7 @@ FROM node:24-bookworm-slim
 WORKDIR /app
 # A fake VPS is a node: Docker Engine only. Agents use the Engine API, so there is no Compose plugin.
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends docker.io ca-certificates iptables bash curl wireguard-tools iproute2 iputils-ping \
+  && apt-get install -y --no-install-recommends docker.io ca-certificates iptables bash curl \
   && rm -rf /var/lib/apt/lists/*
 COPY package*.json ./
 RUN npm install --omit=dev

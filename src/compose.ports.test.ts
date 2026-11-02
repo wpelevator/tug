@@ -234,7 +234,7 @@ test('rolling revisions keep the bind address when their host port is remapped',
   assert.deepEqual(
     withHostPort(spec.body, 20003).HostConfig?.PortBindings,
     { '80/tcp': [{ HostIp: '10.210.0.4', HostPort: '20003' }] },
-    'the revision port is published on the overlay address',
+    'the revision port is published on the node address',
   );
   assert.equal(
     containerSpecs(ds, 'n1', { bind: { address: '10.210.0.4' } }).specs.web.hash,

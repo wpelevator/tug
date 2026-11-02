@@ -98,7 +98,6 @@ globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) =>
             csr,
             mode,
             address: body.address,
-            publicAddress: body.publicAddress,
             labels: body.labels,
           }),
         },
@@ -108,12 +107,6 @@ globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) =>
     if (res.status === 409) res = await identity('replace');
     if (!res.ok) return res;
     const out = (await res.json()) as { node: { id: string } };
-    if (body.wgPublicKey)
-      await realFetch(url.replace('/api/v1/nodes/register', '/agent/v1/wireguard/key'), {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', 'x-tug-test-node': out.node.id },
-        body: JSON.stringify({ publicKey: body.wgPublicKey }),
-      });
     return new Response(JSON.stringify({ ...out, nodeId: out.node.id }), {
       status: 200,
       headers: { 'content-type': 'application/json' },

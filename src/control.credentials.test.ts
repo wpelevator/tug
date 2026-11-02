@@ -254,12 +254,15 @@ const SAMPLES: Record<string, { path: string; body?: unknown }> = {
   'DELETE /api/v1/nodes/:name': { path: '/api/v1/nodes/ghost' },
   'GET /api/v1/nodes': { path: '/api/v1/nodes' },
   'POST /api/v1/nodes/:name/identity': { path: '/api/v1/nodes/x/identity', body: {} },
+  'POST /api/v1/nodes/:name/address': {
+    path: '/api/v1/nodes/x/address',
+    body: { address: '10.0.0.1' },
+  },
   'POST /api/v1/nodes/:name/disable': { path: '/api/v1/nodes/x/disable', body: {} },
   'POST /api/v1/nodes/enrollment-credential': {
     path: '/api/v1/nodes/enrollment-credential',
     body: {},
   },
-  'POST /api/v1/nodes/:name/rotate-wg-key': { path: '/api/v1/nodes/ghost/rotate-wg-key', body: {} },
   'POST /api/v1/nodes/:name/ingress': { path: '/api/v1/nodes/ghost/ingress', body: {} },
   'POST /api/v1/control/backups/run': { path: '/api/v1/control/backups/run', body: {} },
   'POST /api/v1/control/restore': { path: '/api/v1/control/restore', body: {} },
