@@ -79,7 +79,7 @@ The full walkthrough, including nodes you cannot SSH to (`tug node-prepare-enrol
 - [Terminology](docs/terminology.md): core concepts, the naming review (which recommendations are implemented), industry comparisons and the remaining proposed interface improvements.
 - [Architecture](docs/architecture.md): components, reconciliation, workflow diagrams, secrets and runtime paths.
 - [Compose extensions](docs/compose.md): `x-tug` placement, health checks, volumes and limitations.
-- [Control plane](docs/control-plane.md): install, mutual TLS and the private CA, image delivery, control-plane backup and restore.
+- [Control plane](docs/control-plane.md): install, mutual TLS and the private CA, image delivery, control-plane backup and recovery on another host.
 - [Backups](docs/backups.md): scheduled workload backups with `x-tug.backup` (restic), restore, recipes for common databases, and a restore drill. See also the [WordPress example](examples/wordpress/README.md).
 - [Access control](docs/access-control.md): certificate identity classes, scoped operator credentials, roles, audit trail and a GitHub Actions deploy example.
 - [Security](docs/security.md): deployment trust boundaries, security audit findings and validation limits.
