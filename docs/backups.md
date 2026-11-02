@@ -111,7 +111,7 @@ A backup you have not restored is a hope. Rehearse the restore on the live proje
 3. **Restore the database for real, in a quiet moment.** `tug restore db` prints the plan; `tug restore db --confirm` stops WordPress, takes a safety backup of the current data, loads the dump and starts WordPress again. Compare a number you know (the post count, the newest upload) with production.
 4. **Write down how long it took.** That is your real recovery time.
 
-To rehearse a database restore without touching the live one, copy the project into a scratch project name (`TUG_PROJECT`), restore into it with `--from <snapshot id>` naming a snapshot of the original, and remove the scratch project when done. Remember to stop the scratch site from sending mail or running cron against production services.
+To rehearse a database restore without touching the live one, use the original project repository and its escrowed password to dump the snapshot with restic into an isolated throwaway database container, then verify the recovered data and remove the container. Tug does not restore a snapshot into a different project: repositories and snapshot tags are project-specific. Keep the isolated database and any test application disconnected from production services, mail and scheduled jobs. This manual procedure has not yet been validated as a complete fresh-host recovery drill.
 
 ## Known limits
 
