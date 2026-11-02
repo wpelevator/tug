@@ -6,7 +6,7 @@ import path from 'node:path';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from './control.ts';
-import { testImageResolver, testIdentity } from '../tests/helpers.ts';
+import { testImageResolver, testControlUrl, testIdentity } from '../tests/helpers.ts';
 import { generateWgKeyPair } from './mesh.ts';
 import { createCsr, encodeCredential, generateKeyPair } from './pki.ts';
 import { json } from '../tests/helpers.ts';
@@ -29,7 +29,11 @@ async function server(env: Record<string, string> = {}) {
     },
     env,
   );
-  const app = await createApp({ identity: testIdentity, images: { resolve: testImageResolver } });
+  const app = await createApp({
+    identity: testIdentity,
+    controlUrl: testControlUrl,
+    images: { resolve: testImageResolver },
+  });
   const srv = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));
   });

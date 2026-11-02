@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createApp } from './control.ts';
-import { testImageResolver, testIdentity } from '../tests/helpers.ts';
+import { testImageResolver, testControlUrl, testIdentity } from '../tests/helpers.ts';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { json } from '../tests/helpers.ts';
@@ -14,7 +14,11 @@ async function makeServer() {
   process.env.TUG_DATA_DIR = dir;
   process.env.TUG_CONTROL_BACKUP_DIR = path.join(dir, 'control-backups');
   process.env.TUG_CONTROL_RESTORE_DIR = path.join(dir, 'control-restore');
-  const app = await createApp({ identity: testIdentity, images: { resolve: testImageResolver } });
+  const app = await createApp({
+    identity: testIdentity,
+    controlUrl: testControlUrl,
+    images: { resolve: testImageResolver },
+  });
   const srv = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));
   });

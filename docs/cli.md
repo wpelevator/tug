@@ -29,34 +29,36 @@ The CLI reads a YAML or JSON file, `tug.yml` by convention, so a repository can 
 - **Overlay.** `tug.local.yml` next to `tug.yml` (`.tug.local.json` next to `.tug.json`, `<name>.local<ext>` in general) holds what must not be committed. It has the same keys plus `credential` (a path to a credential file), and its values win key by key, including inside `nodeDefaults` and each node. `credential` in the tracked file is an error. `tug init` writes the tracked file only when it is missing (an existing one keeps its comments), points the overlay at the imported credential file (written with mode `0600` under `~/.config/tug/credentials/`), and adds the overlay to `.gitignore` in a git checkout. Connection flags given to `init` for an existing tracked file are saved in the overlay.
 - **Strict keys.** Unknown keys, wrong types and out-of-range values fail with the file and key in the message. Paths in the file (`file`, `ca`) resolve relative to the file, not the working directory.
 
-Each key is the camelCase of the long flag it supplies a default for, with the same value type. A repeatable flag takes a list (`label: [web, db]`; a single string is a one-item list), and a negated flag maps to the positive key set to `false` (`--no-wait` is `wait: false`). A flag on the command line always wins over the file; a list from the file is replaced by flags, not appended to. A key applies only to the commands listed for it.
+Every key is a default for the flag it is named after, on every command that has that flag (a test enforces that the table below and the commands' real options agree), and a flag on the command line always wins. Each key is the camelCase of the long flag it supplies a default for, with the same value type. `nodeDefaults` keys that name `control-install` options (`mesh`, `installDocker`, `image`) are its defaults too. A repeatable flag takes a list (`label: [web, db]`; a single string is a one-item list), and a negated flag maps to the positive key set to `false` (`--no-wait` is `wait: false`). A flag on the command line always wins over the file; a list from the file is replaced by flags, not appended to. A key applies only to the commands listed for it.
 
 | Key | Flag | Commands |
 |---|---|---|
-| `controlUrl` | `--control-url` | all |
+| `controlUrl` | `--control-url` (connections), the address `control-install` advertises | all; `control-install` also writes it into control's environment |
 | `project` | `--project` | project-scoped commands |
 | `credential` (overlay only) | `--credential`, `TUG_CREDENTIAL_FILE` | all |
 | `file` | `-f, --file` | `deploy` |
 | `buildLocal` | `--build-local` | `deploy` |
-| `wait` | `--no-wait` | `deploy`, `rollback` |
-| `nodes.<name>.ssh` | `<ssh-target>` | `node-install` |
-| `nodes.<name>.address` | `--address` | `node-install`, `node-register` |
-| `nodes.<name>.publicAddress` | `--public-address` | `node-install`, `node-register` |
-| `label` | `--label` | `node-install`, `node-register`, `node-prepare-enrollment` |
-| `mesh` | `--mesh` | `node-install`, `node-prepare-enrollment` |
-| `wgPort` | `--wg-port` | `node-install` |
-| `installDocker` | `--install-docker` | `node-install`, `node-prepare-enrollment` |
-| `image` | `--image` | `node-install`, `node-prepare-enrollment` |
-| `agentControlUrl` | `--agent-control-url` | `node-install`, `node-prepare-enrollment` |
+| `wait` | `--no-wait` | `deploy`, `rollback`, `backup-run`, `node-install`, `node-replace-identity`, `node-repair-identity` |
+| `nodes.<name>.ssh` | `<ssh-target>` | `node-install`, `node-replace-identity`, `node-repair-identity` |
+| `nodes.<name>.address` | `--address` | `node-install`, `node-replace-identity`, `node-repair-identity`, `node-register` |
+| `nodes.<name>.publicAddress` | `--public-address` | `node-install`, `node-replace-identity`, `node-repair-identity`, `node-register` |
+| `label` | `--label` | `node-install`, `node-replace-identity`, `node-repair-identity`, `node-register`, `node-prepare-enrollment` |
+| `mesh` | `--mesh` | `node-install`, `node-replace-identity`, `node-repair-identity`, `node-prepare-enrollment`, `control-install` |
+| `wgPort` | `--wg-port` | `node-install`, `node-replace-identity`, `node-repair-identity` |
+| `installDocker` | `--install-docker` | `node-install`, `node-replace-identity`, `node-repair-identity`, `node-prepare-enrollment`, `control-install` |
+| `image` | `--image` | `node-install`, `node-replace-identity`, `node-repair-identity`, `node-prepare-enrollment`, `control-install` |
+| `agentControlUrl` | `--agent-control-url` | `node-install`, `node-replace-identity`, `node-repair-identity`, `node-prepare-enrollment` |
+
+`control-install` reads `controlUrl` from the selected file (or the discovered default file), with the overlay taking precedence. `controlUrl` is the single name for where control is. For `control-install` the address is, in order, `--control-url`, `TUG_CONTROL_URL`, the config file's `controlUrl`, then the SSH target's host and `--port`; the command prints which one it used. For every other command it is the connect target, falling back to the URL stored in your credential, so a tunnel is just `--control-url https://127.0.0.1:18082`. The credential's URL is never used as an installation address. A stale exported `TUG_CONTROL_URL` therefore changes what `control-install` advertises; unset it when installing. A configured URL includes its own public port; `--port` controls the host port published by Docker and does not rewrite the configured URL.
 
 The rows from `label` down are node keys: set them under `nodes.<name>`, or once for every node under `nodeDefaults` (everything except `ssh`, `address` and `publicAddress`). Secrets and per-invocation choices have no key: `--value`, `--force`, `--confirm`, `--version`, `--ttl`, `--timeout`, `--build-local-image` and the like.
 
-The file is not desired state and Tug never reconciles against it. Only `node-install`, `node-register` and `node-prepare-enrollment` read `nodes`, as defaults for flags; every other command asks the control plane. See [Nodes](nodes.md#declaring-nodes-in-the-config-file).
+The file is not desired state and Tug never reconciles against it. Only `node-install`, `node-replace-identity`, `node-repair-identity`, `node-register` and `node-prepare-enrollment` read `nodes`, as defaults for flags; every other command asks the control plane. See [Nodes](nodes.md#declaring-nodes-in-the-config-file).
 
 ## Setup
 
 - `tug init [<credential-file>|-]` creates the config file with the resolved control URL and project when it is missing, imports the credential (a file, or `-` for stdin) into a `0600` file under `~/.config/tug/credentials/` and points the git-ignored overlay next to the config at it; see [Config file](#config-file). Use global `--control-url`, `--project` or `--config` to select them.
-- `tug control-install <ssh-target> [--advertise-url <https-origin>] [--extra-san <name>]... [--mesh] [--install-docker] [--port <port>] [--image <tag>] [--build-local-image] [--credential-out <file>] [--recover-root]` installs control over SSH (`--advertise-url` defaults to the SSH target's host and `--port`) and, on a fresh install, issues the root credential straight into a `0600` local file. The mTLS port defaults to `8443`. `--recover-root` replaces only root's key from the control-plane host. See [Control plane](control-plane.md).
+- `tug control-install <ssh-target> [--extra-san <name>]... [--mesh] [--install-docker] [--port <port>] [--image <tag>] [--build-local-image] [--credential-out <file>] [--recover-root]` installs control over SSH (`--advertise-url` defaults to `controlUrl` from the config, then the SSH target's host and `--port`) and, on a fresh install, issues the root credential straight into a `0600` local file. The mTLS port defaults to `8443`. `--recover-root` replaces only root's key from the control-plane host. See [Control plane](control-plane.md).
 - `tug node-disable <node>` blocks a node's key immediately without SSH, deleting or changing placement or stopping its containers: it withdraws the node's service endpoints and ingress routes but does not drain workloads. `node-replace-identity` brings it back.
 - `tug node-install|node-replace-identity|node-repair-identity [<ssh-target>] --name <node> [--all] [--agent-control-url <url>] [--install-docker] [--address <ip>] [--public-address <ip>] [--label <label>]... [--mesh] [--wg-port <port>] [--image <tag>] [--build-local-image] [--no-wait]` runs the SSH-assisted identity flow (`create`, or `replace` for the latter two; `node-repair-identity` first moves corrupt agent credential documents aside). Without `<ssh-target>` the target is `nodes.<node>.ssh` from the [config file](#config-file); `--all` walks every node with an `ssh` entry, continues after failures and prints per-node results. `--mesh` enables host networking and `NET_ADMIN` and adds WireGuard kernel and UDP-port checks; `--wg-port` defaults to `51820`. See [Nodes](nodes.md).
 - `tug node-register <node> --csr <file> [--mode create|replace]` signs a node-generated CSR and prints the identity response (node, certificate, CA and public URL). It installs nothing; use `agent install-cert` on the host.

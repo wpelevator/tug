@@ -19,7 +19,18 @@ export interface Setting {
 export const COMMAND_SETTINGS: Record<string, Setting> = {
   file: { type: 'path', flag: '--file', commands: ['deploy'] },
   buildLocal: { type: 'boolean', flag: '--build-local', commands: ['deploy'] },
-  wait: { type: 'boolean', flag: '--no-wait', commands: ['deploy', 'rollback'] },
+  wait: {
+    type: 'boolean',
+    flag: '--no-wait',
+    commands: [
+      'deploy',
+      'rollback',
+      'backup-run',
+      'node-install',
+      'node-replace-identity',
+      'node-repair-identity',
+    ],
+  },
 };
 /** Per-node connection data (`nodes.<name>`); `nodeDefaults` takes the subset that is not node-specific. */
 export const NODE_SETTINGS: Record<string, Setting> = {
@@ -28,16 +39,26 @@ export const NODE_SETTINGS: Record<string, Setting> = {
     flag: '<ssh-target>',
     commands: ['node-install', 'node-replace-identity', 'node-repair-identity'],
   },
-  address: { type: 'string', flag: '--address', commands: ['node-install', 'node-register'] },
+  address: {
+    type: 'string',
+    flag: '--address',
+    commands: ['node-install', 'node-replace-identity', 'node-repair-identity', 'node-register'],
+  },
   publicAddress: {
     type: 'string',
     flag: '--public-address',
-    commands: ['node-install', 'node-register'],
+    commands: ['node-install', 'node-replace-identity', 'node-repair-identity', 'node-register'],
   },
   label: {
     type: 'list',
     flag: '--label',
-    commands: ['node-install', 'node-register', 'node-prepare-enrollment'],
+    commands: [
+      'node-install',
+      'node-replace-identity',
+      'node-repair-identity',
+      'node-register',
+      'node-prepare-enrollment',
+    ],
   },
   mesh: {
     type: 'boolean',
@@ -47,6 +68,7 @@ export const NODE_SETTINGS: Record<string, Setting> = {
       'node-replace-identity',
       'node-repair-identity',
       'node-prepare-enrollment',
+      'control-install',
     ],
   },
   wgPort: {
@@ -62,6 +84,7 @@ export const NODE_SETTINGS: Record<string, Setting> = {
       'node-replace-identity',
       'node-repair-identity',
       'node-prepare-enrollment',
+      'control-install',
     ],
   },
   image: {
@@ -72,6 +95,7 @@ export const NODE_SETTINGS: Record<string, Setting> = {
       'node-replace-identity',
       'node-repair-identity',
       'node-prepare-enrollment',
+      'control-install',
     ],
   },
   agentControlUrl: {
@@ -115,6 +139,9 @@ export interface ResolvedCliConfig {
   localFile: string;
   /** Where connections go: the credential's public URL unless overridden (an override changes the connect target only). */
   controlUrl: string;
+  /** Shared config address for installation, before connection-only flags, environment and credential defaults. */
+  /** The control URL the operator asked for (flag, environment or config), without credential or default fallbacks. */
+  requestedControlUrl?: string;
   credential?: Credential;
   credentialFile?: string;
   project: string;
@@ -169,17 +196,14 @@ export async function resolveCliConfig(
           { cause: e },
         );
     }
-  const controlUrl =
-    options.controlUrl ||
-    env.TUG_CONTROL_URL ||
-    config.controlUrl ||
-    credential?.url ||
-    'https://localhost:8443';
+  const requestedControlUrl = options.controlUrl || env.TUG_CONTROL_URL || config.controlUrl;
+  const controlUrl = requestedControlUrl || credential?.url || 'https://localhost:8443';
   return {
     file,
     fileExists: Boolean(base),
     localFile,
     controlUrl: normalizeControlUrl(controlUrl),
+    requestedControlUrl: requestedControlUrl ? normalizeControlUrl(requestedControlUrl) : undefined,
     credential,
     credentialFile,
     project: options.project || env.TUG_PROJECT || config.project || 'site',

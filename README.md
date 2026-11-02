@@ -64,6 +64,8 @@ tug deploy -f docker-compose.yml
 
 The CLI installs the matching `ghcr.io/wpelevator/tug:<version>` image on your hosts. Control serves mutual TLS directly on its port (`8443`): every operator, CI job and node authenticates with a certificate from a private CA created at install, and clients verify a name generated from that CA, so the address can be a bare IP and can change later. Do not terminate TLS in front of it.
 
+A `controlUrl` in `tug.yml` is the one name for where control is: `control-install` advertises it, and every other command connects to it. Pass `--control-url` (or set `TUG_CONTROL_URL`) to override it for one invocation. See [CLI configuration](docs/cli.md#config-file) for precedence and per-node defaults.
+
 The full walkthrough, including nodes you cannot SSH to (`tug node-prepare-enrollment`), CI credentials (`tug credential-create`), moving the control plane and recovery, is in [Getting started](docs/getting-started.md).
 
 ## Documentation

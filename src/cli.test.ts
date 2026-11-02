@@ -52,6 +52,11 @@ test('connection resolution consistently uses explicit options, then environment
       'explicit control URL should override environment and config and normalize trailing slash',
     );
     assert.equal(
+      explicit.requestedControlUrl,
+      'https://flag.test',
+      'the control URL given on the command line is the one control-install advertises',
+    );
+    assert.equal(
       explicit.project,
       'flag-project',
       'explicit project should override environment and config',
@@ -88,6 +93,11 @@ test('connection resolution consistently uses explicit options, then environment
       fallback.controlUrl,
       'https://localhost:8443',
       'missing implicit config should use the documented local control URL',
+    );
+    assert.equal(
+      fallback.requestedControlUrl,
+      undefined,
+      'the connection fallback must not become an installation default',
     );
     assert.equal(
       fallback.project,

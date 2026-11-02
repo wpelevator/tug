@@ -7,6 +7,8 @@ export interface IssueArgs {
   name: string;
   role: string;
   replace: boolean;
+  /** The control URL to write into the credential; defaults to `TUG_CONTROL_URL`. */
+  controlUrl?: string;
 }
 
 export function parseIssueArgs(argv: string[]): IssueArgs {
@@ -28,14 +30,14 @@ export function parseIssueArgs(argv: string[]): IssueArgs {
  */
 export async function issueHostCredential(args: IssueArgs): Promise<string> {
   const dataDir = process.env.TUG_DATA_DIR || './data';
-  const advertiseUrl = process.env.TUG_ADVERTISE_URL;
-  if (!advertiseUrl) throw new Error('TUG_ADVERTISE_URL is required');
+  const controlUrl = args.controlUrl ?? process.env.TUG_CONTROL_URL;
+  if (!controlUrl) throw new Error('TUG_CONTROL_URL is required');
   const db = await openDb(path.join(dataDir, 'tug.db'));
   try {
     const fresh = !db.get('SELECT 1 FROM operator_credentials') && !db.get('SELECT 1 FROM nodes');
     const pki = await Pki.load(path.join(dataDir, 'pki'), fresh);
     const request = parseCredentialRequest({ name: args.name, role: args.role });
-    const created = await createCredential(db, pki, new URL(advertiseUrl).origin, request, 'host', {
+    const created = await createCredential(db, pki, new URL(controlUrl).origin, request, 'host', {
       replace: args.replace,
     });
     if (args.replace)

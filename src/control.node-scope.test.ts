@@ -6,12 +6,16 @@ import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 import { createApp } from './control.ts';
-import { json, testIdentity, testImageResolver } from '../tests/helpers.ts';
+import { json, testControlUrl, testIdentity, testImageResolver } from '../tests/helpers.ts';
 
 /** Every `/agent/v1/*` handler derives the node from the certificate, never from the request. */
 async function setup() {
   process.env.TUG_DATA_DIR = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-scope-'));
-  const app = await createApp({ identity: testIdentity, images: { resolve: testImageResolver } });
+  const app = await createApp({
+    identity: testIdentity,
+    controlUrl: testControlUrl,
+    images: { resolve: testImageResolver },
+  });
   const srv = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));
   });

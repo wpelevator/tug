@@ -22,7 +22,7 @@ Everything that talks to the control plane uses a client certificate: you, CI an
 tug control-install root@203.0.113.5 --install-docker
 ```
 
-Clients need a reachable address for control, which `control-install` takes from the SSH target and the published port (here `https://203.0.113.5:8443`) and prints when it does. Pass `--advertise-url https://control.example.com:8443` when clients should use a different address, for example a DNS name or an SSH alias that only resolves on your machine. It can be an IP or a DNS name. It is written into each credential as the default connect address and added to the server certificate, but it is not the identity: if the address changes you update the setting and clients can override it (see [Moving the control plane](#moving-the-control-plane)). Add `--extra-san <name-or-ip>` for other addresses clients might use, and `--port` to publish a different port.
+Clients need a reachable address for control. `control-install` uses `controlUrl` from the CLI config file, including any overlay override; `--config <file>` selects a file. Without it, the command takes the SSH target and the published port (here `https://203.0.113.5:8443`) and prints that default. Pass `--control-url https://control.example.com:8443` when clients should use a different address, for example a DNS name or an SSH alias that only resolves on your machine. It can be an IP or a DNS name. It is written into each credential as the default connect address and added to the server certificate, but it is not the identity: if the address changes you update the setting and clients can override it (see [Moving the control plane](#moving-the-control-plane)). Add `--extra-san <name-or-ip>` for other addresses clients might use, and `--port` to publish a different port.
 
 The command checks the host (Docker, free disk, free port), starts the control container and writes the root credential to `tug-root.credential.json` on your machine with mode `0600`. Keep it safe; it is full admin access. Running the same command later upgrades control in place and does not issue a new root credential.
 
@@ -93,7 +93,7 @@ It prints the credential once and control keeps no copy of the private key. Stor
 
 Because clients verify the generated control name, the address is only a default:
 
-1. Move or re-address the host and set the new `TUG_ADVERTISE_URL` on control (or rerun `control-install` with the new `--advertise-url`). Control adds the new address to its certificate on restart.
+1. Move or re-address the host and set the new `TUG_CONTROL_URL` on control (or rerun `control-install` with the new `--control-url`). Control adds the new address to its certificate on restart.
 2. Until credentials are refreshed, point clients at the new address: `tug --control-url https://NEW:8443 ...` or `TUG_CONTROL_URL`, and for an agent set `TUG_CONTROL_URL` in `/etc/tug/agent.env`.
 3. Optionally reissue credentials so they carry the new default: `control-install --recover-root` for root, `credential-create` for others, `node-replace-identity` for nodes.
 

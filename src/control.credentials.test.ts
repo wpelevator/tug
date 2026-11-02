@@ -6,7 +6,7 @@ import path from 'node:path';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from './control.ts';
-import { testImageResolver, testIdentity } from '../tests/helpers.ts';
+import { testImageResolver, testControlUrl, testIdentity } from '../tests/helpers.ts';
 import { ROLES, ROUTE_ROLES, hasRole } from './credentials.ts';
 import type { Role } from './credentials.ts';
 
@@ -16,7 +16,11 @@ async function makeServer(dir?: string) {
   process.env.TUG_DATA_DIR = data;
   process.env.TUG_CONTROL_BACKUP_DIR = path.join(data, 'control-backups');
   process.env.TUG_CONTROL_RESTORE_DIR = path.join(data, 'control-restore');
-  const app = await createApp({ identity: testIdentity, images: { resolve: testImageResolver } });
+  const app = await createApp({
+    identity: testIdentity,
+    controlUrl: testControlUrl,
+    images: { resolve: testImageResolver },
+  });
   const srv = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));
   });

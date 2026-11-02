@@ -12,7 +12,7 @@ import http from 'node:http';
 import { attachAgentStream, createApp } from './control.ts';
 import { LIVE_MAX_SESSIONS } from './protocol.ts';
 import type { StreamMessage, WakeResponse } from './protocol.ts';
-import { testImageResolver, json, testIdentity } from '../tests/helpers.ts';
+import { testImageResolver, json, testControlUrl, testIdentity } from '../tests/helpers.ts';
 
 const OPERATOR = 'op-stream-test';
 /** Test-seam headers for a token: the operator, an encoded operator credential, or a node ID. */
@@ -28,6 +28,7 @@ async function server(liveStartTimeoutMs?: number) {
   process.env.TUG_DATA_DIR = dir;
   const app = await createApp({
     identity: testIdentity,
+    controlUrl: testControlUrl,
     liveStartTimeoutMs,
     images: { resolve: testImageResolver },
   });

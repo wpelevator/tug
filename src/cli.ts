@@ -16,7 +16,7 @@ import {
   HOST_NETWORK_FLAG,
   MESH_RUN_FLAGS,
   CONTROL_CONTAINER,
-  defaultAdvertiseUrl,
+  defaultControlUrl,
   controlPortCheck,
   localImageBuildArgs,
   meshPortCheck,
@@ -431,10 +431,6 @@ program
     'install the control plane on a Docker-capable host over SSH and issue the root credential into a local 0600 file; it listens for mTLS only, so front it with TCP passthrough rather than a terminating proxy',
   )
   .option(
-    '--advertise-url <url>',
-    "credential-free https origin clients use by default, including the port (default: the SSH target's host and --port). It is an address, not the identity: clients verify a name generated from the CA",
-  )
-  .option(
     '--extra-san <name>',
     'additional DNS name or IP for the server certificate (repeatable)',
     collect,
@@ -470,7 +466,6 @@ program
     async (
       sshTarget: string,
       o: InstallOpts & {
-        advertiseUrl?: string;
         extraSan: string[];
         port: string;
         credentialOut: string;
@@ -478,13 +473,13 @@ program
         mesh?: boolean;
       },
     ) => {
-      const advertiseUrl = normalizeControlUrl(
-        o.advertiseUrl ?? defaultAdvertiseUrl(sshTarget, o.port),
+      const cfg = await loadCfg();
+      // The control URL clients use: --control-url, TUG_CONTROL_URL or the config's controlUrl, else the SSH target's host
+      // and the published port. Clients verify a name generated from the CA, so this is only an address.
+      const controlUrl = cfg.requestedControlUrl ?? defaultControlUrl(sshTarget, o.port);
+      console.error(
+        `control URL: ${controlUrl} (${cfg.requestedControlUrl ? 'from --control-url, TUG_CONTROL_URL or the config file' : 'from the SSH target and --port'}); clients connect there by default`,
       );
-      if (!o.advertiseUrl)
-        console.error(
-          `advertise URL defaulted to ${advertiseUrl}; pass --advertise-url if clients reach control at another address`,
-        );
       if (o.installDocker) await bootstrapDocker(sshTarget, true);
       preflightRemote(sshTarget, { ports: [Number(o.port)], minDiskMb: 2048, compose: true });
       const image = resolveImage(o.image, o.buildLocalImage);
@@ -492,7 +487,7 @@ program
       const yamlValue = (value: string) => JSON.stringify(value);
       const compose = await loadTemplate(templatesDir, 'control-compose.yml', {
         IMAGE: yamlValue(image),
-        ADVERTISE_URL: yamlValue(new URL(advertiseUrl).origin),
+        CONTROL_URL: yamlValue(new URL(controlUrl).origin),
         EXTRA_SANS: yamlValue(o.extraSan.join(',')),
         PORT: o.port,
         MESH: yamlValue(o.mesh ? 'true' : 'false'),
@@ -518,7 +513,7 @@ program
           `root credential written to ${o.credentialOut}; import it with: tug init ${o.credentialOut}`,
         );
       }
-      console.log(JSON.stringify({ ok: true, sshTarget, url: advertiseUrl }, null, 2));
+      console.log(JSON.stringify({ ok: true, sshTarget, url: controlUrl }, null, 2));
     },
   );
 
@@ -575,6 +570,8 @@ async function installNodeIdentity(
   mode: 'create' | 'replace',
   o: NodeIdentityOpts,
   repair = false,
+  /** False in batch mode, where only the final per-node results are printed. */
+  print = true,
 ): Promise<void> {
   const cfg = await loadCfg();
   const connectUrl = o.agentControlUrl ? normalizeControlUrl(o.agentControlUrl) : undefined;
@@ -624,18 +621,21 @@ async function installNodeIdentity(
         '/api/v1/nodes',
       );
       const seen = nodes.find((n) => n.name === name)?.last_seen_at;
-      if (seen && seen > started)
-        return void console.log(JSON.stringify({ ok: true, node: response.node }, null, 2));
+      if (seen && seen > started) {
+        if (print) console.log(JSON.stringify({ ok: true, node: response.node }, null, 2));
+        return;
+      }
       await new Promise((r) => setTimeout(r, 2000));
     }
     console.error(`node ${name} has not reported yet; check \`docker logs tug-agent\` on the host`);
   }
-  console.log(JSON.stringify({ ok: true, node: response.node }, null, 2));
+  if (print) console.log(JSON.stringify({ ok: true, node: response.node }, null, 2));
 }
 async function runNodeIdentity(
   sshArgument: string | undefined,
   o: NodeIdentityOpts,
   mode: 'create' | 'replace',
+  command: Command,
   repair = false,
 ): Promise<void> {
   const cfg = await loadCfg();
@@ -649,9 +649,10 @@ async function runNodeIdentity(
     for (const [name, settings] of Object.entries(cfg.nodes)) {
       const target = settings.ssh as string | undefined;
       if (!target) continue;
-      const merged = { ...o, ...nodeOverrides(settings), name };
+      const merged = { ...o, name };
+      applyConfigDefaults(command, merged, nodeSettings(cfg, name));
       try {
-        await installNodeIdentity(target, name, mode, merged, repair);
+        await installNodeIdentity(target, name, mode, merged, repair, false);
         results.push({ node: name, ok: true });
       } catch (e) {
         results.push({ node: name, ok: false, error: errMessage(e) });
@@ -669,12 +670,6 @@ async function runNodeIdentity(
     );
   await installNodeIdentity(sshTarget, o.name, mode, o, repair);
 }
-const nodeOverrides = (settings: Record<string, unknown>) => ({
-  ...(settings.address ? { address: settings.address as string } : {}),
-  ...(settings.publicAddress ? { publicAddress: settings.publicAddress as string } : {}),
-  ...(Array.isArray(settings.label) ? { label: settings.label as string[] } : {}),
-  ...(settings.mesh ? { mesh: true } : {}),
-});
 for (const [verb, description, mode, repair] of [
   [
     'node-install',
@@ -702,8 +697,8 @@ for (const [verb, description, mode, repair] of [
     .option('--public-address <addr>')
     .option('--label <label>', 'node label (repeatable)', collect, []);
   addNodeIdentityOptions(command).action(
-    async (sshArgument: string | undefined, o: NodeIdentityOpts) =>
-      runNodeIdentity(sshArgument, o, mode, repair),
+    async (sshArgument: string | undefined, o: NodeIdentityOpts, command: Command) =>
+      runNodeIdentity(sshArgument, o, mode, command, repair),
   );
 }
 
@@ -1620,7 +1615,9 @@ program.hook('preAction', async (_root, command) => {
         : undefined;
   applyConfigDefaults(command, options, {
     ...resolvedConfig.commandDefaults,
-    ...(command.name().startsWith('node-') ? nodeSettings(resolvedConfig, nodeName) : {}),
+    ...(command.name().startsWith('node-') || command.name() === 'control-install'
+      ? nodeSettings(resolvedConfig, nodeName)
+      : {}),
   });
 });
 for (const command of program.commands) {
