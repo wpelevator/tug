@@ -189,13 +189,13 @@ test(
         'tug.project=bkjob',
         '--label',
         'tug.volume=uploads',
-        'tug_bkjob_uploads',
+        'tug_v5_bkjob_uploads',
       );
       docker(
         'run',
         '--rm',
         '-v',
-        'tug_bkjob_uploads:/d',
+        'tug_v5_bkjob_uploads:/d',
         'alpine',
         'sh',
         '-c',
@@ -208,7 +208,7 @@ test(
           tags: ['tug', 'project:bkjob', 'target:volume:uploads'],
           volume: {
             name: 'uploads',
-            dockerVolume: 'tug_bkjob_uploads',
+            dockerVolume: 'tug_v5_bkjob_uploads',
             exclude: ['cache'],
           },
         }),
@@ -275,7 +275,7 @@ test(
           base(repo, {
             target: 'volume:uploads',
             type: 'volume',
-            volume: { name: 'uploads', dockerVolume: 'tug_bkjob_uploads' },
+            volume: { name: 'uploads', dockerVolume: 'tug_v5_bkjob_uploads' },
             restore: { snapshotId: fresh.snapshotId!, mode: 'in-place' },
           }),
           'cmd_wrong',
@@ -291,7 +291,7 @@ test(
         'run',
         '--rm',
         '-v',
-        'tug_bkjob_uploads:/d',
+        'tug_v5_bkjob_uploads:/d',
         'alpine',
         'sh',
         '-c',
@@ -302,7 +302,7 @@ test(
           target: 'volume:uploads',
           type: 'volume',
           tags: ['tug', 'project:bkjob', 'target:volume:uploads'],
-          volume: { name: 'uploads', dockerVolume: 'tug_bkjob_uploads' },
+          volume: { name: 'uploads', dockerVolume: 'tug_v5_bkjob_uploads' },
           restore: { snapshotId: volumeResult.snapshotId!, mode, scratchVolume },
         });
       await runBackupJob(
@@ -315,7 +315,7 @@ test(
         'run',
         '--rm',
         '-v',
-        'tug_bkjob_uploads:/d',
+        'tug_v5_bkjob_uploads:/d',
         'alpine',
         'ls',
         '/d',
@@ -340,7 +340,7 @@ test(
         'a scratch restore materializes the files in a separate volume',
       );
       assert.match(
-        docker('run', '--rm', '-v', 'tug_bkjob_uploads:/d', 'alpine', 'ls', '/d').stdout,
+        docker('run', '--rm', '-v', 'tug_v5_bkjob_uploads:/d', 'alpine', 'ls', '/d').stdout,
         /a\.jpg/,
         'the live volume is untouched by a scratch restore',
       );
@@ -353,7 +353,7 @@ test(
     } finally {
       docker('rm', '-f', 'tug-bkjob-db');
       docker('network', 'rm', network);
-      docker('volume', 'rm', '-f', 'tug_bkjob_uploads', 'tug_bkjob_scratch');
+      docker('volume', 'rm', '-f', 'tug_v5_bkjob_uploads', 'tug_bkjob_scratch');
       // restic runs as root in its container, so on Linux the repository is not removable by this user.
       docker('run', '--rm', '-v', `${dir}:/work`, 'alpine', 'rm', '-rf', '/work/repo');
       await fs.rm(dir, { recursive: true, force: true });

@@ -47,7 +47,7 @@ test('builds per-node desired compose preserving service names', () => {
   );
   assert.deepEqual(
     plan.volumes.map((v) => v.name),
-    ['tug_site_web-data'],
+    ['tug_v4_site_web-data'],
     'only the volumes this node uses are created',
   );
 });

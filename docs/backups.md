@@ -120,7 +120,7 @@ To rehearse a database restore without touching the live one, copy the project i
 - Live volumes are crash-consistent, not application-consistent. Use a command backup for anything with its own consistency (databases).
 - A volume is backed up from the one node that holds it. A volume you mount from a file server with `driver_opts` is read through that node's mount; back up the file server's own disk where you can.
 - Repository maintenance (`restic check`, a read-verify of the data) and SFTP destinations are not built yet.
-- A scratch restore leaves its volume (`<project>_restore-<id>`) behind, and the safety snapshot of every in-place restore is kept for ever. There is no command to list or remove either yet: remove scratch volumes with `docker volume rm` on the node, and safety snapshots with `restic forget` using the repository from `tug backup-repository-password`.
+- A scratch restore leaves its volume (`tug_r<project-length>_<project>_<id>`) behind, and the safety snapshot of every in-place restore is kept for ever. There is no command to list or remove either yet: remove scratch volumes with `docker volume rm` on the node, and safety snapshots with `restic forget` using the repository from `tug backup-repository-password`.
 - The restic helper container defaults to a 512 MB memory limit, which is half of a 1 GB host; lower it with `memory` under `x-tug.backup`. Restic needs more memory for larger repositories, so test the limit against your data.
 - Failures are not pushed anywhere until webhooks exist. Run `tug backup-list --check` from cron or a monitor: it exits nonzero when a target is stale, failed or missed.
 - Cancelling `tug exec` does not stop the remote process.

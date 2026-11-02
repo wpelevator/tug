@@ -185,7 +185,7 @@ test('a rolling service runs on an allocated host port beside the recreated serv
   assert.deepEqual(running(host, 'db'), ['postgres'], 'the recreated service runs as usual');
   assert.ok(host.docker.networks.has('tug_proj'), 'both strategies share the project network');
   assert.ok(
-    host.docker.volumes.has('tug_proj_assets'),
+    host.docker.volumes.has('tug_v4_proj_assets'),
     'the named volume is created once under its Tug name',
   );
 });
