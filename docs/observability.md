@@ -11,10 +11,10 @@ Verified against the code on `main`.
 | Capability | What it does | Limits |
 | --- | --- | --- |
 | Audit trail | Deployments and events record the acting credential, and `system:auto-rollback` for automatic rollbacks. See [Access control](access-control.md). | Answers who acted, not how the system behaves |
-| `tug status` | Prints `GET /api/v1/status` as JSON: projects, the 20 latest deployments, nodes with `status` and `last_seen_at`, and per-node project status including health, rollout state, port and rollout error. | Raw JSON. A node is marked `stale` only when this endpoint is called, using `TUG_STALE_SECONDS` (default 60) |
+| `tug status` | Prints `GET /api/v1/status` as JSON: projects, the 20 latest deployments, nodes with `status` and `last_seen_at`, and per-node project status including health, rollout state, port and rollout error. `--human` summarizes deployments, errors and node reports. | Node health is a last observation, not a live probe; a node is marked `stale` only when this endpoint is called, using `TUG_STALE_SECONDS` (default 60). The current deployment can be outside the 20 returned rows. |
 | `tug events` | Lists events from `GET /api/v1/events`, newest first, at most 500 per call, 100 by default. | Agents report on change only, see [Events](#events) |
 | `tug doctor` | Local checks (Node.js, Docker, the Compose plugin `deploy` needs), control checks (SQLite, CA and server certificate expiry, each node's certificate expiry and connectivity, each online node's observed clock skew, master key, Docker, ingress state) and, with `--nodes` or `--node`, host diagnostics through each agent. It waits for those results. Clock skew is unknown, not zero, for a node that is offline. | A point-in-time check, not a time series |
-| `tug logs <service>` | Queues a `logs.fetch` command on the service's node and prints the tail. | A tail through the poll-based command queue; no follow mode |
+| `tug logs <service>` | Prints a service log tail; `--follow` streams logs through the live channel. | Following logs requires an active WebSocket session. |
 | Reachability | Control has no unauthenticated route, not even a health check: every request needs a client certificate. Monitor TCP reachability of the mTLS port for liveness, and use an authenticated read (`tug doctor`, `tug status`) for readiness. | A TCP check proves the listener accepts connections, not that the database works |
 | Process logs | Control and agent write plain `console.log` and `console.error` text. | No timestamps, levels, structure or request ids |
 
