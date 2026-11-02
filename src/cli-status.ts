@@ -1,0 +1,81 @@
+/** The control status endpoint returns database rows and a JSON-encoded node report. */
+export interface StatusResponse {
+  projects: { id: string; current_deployment_id: string | null }[];
+  deployments: { id: string; version: string; state: string; error_message: string | null }[];
+  nodes: { id: string; name: string; status: string; last_seen_at: string | null }[];
+  statuses: {
+    project_id: string;
+    node_id: string;
+    node: string | null;
+    health: string;
+    observed_version: string | null;
+    status_json: string;
+  }[];
+}
+
+/** Render observations without treating a stale node's last report as current health. */
+export function formatStatus(status: StatusResponse): string {
+  const lines: string[] = [];
+  const nodes = new Map(status.nodes.map((node) => [node.id, node]));
+  for (const project of [...status.projects].sort((a, b) => a.id.localeCompare(b.id))) {
+    const deployment = status.deployments.find((item) => item.id === project.current_deployment_id);
+    lines.push(`Project ${project.id}`);
+    if (deployment) {
+      lines.push(`  Deployment: ${deployment.version} (${deployment.state})`);
+      if (deployment.error_message) lines.push(`  Error: ${deployment.error_message}`);
+    } else {
+      lines.push(
+        project.current_deployment_id
+          ? '  Deployment: current deployment not in recent results'
+          : '  Deployment: none',
+      );
+    }
+    const reports = status.statuses
+      .filter((item) => item.project_id === project.id)
+      .sort((a, b) => (a.node || a.node_id).localeCompare(b.node || b.node_id));
+    if (!reports.length) lines.push('  No node reports');
+    for (const report of reports) {
+      const node = nodes.get(report.node_id);
+      lines.push(
+        `  Node ${report.node || report.node_id}: ${node?.status || 'unknown'}; last reported ${report.health}${report.observed_version ? ` (${report.observed_version})` : ''}`,
+      );
+      try {
+        const detail: unknown = JSON.parse(report.status_json);
+        if (
+          detail &&
+          typeof detail === 'object' &&
+          'error' in detail &&
+          typeof detail.error === 'string' &&
+          detail.error
+        )
+          lines.push(`    Error: ${detail.error}`);
+        if (
+          detail &&
+          typeof detail === 'object' &&
+          'serviceStates' in detail &&
+          detail.serviceStates &&
+          typeof detail.serviceStates === 'object'
+        ) {
+          for (const [name, state] of Object.entries(detail.serviceStates).sort(([a], [b]) =>
+            a.localeCompare(b),
+          )) {
+            if (!state || typeof state !== 'object') continue;
+            const item = state as { rolloutState?: unknown; rolloutError?: unknown };
+            if (typeof item.rolloutState === 'string')
+              lines.push(
+                `    ${name}: ${item.rolloutState}${typeof item.rolloutError === 'string' && item.rolloutError ? ` — ${item.rolloutError}` : ''}`,
+              );
+          }
+        }
+      } catch {
+        lines.push('    Report details unavailable');
+      }
+    }
+  }
+  if (!status.projects.length) lines.push('No projects');
+  lines.push('', 'Nodes');
+  if (!status.nodes.length) lines.push('  No nodes');
+  for (const node of [...status.nodes].sort((a, b) => a.name.localeCompare(b.name)))
+    lines.push(`  ${node.name}: ${node.status}; last seen ${node.last_seen_at || 'never'}`);
+  return lines.join('\n');
+}

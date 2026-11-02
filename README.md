@@ -18,6 +18,7 @@ Deploy Docker Compose applications to one or more ordinary Linux VPSes through a
 - Health-aware cross-node service names (hosts-file entries injected into containers), on by default with a `TUG_SERVICE_NAMES=false` opt-out, and an optional managed Caddy ingress with automatic HTTPS. Both use each node's private `address` on your existing network. See [Networking](docs/networking.md).
 - Private-by-default published ports: agent-generated container definitions bind them to the node address or loopback, never every interface unless you write `0.0.0.0`. Tug does not encrypt node-to-node workload traffic; your network owns reachability, firewalling and encryption. See [Networking](docs/networking.md#published-ports-private-by-default).
 - Workload backups of service commands and volumes with restic, a separate control-plane backup and restore, and `tug doctor` diagnostics for certificate expiry, node connectivity and clock skew.
+- `tug status --human` summarizes deployments, node reports and failures; the default JSON output remains available for automation.
 
 ## How it fits together
 
