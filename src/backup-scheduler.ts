@@ -717,6 +717,8 @@ export function createBackupService(deps: BackupServiceDeps) {
     restore: NonNullable<BackupJobPayload['restore']>,
     runId: string,
   ): { commandId: string; nodeId: string } | { error: string } {
+    // Placement can change after planning; never queue a restore using a stale schedule.
+    sync();
     const schedule = db.get<BackupScheduleRow>(
       'SELECT * FROM backup_schedules WHERE project_id=? AND target=? AND enabled=1',
       project,

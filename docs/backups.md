@@ -31,6 +31,8 @@ Mark a service or a volume with `x-tug.backup` ([Compose extensions](compose.md#
 - **Services** run your `command` through an exec in the running container and stream its output into `restic backup --stdin`, so no staging disk is needed. The command sees the container's own environment, including its secrets, so passwords are read from the environment (`$MARIADB_ROOT_PASSWORD`) and never appear in Tug's configuration, payloads or events. A command that fails, writes nothing or lacks the `verify` text is never kept: the partial snapshot is forgotten and the run fails. The service must be running on the node.
 - **Volumes** are mounted read-only into the restic container and archived, with your `exclude` patterns. A volume that does not exist on the node fails the run instead of backing up an empty one. Live volumes are crash-consistent, which suits uploads and static files.
 - **Retention** runs after each successful backup (`restic forget --prune` per node and target). Snapshots tagged `trigger:pre-restore` are kept regardless.
+
+Before mounting a managed volume, backup and restore check its project and volume ownership labels; a scratch restore checks its scratch volume's project and restore labels. A conflicting or unlabelled volume is refused instead of being read or overwritten.
 - **Images** for restic come from `TUG_RESTIC_IMAGE` on control (default `restic/restic:0.17.3`); a digest reference is recommended. Nodes pull it outbound like any published image.
 - **Restic runs in a helper container** with a memory limit, labelled `tug.job`, removed when it finishes. An agent that restarts mid-job removes leftovers and reports the job failed.
 
@@ -77,6 +79,8 @@ tug restore db --confirm             # latest backup of the db service
 tug restore uploads --scratch --confirm   # files into a new volume, touching nothing live
 ```
 
+A restore plan and its queued restore refresh backup placement from the latest successful deployment before choosing a node, so moving a project does not leave a restore aimed at the previous node until the next scheduler tick. Check the printed target before confirming.
+
 Restores are as generic as backups. A service is restored by running its `x-tug.backup.restore` command in the running container with the stored file on standard input (`restic dump` piped in), so a MariaDB service uses `restore: sh -c 'mariadb -uroot -p"$MARIADB_ROOT_PASSWORD"'`. A volume is emptied and filled from the snapshot, or restored into a new volume with `--scratch`. A service without a `restore` command is refused rather than guessed at.
 
 `tug restore` returns when the data is back and the services it stopped report serving again, or after five minutes with a warning if they do not, so a script can probe the site as soon as it returns. An in-place restore is deliberately careful:
@@ -89,6 +93,17 @@ Restores are as generic as backups. A service is restored by running its `x-tug.
 Only a snapshot this target produced can be restored into it (its `project:` and `target:` tags are checked). If the restore itself fails, the writers stay stopped and the project locked, because a half-restored database serving traffic is worse than an outage. The restore is `interrupted`; `tug restore-resume <id>` tries again and `tug restore-release <id>` starts the services anyway. Scheduled backups of a target are skipped while it is being restored. A restore is recorded with `restore.started`, `restore.completed`, `restore.failed` and `restore.released` events.
 
 A scratch restore of a volume is also the restore drill: it proves a backup can be read without touching anything live. Databases are the same drill by hand: `restic dump <snapshot> wordpress.sql` into a throwaway container.
+
+## Recover a site on a replacement node
+
+This is a manual procedure, not automatic failover. A WordPress and MariaDB project was recovered this way with the published 0.9.0 release in the [real-host drill](real-host-evaluation.md#recovery-drill-with-the-published-090-release-2-november-2026). The original host was simulated as unavailable while control and the backup destination stayed available. Restore control first if it is also lost.
+
+1. Fence the lost node or otherwise ensure its old workloads cannot write to shared services. Enroll the replacement node and verify it is online. Keep the recovery site private or otherwise block public traffic while its new database and volumes are empty; do not expose a fresh WordPress installer.
+2. Change the project’s service and volume placement to the replacement node and deploy the same project using the retained images, configuration and secrets. The replacement uses fresh local volumes; deploying alone does not restore their contents. Keep the old backup repository and its password available.
+3. Check `tug backup-list` and run `tug restore db` and `tug restore wp-content` without `--confirm`. Verify each plan names the replacement node and the intended pre-loss snapshot. If the latest snapshot is not the desired one, use `--from` with the intended backup run or snapshot ID. Older releases may briefly show the former node until the backup scheduler catches up; never confirm a plan aimed at the wrong host.
+4. Restore the database and uploads with the printed commands and `--confirm`. Tug normally takes a safety backup before each in-place restore and stops the writers; wait for each restore to finish and investigate any warning before continuing. Verify known database content and uploaded files, probe the application, then re-enable traffic and update DNS or routing as needed.
+
+This does not restore data that was never backed up, external services, DNS, or changes after the selected snapshots. A live workload can write new data during recovery unless traffic and other writers are fenced; control alone cannot fence an unreachable or compromised host.
 
 ## Control plane backup
 
@@ -109,7 +124,7 @@ A backup you have not restored is a hope. Rehearse the restore on the live proje
 3. **Restore the database for real, in a quiet moment.** `tug restore db` prints the plan; `tug restore db --confirm` stops WordPress, takes a safety backup of the current data, loads the dump and starts WordPress again. Compare a number you know (the post count, the newest upload) with production.
 4. **Write down how long it took.** That is your real recovery time.
 
-To rehearse a database restore without touching the live one, copy the project into a scratch project name (`TUG_PROJECT`), restore into it with `--from <snapshot id>` naming a snapshot of the original, and remove the scratch project when done. Remember to stop the scratch site from sending mail or running cron against production services.
+To rehearse a database restore without touching the live one, use the original project repository and its escrowed password to dump the snapshot with restic into an isolated throwaway database container, then verify the recovered data and remove the container. Tug does not restore a snapshot into a different project: repositories and snapshot tags are project-specific. Keep the isolated database and any test application disconnected from production services, mail and scheduled jobs. This manual procedure has not yet been validated as a complete fresh-host recovery drill.
 
 ## Known limits
 
@@ -118,7 +133,7 @@ To rehearse a database restore without touching the live one, copy the project i
 - Live volumes are crash-consistent, not application-consistent. Use a command backup for anything with its own consistency (databases).
 - A volume is backed up from the one node that holds it. A volume you mount from a file server with `driver_opts` is read through that node's mount; back up the file server's own disk where you can.
 - Repository maintenance (`restic check`, a read-verify of the data) and SFTP destinations are not built yet.
-- A scratch restore leaves its volume (`<project>_restore-<id>`) behind, and the safety snapshot of every in-place restore is kept for ever. There is no command to list or remove either yet: remove scratch volumes with `docker volume rm` on the node, and safety snapshots with `restic forget` using the repository from `tug backup-repository-password`.
+- A scratch restore leaves its volume (`tug_r<project-length>_<project>_<id>`) behind, and the safety snapshot of every in-place restore is kept for ever. There is no command to list or remove either yet: remove scratch volumes with `docker volume rm` on the node, and safety snapshots with `restic forget` using the repository from `tug backup-repository-password`.
 - The restic helper container defaults to a 512 MB memory limit, which is half of a 1 GB host; lower it with `memory` under `x-tug.backup`. Restic needs more memory for larger repositories, so test the limit against your data.
 - Failures are not pushed anywhere until webhooks exist. Run `tug backup-list --check` from cron or a monitor: it exits nonzero when a target is stale, failed or missed.
 - Cancelling `tug exec` does not stop the remote process.

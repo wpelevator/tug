@@ -1,6 +1,12 @@
 import { Transform } from 'node:stream';
 import { redactSecrets } from './backup-destination.ts';
-import { LABEL_JOB, LABEL_PROJECT, LABEL_SERVICE } from './container-spec.ts';
+import {
+  LABEL_JOB,
+  LABEL_PROJECT,
+  LABEL_SERVICE,
+  assertVolumeOwnership,
+  volumeName,
+} from './container-spec.ts';
 import type { AttachedProcess, CreateContainerBody, DockerApi } from './docker-api.ts';
 import type {
   BackupCredentialsResponse,
@@ -204,15 +210,29 @@ export async function runBackupJob(
         : payload.volume.dockerVolume;
       if (scratch) {
         if (!dockerVolume) throw new JobError('a scratch restore needs a scratch volume name');
-        if (!(await docker.inspectVolume(dockerVolume)))
+        let existing = await docker.inspectVolume(dockerVolume);
+        if (!existing) {
           await docker.createVolume(dockerVolume, {
             labels: { 'tug.project': payload.project, 'tug.restore': payload.runId },
           });
-      } else if (!(await docker.inspectVolume(dockerVolume)))
-        // Docker would silently create an empty volume for a missing name and the backup would succeed with nothing in it.
-        throw new JobError(
-          `volume ${dockerVolume} does not exist on this node; a volume is created when a service that uses it is placed here`,
-        );
+          existing = await docker.inspectVolume(dockerVolume);
+        }
+        if (
+          existing?.Labels?.[LABEL_PROJECT] !== payload.project ||
+          existing.Labels?.['tug.restore'] !== payload.runId
+        )
+          throw new JobError(`scratch volume ${dockerVolume} is not owned by this restore`);
+      } else {
+        if (dockerVolume !== volumeName(payload.project, payload.volume.name))
+          throw new JobError('volume name does not match the project and target');
+        const existing = await docker.inspectVolume(dockerVolume);
+        if (!existing)
+          // Docker would silently create an empty volume for a missing name and the backup would succeed with nothing in it.
+          throw new JobError(
+            `volume ${dockerVolume} does not exist on this node; a volume is created when a service that uses it is placed here`,
+          );
+        assertVolumeOwnership(existing, payload.project, payload.volume.name);
+      }
       binds.push(`${dockerVolume}:/data${kind === 'backup.restore' ? '' : ':ro'}`);
     }
     const restic = await helper('restic', {

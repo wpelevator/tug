@@ -11,11 +11,11 @@ The operator this is for runs one to a few dozen sites on two to ten VPSes, depl
 ## Principles
 
 1. **Compose stays the app format.** `docker compose up` works locally; `x-tug` adds deployment metadata, and Compose features that cannot work across nodes are rejected rather than half-supported ([Compose extensions](compose.md#not-supported)). Compose is the input, not the node runtime: nodes need only the Docker Engine ([M14](#m14--engine-api-agent)).
-2. **Production runs immutable images.** Application code, including WordPress core, themes and plugins, ships inside an image built on control or on the operator's machine. Every image a deployment uses is pinned to a digest when the deployment is created ([M13](#m13--pinned-images-and-one-delivery-path-done)). Nothing is built or synced into a running node during reconciliation, so rollback is switching image references and always restores exactly what ran.
+2. **Production runs immutable images.** Application code, including WordPress core, themes and plugins, ships inside an image built on control or on the operator's machine. Every image a deployment uses is pinned to a digest when the deployment is created ([M13](#m13--pinned-images-and-one-delivery-path-done)). Nothing is built or synced into a running node during reconciliation, so an image rollback restores the earlier image and configuration when retained artifacts remain available. It does not reverse database changes, uploads or external side effects.
 3. **Agents reconcile desired state and only dial out.** Normal deploys need no SSH and no inbound port on nodes, so nodes behind NAT or a deny-all firewall work. Running containers keep serving while control is down.
 4. **One writer.** Desired state, locks, secrets and history live in one control plane. This keeps ordering, rollback and audit simple; availability comes from control backups and, if needed later, a warm standby.
 5. **Stateful things are pinned and backed up.** Databases and data volumes stay on their placement node unless the operator moves them, are never deleted by a deploy, and every first-class stateful service has a backup and restore path.
-6. **Private by default.** Nothing Tug deploys should become reachable from the internet unless it is routed through the ingress or the operator asked for it.
+6. **Private by default.** Bind ports to the configured node address or loopback unless the operator explicitly requests a public bind. Reachability, firewalling and workload-traffic encryption depend on the operator's network; a private address alone is not an isolation guarantee.
 7. **Start simple.** No distributed storage, no autoscaling, no bin-packing scheduler, no database failover. Single points of failure are allowed when they are documented. A single node needs nothing beyond Docker, the agent and control: ingress and other subsystems stay optional layers on top of that core, and multi-node workloads use the operator's existing network.
 
 Non-goals: Kubernetes compatibility, provisioning VPSes through provider APIs, autoscaling, distributed block or file storage, database HA, a multi-tenant hosted control plane.
@@ -24,9 +24,9 @@ Non-goals: Kubernetes compatibility, provisioning VPSes through provider APIs, a
 
 These are the shapes Tug is tested against and the ones the docs should steer people toward.
 
-**Small: one node per site, or several sites per node.** App and database on the same node, the managed Caddy ingress on that node, data in local named volumes. This is what most WordPress sites need and what was validated first ([Real-host evaluation](real-host-evaluation.md)). Many sites per node is the common case, so per-project isolation, ingress routing for many hostnames and per-site backups matter more than multi-node features.
+**Small: one node per site, or several sites per node.** App and database on the same node, the managed Caddy ingress on that node, data in local named volumes. This is what most WordPress sites need and what was validated first ([Real-host evaluation](real-host-evaluation.md)). Many sites per node is the common case, so clear project boundaries, ingress routing for many hostnames and per-site backups matter more than multi-node features. Project boundaries are not isolation between mutually untrusted workloads.
 
-**Scaled WordPress:**
+**Scaled WordPress (a possible future topology, not the flagship or a validated support promise):**
 
 ```text
 Internet -> ingress node (managed Caddy, TLS)
@@ -120,7 +120,7 @@ Cancelled when Tug stopped providing a workload overlay. Tug will not build the 
 
 ### M13 — Pinned images and one delivery path (done)
 
-Make rollback restore exactly what ran, and leave one way for images to reach a node.
+Pin image identity for reliable image rollback, and leave one way for Tug-built images to reach a node. Mutable data and external side effects are not rolled back.
 
 - **Digest pinning.** Control resolves each distinct published image tag once per deployment and stores `image@sha256:…` in desired state and canonical Compose before publication. Explicit pins need no lookup. Multi-platform indexes stay intact. Resolution failure leaves current desired state unchanged; rollback and scaling reuse stored pins. Nodes pull by digest from upstream. Private HTTPS registries use the encrypted project secret `TUG_REGISTRY_AUTH` and Engine API authentication, released only to assigned services. See [Control plane](control-plane.md#published-images-and-private-registries).
 - **One built-image delivery path.** Remote and local builds always travel as retained saved archives from control. Built-image registry configuration, `--no-build-upload`, registry pull tokens and their rotate/revoke commands, registry auth hooks and node `docker login` are removed. Each node has one agent credential. CI-built images can be pushed independently and deployed through `image:`.
@@ -153,21 +153,27 @@ The agent stops running the `docker compose` CLI and reconciles containers throu
 - Load-balanced service names and multiple routes per service, wildcard certificates.
 - Managed DNS convenience domain for ingress, similar to uncloud's `*.uncloud.run`.
 
+## Product decisions and reasoning
+
+Tug serves a trusted operator or small trusted team running several WordPress sites on one or a few ordinary VPSes. The flagship is the single-node site, including several independent sites on one node; additional nodes first add capacity and placement for independent sites. A scaled single site is a later, demand-driven use case. Judge work by whether it makes installing, operating and recovering those sites easier and safer, not by feature parity or the number of orchestration milestones completed.
+
+The control plane earns its cost through understandable state, reliable deployments, backup visibility and recovery. Prefer a proven, repeatable recovery journey over additional scheduling, networking or infrastructure features. Restic is the backup repository mechanism; Tug's responsibility is to make backup status, credentials, off-host copies and actual restore outcomes understandable. Do not set recovery time or data-loss targets until a representative exercise measures them.
+
+Deployment authors are trusted infrastructure operators. Project-scoped credentials are operational least-privilege controls that reduce accidental access and limit a compromised credential's API authority; they do not isolate mutually untrusted code, shared kernels, application networks, builds or workload secrets. An operator who can deploy or execute code must be trusted with the workload's secrets and the nodes they can select. Use separate hosts or control planes for mutually untrusted authors. Continue fixing concrete authorization, confidentiality and data-safety defects, but do not add a complex tenant-isolation policy without an explicit user need and a coherent end-to-end threat model. An earlier project node/hostname grants and host-feature restrictions experiment remains separate from the recovery-first branch; evaluate it against this contract before adopting it. It is not a product decision to support hostile tenants.
+
+Every subsystem Tug owns carries maintenance and failure costs. Keep the outbound agent while its NAT and unattended reconciliation benefits justify it, but a bounded SSH-controller experiment is legitimate if it preserves the operational guarantees users need. Compare control-hosted image archives with an existing registry on deployment, recovery, storage, security and operational cost before expanding either path. Keep the Compose subset explicit and predictable, use the operator's private network for cross-node workloads, and prefer simple placement over a general scheduler. Remove or narrow an existing feature if its cost exceeds its demonstrated value.
+
+Claims must match verified behavior. Image rollback does not undo data, schema or external side effects; private port binding depends on the configured address and network; scoped credentials are not tenant isolation. Deployment success needs a documented definition that distinguishes node health from ingress applying the intended revision and, if relevant, an external probe. Each claim needs tests at the cheapest useful layer and real-host evidence for the end-to-end operating journey.
+
 ## Sequencing
 
-Current priority order:
+1. Review the current security work against the trusted-operator contract. Preserve independently useful data-safety and confidentiality fixes, assess grants and restrictions on their own merits, and do not claim a tenant-isolation boundary.
+2. Prove recovery on disposable hosts using published artifacts: install WordPress, deploy a meaningful change, back up database, uploads, control state, credentials and image artifacts; recover a lost workload host and then a lost control plane onto fresh storage, reconnect the fleet and verify the site. Record elapsed time, data-loss window, manual actions and gaps; fix and retest failures. The control and workload backups are separate and both must be recoverable.
+3. Improve the ordinary operator experience: clear human-readable status and errors, backup freshness and actionable alerts, and explicit deployment progress and success semantics including ingress acknowledgement where promised.
+4. Harden the actual production path: bounded work and storage, safe build inputs, credential handling, and repeatable release, install and upgrade checks.
+5. Reconsider flexible node roles, release hooks, scaled WordPress, additional networking, dashboards and stronger isolation only for a demonstrated need. Co-locating control is attractive for small installations but requires an independently tested off-host recovery path and an explicit host trust model.
 
-1. M14 Engine API agent: removes the Compose workarounds, and makes M11's `tug run` a one-off container create.
-2. M11 backups and run-once jobs: the main gap for the target operator.
-3. M15 flexible node roles.
-4. M9 metrics and M8/M9 webhooks.
-5. Remaining M5 items (long-poll removal, agent and daemon log streams, process termination).
-
-M10 (private-by-default ports) is done. M12 is cancelled; its two residual limitations stay in [Later](#later--only-if-needed) until a concrete multi-node need justifies designs that do not require a Tug-owned overlay.
-
-Dependencies: M10 builds on M2. M11 uses the M5 command channel for job output and M8 webhooks for alerts but needs neither to start. M13 is independent of M14, and M14's config hash uses the pinned image references. M15's control-on-a-node needs the managed Caddy from M2.
-
-The reference topology also needs a validated example: a scaled WordPress project with code in the image and uploads on S3-compatible storage or a file server the operator runs, deployed on real hosts once M11 lands (M10 is done).
+M10 is done; M12 is cancelled and its residual limitations are deferred. M14 and much of M11 are implemented; the current priority is verifying the complete operating journey rather than repeating those milestones. The milestone descriptions and checklist record existing work and candidates, not commitments that override this sequence.
 
 Historical validation: [real-host runs](real-host-evaluation.md) on two Ubuntu 24.04 hosts covered SSH install with the Docker bootstrap, the now-removed WireGuard mesh, an agent behind bridge NAT, a publicly trusted Let's Encrypt certificate from the managed Caddy, cross-node service names as then implemented, remote and `--build-local` deploys, rollback from a retained image, a rolling rollout through the public ingress with no failed requests (over 2,200 sampled), a failing version rejected while the old revision kept serving, automatic rollback, and on freshly wiped hosts label placement, `global`, `tug scale`, `ps`/`inspect`/`exec`/`logs -f` and a cloud-init enrolled node behind a deny-all-inbound firewall ([M6, M7 and enrollment](real-host-evaluation.md#m6-m7-and-enrollment-on-fresh-hosts)). The mesh and mesh-based name results are retained as history, not evidence for the current plain-address network path. Not yet validated on real hosts: the current plain-address cross-node service-name, ingress and private-port path, a node behind real NAT, certificate renewal, arm64 nodes and dnf-based hosts.
 

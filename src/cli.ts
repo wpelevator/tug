@@ -20,7 +20,7 @@ import {
   controlPortCheck,
   localImageBuildArgs,
 } from './cli-install.ts';
-import { createSourceArchive, prepareLocalImages } from './cli-build.ts';
+import { createLocalBuildSnapshot, createSourceArchive, prepareLocalImages } from './cli-build.ts';
 import { saveImageArchive } from './artifacts.ts';
 import { spawnSync } from 'node:child_process';
 import type { SpawnSyncOptions } from 'node:child_process';
@@ -34,6 +34,8 @@ import { errMessage, loadTemplate } from './util.ts';
 import { createTransport } from './agent-credential.ts';
 import { decodeCredential, writeFileDurable } from './pki.ts';
 import { backupCheckProblems } from './backup-check.ts';
+import { formatStatus } from './cli-status.ts';
+import type { StatusResponse } from './cli-status.ts';
 import { PROJECT_NAME_PATTERN, ROLES, CREDENTIAL_NAME_PATTERN } from './credentials.ts';
 import { packageVersion, resolveImage } from './image.ts';
 import { TERMINAL_DEPLOYMENT_STATES } from './protocol.ts';
@@ -1208,7 +1210,14 @@ program
         const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-local-build-'));
         try {
           const form = new FormData();
-          const localImages = await prepareLocalImages(compose, process.cwd(), directory);
+          const source = Object.values(compose.services).some((service) => service.build)
+            ? await createLocalBuildSnapshot(process.cwd(), directory, [
+                cfg.file,
+                cfg.localFile,
+                ...(cfg.credentialFile ? [cfg.credentialFile] : []),
+              ])
+            : process.cwd();
+          const localImages = await prepareLocalImages(compose, source, directory);
           for (const { field } of localImages)
             form.append(
               field,
@@ -1243,7 +1252,11 @@ program
   );
 program
   .command('status')
-  .action(async () => console.log(JSON.stringify(await request('GET', '/api/v1/status'), null, 2)));
+  .option('--human', 'show a readable summary instead of JSON')
+  .action(async (o: { human?: boolean }) => {
+    const status = await request<StatusResponse>('GET', '/api/v1/status');
+    console.log(o.human ? formatStatus(status) : JSON.stringify(status, null, 2));
+  });
 program
   .command('events')
   .description(

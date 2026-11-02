@@ -64,7 +64,7 @@ import {
 import { EXPIRY_WARN_DAYS, certificateExpiry, diagnoseNode } from './diagnostics.ts';
 import { serverTlsOptions } from './tls-server.ts';
 import { isNodeHost } from './node-address.ts';
-import { buildIngressWork, resolveServiceEndpoints } from './ingress.ts';
+import { buildIngressWork, ingressConfigHash, resolveServiceEndpoints } from './ingress.ts';
 import { parseStatusReport } from './status-report.ts';
 import type { NodeView } from './ingress.ts';
 import {
@@ -898,7 +898,61 @@ export async function createApp(
           : byNode.get(node)?.observed_version === state.version) &&
         ['serving', 'skipped'].includes(byNode.get(node)?.health ?? ''),
     );
-    if (ok)
+    // For projects using managed ingress, wait until each enabled ingress node has applied
+    // the current routing configuration. Container health alone does not prove a switch.
+    const ingressServices = Object.entries(state.compose.services || {})
+      .filter(([, service]) => service['x-tug']?.ingress)
+      .map(([name]) => name);
+    // A revision that removes its last route must wait for that removal too.
+    const previous = db.get<{ state_json: string }>(
+      `SELECT ds.state_json FROM desired_states ds JOIN deployments d ON d.id=ds.deployment_id
+       WHERE d.project_id=? AND d.id<>? AND d.state='succeeded' ORDER BY d.created_at DESC LIMIT 1`,
+      projectId,
+      project.current_deployment_id,
+    );
+    const previouslyRouted = previous
+      ? Object.values(
+          (JSON.parse(previous.state_json) as DesiredState).compose.services || {},
+        ).some((service) => service['x-tug']?.ingress)
+      : false;
+    const ingressNodes =
+      ingressServices.length || previouslyRouted
+        ? db.all<NodeRow>('SELECT * FROM nodes WHERE ingress=1 AND disabled_at IS NULL')
+        : [];
+    const staleBefore = new Date(
+      Date.now() - Number(process.env.TUG_STALE_SECONDS || 60) * 1000,
+    ).toISOString();
+    const ingressReady =
+      !ingressNodes.length ||
+      ingressNodes.every((node) => {
+        const work = ingressFor(node, currentDesiredStates());
+        if (
+          !ingressServices.every((service) =>
+            work.routes.some(
+              (route) =>
+                route.project === projectId && route.service === service && route.upstreams.length,
+            ),
+          )
+        )
+          return false;
+        if (!node.ingress_status_json) return false;
+        try {
+          const status = JSON.parse(node.ingress_status_json) as {
+            state?: string;
+            configHash?: string;
+            reportedAt?: string;
+          };
+          return (
+            status.state === 'serving' &&
+            status.configHash === ingressConfigHash(work) &&
+            typeof status.reportedAt === 'string' &&
+            status.reportedAt >= staleBefore
+          );
+        } catch {
+          return false;
+        }
+      });
+    if (ok && ingressReady)
       db.run(
         'UPDATE deployments SET state=?,updated_at=? WHERE id=? AND state=?',
         'succeeded',
@@ -1666,7 +1720,13 @@ export async function createApp(
     const node = findNode(String(req.params.name));
     if (!node) return res.status(404).json({ error: 'node not found' });
     const enabled = req.body.enabled !== false;
-    db.run('UPDATE nodes SET ingress=?,updated_at=? WHERE id=?', enabled ? 1 : 0, now(), node.id);
+    db.run(
+      'UPDATE nodes SET ingress_status_json=CASE WHEN ingress<>? THEN NULL ELSE ingress_status_json END,ingress=?,updated_at=? WHERE id=?',
+      enabled ? 1 : 0,
+      enabled ? 1 : 0,
+      now(),
+      node.id,
+    );
     wakeHub.wake(node.id);
     res.json({ ok: true, node: node.name, ingress: enabled });
   });
@@ -3098,7 +3158,6 @@ export async function createApp(
         st.health,
         ts,
       );
-      updateDeploymentConvergence(st.project);
     }
     // Commands are resolved under the calling node first: only a running command of this node can be
     // heartbeated or completed, so foreign and already-finished command ids change nothing.
@@ -3124,7 +3183,7 @@ export async function createApp(
     }
     if (report.ingress)
       db.run(
-        'UPDATE nodes SET ingress_status_json=? WHERE id=?',
+        'UPDATE nodes SET ingress_status_json=? WHERE id=? AND ingress=1 AND disabled_at IS NULL',
         JSON.stringify({ ...report.ingress, reportedAt: ts }),
         req.node!.id,
       );
@@ -3136,6 +3195,12 @@ export async function createApp(
         ts,
         req.node!.id,
       );
+    // Ingress-only nodes can acknowledge routing without reporting any project; recheck
+    // every active rollout after all project and ingress observations have been stored.
+    for (const deployment of db.all<{ project_id: string }>(
+      "SELECT DISTINCT project_id FROM deployments WHERE state='rolling_out'",
+    ))
+      updateDeploymentConvergence(deployment.project_id);
     try {
       restores.advance();
     } catch (e) {

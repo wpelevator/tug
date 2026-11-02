@@ -10,7 +10,7 @@ Deploy Docker Compose applications to one or more ordinary Linux VPSes through a
 - Nodes join over SSH (`node-install`) or enroll themselves with a single `docker run` after `node-prepare-enrollment`, each with its own certificate and an immutable node ID. Agents only dial out, so nodes behind NAT work.
 - Agents pull desired state from control, reconcile containers through the Docker Engine API, run TCP/HTTP/Docker health checks and report status. An outbound WebSocket wakes them as soon as control queues work and carries live `exec`, followed logs, `ps` and `inspect` sessions, with long-poll and periodic-poll fallbacks for ordinary work.
 - `x-tug` placement of services and volumes on nodes, with immutable desired-state records per deployment.
-- Build application images on control from uploaded source, or locally with `deploy --build-local`. Agents download saved images directly from control. Published images are pinned to registry digests at deployment creation.
+- Build application images on control from uploaded source, or locally with `deploy --build-local`. Both use a filtered source snapshot that excludes known Tug credentials; operators must still exclude other secrets. Agents download saved images directly from control. Published images are pinned to registry digests at deployment creation.
 - Secrets encrypted at rest, released only to the nodes whose services reference them, with targeted service recreation when only a secret changes.
 - Deployment convergence, per-project operation locks, cancellation, rollback, per-service rollout events and log fetching through the agents.
 - Opt-in zero-downtime rolling rollouts for ingress-fronted services (`x-tug.rollout`) and automatic rollback of failed deployments (`x-tug.rollback: auto`). See [Compose extensions](docs/compose.md#rolling-rollouts).
@@ -18,6 +18,7 @@ Deploy Docker Compose applications to one or more ordinary Linux VPSes through a
 - Health-aware cross-node service names (hosts-file entries injected into containers), on by default with a `TUG_SERVICE_NAMES=false` opt-out, and an optional managed Caddy ingress with automatic HTTPS. Both use each node's private `address` on your existing network. See [Networking](docs/networking.md).
 - Private-by-default published ports: agent-generated container definitions bind them to the node address or loopback, never every interface unless you write `0.0.0.0`. Tug does not encrypt node-to-node workload traffic; your network owns reachability, firewalling and encryption. See [Networking](docs/networking.md#published-ports-private-by-default).
 - Workload backups of service commands and volumes with restic, a separate control-plane backup and restore, and `tug doctor` diagnostics for certificate expiry, node connectivity and clock skew.
+- `tug status --human` summarizes deployments, node reports and failures; the default JSON output remains available for automation.
 
 ## How it fits together
 
@@ -76,7 +77,7 @@ The full walkthrough, including nodes you cannot SSH to (`tug node-prepare-enrol
 - [Terminology](docs/terminology.md): core concepts, the naming review (which recommendations are implemented), industry comparisons and the remaining proposed interface improvements.
 - [Architecture](docs/architecture.md): components, reconciliation, workflow diagrams, secrets and runtime paths.
 - [Compose extensions](docs/compose.md): `x-tug` placement, health checks, volumes and limitations.
-- [Control plane](docs/control-plane.md): install, mutual TLS and the private CA, image delivery, control-plane backup and restore.
+- [Control plane](docs/control-plane.md): install, mutual TLS and the private CA, image delivery, control-plane backup and recovery on another host.
 - [Backups](docs/backups.md): scheduled workload backups with `x-tug.backup` (restic), restore, recipes for common databases, and a restore drill. See also the [WordPress example](examples/wordpress/README.md).
 - [Access control](docs/access-control.md): certificate identity classes, scoped operator credentials, roles, audit trail and a GitHub Actions deploy example.
 - [Security](docs/security.md): deployment trust boundaries, security audit findings and validation limits.

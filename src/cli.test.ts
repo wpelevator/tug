@@ -9,7 +9,7 @@ import * as yaml from 'js-yaml';
 import * as tar from 'tar';
 import { writeCredentialFile } from '../tests/helpers.ts';
 import { resolveCliConfig, integerOption } from './cli-config.ts';
-import { createSourceArchive, prepareLocalImages } from './cli-build.ts';
+import { createLocalBuildSnapshot, createSourceArchive, prepareLocalImages } from './cli-build.ts';
 import {
   controlPortCheck,
   dockerPlatform,
@@ -270,6 +270,50 @@ test('init applies global options after the command without relying on Docker or
     );
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('local build snapshots exclude credential files even when ignore rules re-include them', async () => {
+  const source = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-local-source-'));
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-local-snapshot-'));
+  try {
+    await fs.mkdir(path.join(source, 'config'));
+    await fs.writeFile(path.join(source, 'Dockerfile'), 'FROM scratch\nCOPY . /app\n');
+    await fs.writeFile(
+      path.join(source, '.dockerignore'),
+      '!config/admin.json\n!nested.credential.json\n',
+    );
+    await fs.writeFile(path.join(source, 'app.txt'), 'application');
+    await fs.writeFile(path.join(source, 'nested.credential.json'), 'dummy credential');
+    await fs.writeFile(path.join(source, 'config', 'admin.json'), 'dummy custom credential');
+    await fs.writeFile(path.join(source, 'tug.local.yml'), 'dummy overlay');
+    const snapshot = await createLocalBuildSnapshot(source, tmp, [
+      path.join(source, 'config', 'admin.json'),
+    ]);
+    assert.equal(
+      await fs.readFile(path.join(snapshot, 'app.txt'), 'utf8'),
+      'application',
+      'the local build snapshot must retain application files',
+    );
+    for (const name of ['nested.credential.json', 'config/admin.json', 'tug.local.yml'])
+      await assert.rejects(
+        fs.access(path.join(snapshot, name)),
+        { code: 'ENOENT' },
+        'mandatory credential exclusions must not be overridden by ignore rules',
+      );
+    assert.equal(
+      await fs.readFile(path.join(source, 'config', 'admin.json'), 'utf8'),
+      'dummy custom credential',
+      'creating a snapshot must not modify the original checkout',
+    );
+    await assert.rejects(
+      fs.access(path.join(tmp, 'source.tgz')),
+      { code: 'ENOENT' },
+      'the temporary source archive must be removed after extraction',
+    );
+  } finally {
+    await fs.rm(source, { recursive: true, force: true });
+    await fs.rm(tmp, { recursive: true, force: true });
   }
 });
 

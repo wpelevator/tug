@@ -67,6 +67,18 @@ Tug issues one node identity (key and certificate) per node. It does not push bu
 
 Running containers keep serving while control is down; agents just cannot pick up new desired state until it is back.
 
+### Recover control on another host
+
+This procedure was exercised with the published 0.9.0 release on two VPSes; see [Real-host evaluation](real-host-evaluation.md#recovery-drill-with-the-published-090-release-2-november-2026) for the exact scope and limitations. Restore the workload data separately using its project backups. Keep the control backup encrypted off-host and keep the original operator credential and backup repository passwords separately; the control archive contains the master key and private CA.
+
+1. Stop or isolate the old control plane before directing agents to the replacement. Two active control planes with divergent state are not a supported failover setup. Running workload containers continue serving while control is unavailable.
+2. Install the matching Tug release on the replacement host with `tug control-install`, writing its temporary bootstrap credential to a private file. This initializes a new control and CA solely to authorize the restore.
+3. Copy the decrypted control archive into the replacement control data directory with mode `0600`. The standard installer mounts host `/var/lib/tug-control` as `/data`: for example, a host file `/var/lib/tug-control/restore-input.tar.gz` is addressed to the API as `/data/restore-input.tar.gz`. The archive path is read on the control host; the CLI does not upload a local file.
+4. Run `tug control-restore /data/restore-input.tar.gz --confirm --credential <bootstrap-credential>`, then restart the control container. Restore replaces the bootstrap CA, credentials, state and image store; the temporary credential no longer authenticates after restart.
+5. Connect with the original operator credential and use `--control-url https://<replacement-host>:8443` if the address changed. Verify the recovered projects, deployments and backup catalog. Agents that still point to the old address must be repointed; the tested 0.9.0 path was `tug node-replace-identity <ssh-target> --name <node> --control-url https://<replacement-host>:8443 --agent-control-url https://<replacement-host>:8443 --credential <original-credential>`. Verify that each node returns online and that the site serves the expected data.
+
+A snapshot older than later node or operator changes does not contain those changes; follow the identity and revocation recovery notes in [Authentication and PKI](#authentication-and-pki). This sequence does not replace a separate, tested backup of workload volumes or databases.
+
 ## Access control
 
 Besides the `root` admin credential, control accepts named operator credentials with `read`, `deploy` or `admin` roles, optionally limited to projects, for CI and teammates. Every deployment and control event records the acting credential name. See [Access control](access-control.md) for the endpoint table, the audit trail and a GitHub Actions deploy example. Control stores each credential's name, role, scope and public-key hash (never a private key); these records travel with control backups.

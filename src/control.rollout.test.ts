@@ -9,6 +9,7 @@ import { createApp } from './control.ts';
 import { testImageResolver, testControlUrl, testIdentity } from '../tests/helpers.ts';
 import { json } from '../tests/helpers.ts';
 import type { ComposeFile } from './protocol.ts';
+import { ingressConfigHash } from './ingress.ts';
 
 async function server() {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-rollout-'));
@@ -73,6 +74,29 @@ async function server() {
     );
     assert.equal(res.status, 200);
   };
+  const reportIngress = async (
+    token: string,
+    node: string,
+    state: 'serving' | 'failed' = 'serving',
+    hash?: string,
+  ) => {
+    const work = await json(await fetch(`${base}/agent/v1/work`, { headers: agent(token) }));
+    const res = await post(
+      '/agent/v1/status',
+      {
+        node,
+        projects: [],
+        commandResults: [],
+        ingress: {
+          state,
+          configHash: hash ?? ingressConfigHash(work.ingress),
+          routes: work.ingress?.routes.length ?? 0,
+        },
+      },
+      agent(token),
+    );
+    assert.equal(res.status, 200, 'the ingress status report must be accepted');
+  };
   const deployment = async (id: string) => get(`/api/v1/deployments/${id}`);
   const events = async (project = 'site') =>
     (await get(`/api/v1/events?project=${project}&limit=100`)).events as {
@@ -102,6 +126,7 @@ async function server() {
     register,
     deploy,
     report,
+    reportIngress,
     deployment,
     events,
     waitFor,
@@ -138,6 +163,7 @@ test('ingress follows the port a rolling service reports and keeps the old one w
     await s.post('/api/v1/nodes/edge/ingress', { enabled: true });
     await s.deploy(stack('web:1'), 'v1');
     await s.report(app.nodeId, 'app', 'serving', serving(20000));
+    await s.reportIngress(edge.nodeId, 'edge');
     const edgeWork = async () =>
       json(await fetch(`${s.base}/agent/v1/work`, { headers: s.agent(edge.nodeId) }));
     assert.deepEqual(
@@ -165,6 +191,7 @@ test('ingress follows the port a rolling service reports and keeps the old one w
       'the rendered Caddyfile changes so the agent reloads Caddy',
     );
 
+    await s.reportIngress(edge.nodeId, 'edge');
     await s.deploy(stack('web:3'), 'v3');
     await s.report(app.nodeId, 'app', 'failed', serving(20001, { rolloutError: 'http 503' }));
     const kept = await edgeWork();
@@ -211,6 +238,101 @@ test('recreated services still route to their declared published port', async ()
       w.ingress.routes[0].upstreams,
       ['127.0.0.1:8080'],
       'without a reported port the declared one is used, as before',
+    );
+  } finally {
+    await s.close();
+  }
+});
+
+test('managed ingress must acknowledge the current routed configuration before deployment succeeds', async () => {
+  const s = await server();
+  try {
+    const edge = await s.register('edge');
+    const app = await s.register('app', { address: '192.168.1.5' });
+    await s.post('/api/v1/nodes/edge/ingress', { enabled: true });
+    const v1 = await s.deploy(stack('web:1'), 'v1');
+    await s.report(app.nodeId, 'app', 'serving', serving(20000));
+    assert.equal(
+      (await s.deployment(v1.deployment.id)).state,
+      'rolling_out',
+      'a healthy app must wait for ingress acknowledgement',
+    );
+    await s.reportIngress(edge.nodeId, 'edge', 'failed');
+    assert.equal(
+      (await s.deployment(v1.deployment.id)).state,
+      'rolling_out',
+      'a failed ingress application must not satisfy convergence',
+    );
+    await s.reportIngress(edge.nodeId, 'edge', 'serving', 'outdated');
+    assert.equal(
+      (await s.deployment(v1.deployment.id)).state,
+      'rolling_out',
+      'an old configuration hash must not satisfy convergence',
+    );
+    await s.reportIngress(edge.nodeId, 'edge');
+    assert.equal(
+      (await s.deployment(v1.deployment.id)).state,
+      'succeeded',
+      'an ingress-only node acknowledgement must complete convergence',
+    );
+    await s.post('/api/v1/nodes/edge/ingress', { enabled: false });
+    await s.reportIngress(edge.nodeId, 'edge', 'serving', 'ignored-while-disabled');
+    await s.post('/api/v1/nodes/edge/ingress', { enabled: true });
+    const v2 = await s.deploy(stack('web:2'), 'v2');
+    await s.report(app.nodeId, 'app', 'serving', serving(20001));
+    assert.equal(
+      (await s.deployment(v2.deployment.id)).state,
+      'rolling_out',
+      'an acknowledgement for the previous upstream must not complete the next deployment',
+    );
+    await s.reportIngress(edge.nodeId, 'edge');
+    assert.equal(
+      (await s.deployment(v2.deployment.id)).state,
+      'succeeded',
+      'the new upstream must be acknowledged before success',
+    );
+    const noRoute = stack('web:3');
+    delete (noRoute.services.web['x-tug'] as Record<string, unknown>).ingress;
+    delete (noRoute.services.web['x-tug'] as Record<string, unknown>).rollout;
+    const v3 = await s.deploy(noRoute, 'v3');
+    await s.report(app.nodeId, 'app', 'serving', serving());
+    assert.equal(
+      (await s.deployment(v3.deployment.id)).state,
+      'rolling_out',
+      'route removal must be acknowledged before success',
+    );
+    await s.reportIngress(edge.nodeId, 'edge');
+    assert.equal(
+      (await s.deployment(v3.deployment.id)).state,
+      'succeeded',
+      'acknowledged route removal must complete the deployment',
+    );
+  } finally {
+    await s.close();
+  }
+});
+
+test('all enabled ingress nodes must acknowledge before deployment succeeds', async () => {
+  const s = await server();
+  try {
+    const edge1 = await s.register('edge1');
+    const edge2 = await s.register('edge2');
+    const app = await s.register('app', { address: '192.168.1.5' });
+    await s.post('/api/v1/nodes/edge1/ingress', { enabled: true });
+    await s.post('/api/v1/nodes/edge2/ingress', { enabled: true });
+    const deploy = await s.deploy(stack('web:1'), 'v1');
+    await s.report(app.nodeId, 'app', 'serving', serving(20000));
+    await s.reportIngress(edge1.nodeId, 'edge1');
+    assert.equal(
+      (await s.deployment(deploy.deployment.id)).state,
+      'rolling_out',
+      'one ingress acknowledgement must not stand in for another node',
+    );
+    await s.reportIngress(edge2.nodeId, 'edge2');
+    assert.equal(
+      (await s.deployment(deploy.deployment.id)).state,
+      'succeeded',
+      'the deployment must succeed once both ingress nodes acknowledge',
     );
   } finally {
     await s.close();

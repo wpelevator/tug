@@ -1,5 +1,5 @@
 import { id } from './util.ts';
-import { volumeName } from './container-spec.ts';
+import { scratchVolumeName } from './container-spec.ts';
 import type { BackupService } from './backup-scheduler.ts';
 import type { Db, BackupRunRow, CommandRow, RestoreRunRow, NodeStatusRow } from './db.ts';
 import type { ComposeFile, DesiredState, ProjectStatus } from './protocol.ts';
@@ -157,6 +157,8 @@ export function createRestoreService(deps: RestoreDeps) {
 
   /** Validates a request and describes what a restore would do; nothing is changed. */
   function plan(request: RestoreRequest): RestorePlan | { error: string; status: number } {
+    // The most recent deployment may have moved the target since the last scheduler tick.
+    backups.sync();
     const desired = deployed(request.project);
     if (!desired)
       return { error: `project ${request.project} has no successful deployment`, status: 409 };
@@ -202,9 +204,7 @@ export function createRestoreService(deps: RestoreDeps) {
       snapshotId: snapshot.snapshotId,
       snapshotTime: snapshot.time,
       mode,
-      ...(mode === 'scratch'
-        ? { scratchVolume: volumeName(request.project, `restore-${id('r').slice(-6)}`) }
-        : {}),
+      ...(mode === 'scratch' ? { scratchVolume: scratchVolumeName(request.project, id('r')) } : {}),
       writers,
       safetyBackup: mode === 'in-place' && request.safetyBackup !== false,
     };

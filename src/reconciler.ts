@@ -67,17 +67,56 @@ export async function ensureProjectResources(
   project: string,
   plan: NodePlan,
 ): Promise<void> {
-  if (!(await docker.inspectNetwork(plan.network)))
-    await docker.createNetwork(plan.network, { [LABEL_PROJECT]: project });
+  // Check all volumes before creating resources or replacing containers. An older owned volume must
+  // never be silently replaced by a new, empty volume after the naming scheme changes.
   for (const volume of plan.volumes) {
-    if (await docker.inspectVolume(volume.name)) continue;
+    if (volume.external || (await docker.inspectVolume(volume.name))) continue;
+    const volumeKey = volume.labels['tug.volume'];
+    const legacyName = `tug_${project}_${volumeKey}`;
+    const legacy = await docker.inspectVolume(legacyName);
+    if (legacy?.Labels?.[LABEL_PROJECT] === project && legacy.Labels?.['tug.volume'] === volumeKey)
+      throw new Error(
+        `managed volume ${legacyName} uses an earlier Tug name; refusing to create empty volume ${volume.name}. Recover or copy its data before deploying`,
+      );
+  }
+  let network = await docker.inspectNetwork(plan.network);
+  if (!network) {
+    await docker.createNetwork(plan.network, { [LABEL_PROJECT]: project });
+    network = await docker.inspectNetwork(plan.network);
+  }
+  if (!network) throw new Error(`network ${plan.network} could not be inspected after creation`);
+  if (network && network.Labels?.[LABEL_PROJECT] !== project)
+    throw new Error(`network ${plan.network} is not owned by project ${project}`);
+  for (const volume of plan.volumes) {
+    let existing = await docker.inspectVolume(volume.name);
+    if (!existing && !volume.external) {
+      await docker.createVolume(volume.name, {
+        driver: volume.driver,
+        opts: volume.opts,
+        labels: volume.labels,
+      });
+      existing = await docker.inspectVolume(volume.name);
+    }
+    if (existing) {
+      if (!volume.external) {
+        const sameOptions = (a: Record<string, string>, b: Record<string, string>) =>
+          Object.keys(a).length === Object.keys(b).length &&
+          Object.entries(a).every(([key, value]) => b[key] === value);
+        if (
+          existing.Labels?.[LABEL_PROJECT] !== project ||
+          existing.Labels?.['tug.volume'] !== volume.labels['tug.volume'] ||
+          existing.Driver !== volume.driver ||
+          !sameOptions(existing.Options || {}, volume.opts)
+        )
+          throw new Error(
+            `volume ${volume.name} does not match the project's owned volume definition`,
+          );
+      }
+      continue;
+    }
     if (volume.external)
       throw new Error(`external volume ${volume.name} does not exist on this node`);
-    await docker.createVolume(volume.name, {
-      driver: volume.driver,
-      opts: volume.opts,
-      labels: volume.labels,
-    });
+    throw new Error(`volume ${volume.name} could not be inspected after creation`);
   }
 }
 

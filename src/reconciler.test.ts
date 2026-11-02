@@ -7,10 +7,121 @@ import { reconcile } from './agent.ts';
 import type { AgentContext } from './agent.ts';
 import { buildDesiredState } from './compose.ts';
 import { containerSpecs, withHostPort } from './container-spec.ts';
-import { loadRolloutState, parsePortRange } from './reconciler.ts';
+import { ensureProjectResources, loadRolloutState, parsePortRange } from './reconciler.ts';
 import type { ComposeFile, SecretsResponse } from './protocol.ts';
 import type { HttpClient } from './runners.ts';
 import { FakeDocker, normalized } from '../tests/fake-docker.ts';
+
+test('project resources reject unsafe or foreign pre-existing resources', async () => {
+  const docker = new FakeDocker();
+  const plan = {
+    network: 'tug_alpha',
+    volumes: [
+      {
+        name: 'tug_alpha_data',
+        driver: 'local',
+        opts: {},
+        labels: { 'tug.project': 'alpha', 'tug.volume': 'data' },
+        external: false,
+      },
+    ],
+    specs: {},
+  };
+  docker.networks.set(plan.network, {
+    Name: plan.network,
+    Id: 'foreign',
+    Labels: { 'tug.project': 'other' },
+  });
+  await assert.rejects(
+    ensureProjectResources(docker, 'alpha', plan),
+    /not owned/,
+    'foreign networks must not be reused',
+  );
+  docker.networks.clear();
+  docker.volumes.set(plan.volumes[0].name, {
+    Name: plan.volumes[0].name,
+    Driver: 'local',
+    Labels: plan.volumes[0].labels,
+    Options: { type: 'none', o: 'bind', device: '/' },
+  });
+  await assert.rejects(
+    ensureProjectResources(docker, 'alpha', plan),
+    /does not match/,
+    'host-backed volumes must not be reused as ordinary volumes',
+  );
+  docker.volumes.set(plan.volumes[0].name, {
+    Name: plan.volumes[0].name,
+    Driver: 'local',
+    Labels: { 'tug.project': 'alpha_data', 'tug.volume': 'other' },
+    Options: {},
+  });
+  await assert.rejects(
+    ensureProjectResources(docker, 'alpha', plan),
+    /does not match/,
+    'colliding volume names must not grant access across projects',
+  );
+  docker.volumes.clear();
+  await ensureProjectResources(docker, 'alpha', plan);
+  await ensureProjectResources(docker, 'alpha', plan);
+  assert.equal(docker.volumes.size, 1, 'matching owned volumes must be reusable');
+});
+
+test('legacy owned volumes block new empty volumes before any resource is created', async () => {
+  const docker = new FakeDocker();
+  const plan = {
+    network: 'tug_alpha',
+    volumes: [
+      {
+        name: 'tug_v5_alpha_new',
+        driver: 'local',
+        opts: {},
+        labels: { 'tug.project': 'alpha', 'tug.volume': 'new' },
+        external: false,
+      },
+      {
+        name: 'tug_v5_alpha_data_logs',
+        driver: 'local',
+        opts: {},
+        labels: { 'tug.project': 'alpha', 'tug.volume': 'data_logs' },
+        external: false,
+      },
+    ],
+    specs: {},
+  };
+  docker.volumes.set('tug_alpha_data_logs', {
+    Name: 'tug_alpha_data_logs',
+    Driver: 'local',
+    Labels: { 'tug.project': 'alpha', 'tug.volume': 'data_logs' },
+    Options: {},
+  });
+  await assert.rejects(
+    ensureProjectResources(docker, 'alpha', plan),
+    /tug_alpha_data_logs.*refusing to create empty volume.*Recover or copy/,
+    'an owned old-name volume must stop the deployment with a recovery remedy',
+  );
+  assert.equal(
+    docker.volumes.size,
+    1,
+    'preflight must not create any new volume before checking every old name',
+  );
+  assert.equal(docker.networks.size, 0, 'preflight must fail before creating the project network');
+  assert.deepEqual(docker.calls, [], 'preflight must not mutate Docker resources');
+  docker.volumes.set('tug_alpha_data_logs', {
+    Name: 'tug_alpha_data_logs',
+    Driver: 'local',
+    Labels: { 'tug.project': 'alpha_data', 'tug.volume': 'logs' },
+    Options: {},
+  });
+  await ensureProjectResources(docker, 'alpha', plan);
+  assert.ok(
+    docker.volumes.has('tug_v5_alpha_data_logs'),
+    'an old-name collision owned by another project must not block a new volume',
+  );
+  assert.ok(
+    docker.volumes.has('tug_alpha_data_logs'),
+    'the other project’s old volume must remain untouched',
+  );
+});
 
 /** A host where containers whose image is in `unhealthy` fail their HTTP health check. */
 function fakeHost() {
@@ -131,7 +242,7 @@ test('a rolling service runs on an allocated host port beside the recreated serv
   assert.deepEqual(running(host, 'db'), ['postgres'], 'the recreated service runs as usual');
   assert.ok(host.docker.networks.has('tug_proj'), 'both strategies share the project network');
   assert.ok(
-    host.docker.volumes.has('tug_proj_assets'),
+    host.docker.volumes.has('tug_v4_proj_assets'),
     'the named volume is created once under its Tug name',
   );
 });

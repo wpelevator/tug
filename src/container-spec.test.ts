@@ -1,7 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildDesiredState } from './compose.ts';
-import { composeDurationMs, containerSpecs, sizeBytes, startOrder } from './container-spec.ts';
+import {
+  composeDurationMs,
+  containerSpecs,
+  scratchVolumeName,
+  sizeBytes,
+  startOrder,
+  volumeName,
+} from './container-spec.ts';
 import { normalized } from '../tests/fake-docker.ts';
 import type { ComposeFile } from './protocol.ts';
 
@@ -12,6 +19,47 @@ const plan = (compose: ComposeFile, opts = {}, version = 'v1') =>
     'n1',
     opts,
   );
+
+test('managed volume names distinguish project and volume boundaries', () => {
+  const first = volumeName('alpha', 'data_logs');
+  const second = volumeName('alpha_data', 'logs');
+  assert.notEqual(
+    first,
+    second,
+    'project and volume pairs must not resolve to the same Docker volume',
+  );
+  assert.notEqual(
+    first,
+    scratchVolumeName('alpha', 'data_logs'),
+    'scratch and managed volumes must occupy distinct namespaces',
+  );
+  assert.equal(
+    volumeName('alpha', 'data_logs'),
+    first,
+    'volume naming must be deterministic across deploy, backup and delete',
+  );
+});
+
+test('managed volume ownership labels cannot be overridden', () => {
+  const resources = plan({
+    services: { app: { image: 'x', volumes: ['data:/data'], ...place } },
+    volumes: {
+      data: {
+        labels: {
+          'tug.project': 'other',
+          'tug.volume': 'other',
+          'tug.restore': 'rst_forged',
+          custom: 'ok',
+        },
+      },
+    },
+  });
+  assert.deepEqual(
+    resources.volumes[0].labels,
+    { 'tug.project': 'p', 'tug.volume': 'data', custom: 'ok' },
+    'managed volume ownership must reflect the actual project and volume',
+  );
+});
 
 test('the config hash ignores the deployment revision but follows definition and secret versions', () => {
   const c: ComposeFile = {

@@ -2,7 +2,7 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import * as tar from 'tar';
-import { buildImage, run } from './build.ts';
+import { buildImage, run, unpackContext } from './build.ts';
 import { saveImageArchive } from './artifacts.ts';
 import type { ComposeFile, LocalImageUpload } from './protocol.ts';
 import { CONFIG_NAMES } from './cli-config.ts';
@@ -140,6 +140,23 @@ export async function createSourceArchive(
     },
     ['.'],
   );
+}
+
+/** Build from the same filtered, validated source snapshot used for remote builds. */
+export async function createLocalBuildSnapshot(
+  contextDir: string,
+  directory: string,
+  configFiles: string[],
+): Promise<string> {
+  const archive = path.join(directory, 'source.tgz');
+  const snapshot = path.join(directory, 'source');
+  try {
+    await createSourceArchive(contextDir, archive, configFiles);
+    await unpackContext(archive, snapshot);
+    return snapshot;
+  } finally {
+    await fs.rm(archive, { force: true });
+  }
 }
 
 /** Build only application build services; callers own temporary files and upload transport. */
