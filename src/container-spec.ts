@@ -171,8 +171,10 @@ function volumeSpecs(desired: DesiredState, node: string, used: ReadonlySet<stri
   for (const key of [...used].sort()) {
     const def = desired.compose.volumes?.[key] || {};
     const xe = def['x-tug'] || {};
+    const customLabels = { ...((def.labels as Record<string, string> | undefined) || {}) };
+    delete customLabels['tug.restore'];
     const labels = {
-      ...((def.labels as Record<string, string> | undefined) || {}),
+      ...customLabels,
       [LABEL_PROJECT]: desired.project,
       'tug.volume': key,
     };
