@@ -182,7 +182,15 @@ test(
         'a wrong repository password fails and does not re-initialize',
       );
 
-      docker('volume', 'create', 'tug_bkjob_uploads');
+      docker(
+        'volume',
+        'create',
+        '--label',
+        'tug.project=bkjob',
+        '--label',
+        'tug.volume=uploads',
+        'tug_bkjob_uploads',
+      );
       docker(
         'run',
         '--rm',

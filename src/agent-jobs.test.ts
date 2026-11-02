@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { JobRunner } from './agent-jobs.ts';
-import { backupArgs, forgetArgs, memoryBytes, parseSummary } from './backup-job.ts';
+import { backupArgs, forgetArgs, memoryBytes, parseSummary, runBackupJob } from './backup-job.ts';
 import { FakeDocker } from '../tests/fake-docker.ts';
 import type { BackupJobPayload, Command } from './protocol.ts';
 
@@ -234,6 +234,50 @@ test('a volume backup fails when the volume does not exist on the node instead o
     JSON.stringify(result.result),
     /volume tug_site_uploads does not exist on this node/,
     'the error says which volume is missing',
+  );
+});
+
+test('backup and restore reject a volume owned by another project', async () => {
+  const docker = dockerWith(() => ({ code: 0 }));
+  docker.volumes.set('tug_site_data_uploads', {
+    Name: 'tug_site_data_uploads',
+    Labels: { 'tug.project': 'site_data', 'tug.volume': 'uploads' },
+  });
+  const job = payload({
+    type: 'volume',
+    target: 'volume:data_uploads',
+    volume: { name: 'data_uploads', dockerVolume: 'tug_site_data_uploads' },
+  });
+  for (const kind of ['backup.run', 'backup.restore'] as const)
+    await assert.rejects(
+      runBackupJob(job, 'cmd', { docker, credentials }, kind),
+      /not owned/,
+      `${kind} must not access another project's volume`,
+    );
+  assert.equal(docker.names().length, 0, 'a refused volume must not be mounted by a helper');
+});
+
+test('scratch restore does not reuse an unrelated existing volume', async () => {
+  const docker = dockerWith(() => ({ code: 0 }));
+  docker.volumes.set('tug_site_restore-x', {
+    Name: 'tug_site_restore-x',
+    Labels: { 'tug.project': 'other' },
+  });
+  const job = payload({
+    type: 'volume',
+    target: 'volume:uploads',
+    volume: { name: 'uploads', dockerVolume: 'tug_site_uploads' },
+    restore: { snapshotId: 'snap', mode: 'scratch', scratchVolume: 'tug_site_restore-x' },
+  });
+  await assert.rejects(
+    runBackupJob(job, 'cmd', { docker, credentials }, 'backup.restore'),
+    /not owned/,
+    'a scratch restore must not overwrite an unrelated volume',
+  );
+  assert.equal(
+    docker.names().length,
+    0,
+    'a refused scratch volume must not be mounted by a helper',
   );
 });
 

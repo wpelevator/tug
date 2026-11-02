@@ -579,7 +579,10 @@ test('executeCommand drives the Engine API for restart, logs, volume delete and 
   await reconcile(desired(twoServices), ctx);
   d.logOutput.set(d.service('proj', 'web')[0].name, 'log-line\n');
   d.addImage('nginx');
-  d.volumes.set('tug_proj_data', { Name: 'tug_proj_data' });
+  d.volumes.set('tug_proj_data', {
+    Name: 'tug_proj_data',
+    Labels: { 'tug.project': 'proj', 'tug.volume': 'data' },
+  });
 
   assert.deepEqual(
     await executeCommand(
@@ -655,6 +658,10 @@ test('executeCommand tolerates a missing volume, reports failing diagnostics, re
   assert.equal(deleted.state, 'succeeded', 'deleting a volume that is already gone succeeds');
 
   const broken = await makeCtx();
+  fake(broken).volumes.set('tug_proj_data', {
+    Name: 'tug_proj_data',
+    Labels: { 'tug.project': 'proj', 'tug.volume': 'data' },
+  });
   const fail = async () => {
     throw new DockerError(500, 'permission denied');
   };
@@ -688,6 +695,31 @@ test('executeCommand tolerates a missing volume, reports failing diagnostics, re
     state: 'failed',
     result: { error: 'unsupported command nope' },
   });
+});
+
+test('volume deletion refuses a colliding volume owned by another project', async () => {
+  const ctx = await makeCtx();
+  const docker = fake(ctx);
+  docker.volumes.set('tug_alpha_data_logs', {
+    Name: 'tug_alpha_data_logs',
+    Labels: { 'tug.project': 'alpha_data', 'tug.volume': 'logs' },
+  });
+  await assert.rejects(
+    executeCommand(
+      {
+        id: 'c1',
+        type: 'volume.delete',
+        payload_json: JSON.stringify({ project: 'alpha', volume: 'data_logs' }),
+      },
+      ctx,
+    ),
+    /not owned/,
+    'a colliding Docker volume must not be deleted',
+  );
+  assert.ok(
+    docker.volumes.has('tug_alpha_data_logs'),
+    'the other project’s volume must remain intact',
+  );
 });
 
 test('pollOnce reconciles desired states, runs commands and posts one status report', async () => {

@@ -26,6 +26,7 @@ import { addressBoundServices, isRolling, serviceSecretVersions } from './compos
 import {
   LABEL_PROJECT,
   LABEL_SERVICE,
+  assertVolumeOwnership,
   containerSpecs,
   networkName,
   volumeName,
@@ -827,9 +828,13 @@ export async function executeCommand(
   if (command.type === 'volume.delete') {
     const { project, volume } = payload;
     // Volumes are never removed by reconciliation; this explicit command is the only way one goes away.
-    await ctx.docker.removeVolume(volumeName(project, volume)).catch((e) => {
-      if (!isNotFound(e)) throw e;
-    });
+    const name = volumeName(project, volume);
+    const existing = await ctx.docker.inspectVolume(name);
+    if (existing) assertVolumeOwnership(existing, project, volume);
+    if (existing)
+      await ctx.docker.removeVolume(name).catch((e) => {
+        if (!isNotFound(e)) throw e;
+      });
     return {
       commandId: command.id,
       state: 'succeeded',

@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import { bindPorts, crossNodeHosts } from './compose.ts';
 import { sentinelNames, substituteSentinels } from './normalize.ts';
 import type { CreateContainerBody } from './docker-api.ts';
+import type { VolumeInspect } from './docker-api.ts';
 import type { ComposeService, DesiredState, ServiceEndpoint } from './protocol.ts';
 import type { PortBind } from './compose.ts';
 
@@ -13,6 +14,12 @@ export const LABEL_JOB = 'tug.job';
 export const LABEL_SERVICE = 'tug.service';
 export const LABEL_REVISION = 'tug.revision';
 export const LABEL_HASH = 'tug.config-hash';
+
+/** Never treat a Docker name alone as proof of ownership; project/volume pairs can share a name. */
+export function assertVolumeOwnership(volume: VolumeInspect, project: string, name: string): void {
+  if (volume.Labels?.[LABEL_PROJECT] !== project || volume.Labels?.['tug.volume'] !== name)
+    throw new Error(`volume ${volume.Name} is not owned by project ${project} as volume ${name}`);
+}
 
 /** The project network every container of the project joins; service names are its aliases. */
 export const networkName = (project: string): string => `tug_${project}`;
