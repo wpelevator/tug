@@ -419,6 +419,12 @@ test('a scratch restore of a volume takes no lock and holds nothing', async () =
   assert.equal(job.type, 'backup.restore');
   assert.equal(job.payload.restore?.mode, 'scratch');
   assert.equal(job.payload.restore?.scratchVolume, plan.scratchVolume);
+  assert.equal(job.payload.runId, started.restoreId, 'the scratch job uses the stable restore ID');
+  assert.match(
+    plan.scratchVolume!,
+    /restore-r_[a-f0-9]{16}$/,
+    'scratch volume names retain the full random identifier',
+  );
   f.finish(job.id, 'succeeded');
   f.restores.advance();
   assert.equal(

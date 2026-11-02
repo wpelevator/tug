@@ -213,13 +213,13 @@ export async function runBackupJob(
         let existing = await docker.inspectVolume(dockerVolume);
         if (!existing) {
           await docker.createVolume(dockerVolume, {
-            labels: { 'tug.project': payload.project, 'tug.restore': dockerVolume },
+            labels: { 'tug.project': payload.project, 'tug.restore': payload.runId },
           });
           existing = await docker.inspectVolume(dockerVolume);
         }
         if (
           existing?.Labels?.[LABEL_PROJECT] !== payload.project ||
-          existing.Labels?.['tug.restore'] !== dockerVolume
+          existing.Labels?.['tug.restore'] !== payload.runId
         )
           throw new JobError(`scratch volume ${dockerVolume} is not owned by this restore`);
       } else {

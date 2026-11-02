@@ -16,7 +16,16 @@ const plan = (compose: ComposeFile, opts = {}, version = 'v1') =>
 test('managed volume ownership labels cannot be overridden', () => {
   const resources = plan({
     services: { app: { image: 'x', volumes: ['data:/data'], ...place } },
-    volumes: { data: { labels: { 'tug.project': 'other', 'tug.volume': 'other', custom: 'ok' } } },
+    volumes: {
+      data: {
+        labels: {
+          'tug.project': 'other',
+          'tug.volume': 'other',
+          'tug.restore': 'rst_forged',
+          custom: 'ok',
+        },
+      },
+    },
   });
   assert.deepEqual(
     resources.volumes[0].labels,

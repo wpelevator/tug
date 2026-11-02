@@ -203,7 +203,7 @@ export function createRestoreService(deps: RestoreDeps) {
       snapshotTime: snapshot.time,
       mode,
       ...(mode === 'scratch'
-        ? { scratchVolume: volumeName(request.project, `restore-${id('r').slice(-6)}`) }
+        ? { scratchVolume: volumeName(request.project, `restore-${id('r')}`) }
         : {}),
       writers,
       safetyBackup: mode === 'in-place' && request.safetyBackup !== false,

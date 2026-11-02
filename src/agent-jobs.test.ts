@@ -281,6 +281,38 @@ test('scratch restore does not reuse an unrelated existing volume', async () => 
   );
 });
 
+test('scratch restore checks restore identity and can resume the same restore', async () => {
+  const docker = dockerWith((cmd) =>
+    cmd[0] === 'restic' && cmd[1] === 'snapshots'
+      ? { code: 0, out: JSON.stringify([{ tags: ['project:site', 'target:volume:uploads'] }]) }
+      : { code: 0 },
+  );
+  const job = payload({
+    runId: 'rst_original',
+    type: 'volume',
+    target: 'volume:uploads',
+    volume: { name: 'uploads', dockerVolume: 'tug_site_uploads' },
+    restore: { snapshotId: 'snap', mode: 'scratch', scratchVolume: 'tug_site_restore-x' },
+  });
+  await runBackupJob(job, 'first', { docker, credentials }, 'backup.restore');
+  assert.equal(
+    docker.volumes.get('tug_site_restore-x')?.Labels?.['tug.restore'],
+    'rst_original',
+    'the scratch volume identifies its restore',
+  );
+  await runBackupJob(job, 'resume', { docker, credentials }, 'backup.restore');
+  await assert.rejects(
+    runBackupJob(
+      { ...job, runId: 'rst_other' },
+      'other',
+      { docker, credentials },
+      'backup.restore',
+    ),
+    /not owned/,
+    'another restore in the same project must not reuse the scratch volume',
+  );
+});
+
 const SUMMARY =
   '{"message_type":"summary","snapshot_id":"snap1234","data_added":10,"total_bytes_processed":20}\n';
 
