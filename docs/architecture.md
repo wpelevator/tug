@@ -19,7 +19,7 @@ The [README](../README.md#how-it-fits-together) has an overview diagram of how t
 
 ## Desired state and reconciliation
 
-`tug deploy` sends the Compose file to control, which validates `x-tug` placement (see [Compose extensions](compose.md)), optionally builds images for services with `build:`, and stores an immutable desired-state record for the deployment. Each agent receives the desired states that place services on its node, applies them, and reports the observed display version, immutable desired-state revision and health per project. When every node assigned to the current deployment reports that revision as `serving` (or `skipped`), the deployment becomes `succeeded`; if one reports `failed`, the deployment becomes `failed` and its error includes that node's apply error and any rollout errors, which is what `tug deploy` prints.
+`tug deploy` sends the Compose file to control, which validates `x-tug` placement (see [Compose extensions](compose.md)), optionally builds images for services with `build:`, and stores an immutable desired-state record for the deployment. Each agent receives the desired states that place services on its node, applies them, and reports the observed display version, immutable desired-state revision and health per project. When every assigned node reports the current revision as `serving` (or `skipped`), control also waits for every enabled managed-ingress node to report the current routing configuration as applied when the project adds, changes or removes ingress routes. The acknowledged configuration must contain each current project route with a serving upstream; a failed, stale or older ingress report cannot complete deployment. With no enabled ingress node, convergence reports service health only. This acknowledgement confirms the agent applied its Caddy configuration, not external DNS, certificate issuance or a successful public request. A failed node report still fails the deployment with its apply and rollout errors; an unavailable ingress can leave the deployment `rolling_out` until it recovers or the CLI times out.
 
 Deploys, rollbacks, secret changes and data-deleting volume removals take a per-project operation lock, so concurrent operations on one project are rejected with `409`. Long builds renew the project lease and check ownership/cancellation before publication. Deploy publication, rollback and artifact backup/restore share an operation-lifetime writer queue. Rollback creates a new deployment and revision whose desired state copies the most recent earlier `succeeded` or `rolling_out` one. With `x-tug.rollback: auto` control creates that rollback itself when a deployment turns `failed`; see [Rolling rollouts and automatic rollback](#rolling-rollouts-and-automatic-rollback).
 
@@ -197,9 +197,11 @@ sequenceDiagram
     alt healthy
         A->>A: active = new, old revision scheduled to drain
         A->>Ctrl: POST /agent/v1/status (web serving, port 20001)
-        Ctrl->>Ctrl: endpoint port 20001, re-render Caddyfile, deployment succeeded
+        Ctrl->>Ctrl: endpoint port 20001, re-render Caddyfile; deployment still rolling_out
         E->>Ctrl: GET /agent/v1/work (new Caddyfile)
         E->>E: caddy reload (graceful, no dropped connections)
+        E->>Ctrl: report applied configuration hash
+        Ctrl->>Ctrl: matching ingress acknowledged -> deployment succeeded
         A->>A: a later poll, after the drain: remove the old revision
     else health check fails or no free port
         A->>A: remove the new revision, remember the failure for this desired revision

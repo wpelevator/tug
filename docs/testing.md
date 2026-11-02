@@ -12,6 +12,8 @@ Commands to run each suite are in [Development](development.md). Entries marked 
 | 2. Docker integration | Control plus fake VPSes (privileged containers with their own Docker daemon), plain-address cross-node networking and Caddy, registry-free image delivery, the built `dist/` CLI and the shipped runtime image | Docker, minutes | Exists and runs in CI; a shared load probe and more scenarios are proposed |
 | 3. Real hosts | Two disposable VPSes: SSH installation, an operator-provided private network, Let's Encrypt, real latency | Two cloud hosts | Run by hand so far; an on-demand automated run is proposed |
 
+Managed-ingress convergence tests exercise current and outdated configuration hashes, failed ingress application, ingress-only acknowledgements, upstream changes and route removal. These control-level tests do not prove external DNS, TLS issuance or public reachability.
+
 ## What the layers have found
 
 | Finding | Found by | Guarded by |
