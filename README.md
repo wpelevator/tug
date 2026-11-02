@@ -91,6 +91,7 @@ The full walkthrough, including nodes you cannot SSH to (`tug node-prepare-enrol
 - [Releases](docs/releases.md): changesets, npm and Docker image publishing.
 - [Standalone binary](docs/standalone-binary.md): proposed Bun-compiled CLI binaries and Homebrew distribution, with the mTLS dependency findings.
 - [Roadmap](docs/roadmap.md): goals, principles, the reference WordPress topology and planned milestones.
+- [Docker Swarm comparison](docs/swarm-comparison.md): overlapping capabilities, workflow advantages, scheduling and networking limits, failure behavior and workload fit.
 
 ## Development
 
