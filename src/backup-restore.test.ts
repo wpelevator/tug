@@ -408,7 +408,7 @@ test('a scratch restore of a volume takes no lock and holds nothing', async () =
   assert.ok(
     !('error' in plan) &&
       plan.mode === 'scratch' &&
-      plan.scratchVolume?.startsWith('tug_site_restore-'),
+      plan.scratchVolume?.startsWith('tug_r4_site_r_'),
   );
   const started = f.restores.start(request({ target: 'volume:uploads', scratch: true }), plan) as {
     restoreId: string;
@@ -422,7 +422,7 @@ test('a scratch restore of a volume takes no lock and holds nothing', async () =
   assert.equal(job.payload.runId, started.restoreId, 'the scratch job uses the stable restore ID');
   assert.match(
     plan.scratchVolume!,
-    /restore-r_[a-f0-9]{16}$/,
+    /tug_r4_site_r_[a-f0-9]{16}$/,
     'scratch volume names retain the full random identifier',
   );
   f.finish(job.id, 'succeeded');

@@ -1,5 +1,5 @@
 import { id } from './util.ts';
-import { volumeName } from './container-spec.ts';
+import { scratchVolumeName } from './container-spec.ts';
 import type { BackupService } from './backup-scheduler.ts';
 import type { Db, BackupRunRow, CommandRow, RestoreRunRow, NodeStatusRow } from './db.ts';
 import type { ComposeFile, DesiredState, ProjectStatus } from './protocol.ts';
@@ -202,9 +202,7 @@ export function createRestoreService(deps: RestoreDeps) {
       snapshotId: snapshot.snapshotId,
       snapshotTime: snapshot.time,
       mode,
-      ...(mode === 'scratch'
-        ? { scratchVolume: volumeName(request.project, `restore-${id('r')}`) }
-        : {}),
+      ...(mode === 'scratch' ? { scratchVolume: scratchVolumeName(request.project, id('r')) } : {}),
       writers,
       safetyBackup: mode === 'in-place' && request.safetyBackup !== false,
     };

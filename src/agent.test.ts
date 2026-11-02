@@ -579,8 +579,8 @@ test('executeCommand drives the Engine API for restart, logs, volume delete and 
   await reconcile(desired(twoServices), ctx);
   d.logOutput.set(d.service('proj', 'web')[0].name, 'log-line\n');
   d.addImage('nginx');
-  d.volumes.set('tug_proj_data', {
-    Name: 'tug_proj_data',
+  d.volumes.set('tug_v4_proj_data', {
+    Name: 'tug_v4_proj_data',
     Labels: { 'tug.project': 'proj', 'tug.volume': 'data' },
   });
 
@@ -620,8 +620,8 @@ test('executeCommand drives the Engine API for restart, logs, volume delete and 
     },
     ctx,
   );
-  assert.equal(d.calls.at(-1), 'volume-rm tug_proj_data', 'the Tug-named volume is removed');
-  assert.ok(!d.volumes.has('tug_proj_data'));
+  assert.equal(d.calls.at(-1), 'volume-rm tug_v4_proj_data', 'the Tug-named volume is removed');
+  assert.ok(!d.volumes.has('tug_v4_proj_data'));
 
   const diag = await executeCommand({ id: 'c4', type: 'diagnostics.run', payload_json: '{}' }, ctx);
   assert.equal(diag.state, 'succeeded');
@@ -658,8 +658,8 @@ test('executeCommand tolerates a missing volume, reports failing diagnostics, re
   assert.equal(deleted.state, 'succeeded', 'deleting a volume that is already gone succeeds');
 
   const broken = await makeCtx();
-  fake(broken).volumes.set('tug_proj_data', {
-    Name: 'tug_proj_data',
+  fake(broken).volumes.set('tug_v4_proj_data', {
+    Name: 'tug_v4_proj_data',
     Labels: { 'tug.project': 'proj', 'tug.volume': 'data' },
   });
   const fail = async () => {
@@ -700,8 +700,8 @@ test('executeCommand tolerates a missing volume, reports failing diagnostics, re
 test('volume deletion refuses a colliding volume owned by another project', async () => {
   const ctx = await makeCtx();
   const docker = fake(ctx);
-  docker.volumes.set('tug_alpha_data_logs', {
-    Name: 'tug_alpha_data_logs',
+  docker.volumes.set('tug_v5_alpha_data_logs', {
+    Name: 'tug_v5_alpha_data_logs',
     Labels: { 'tug.project': 'alpha_data', 'tug.volume': 'logs' },
   });
   await assert.rejects(
@@ -717,7 +717,7 @@ test('volume deletion refuses a colliding volume owned by another project', asyn
     'a colliding Docker volume must not be deleted',
   );
   assert.ok(
-    docker.volumes.has('tug_alpha_data_logs'),
+    docker.volumes.has('tug_v5_alpha_data_logs'),
     'the other project’s volume must remain intact',
   );
 });

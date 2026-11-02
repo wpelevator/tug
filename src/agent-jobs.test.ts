@@ -222,7 +222,7 @@ test('a volume backup fails when the volume does not exist on the node instead o
       payload({
         type: 'volume',
         target: 'volume:uploads',
-        volume: { name: 'uploads', dockerVolume: 'tug_site_uploads' },
+        volume: { name: 'uploads', dockerVolume: 'tug_v4_site_uploads' },
       }),
       'backup.run',
     ),
@@ -232,21 +232,21 @@ test('a volume backup fails when the volume does not exist on the node instead o
   assert.equal(result.state, 'failed', 'a missing volume fails the job');
   assert.match(
     JSON.stringify(result.result),
-    /volume tug_site_uploads does not exist on this node/,
+    /volume tug_v4_site_uploads does not exist on this node/,
     'the error says which volume is missing',
   );
 });
 
 test('backup and restore reject a volume owned by another project', async () => {
   const docker = dockerWith(() => ({ code: 0 }));
-  docker.volumes.set('tug_site_data_uploads', {
-    Name: 'tug_site_data_uploads',
+  docker.volumes.set('tug_v4_site_data_uploads', {
+    Name: 'tug_v4_site_data_uploads',
     Labels: { 'tug.project': 'site_data', 'tug.volume': 'uploads' },
   });
   const job = payload({
     type: 'volume',
     target: 'volume:data_uploads',
-    volume: { name: 'data_uploads', dockerVolume: 'tug_site_data_uploads' },
+    volume: { name: 'data_uploads', dockerVolume: 'tug_v4_site_data_uploads' },
   });
   for (const kind of ['backup.run', 'backup.restore'] as const)
     await assert.rejects(
@@ -266,7 +266,7 @@ test('scratch restore does not reuse an unrelated existing volume', async () => 
   const job = payload({
     type: 'volume',
     target: 'volume:uploads',
-    volume: { name: 'uploads', dockerVolume: 'tug_site_uploads' },
+    volume: { name: 'uploads', dockerVolume: 'tug_v4_site_uploads' },
     restore: { snapshotId: 'snap', mode: 'scratch', scratchVolume: 'tug_site_restore-x' },
   });
   await assert.rejects(
@@ -291,7 +291,7 @@ test('scratch restore checks restore identity and can resume the same restore', 
     runId: 'rst_original',
     type: 'volume',
     target: 'volume:uploads',
-    volume: { name: 'uploads', dockerVolume: 'tug_site_uploads' },
+    volume: { name: 'uploads', dockerVolume: 'tug_v4_site_uploads' },
     restore: { snapshotId: 'snap', mode: 'scratch', scratchVolume: 'tug_site_restore-x' },
   });
   await runBackupJob(job, 'first', { docker, credentials }, 'backup.restore');
