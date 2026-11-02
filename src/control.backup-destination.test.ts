@@ -6,7 +6,13 @@ import path from 'node:path';
 import { createApp } from './control.ts';
 import { openDb } from './db.ts';
 import { decrypt } from './secrets.ts';
-import { json, testImageResolver, testControlUrl, testIdentity } from '../tests/helpers.ts';
+import {
+  json,
+  testImageResolver,
+  testControlUrl,
+  testIdentity,
+  grantProjectFixture,
+} from '../tests/helpers.ts';
 import { repositoryPassword } from './backup-destination.ts';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -189,14 +195,18 @@ test('credentials are released only to the owning node for a running backup comm
     await call(s.base, 'POST', '/api/v1/projects', { name: 'site' });
     const n1 = await json(await call(s.base, 'POST', '/api/v1/nodes/register', { name: 'n1' }));
     const n2 = await json(await call(s.base, 'POST', '/api/v1/nodes/register', { name: 'n2' }));
-    const deployOn = (version: string, node: string) =>
-      call(s.base, 'POST', '/api/v1/deployments', {
+    const deployOn = async (version: string, node: string) => {
+      await grantProjectFixture(s.base, 'site', {
+        services: { web: { image: 'nginx', 'x-tug': { placement: { nodes: [node] } } } },
+      });
+      return call(s.base, 'POST', '/api/v1/deployments', {
         project: 'site',
         version,
         compose: {
           services: { web: { image: 'nginx', 'x-tug': { placement: { nodes: [node] } } } },
         },
       });
+    };
     assert.equal((await deployOn('v1', 'n1')).status, 200, 'the project is placed on n1');
     const db = await openDb(s.dbFile);
     const ids = db.all<{ id: string; name: string }>('SELECT id,name FROM nodes');

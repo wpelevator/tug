@@ -6,7 +6,12 @@ import path from 'node:path';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from './control.ts';
-import { testImageResolver, testControlUrl, testIdentity } from '../tests/helpers.ts';
+import {
+  testImageResolver,
+  testControlUrl,
+  testIdentity,
+  grantProjectFixture,
+} from '../tests/helpers.ts';
 import { json } from '../tests/helpers.ts';
 import type { ComposeFile } from './protocol.ts';
 
@@ -36,6 +41,7 @@ async function server() {
   const register = async (name: string, body: Record<string, unknown> = {}) =>
     json(await post('/api/v1/nodes/register', { name, ...body }));
   const deploy = async (compose: ComposeFile, version: string, project = 'site') => {
+    await grantProjectFixture(base, project, compose);
     const res = await post('/api/v1/deployments', { project, version, compose });
     const body = await json(res);
     assert.equal(res.status, 200, JSON.stringify(body));

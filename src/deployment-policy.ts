@@ -38,16 +38,18 @@ export function parseProjectPolicy(value: unknown): ProjectPolicy {
   };
 }
 
-export function projectPolicyViolations(
-  policy: ProjectPolicy,
-  desired: DesiredState,
-  allNodes: readonly string[],
-): string[] {
+export function projectPolicyViolations(policy: ProjectPolicy, desired: DesiredState): string[] {
   const failures: string[] = [];
   for (const [service, spec] of Object.entries(desired.services)) {
-    const nodes = spec.placement.nodes?.length ? spec.placement.nodes : allNodes;
+    const nodes = spec.placement.nodes || [];
+    if (!nodes.length) failures.push(`${service}: no fixed node placement`);
     for (const node of nodes)
       if (!policy.nodes.includes(node)) failures.push(`${service}: node ${node} is not granted`);
+  }
+  for (const [name, volume] of Object.entries(desired.compose.volumes || {})) {
+    for (const node of volume['x-tug']?.placement?.nodes || [])
+      if (!policy.nodes.includes(node))
+        failures.push(`volume ${name}: node ${node} is not granted`);
   }
   for (const [host, service] of ingressHostsOf(desired.compose)) {
     if (

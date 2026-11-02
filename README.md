@@ -61,8 +61,11 @@ npm install -g @wpelevator/tug
 tug control-install root@203.0.113.5 --install-docker
 tug init tug-root.credential.json
 tug node-install root@198.51.100.7 --name app1 --address 10.0.0.7 --install-docker
+tug project-policy-set --nodes app1
 tug deploy -f docker-compose.yml
 ```
+
+Projects start with no node or ingress hostname grants. If the Compose file declares ingress, include its host in `project-policy-set --hosts`; see [Access control](docs/access-control.md).
 
 The CLI installs the matching `ghcr.io/wpelevator/tug:<version>` image on your hosts. Control serves mutual TLS directly on its port (`8443`): every operator, CI job and node authenticates with a certificate from a private CA created at install, and clients verify a name generated from that CA, so the address can be a bare IP and can change later. Do not terminate TLS in front of it.
 

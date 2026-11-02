@@ -6,7 +6,13 @@ import path from 'node:path';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from './control.ts';
-import { json, testControlUrl, testIdentity, testImageResolver } from '../tests/helpers.ts';
+import {
+  json,
+  testControlUrl,
+  testIdentity,
+  testImageResolver,
+  grantProjectFixture,
+} from '../tests/helpers.ts';
 
 async function server() {
   process.env.TUG_DATA_DIR = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-hosts-'));
@@ -28,8 +34,16 @@ async function server() {
   const reg = await json(await call('POST', '/api/v1/nodes/register', { name: 'n1' }));
   const node = { 'x-tug-test-node': reg.nodeId, 'content-type': 'application/json' };
   return {
-    deploy: (project: string, version: string, host: string) =>
-      call('POST', '/api/v1/deployments', {
+    deploy: async (project: string, version: string, host: string) => {
+      await grantProjectFixture(base, project, {
+        services: {
+          web: {
+            image: 'nginx',
+            'x-tug': { placement: { nodes: ['n1'] }, ingress: { host, port: 80 } },
+          },
+        },
+      });
+      return call('POST', '/api/v1/deployments', {
         project,
         version,
         compose: {
@@ -41,7 +55,8 @@ async function server() {
             },
           },
         },
-      }),
+      });
+    },
     serve: (project: string, version: string, revision: string) =>
       call(
         'POST',

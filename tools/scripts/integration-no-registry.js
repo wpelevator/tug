@@ -137,6 +137,7 @@ try {
       ),
     'The isolated node must register and poll',
   );
+  await request('/api/v1/projects/imagedemo/policy', { nodes: ['image-node'], ingressHosts: [] });
   nodeContainer = await compose('ps', '-q', 'node');
   const services = (await compose('config', '--services')).split(/\s+/);
   assert.deepEqual(

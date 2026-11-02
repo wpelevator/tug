@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { createApp } from './control.ts';
-import { json, testControlUrl, testIdentity } from '../tests/helpers.ts';
+import { json, testControlUrl, testIdentity, grantProjectFixture } from '../tests/helpers.ts';
 import { resolveImage } from './registry.ts';
 
 async function server() {
@@ -60,8 +60,11 @@ async function server() {
     }),
   });
   assert.equal(secret.status, 200, 'project registry credentials must be stored as a secret');
-  const deploy = (version: string) =>
-    post('/api/v1/deployments', {
+  const deploy = async (version: string) => {
+    await grantProjectFixture(base, 'site', {
+      services: { app: { image: 'nginx', 'x-tug': { placement: { nodes: ['n1'] } } } },
+    });
+    return post('/api/v1/deployments', {
       project: 'site',
       version,
       compose: {
@@ -77,6 +80,7 @@ async function server() {
         },
       },
     });
+  };
   const report = (token: string, desired: { version: string; revision: string }) =>
     post(
       '/agent/v1/status',
@@ -156,6 +160,9 @@ test('published images pin once per deployment, rollback and late nodes keep the
     await s.report(n1.nodeId, first.desiredState);
     s.moveTag();
     const n2 = await s.node('n2');
+    await grantProjectFixture(s.base, 'site', {
+      services: { app: { image: 'nginx', 'x-tug': { placement: { nodes: ['n2'] } } } },
+    });
     await s.post('/api/v1/scale', { project: 'site', service: 'app', replicas: 2 });
     const late = await json(await s.get('/agent/v1/work', n2.nodeId));
     assert.equal(

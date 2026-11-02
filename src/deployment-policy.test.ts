@@ -49,19 +49,19 @@ test('project grants check concrete placement and do not grant wildcard apexes',
   const desired = buildDesiredState({ project: 'site', version: 'v1', compose });
   const policy = parseProjectPolicy({ nodes: ['n1'], ingressHosts: ['*.example.com'] });
   assert.deepEqual(
-    projectPolicyViolations(policy, desired, ['n1', 'n2']),
+    projectPolicyViolations(policy, desired),
     [],
     'the explicit node and matching subdomain must be granted',
   );
   desired.services.web.placement.nodes = [];
   assert.match(
-    projectPolicyViolations(policy, desired, ['n1', 'n2']).join(' '),
-    /n2/,
-    'implicit placement must check every eligible node',
+    projectPolicyViolations(policy, desired).join(' '),
+    /no fixed node placement/,
+    'implicit placement must be resolved before publication',
   );
   desired.compose.services.web['x-tug']!.ingress!.host = 'example.com';
   assert.match(
-    projectPolicyViolations(policy, desired, ['n1']).join(' '),
+    projectPolicyViolations(policy, desired).join(' '),
     /example.com is not granted/,
     'wildcard grants must not include the apex hostname',
   );

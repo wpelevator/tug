@@ -102,7 +102,13 @@ import {
   revokeCredential,
 } from './credentials.ts';
 import type { Actor, Identity, ProjectResolver, RouteRole } from './credentials.ts';
-import { privilegedComposeFeatures, privilegedServiceFeatures } from './deployment-policy.ts';
+import {
+  parseProjectPolicy,
+  privilegedComposeFeatures,
+  privilegedServiceFeatures,
+  projectPolicyViolations,
+} from './deployment-policy.ts';
+import type { ProjectPolicy } from './deployment-policy.ts';
 import type {
   BackupCredentialsResponse,
   LiveRequest,
@@ -994,6 +1000,7 @@ export async function createApp(
       const ts = now();
       const depId = id('dep');
       const previousState: DesiredState = JSON.parse(previousDs.state_json);
+      checkProjectPolicy(project, previousState);
       const privileged = privilegedComposeFeatures(previousState.compose);
       if (!opts.allowPrivileged && privileged.length)
         throw httpError(
@@ -1236,6 +1243,83 @@ export async function createApp(
       .json({ error: err.message, lock: err.lock || undefined });
   }
 
+  function projectPolicy(project: string): ProjectPolicy {
+    const row = db.get<{ nodes_json: string; ingress_hosts_json: string }>(
+      'SELECT nodes_json,ingress_hosts_json FROM project_policies WHERE project_id=?',
+      project,
+    );
+    return row
+      ? { nodes: JSON.parse(row.nodes_json), ingressHosts: JSON.parse(row.ingress_hosts_json) }
+      : { nodes: [], ingressHosts: [] };
+  }
+  function checkProjectPolicy(
+    project: string,
+    state: DesiredState,
+    policy = projectPolicy(project),
+  ): void {
+    const violations = projectPolicyViolations(policy, state);
+    if (violations.length)
+      throw httpError(
+        403,
+        `project policy denies workload: ${violations.join(', ')}; ask an admin to update the project policy`,
+      );
+  }
+
+  const policyProject: ProjectResolver = (req) => String(req.params.project);
+  api('get', '/api/v1/projects/:project/policy', policyProject, async (req, res) => {
+    const project = String(req.params.project);
+    if (!db.get('SELECT 1 FROM projects WHERE id=?', project))
+      return res.status(404).json({ error: 'project not found' });
+    res.json({ project, ...projectPolicy(project) });
+  });
+  api('post', '/api/v1/projects/:project/policy', policyProject, async (req, res) =>
+    withWriter(async () => {
+      const project = String(req.params.project);
+      if (!PROJECT_NAME_PATTERN.test(project) || isReservedProject(project))
+        throw httpError(400, 'invalid project name');
+      let policy: ProjectPolicy;
+      try {
+        policy = parseProjectPolicy(req.body);
+      } catch (error) {
+        throw httpError(400, errMessage(error));
+      }
+      const knownNodes = new Set(
+        db
+          .all<{ name: string }>('SELECT name FROM nodes WHERE disabled_at IS NULL')
+          .map((node) => node.name),
+      );
+      const existingGrants = new Set(projectPolicy(project).nodes);
+      for (const node of policy.nodes)
+        if (!knownNodes.has(node) && !existingGrants.has(node))
+          throw httpError(400, `node ${node} is not an enabled node`);
+      const current = currentDesired(project);
+      if (current)
+        checkProjectPolicy(project, JSON.parse(current.state_json) as DesiredState, policy);
+      const ts = now();
+      db.run(
+        'INSERT OR IGNORE INTO projects(id,name,created_at,updated_at) VALUES(?,?,?,?)',
+        project,
+        project,
+        ts,
+        ts,
+      );
+      db.run(
+        'INSERT INTO project_policies(project_id,nodes_json,ingress_hosts_json,updated_at) VALUES(?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET nodes_json=excluded.nodes_json,ingress_hosts_json=excluded.ingress_hosts_json,updated_at=excluded.updated_at',
+        project,
+        JSON.stringify(policy.nodes),
+        JSON.stringify(policy.ingressHosts),
+        ts,
+      );
+      audit(req.actor!, {
+        project,
+        type: 'project.policy',
+        message: `project policy changed by ${req.actor!.name}`,
+        metadata: { ...policy },
+      });
+      res.json({ project, ...policy });
+    }),
+  );
+
   api('post', '/api/v1/scale', null, async (req, res) => {
     const project = req.body?.project;
     const service = req.body?.service;
@@ -1255,6 +1339,7 @@ export async function createApp(
     );
     const nodeInfos = nodeRows
       .filter((row) => !isStale(row))
+      .filter((row) => projectPolicy(project).nodes.includes(row.name))
       .map((row) => ({
         name: row.name,
         labels: row.labels_json ? (JSON.parse(row.labels_json) as string[]) : [],
@@ -1281,6 +1366,7 @@ export async function createApp(
       nodes: selected.map((node) => node.name),
     };
     state.services[service].replicas = selected.length;
+    checkProjectPolicy(project, state);
     state.revision = id('rev');
     db.run('UPDATE desired_states SET state_json=? WHERE id=?', JSON.stringify(state), dsRow.id);
     wakeAll(project);
@@ -2103,9 +2189,11 @@ export async function createApp(
       const nodeRows = db.all<NodeRow>(
         'SELECT name,labels_json,last_seen_at,created_at FROM nodes WHERE disabled_at IS NULL ORDER BY created_at,name',
       );
+      const policy = projectPolicy(project);
       // Stale nodes (agent not seen recently) are not scheduled onto, so a dead host cannot hold a rollout open.
       const nodeInfos = nodeRows
         .filter((row) => !isStale(row))
+        .filter((row) => policy.nodes.includes(row.name))
         .map((row) => ({
           name: row.name,
           labels: row.labels_json ? (JSON.parse(row.labels_json) as string[]) : [],
@@ -2121,6 +2209,10 @@ export async function createApp(
         const placement = ext.placement || {};
         const global = ext.global === true;
         const labels = Array.isArray(placement.labels) ? placement.labels : [];
+        if (!placement.nodes?.length && !labels.length && !global) {
+          const defaultNode = nodeRows.find((node) => policy.nodes.includes(node.name));
+          if (defaultNode) ext.placement = { ...placement, nodes: [defaultNode.name] };
+        }
         if (!placement.nodes?.length && (labels.length || global)) {
           const matched = nodeInfos
             .filter((node) => labels.every((label) => node.labels.includes(label)))
@@ -2145,11 +2237,22 @@ export async function createApp(
       try {
         validateCompose(
           compose,
-          nodes.map((n) => n.name),
+          nodes.filter((n) => policy.nodes.includes(n.name)).map((n) => n.name),
         );
       } catch (e) {
         throw httpError(400, errMessage(e));
       }
+      const grantedNodes = nodes.filter((node) => policy.nodes.includes(node.name));
+      if (!grantedNodes.length)
+        throw httpError(
+          403,
+          'project policy grants no enabled nodes; ask an admin to update the project policy',
+        );
+      checkProjectPolicy(
+        project,
+        buildDesiredState({ project, version, compose, defaultNode: grantedNodes[0].name }),
+        policy,
+      );
       assertIngressHostsFree(project, compose);
       if (req.actor!.role !== 'admin') {
         const privileged = privilegedComposeFeatures(compose);
@@ -2256,7 +2359,7 @@ export async function createApp(
         version,
         revision: depId,
         compose,
-        defaultNode: nodes[0]?.name || null,
+        defaultNode: grantedNodes[0]?.name || null,
       });
       if (context) {
         contextDir = path.resolve(DATA_DIR, 'build-contexts', depId);
@@ -2351,6 +2454,7 @@ export async function createApp(
       const buildLock = lock;
       const publishingId = depId;
       await withPublication(() => {
+        checkProjectPolicy(project, desired);
         const owned = db.get(
           'SELECT 1 FROM locks WHERE name=? AND owner=? AND expires_at>?',
           buildLock.name,

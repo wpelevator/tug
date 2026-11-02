@@ -75,6 +75,7 @@ services:
 ```
 
 ```bash
+tug project-policy-set --nodes app1 # add --hosts example.com for ingress routes
 tug secret-set DB_PASSWORD        # only if your services use @@tug:secret:NAME@@
 tug deploy -f docker-compose.yml
 ```

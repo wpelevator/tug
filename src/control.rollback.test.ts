@@ -4,7 +4,12 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createApp } from './control.ts';
-import { testImageResolver, testControlUrl, testIdentity } from '../tests/helpers.ts';
+import {
+  testImageResolver,
+  testControlUrl,
+  testIdentity,
+  grantProjectFixture,
+} from '../tests/helpers.ts';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
@@ -44,6 +49,7 @@ test('rollback selects previous immutable desired state', async () => {
       services: { web: { image: `nginx:${tag}`, 'x-tug': { placement: { nodes: ['n1'] } } } },
     });
     const registered = await post(s.base, '/api/v1/nodes/register', { name: 'n1' });
+    await grantProjectFixture(s.base, 'site', compose('1.27-alpine'));
     const first = await post(s.base, '/api/v1/deployments', {
       project: 'site',
       version: 'v1',

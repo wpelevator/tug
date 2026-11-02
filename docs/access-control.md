@@ -33,7 +33,9 @@ A `deploy` credential must be trusted with its workloads' secrets: live `inspect
 
 Host bind mounts, external volumes, non-local drivers, volume driver options, added capabilities, non-default logging and secrets outside service environments require an `admin` deployment. A `deploy` credential cannot scale or roll back to a privileged workload, or use `exec` or `run` on a service with any privileged revision still retained in project history. This conservative history check protects against an older privileged container still serving during reconciliation. An administrator can perform these operations deliberately. Automatic rollback to a privileged revision requires the failed deployment's actor to still hold an active admin credential.
 
-Project scope limits API access to project records; it does not yet control which shared nodes a project can select or isolate co-located projects. Treat deployment authors as administrators of the nodes they can select. Use separate hosts or control planes for mutually untrusted authors. See the [security audit](security.md) for the demonstrated boundaries and outstanding fixes.
+An admin must grant every project the nodes and ingress hostnames it may use with `tug project-policy-set --nodes app1,app2 --hosts 'example.com,*.example.org'`. The command replaces the complete policy; `tug project-policy-show` displays it. New projects have no grants, and deployment, scale and rollback check policy for every role, including admin. A wildcard grants its subdomains, not its apex. An update that would revoke a node or hostname used by current desired state is refused; deploy a compliant revision first. Node disable remains the emergency withdrawal mechanism.
+
+Project grants and scoped credentials do not provide shared-kernel isolation or prevent application network access to other workloads. Treat deployment authors as administrators of the nodes they can select. Use separate hosts or control planes for mutually untrusted authors. See the [security audit](security.md) for the demonstrated boundaries and outstanding fixes.
 
 ## Endpoint table
 
@@ -46,10 +48,12 @@ The project column says how a scoped credential's allowed projects are checked: 
 | `GET /api/v1/status` | `read` | Response is filtered to allowed projects |
 | `GET /api/v1/events` | `read` | `project` query, or filtered to allowed projects |
 | `GET /api/v1/projects/:project` | `read` | Path |
+| `GET /api/v1/projects/:project/policy` | `admin` | Path |
 | `GET /api/v1/deployments/:id` | `read` | Deployment's project |
 | `GET /api/v1/volumes` | `read` | Query |
 | `GET /api/v1/secrets` | `read` | Query (names and versions only) |
 | `POST /api/v1/projects` | `deploy` | Body `name` |
+| `POST /api/v1/projects/:project/policy` | `admin` | Path |
 | `POST /api/v1/deployments` | `deploy` | Body or upload payload `project` |
 | `POST /api/v1/deployments/:id/cancel` | `deploy` | Deployment's project |
 | `POST /api/v1/rollback` | `deploy` | Body |

@@ -13,6 +13,57 @@ import {
   identityUri,
 } from '../src/pki.ts';
 import type { Credential } from '../src/pki.ts';
+import type { ComposeFile } from '../src/protocol.ts';
+
+/** Explicit fixture setup: grant only the registered nodes and valid ingress hosts requested by a test Compose file. */
+export async function grantProjectFixture(
+  base: string,
+  project: string,
+  compose: ComposeFile,
+): Promise<void> {
+  const headers = { 'x-tug-test-operator': 'operator', 'content-type': 'application/json' };
+  const list = await fetch(`${base}/api/v1/nodes`, { headers });
+  if (!list.ok) throw new Error(`cannot list fixture nodes: ${list.status}`);
+  const { nodes: known } = (await list.json()) as {
+    nodes: { name: string; labels: string[]; disabled_at: string | null }[];
+  };
+  const active = known.filter((node) => !node.disabled_at);
+  const prior = await fetch(`${base}/api/v1/projects/${encodeURIComponent(project)}/policy`, {
+    headers,
+  });
+  const old = prior.ok
+    ? ((await prior.json()) as { nodes: string[]; ingressHosts: string[] })
+    : { nodes: [], ingressHosts: [] };
+  const nodes = new Set(old.nodes);
+  const hosts = new Set(old.ingressHosts);
+  for (const service of Object.values(compose?.services || {})) {
+    const placement = service['x-tug']?.placement;
+    if (placement?.nodes?.length) {
+      for (const name of placement.nodes)
+        if (active.some((node) => node.name === name)) nodes.add(name);
+    } else if (placement?.labels?.length || service['x-tug']?.global) {
+      for (const node of active)
+        if ((placement?.labels || []).every((label) => node.labels.includes(label)))
+          nodes.add(node.name);
+    } else if (active[0]) nodes.add(active[0].name);
+    const host = service['x-tug']?.ingress?.host;
+    if (
+      typeof host === 'string' &&
+      /^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i.test(host)
+    )
+      hosts.add(host.toLowerCase());
+  }
+  for (const volume of Object.values(compose?.volumes || {}))
+    for (const name of volume['x-tug']?.placement?.nodes || [])
+      if (active.some((node) => node.name === name)) nodes.add(name);
+  const response = await fetch(`${base}/api/v1/projects/${encodeURIComponent(project)}/policy`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ nodes: [...nodes], ingressHosts: [...hosts] }),
+  });
+  if (!response.ok)
+    throw new Error(`cannot set fixture policy: ${response.status} ${await response.text()}`);
+}
 
 /** Untyped JSON body of a fetch response; tests assert on the shape themselves. */
 export const json = (res: Response): Promise<any> => res.json();

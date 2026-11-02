@@ -11,7 +11,7 @@ import type { AddressInfo } from 'node:net';
 import * as tar from 'tar';
 import { createApp } from './control.ts';
 import { openDb } from './db.ts';
-import { json, testControlUrl, testIdentity } from '../tests/helpers.ts';
+import { json, testControlUrl, testIdentity, grantProjectFixture } from '../tests/helpers.ts';
 
 async function server(openDatabase?: typeof openDb) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-images-'));
@@ -68,6 +68,7 @@ async function server(openDatabase?: typeof openDb) {
     local = false,
     imageRef = 'tug-build/00000000-0000-4000-8000-000000000000/image-0:local',
   ) => {
+    await grantProjectFixture(base, 'app', compose);
     const form = new FormData();
     const payload = {
       project: 'app',
@@ -254,6 +255,9 @@ test('local uploads import without a remote build and failed builds keep the pre
       1,
       'failed unpublished builds must not leak archive files',
     );
+    await grantProjectFixture(s.base, 'other', {
+      services: { app: { build: '.', 'x-tug': { placement: { nodes: ['n1'] } } } },
+    });
     const missing = await s.post('/api/v1/deployments', {
       project: 'other',
       compose: { services: { app: { build: '.', 'x-tug': { placement: { nodes: ['n1'] } } } } },

@@ -6,7 +6,12 @@ import path from 'node:path';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from './control.ts';
-import { testImageResolver, testControlUrl, testIdentity } from '../tests/helpers.ts';
+import {
+  testImageResolver,
+  testControlUrl,
+  testIdentity,
+  grantProjectFixture,
+} from '../tests/helpers.ts';
 import { createCsr, generateKeyPair } from './pki.ts';
 import { json } from '../tests/helpers.ts';
 
@@ -205,6 +210,7 @@ test('service endpoints use node addresses by default once the node reports the 
   try {
     const app = await s.register('app', { address: '192.168.1.4' });
     const dbn = await s.register('dbn', { address: '192.168.1.6' });
+    await grantProjectFixture(s.base, 'blog', stack);
     const dep = await s.post('/api/v1/deployments', {
       project: 'blog',
       version: 'v1',
@@ -256,6 +262,7 @@ test('only ingress nodes get an edge config, built from all projects and serving
     const edge = await s.register('edge', { address: '192.168.1.2' });
     const app = await s.register('app', { address: '192.168.1.5' });
     await s.register('dbn', { address: '192.168.1.6' });
+    await grantProjectFixture(s.base, 'blog', stack);
     await s.post('/api/v1/deployments', { project: 'blog', version: 'v1', compose: stack });
     assert.equal(
       (await s.work(edge.nodeId)).ingress,
@@ -300,6 +307,7 @@ test('ingress uses node addresses with service names disabled, and ingress statu
     const edge = await s.register('edge');
     const app = await s.register('app', { address: '192.168.1.5' });
     await s.post('/api/v1/nodes/edge/ingress', { enabled: true });
+    await grantProjectFixture(s.base, 'blog', { services: { web: stack.services.web } });
     await s.post('/api/v1/deployments', {
       project: 'blog',
       version: 'v1',
@@ -355,7 +363,9 @@ test('the work response binds published ports to node addresses or loopback', as
         },
       },
     };
+    await grantProjectFixture(s.base, 'site', site);
     await s.post('/api/v1/deployments', { project: 'site', version: 'v1', compose: site });
+    await grantProjectFixture(s.base, 'blog', stack);
     await s.post('/api/v1/deployments', { project: 'blog', version: 'v1', compose: stack });
     assert.deepEqual(
       (await s.work(edge.nodeId)).ports,
@@ -391,11 +401,18 @@ test('deploy rejects invalid ingress annotations and custom TLS without its secr
           image: 'nginx',
           ports: ['8080:80'],
           'x-tug': {
-            ingress: { host: 'a.example.com', port: 80, tls: 'custom', cert: 'C', key: 'K' },
+            ingress: {
+              host: 'a.example.com',
+              port: 80,
+              tls: 'custom' as const,
+              cert: 'C',
+              key: 'K',
+            },
           },
         },
       },
     };
+    await grantProjectFixture(s.base, 'blog', custom);
     const missing = await s.post('/api/v1/deployments', {
       project: 'blog',
       version: 'v1',

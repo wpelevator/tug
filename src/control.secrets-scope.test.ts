@@ -4,7 +4,12 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createApp } from './control.ts';
-import { testImageResolver, testControlUrl, testIdentity } from '../tests/helpers.ts';
+import {
+  testImageResolver,
+  testControlUrl,
+  testIdentity,
+  grantProjectFixture,
+} from '../tests/helpers.ts';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { json } from '../tests/helpers.ts';
@@ -59,6 +64,7 @@ test('agent secret fetch is scoped to requested assigned services', async () => 
         },
       },
     };
+    await grantProjectFixture(s.base, 'site', compose);
     await post(s.base, '/api/v1/deployments', { project: 'site', version: 'v1', compose });
     const res = await fetch(`${s.base}/agent/v1/secrets?project=site&services=web`, {
       headers: { 'x-tug-test-node': node.nodeId },

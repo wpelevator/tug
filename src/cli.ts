@@ -735,6 +735,42 @@ program
   );
 
 program
+  .command('project-policy-set')
+  .description('Set the nodes and ingress hosts a project may use (admin only)')
+  .option('--nodes <names>', 'comma-separated registered node names', '')
+  .option('--hosts <names>', 'comma-separated ingress host patterns', '')
+  .action(async (o: CommonOpts & { nodes: string; hosts: string }) => {
+    const project = o.project || (await loadCfg()).project || 'site';
+    const split = (value: string) =>
+      value
+        .split(',')
+        .map((part) => part.trim())
+        .filter(Boolean);
+    console.log(
+      JSON.stringify(
+        await request('POST', `/api/v1/projects/${encodeURIComponent(project)}/policy`, {
+          nodes: split(o.nodes),
+          ingressHosts: split(o.hosts),
+        }),
+        null,
+        2,
+      ),
+    );
+  });
+program
+  .command('project-policy-show')
+  .description('Show the nodes and ingress hosts granted to a project (admin only)')
+  .action(async (o: CommonOpts) => {
+    const project = o.project || (await loadCfg()).project || 'site';
+    console.log(
+      JSON.stringify(
+        await request('GET', `/api/v1/projects/${encodeURIComponent(project)}/policy`),
+        null,
+        2,
+      ),
+    );
+  });
+program
   .command('secret-set <name>')
   .option('--value <value>')
   .action(async (name: string, o: CommonOpts & { value?: string }) => {

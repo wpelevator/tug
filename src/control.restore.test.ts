@@ -4,7 +4,13 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createApp } from './control.ts';
-import { json, testImageResolver, testControlUrl, testIdentity } from '../tests/helpers.ts';
+import {
+  json,
+  testImageResolver,
+  testControlUrl,
+  testIdentity,
+  grantProjectFixture,
+} from '../tests/helpers.ts';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
@@ -60,6 +66,7 @@ test('a restore locks the project, holds the writers through the work response, 
     const work = async () => json(await call(s.base, 'GET', '/agent/v1/work', undefined, agent));
     const report = (body: unknown) => call(s.base, 'POST', '/agent/v1/status', body, agent);
 
+    await grantProjectFixture(s.base, 'site', compose);
     await call(s.base, 'POST', '/api/v1/deployments', { project: 'site', version: 'v1', compose });
     const revision = (await work()).desiredStates[0].revision;
     const serving = (web: string) => ({

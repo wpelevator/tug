@@ -12,7 +12,13 @@ import http from 'node:http';
 import { attachAgentStream, createApp } from './control.ts';
 import { LIVE_MAX_SESSIONS } from './protocol.ts';
 import type { StreamMessage, WakeResponse } from './protocol.ts';
-import { testImageResolver, json, testControlUrl, testIdentity } from '../tests/helpers.ts';
+import {
+  testImageResolver,
+  json,
+  testControlUrl,
+  testIdentity,
+  grantProjectFixture,
+} from '../tests/helpers.ts';
 
 const OPERATOR = 'op-stream-test';
 /** Test-seam headers for a token: the operator, an encoded operator credential, or a node ID. */
@@ -113,10 +119,11 @@ test('authenticated stream wakes the node and the cursor closes long-poll races'
       'the wake should correspond to work queued for the target node',
     );
 
-    const deployWake = nextMessage(ws);
     const compose = {
       services: { web: { image: 'nginx:alpine', 'x-tug': { placement: { nodes: ['n1'] } } } },
     };
+    await grantProjectFixture(s.base, 'site', compose);
+    const deployWake = nextMessage(ws);
     const deployed = await s.call('POST', '/api/v1/deployments', {
       project: 'site',
       version: 'v1',
@@ -292,6 +299,9 @@ async function liveFixture(nodes = ['n1'], liveStartTimeoutMs?: number) {
   const s = await server(liveStartTimeoutMs);
   for (const name of nodes.filter((name) => name !== 'n1'))
     await s.call('POST', '/api/v1/nodes/register', { name, address: '10.0.0.2' });
+  await grantProjectFixture(s.base, 'site', {
+    services: { web: { image: 'nginx:alpine', 'x-tug': { placement: { nodes } } } },
+  });
   const deployed = await s.call('POST', '/api/v1/deployments', {
     project: 'site',
     version: 'v1',
@@ -320,6 +330,9 @@ const execRequest = {
 test('deploy credentials cannot exec or run a privileged revision', async () => {
   const s = await server();
   try {
+    await grantProjectFixture(s.base, 'site', {
+      services: { web: { image: 'nginx:alpine', 'x-tug': { placement: { nodes: ['n1'] } } } },
+    });
     const deployed = await s.call('POST', '/api/v1/deployments', {
       project: 'site',
       version: 'v1',

@@ -4,7 +4,13 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createApp } from './control.ts';
-import { json, testImageResolver, testControlUrl, testIdentity } from '../tests/helpers.ts';
+import {
+  json,
+  testImageResolver,
+  testControlUrl,
+  testIdentity,
+  grantProjectFixture,
+} from '../tests/helpers.ts';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
@@ -63,6 +69,7 @@ test('a manual backup flows from the API through the agent protocol to the catal
       name: 'DB_ROOT_PASSWORD',
       value: 'rootpw-123',
     });
+    await grantProjectFixture(s.base, 'site', compose);
     const deploy = await call(s.base, 'POST', '/api/v1/deployments', {
       project: 'site',
       version: 'v1',

@@ -4,7 +4,12 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createApp } from './control.ts';
-import { testImageResolver, testControlUrl, testIdentity } from '../tests/helpers.ts';
+import {
+  testImageResolver,
+  testControlUrl,
+  testIdentity,
+  grantProjectFixture,
+} from '../tests/helpers.ts';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { json } from '../tests/helpers.ts';
@@ -27,6 +32,9 @@ async function server() {
     method: 'POST',
     headers: { 'x-tug-test-operator': 'operator', 'content-type': 'application/json' },
     body: JSON.stringify({ name: 'n1' }),
+  });
+  await grantProjectFixture(base, 'site', {
+    services: { web: { image: 'nginx:alpine', 'x-tug': { placement: { nodes: ['n1'] } } } },
   });
   return {
     base: `http://127.0.0.1:${(srv.address() as AddressInfo).port}`,

@@ -4,7 +4,12 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createApp } from './control.ts';
-import { testImageResolver, testControlUrl, testIdentity } from '../tests/helpers.ts';
+import {
+  testImageResolver,
+  testControlUrl,
+  testIdentity,
+  grantProjectFixture,
+} from '../tests/helpers.ts';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { json } from '../tests/helpers.ts';
@@ -54,6 +59,7 @@ test('registers node, stores secret, creates desired state, serves agent work', 
     const compose = {
       services: { web: { image: 'nginx:alpine', 'x-tug': { placement: { nodes: ['n1'] } } } },
     };
+    await grantProjectFixture(s.base, 'site', compose);
     res = await fetch(`${s.base}/api/v1/deployments`, {
       method: 'POST',
       headers: op(),
@@ -131,6 +137,7 @@ test('failed node status fails deployment and unblocks future deploys', async ()
     const compose = {
       services: { web: { image: 'nginx:alpine', 'x-tug': { placement: { nodes: ['n1'] } } } },
     };
+    await grantProjectFixture(s.base, 'site', compose);
     res = await fetch(`${s.base}/api/v1/deployments`, {
       method: 'POST',
       headers: op(),

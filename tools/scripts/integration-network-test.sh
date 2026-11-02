@@ -37,6 +37,7 @@ done
 TUG_CONFIG=$(mktemp)
 export TUG_CONFIG TUG_CREDENTIAL_FILE="$CRED" TUG_CONTROL_URL="$CONTROL"
 node -e 'require("node:fs").writeFileSync(process.env.TUG_CONFIG, "{}")'
+node src/cli.ts project-policy-set --project netdemo --nodes vps-a,vps-b --hosts app.test
 node src/cli.ts deploy -f docker-compose.network-sample.yml --project netdemo --timeout 240
 COMPOSE_PROJECT_NAME="$PROJECT" node tools/scripts/integration-verify-network.js
 

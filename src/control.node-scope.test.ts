@@ -6,7 +6,13 @@ import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 import { createApp } from './control.ts';
-import { json, testControlUrl, testIdentity, testImageResolver } from '../tests/helpers.ts';
+import {
+  json,
+  testControlUrl,
+  testIdentity,
+  testImageResolver,
+  grantProjectFixture,
+} from '../tests/helpers.ts';
 
 /** Every `/agent/v1/*` handler derives the node from the certificate, never from the request. */
 async function setup() {
@@ -31,6 +37,9 @@ async function setup() {
   for (const name of ['n1', 'n2'])
     await call('POST', '/api/v1/nodes/register', op, { name, address: `10.0.0.${name.slice(1)}` });
   await call('POST', '/api/v1/secrets', op, { project: 'site', name: 'S', value: 'secret-for-n1' });
+  await grantProjectFixture(base, 'site', {
+    services: { web: { image: 'nginx:alpine', 'x-tug': { placement: { nodes: ['n1'] } } } },
+  });
   const deployed = await call('POST', '/api/v1/deployments', op, {
     project: 'site',
     version: 'v1',

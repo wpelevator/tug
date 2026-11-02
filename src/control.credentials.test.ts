@@ -6,12 +6,13 @@ import path from 'node:path';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from './control.ts';
+import { openDb } from './db.ts';
 import { testImageResolver, testControlUrl, testIdentity } from '../tests/helpers.ts';
 import { ROLES, ROUTE_ROLES, hasRole } from './credentials.ts';
 import type { Role } from './credentials.ts';
 
 const OPERATOR = 'op-tokens-test';
-async function makeServer(dir?: string) {
+async function makeServer(dir?: string, resolveImage = testImageResolver) {
   const data = dir ?? (await fs.mkdtemp(path.join(os.tmpdir(), 'tug-tokens-')));
   process.env.TUG_DATA_DIR = data;
   process.env.TUG_CONTROL_BACKUP_DIR = path.join(data, 'control-backups');
@@ -19,7 +20,7 @@ async function makeServer(dir?: string) {
   const app = await createApp({
     identity: testIdentity,
     controlUrl: testControlUrl,
-    images: { resolve: testImageResolver },
+    images: { resolve: resolveImage },
   });
   const srv = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));
@@ -66,6 +67,11 @@ test('deploy credentials cannot publish host-sensitive workloads', async () => {
   const s = await makeServer();
   try {
     const node = (await s.call(OPERATOR, 'POST', '/api/v1/nodes/register', { name: 'n1' })).body;
+    const policy = await s.call(OPERATOR, 'POST', '/api/v1/projects/site/policy', {
+      nodes: ['n1'],
+      ingressHosts: [],
+    });
+    assert.equal(policy.status, 200, 'an administrator must grant the test project its node');
     const deploy = await s.mint('limited', 'deploy', ['site']);
     const variants = [
       {
@@ -159,6 +165,464 @@ test('deploy credentials cannot publish host-sensitive workloads', async () => {
       adminRollback.status,
       200,
       'an admin can deliberately roll back to a privileged revision',
+    );
+  } finally {
+    await s.close();
+  }
+});
+
+test('project resource grants are explicit, admin-controlled and cannot abandon published workloads', async () => {
+  const s = await makeServer();
+  try {
+    await s.call(OPERATOR, 'POST', '/api/v1/nodes/register', { name: 'n1' });
+    await s.call(OPERATOR, 'POST', '/api/v1/nodes/register', { name: 'n2' });
+    const deploy = await s.mint('policy-ci', 'deploy', ['site']);
+    const body = { project: 'site', version: 'v1', compose: compose('n1') };
+    assert.equal(
+      (await s.call(OPERATOR, 'POST', '/api/v1/deployments', body)).status,
+      403,
+      'even an administrator must grant resources before deployment',
+    );
+    const injected = await s.call(deploy, 'POST', '/api/v1/deployments', {
+      ...body,
+      policy: { nodes: ['n1'], ingressHosts: [] },
+    });
+    assert.equal(
+      injected.status,
+      403,
+      'deployment payloads must not grant their own project access',
+    );
+    const multipart = new FormData();
+    multipart.set(
+      'payload',
+      JSON.stringify({ ...body, policy: { nodes: ['n1'], ingressHosts: [] } }),
+    );
+    const multipartResult = await fetch(`${s.base}/api/v1/deployments`, {
+      method: 'POST',
+      headers: { 'x-tug-test-credential': deploy },
+      body: multipart,
+    });
+    assert.equal(
+      multipartResult.status,
+      403,
+      'multipart deployment payloads must not grant their own project access',
+    );
+    assert.equal(
+      (
+        await s.call(deploy, 'POST', '/api/v1/projects/site/policy', {
+          nodes: ['n1'],
+          ingressHosts: [],
+        })
+      ).status,
+      403,
+      'deploy credentials must not modify project grants',
+    );
+    assert.equal(
+      (
+        await s.call(OPERATOR, 'POST', '/api/v1/projects/site/policy', {
+          nodes: ['n1'],
+          ingressHosts: [],
+        })
+      ).status,
+      200,
+      'an administrator can grant the node',
+    );
+    const denied = await s.call(deploy, 'POST', '/api/v1/deployments', {
+      ...body,
+      compose: compose('n2'),
+    });
+    assert.equal(denied.status, 403, 'a project cannot deploy to an ungranted node');
+    assert.equal(
+      (await s.call(deploy, 'POST', '/api/v1/deployments', body)).status,
+      200,
+      'a deployment on a granted node must succeed',
+    );
+    const scaled = await s.call(deploy, 'POST', '/api/v1/scale', {
+      project: 'site',
+      service: 'web',
+      replicas: 2,
+    });
+    assert.deepEqual(scaled.body.nodes, ['n1'], 'scale must not select an ungranted node');
+    const narrowed = await s.call(OPERATOR, 'POST', '/api/v1/projects/site/policy', {
+      nodes: [],
+      ingressHosts: [],
+    });
+    assert.equal(
+      narrowed.status,
+      403,
+      'a policy cannot revoke resources used by current desired state',
+    );
+    assert.deepEqual(
+      (await s.call(OPERATOR, 'GET', '/api/v1/projects/site/policy')).body.nodes,
+      ['n1'],
+      'a rejected narrowing must leave the existing policy unchanged',
+    );
+  } finally {
+    await s.close();
+  }
+});
+
+test('policy paths honor scope even if a scoped admin is present in storage', async () => {
+  const s = await makeServer();
+  try {
+    const scoped = await s.mint('scoped-policy', 'deploy', ['a']);
+    const db = await openDb(path.join(s.data, 'tug.db'));
+    try {
+      db.run("UPDATE operator_credentials SET role='admin' WHERE name=?", 'scoped-policy');
+    } finally {
+      db.close();
+    }
+    assert.equal(
+      (await s.call(scoped, 'POST', '/api/v1/projects/b/policy', { nodes: [], ingressHosts: [] }))
+        .status,
+      403,
+      'a scoped principal must not create a foreign project through policy',
+    );
+    assert.equal(
+      (await s.call(scoped, 'GET', '/api/v1/projects/b/policy')).status,
+      403,
+      'a scoped principal must not read another project policy',
+    );
+  } finally {
+    await s.close();
+  }
+});
+
+test('rollback rechecks narrowed node grants even for administrators', async () => {
+  const s = await makeServer();
+  try {
+    const n1 = (await s.call(OPERATOR, 'POST', '/api/v1/nodes/register', { name: 'n1' })).body;
+    await s.call(OPERATOR, 'POST', '/api/v1/nodes/register', { name: 'n2' });
+    await s.call(OPERATOR, 'POST', '/api/v1/projects/site/policy', {
+      nodes: ['n1', 'n2'],
+      ingressHosts: [],
+    });
+    const first = await s.call(OPERATOR, 'POST', '/api/v1/deployments', {
+      project: 'site',
+      version: 'v1',
+      compose: compose('n1'),
+    });
+    assert.equal(first.status, 200, 'the first revision uses a granted node');
+    await s.call(n1.nodeId, 'POST', '/agent/v1/status', {
+      projects: [
+        {
+          project: 'site',
+          observedVersion: 'v1',
+          observedRevision: first.body.desiredState.revision,
+          health: 'serving',
+        },
+      ],
+    });
+    const second = await s.call(OPERATOR, 'POST', '/api/v1/deployments', {
+      project: 'site',
+      version: 'v2',
+      compose: compose('n2'),
+    });
+    assert.equal(second.status, 200, 'the replacement uses the other granted node');
+    const narrowed = await s.call(OPERATOR, 'POST', '/api/v1/projects/site/policy', {
+      nodes: ['n2'],
+      ingressHosts: [],
+    });
+    assert.equal(narrowed.status, 200, 'an unused node may be removed from policy');
+    const rollback = await s.call(OPERATOR, 'POST', '/api/v1/rollback', {
+      project: 'site',
+      force: true,
+    });
+    assert.equal(rollback.status, 403, 'rollback must not restore a revision on a revoked node');
+  } finally {
+    await s.close();
+  }
+});
+
+test('automatic rollback refuses a revision whose node grant was removed', async () => {
+  const s = await makeServer();
+  try {
+    const n1 = (await s.call(OPERATOR, 'POST', '/api/v1/nodes/register', { name: 'n1' })).body;
+    const n2 = (await s.call(OPERATOR, 'POST', '/api/v1/nodes/register', { name: 'n2' })).body;
+    await s.call(OPERATOR, 'POST', '/api/v1/projects/site/policy', {
+      nodes: ['n1', 'n2'],
+      ingressHosts: [],
+    });
+    const first = await s.call(OPERATOR, 'POST', '/api/v1/deployments', {
+      project: 'site',
+      version: 'v1',
+      compose: compose('n1'),
+    });
+    await s.call(n1.nodeId, 'POST', '/agent/v1/status', {
+      projects: [
+        {
+          project: 'site',
+          observedVersion: 'v1',
+          observedRevision: first.body.desiredState.revision,
+          health: 'serving',
+        },
+      ],
+    });
+    const second = await s.call(OPERATOR, 'POST', '/api/v1/deployments', {
+      project: 'site',
+      version: 'v2',
+      compose: { ...compose('n2'), 'x-tug': { rollback: 'auto' } },
+    });
+    assert.equal(second.status, 200, 'the replacement deployment must publish');
+    assert.equal(
+      (
+        await s.call(OPERATOR, 'POST', '/api/v1/projects/site/policy', {
+          nodes: ['n2'],
+          ingressHosts: [],
+        })
+      ).status,
+      200,
+      'the old node grant can be removed',
+    );
+    await s.call(n2.nodeId, 'POST', '/agent/v1/status', {
+      projects: [
+        {
+          project: 'site',
+          observedVersion: 'v2',
+          observedRevision: second.body.desiredState.revision,
+          health: 'failed',
+        },
+      ],
+    });
+    let event: { message: string } | undefined;
+    for (let i = 0; i < 100 && !event; i++) {
+      const events = (await s.call(OPERATOR, 'GET', '/api/v1/events?project=site')).body.events as {
+        type: string;
+        message: string;
+      }[];
+      event = events.find((entry) => entry.type === 'deployment.auto_rollback_skipped');
+      if (!event) await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.match(
+      event?.message || '',
+      /node n1 is not granted/,
+      'automatic rollback must report the denied old node',
+    );
+  } finally {
+    await s.close();
+  }
+});
+
+test('policy changes cannot race a deployment awaiting image resolution', async () => {
+  let release!: () => void;
+  let started!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const resolving = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  const s = await makeServer(undefined, async (image) => {
+    started();
+    await gate;
+    return image;
+  });
+  try {
+    await s.call(OPERATOR, 'POST', '/api/v1/nodes/register', { name: 'n1' });
+    await s.call(OPERATOR, 'POST', '/api/v1/projects/site/policy', {
+      nodes: ['n1'],
+      ingressHosts: [],
+    });
+    const deployment = s.call(OPERATOR, 'POST', '/api/v1/deployments', {
+      project: 'site',
+      version: 'v1',
+      compose: compose('n1'),
+    });
+    await resolving;
+    let updated = false;
+    const policy = s
+      .call(OPERATOR, 'POST', '/api/v1/projects/site/policy', { nodes: [], ingressHosts: [] })
+      .then((result) => {
+        updated = true;
+        return result;
+      });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(updated, false, 'a policy update must wait while a deployment owns the writer');
+    release();
+    assert.equal((await deployment).status, 200, 'the authorized deployment must publish');
+    assert.equal(
+      (await policy).status,
+      403,
+      'the queued narrowing must recheck the newly published workload',
+    );
+  } finally {
+    release();
+    await s.close();
+  }
+});
+
+test('ingress hosts require explicit project grants', async () => {
+  const s = await makeServer();
+  try {
+    await s.call(OPERATOR, 'POST', '/api/v1/nodes/register', { name: 'n1' });
+    await s.call(OPERATOR, 'POST', '/api/v1/projects/site/policy', {
+      nodes: ['n1'],
+      ingressHosts: [],
+    });
+    const definition = {
+      services: {
+        web: {
+          image: 'nginx',
+          ports: ['8080:80'],
+          'x-tug': { placement: { nodes: ['n1'] }, ingress: { host: 'app.example.com', port: 80 } },
+        },
+      },
+    };
+    const body = { project: 'site', version: 'v1', compose: definition };
+    assert.equal(
+      (await s.call(OPERATOR, 'POST', '/api/v1/deployments', body)).status,
+      403,
+      'even an admin must not publish an ungranted hostname',
+    );
+    assert.equal(
+      (
+        await s.call(OPERATOR, 'POST', '/api/v1/projects/site/policy', {
+          nodes: ['n1'],
+          ingressHosts: ['*.example.com'],
+        })
+      ).status,
+      200,
+      'the wildcard grant can be assigned explicitly',
+    );
+    assert.equal(
+      (await s.call(OPERATOR, 'POST', '/api/v1/deployments', body)).status,
+      200,
+      'a covered subdomain must be accepted',
+    );
+    assert.equal(
+      (
+        await s.call(OPERATOR, 'POST', '/api/v1/projects/site/policy', {
+          nodes: ['n1'],
+          ingressHosts: [],
+        })
+      ).status,
+      403,
+      'policy must not remove a hostname used by current desired state',
+    );
+  } finally {
+    await s.close();
+  }
+});
+
+test('a disabled node can be retained in policy while replacing its workload', async () => {
+  const s = await makeServer();
+  try {
+    const n1 = (await s.call(OPERATOR, 'POST', '/api/v1/nodes/register', { name: 'n1' })).body;
+    await s.call(OPERATOR, 'POST', '/api/v1/nodes/register', { name: 'n2' });
+    await s.call(OPERATOR, 'POST', '/api/v1/projects/site/policy', {
+      nodes: ['n1'],
+      ingressHosts: [],
+    });
+    const first = await s.call(OPERATOR, 'POST', '/api/v1/deployments', {
+      project: 'site',
+      version: 'v1',
+      compose: compose('n1'),
+    });
+    await s.call(n1.nodeId, 'POST', '/agent/v1/status', {
+      projects: [
+        {
+          project: 'site',
+          observedVersion: 'v1',
+          observedRevision: first.body.desiredState.revision,
+          health: 'serving',
+        },
+      ],
+    });
+    assert.equal(
+      (await s.call(OPERATOR, 'POST', '/api/v1/nodes/n1/disable', {})).status,
+      200,
+      'the old node can be disabled',
+    );
+    assert.equal(
+      (
+        await s.call(OPERATOR, 'POST', '/api/v1/projects/site/policy', {
+          nodes: ['n1', 'n2'],
+          ingressHosts: [],
+        })
+      ).status,
+      200,
+      'an existing disabled grant must be retained while a replacement is added',
+    );
+    assert.equal(
+      (
+        await s.call(OPERATOR, 'POST', '/api/v1/deployments', {
+          project: 'site',
+          version: 'v2',
+          compose: compose('n2'),
+        })
+      ).status,
+      200,
+      'the workload must deploy to the granted replacement node',
+    );
+    assert.equal(
+      (
+        await s.call(OPERATOR, 'POST', '/api/v1/projects/site/policy', {
+          nodes: ['n2'],
+          ingressHosts: [],
+        })
+      ).status,
+      200,
+      'the old node grant can be removed once desired state moves',
+    );
+    assert.equal(
+      (
+        await s.call(OPERATOR, 'POST', '/api/v1/projects/site/policy', {
+          nodes: ['n1', 'n2'],
+          ingressHosts: [],
+        })
+      ).status,
+      400,
+      'a removed disabled node cannot be granted again',
+    );
+  } finally {
+    await s.close();
+  }
+});
+
+test('an empty placement is pinned before later nodes enroll', async () => {
+  const s = await makeServer();
+  try {
+    await s.call(OPERATOR, 'POST', '/api/v1/nodes/register', { name: 'n1' });
+    await s.call(OPERATOR, 'POST', '/api/v1/projects/site/policy', {
+      nodes: ['n1'],
+      ingressHosts: [],
+    });
+    await s.call(OPERATOR, 'POST', '/api/v1/secrets', {
+      project: 'site',
+      name: 'KEY',
+      value: 'fixture-secret',
+    });
+    const deployment = await s.call(OPERATOR, 'POST', '/api/v1/deployments', {
+      project: 'site',
+      version: 'v1',
+      compose: {
+        services: {
+          web: {
+            image: 'nginx',
+            environment: { KEY: '@@tug:secret:KEY@@' },
+            'x-tug': { placement: {} },
+          },
+        },
+      },
+    });
+    assert.equal(deployment.status, 200, 'an empty placement is resolved to the granted node');
+    assert.deepEqual(
+      deployment.body.desiredState.services.web.placement.nodes,
+      ['n1'],
+      'published placement must be concrete',
+    );
+    const n2 = (await s.call(OPERATOR, 'POST', '/api/v1/nodes/register', { name: 'n2' })).body;
+    const work = await s.call(n2.nodeId, 'GET', '/agent/v1/work');
+    assert.equal(
+      work.body.desiredStates.some((state: { project: string }) => state.project === 'site'),
+      false,
+      'a newly enrolled ungranted node must receive no workload',
+    );
+    const secrets = await s.call(n2.nodeId, 'GET', '/agent/v1/secrets?project=site&services=web');
+    assert.deepEqual(
+      secrets.body.secrets,
+      {},
+      'a newly enrolled ungranted node must receive no project secrets',
     );
   } finally {
     await s.close();
@@ -319,6 +783,7 @@ const SAMPLES: Record<string, { path: string; body?: unknown }> = {
   'GET /api/v1/status': { path: '/api/v1/status' },
   'GET /api/v1/events': { path: '/api/v1/events' },
   'GET /api/v1/projects/:project': { path: '/api/v1/projects/site' },
+  'GET /api/v1/projects/:project/policy': { path: '/api/v1/projects/site/policy' },
   'GET /api/v1/deployments/:id': { path: '/api/v1/deployments/dep_x' },
   'GET /api/v1/volumes': { path: '/api/v1/volumes' },
   'GET /api/v1/secrets': { path: '/api/v1/secrets' },
@@ -338,6 +803,10 @@ const SAMPLES: Record<string, { path: string; body?: unknown }> = {
     path: '/api/v1/backup/repository-password?project=site',
   },
   'POST /api/v1/projects': { path: '/api/v1/projects', body: { name: 'site' } },
+  'POST /api/v1/projects/:project/policy': {
+    path: '/api/v1/projects/site/policy',
+    body: { nodes: ['n1'], ingressHosts: [] },
+  },
   'POST /api/v1/deployments': {
     path: '/api/v1/deployments',
     body: { project: 'site', compose: { services: {} } },
@@ -379,6 +848,11 @@ const SAMPLES: Record<string, { path: string; body?: unknown }> = {
 test('every operator route enforces its declared role for read, deploy and admin credentials', async () => {
   const s = await makeServer();
   try {
+    await s.call(OPERATOR, 'POST', '/api/v1/nodes/register', { name: 'n1' });
+    await s.call(OPERATOR, 'POST', '/api/v1/projects/site/policy', {
+      nodes: ['n1'],
+      ingressHosts: [],
+    });
     const tokens: Record<Role, string> = {
       read: await s.mint('r', 'read'),
       deploy: await s.mint('d', 'deploy'),
@@ -495,6 +969,11 @@ test('project-scoped credentials only reach their own projects and learn nothing
   const s = await makeServer();
   try {
     await s.call(OPERATOR, 'POST', '/api/v1/nodes/register', { name: 'n1' });
+    for (const project of ['a', 'b'])
+      await s.call(OPERATOR, 'POST', `/api/v1/projects/${project}/policy`, {
+        nodes: ['n1'],
+        ingressHosts: [],
+      });
     const ci = await s.mint('ci-a', 'deploy', ['a']);
     const viewer = await s.mint('view-a', 'read', ['a']);
     const unscoped = await s.mint('all', 'deploy');
@@ -656,6 +1135,10 @@ test('mutations record the acting token on deployments and events', async () => 
   try {
     const registered = (await s.call(OPERATOR, 'POST', '/api/v1/nodes/register', { name: 'n1' }))
       .body;
+    await s.call(OPERATOR, 'POST', '/api/v1/projects/site/policy', {
+      nodes: ['n1'],
+      ingressHosts: [],
+    });
     const ci = await s.mint('ci-bot', 'deploy');
     const first = (
       await s.call(ci, 'POST', '/api/v1/deployments', {

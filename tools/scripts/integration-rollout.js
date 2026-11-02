@@ -133,6 +133,11 @@ try {
     };
   });
 
+  await api(`/api/v1/projects/${PROJECT}/policy`, {
+    nodes: ['vps-a'],
+    ingressHosts: ['rollout.test'],
+  });
+
   // ---- v1 ---------------------------------------------------------------------------------------
   await waitState(await deploy('v1'), 'succeeded');
   await until('ingress serves v1', async () => {

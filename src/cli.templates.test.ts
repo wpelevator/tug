@@ -347,6 +347,16 @@ test('install commands render the shipped templates (src in dev, dist in the ima
         },
       }),
     );
+    await cli('project-policy-set', '--project', 'after-command', '--nodes', 'n-tpl');
+    await cli('project-policy-set', '--project', 'before-command', '--nodes', 'n-tpl');
+    const policy = JSON.parse(
+      (await cli('project-policy-show', '--project', 'before-command')).stdout,
+    );
+    assert.deepEqual(
+      policy.nodes,
+      ['n-tpl'],
+      'project-policy-show returns the node granted through the CLI',
+    );
     const deployment = await cli(
       'deploy',
       '--version',

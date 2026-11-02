@@ -6,7 +6,13 @@ import path from 'node:path';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from './control.ts';
-import { json, testControlUrl, testIdentity, testImageResolver } from '../tests/helpers.ts';
+import {
+  json,
+  testControlUrl,
+  testIdentity,
+  testImageResolver,
+  grantProjectFixture,
+} from '../tests/helpers.ts';
 
 async function server() {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-reports-'));
@@ -43,6 +49,7 @@ async function server() {
     };
   };
   return {
+    base,
     call,
     register,
     close: () => new Promise((resolve) => srv.close(resolve)),
@@ -74,6 +81,7 @@ test('a node status report with a malformed rollout port is rejected before it r
   try {
     const a = await s.register('a');
     const b = await s.register('b');
+    await grantProjectFixture(s.base, 'app', webOn('a'));
     await s.call('POST', '/api/v1/deployments', {
       project: 'app',
       version: 'v1',
@@ -115,6 +123,7 @@ test('a node can only report services that are placed on it', async () => {
   try {
     const a = await s.register('a');
     const b = await s.register('b');
+    await grantProjectFixture(s.base, 'app', webOn('a'));
     await s.call('POST', '/api/v1/deployments', {
       project: 'app',
       version: 'v1',
@@ -141,6 +150,7 @@ test('disabling a node withdraws it from service endpoints', async () => {
   try {
     const a = await s.register('a');
     const b = await s.register('b');
+    await grantProjectFixture(s.base, 'app', webOn('a'));
     await s.call('POST', '/api/v1/deployments', {
       project: 'app',
       version: 'v1',
@@ -173,6 +183,9 @@ test('backup results and heartbeats from another node or for a finished command 
     await s.call('POST', '/api/v1/backup/destination', {
       url: 's3:https://s3.example.com/bucket/tug',
       env: { AWS_ACCESS_KEY_ID: 'AKIAEXAMPLE', AWS_SECRET_ACCESS_KEY: 'sekret-value-1' },
+    });
+    await grantProjectFixture(s.base, 'site', {
+      services: { db: { image: 'mariadb', 'x-tug': { placement: { nodes: ['n1'] } } } },
     });
     await s.call('POST', '/api/v1/deployments', {
       project: 'site',

@@ -5,7 +5,12 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createApp } from './control.ts';
-import { testImageResolver, testControlUrl, testIdentity } from '../tests/helpers.ts';
+import {
+  testImageResolver,
+  testControlUrl,
+  testIdentity,
+  grantProjectFixture,
+} from '../tests/helpers.ts';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
@@ -58,6 +63,7 @@ test('label placement spreads replicas, scale resizes them', async () => {
         },
       },
     };
+    await grantProjectFixture(s.base, 'site', compose);
     const dep = await post(s.base, '/api/v1/deployments', {
       project: 'site',
       version: 'v1',
@@ -114,6 +120,7 @@ test('stale nodes are skipped by label placement and scale, and scale never fall
         web: { image: 'nginx', 'x-tug': { global: true, placement: { labels: ['app'] } } },
       },
     };
+    await grantProjectFixture(s.base, 'site', compose);
     const dep = await post(s.base, '/api/v1/deployments', {
       project: 'site',
       version: 'v1',
@@ -149,6 +156,9 @@ test('node-remove deletes a retired node but refuses placed or still-reporting n
     const keep = await post(s.base, '/api/v1/nodes/register', { name: 'keep' });
     const old = await post(s.base, '/api/v1/nodes/register', { name: 'old' });
     await post(s.base, '/api/v1/nodes/register', { name: 'idle' });
+    await grantProjectFixture(s.base, 'site', {
+      services: { web: { image: 'nginx', 'x-tug': { placement: { nodes: ['keep', 'old'] } } } },
+    });
     const first = await post(s.base, '/api/v1/deployments', {
       project: 'site',
       version: 'v1',
@@ -220,6 +230,9 @@ test('explicit placement is refused on disabled or unknown nodes', async () => {
   try {
     await post(s.base, '/api/v1/nodes/register', { name: 'n1' });
     await post(s.base, '/api/v1/nodes/register', { name: 'n2' });
+    await grantProjectFixture(s.base, 'site', {
+      services: { web: { image: 'nginx', 'x-tug': { placement: { nodes: ['n1', 'n2'] } } } },
+    });
     await post(s.base, '/api/v1/nodes/n1/disable', {});
     const deploy = (node: string) =>
       fetch(`${s.base}/api/v1/deployments`, {
