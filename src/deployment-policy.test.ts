@@ -1,10 +1,71 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { privilegedComposeFeatures } from './deployment-policy.ts';
+import {
+  privilegedComposeFeatures,
+  parseProjectPolicy,
+  projectPolicyViolations,
+} from './deployment-policy.ts';
+import { buildDesiredState } from './compose.ts';
 import type { ComposeFile } from './protocol.ts';
 
 const features = (service: Record<string, unknown>, volumes: ComposeFile['volumes'] = {}) =>
   privilegedComposeFeatures({ services: { app: { image: 'example', ...service } }, volumes });
+
+test('project grants reject malformed input and normalize explicit names', () => {
+  assert.throws(
+    () => parseProjectPolicy({ nodes: ['n1'], ingressHosts: [], admin: true }),
+    /unknown/,
+    'policy must reject injected fields',
+  );
+  assert.throws(
+    () => parseProjectPolicy({ nodes: ['bad name'], ingressHosts: [] }),
+    /nodes/,
+    'policy must reject invalid node names',
+  );
+  assert.throws(
+    () => parseProjectPolicy({ nodes: [], ingressHosts: ['*'] }),
+    /ingressHosts/,
+    'policy must reject unbounded hostname grants',
+  );
+  assert.deepEqual(
+    parseProjectPolicy({
+      nodes: ['n2', 'n1', 'n2'],
+      ingressHosts: ['*.EXAMPLE.COM', '*.example.com'],
+    }),
+    { nodes: ['n1', 'n2'], ingressHosts: ['*.example.com'] },
+    'grants must be normalized and deduplicated',
+  );
+});
+
+test('project grants check concrete placement and do not grant wildcard apexes', () => {
+  const compose: ComposeFile = {
+    services: {
+      web: {
+        image: 'web',
+        'x-tug': { placement: { nodes: ['n1'] }, ingress: { host: 'app.example.com', port: 80 } },
+      },
+    },
+  };
+  const desired = buildDesiredState({ project: 'site', version: 'v1', compose });
+  const policy = parseProjectPolicy({ nodes: ['n1'], ingressHosts: ['*.example.com'] });
+  assert.deepEqual(
+    projectPolicyViolations(policy, desired, ['n1', 'n2']),
+    [],
+    'the explicit node and matching subdomain must be granted',
+  );
+  desired.services.web.placement.nodes = [];
+  assert.match(
+    projectPolicyViolations(policy, desired, ['n1', 'n2']).join(' '),
+    /n2/,
+    'implicit placement must check every eligible node',
+  );
+  desired.compose.services.web['x-tug']!.ingress!.host = 'example.com';
+  assert.match(
+    projectPolicyViolations(policy, desired, ['n1']).join(' '),
+    /example.com is not granted/,
+    'wildcard grants must not include the apex hostname',
+  );
+});
 test('ordinary local volumes and default logging do not require administrator privileges', () => {
   assert.deepEqual(
     features(

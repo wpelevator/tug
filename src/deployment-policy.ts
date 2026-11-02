@@ -1,5 +1,64 @@
-import type { ComposeFile, ComposeService } from './protocol.ts';
+import type { ComposeFile, ComposeService, DesiredState } from './protocol.ts';
 import { sentinelNames } from './normalize.ts';
+import { ingressHostsOf } from './compose.ts';
+
+export interface ProjectPolicy {
+  nodes: string[];
+  ingressHosts: string[];
+}
+const NAME = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/;
+const HOST = /^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/;
+
+/** Accept only explicit bounded grants supplied by an administrator. */
+export function parseProjectPolicy(value: unknown): ProjectPolicy {
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    throw new Error('policy must be an object');
+  const input = value as Record<string, unknown>;
+  if (Object.keys(input).some((key) => key !== 'nodes' && key !== 'ingressHosts'))
+    throw new Error('unknown project policy field');
+  if (
+    !Array.isArray(input.nodes) ||
+    input.nodes.length > 1000 ||
+    !input.nodes.every((node) => typeof node === 'string' && NAME.test(node))
+  )
+    throw new Error('policy nodes must be an array of valid node names (at most 1000)');
+  if (
+    !Array.isArray(input.ingressHosts) ||
+    input.ingressHosts.length > 1000 ||
+    !input.ingressHosts.every(
+      (host) => typeof host === 'string' && host.length <= 253 && HOST.test(host.toLowerCase()),
+    )
+  )
+    throw new Error('policy ingressHosts must be an array of valid host patterns (at most 1000)');
+  return {
+    nodes: [...new Set(input.nodes as string[])].sort(),
+    ingressHosts: [
+      ...new Set((input.ingressHosts as string[]).map((host) => host.toLowerCase())),
+    ].sort(),
+  };
+}
+
+export function projectPolicyViolations(
+  policy: ProjectPolicy,
+  desired: DesiredState,
+  allNodes: readonly string[],
+): string[] {
+  const failures: string[] = [];
+  for (const [service, spec] of Object.entries(desired.services)) {
+    const nodes = spec.placement.nodes?.length ? spec.placement.nodes : allNodes;
+    for (const node of nodes)
+      if (!policy.nodes.includes(node)) failures.push(`${service}: node ${node} is not granted`);
+  }
+  for (const [host, service] of ingressHostsOf(desired.compose)) {
+    if (
+      !policy.ingressHosts.some(
+        (grant) => grant === host || (grant.startsWith('*.') && host.endsWith(grant.slice(1))),
+      )
+    )
+      failures.push(`${service}: ingress host ${host} is not granted`);
+  }
+  return failures;
+}
 
 /** Returns host-sensitive features requiring an administrator, without relying on client-supplied flags. */
 export function privilegedServiceFeatures(compose: ComposeFile, service: ComposeService): string[] {
