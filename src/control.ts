@@ -1381,10 +1381,14 @@ export async function createApp(
         }
       } else {
         if (!existing) return res.status(404).json({ error: 'node not found' });
+        if (body.address !== undefined && !isNodeHost(body.address))
+          throw httpError(400, 'address must be an IP address or hostname without a port');
+        const address = body.address === undefined ? existing.address : body.address;
         db.run(
-          "UPDATE nodes SET key_hash=?,disabled_at=NULL,status='registered',cert_not_after=?,updated_at=? WHERE id=?",
+          "UPDATE nodes SET key_hash=?,disabled_at=NULL,status='registered',cert_not_after=?,address=?,updated_at=? WHERE id=?",
           signed.keyHash,
           signed.notAfter.toISOString(),
+          address || null,
           now(),
           existing.id,
         );
@@ -1394,6 +1398,8 @@ export async function createApp(
           metadata: { node: name },
         });
         reconcileSockets();
+        endpointSnapshot = JSON.stringify(endpointsFor(currentDesiredStates()));
+        wakeAll();
       }
       res.json(identityResponse(nodeId, signed.cert));
     } catch (e) {

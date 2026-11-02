@@ -56,7 +56,7 @@ nodes:
 
 To change a registered node’s address, run `tug node-address app1 10.0.0.12`. Control wakes the agents so port bindings and service endpoints converge to the new address. The address must already be available on the node and reachable by its peers.
 
-The control plane stays the source of truth. Only `node-install`, `node-replace-identity`, `node-repair-identity`, `node-register` and `node-prepare-enrollment` read `nodes`, as flag defaults; `status`, `deploy`, `scale`, `ps`, `logs`, `exec`, `node-remove` and every other command ask control and never consult the file. Re-running `node-install` with the same key is an idempotent retry that keeps the first call's metadata; `node-replace-identity` installs a new key and keeps the node's ID, metadata and placement. Editing the file without re-running anything changes nothing in control.
+The control plane stays the source of truth. Only `node-install`, `node-replace-identity`, `node-repair-identity`, `node-register` and `node-prepare-enrollment` read `nodes`, as flag defaults; `status`, `deploy`, `scale`, `ps`, `logs`, `exec`, `node-remove` and every other command ask control and never consult the file. Re-running `node-install` with the same key is an idempotent retry that keeps the first call's metadata; `node-replace-identity` installs a new key and keeps the node's ID, metadata and placement. It also updates the node's `address` when `--address` is supplied, with the same validation as registration. Editing the file without re-running anything changes nothing in control.
 
 ## Self-service enrollment (`node-prepare-enrollment`)
 

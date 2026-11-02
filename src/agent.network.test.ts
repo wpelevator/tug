@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { isIP } from 'node:net';
-import { pollOnce } from './agent.ts';
+import { endpointAddressesForAgent, pollOnce } from './agent.ts';
 import type { AgentContext } from './agent.ts';
 import { buildDesiredState } from './compose.ts';
 import type { ComposeFile, WorkResponse } from './protocol.ts';
@@ -73,6 +73,33 @@ test('poll injects cross-node service endpoints as plain-address extra hosts', a
   assert.ok(
     extraHosts?.includes('db.blog.tug:192.168.10.2'),
     'the project-qualified service name resolves to the same plain node address',
+  );
+});
+
+test('endpoint resolution leaves local services untouched and drops unresolvable remote endpoints', async () => {
+  const resolved = await endpointAddressesForAgent(
+    {
+      local: [{ node: 'n1', address: 'bad.invalid' }],
+      remote: [
+        { node: 'n2', address: 'bad.invalid' },
+        { node: 'n2', address: '192.0.2.9' },
+      ],
+      allBad: [{ node: 'n2', address: 'bad.invalid' }],
+    },
+    new Set(['local']),
+    async (host) => {
+      if (host === 'bad.invalid') throw new Error('no such host');
+      return { address: '192.0.2.9' };
+    },
+  );
+
+  assert.deepEqual(
+    resolved,
+    {
+      remote: [{ node: 'n2', address: '192.0.2.9' }],
+      allBad: [],
+    },
+    'local service endpoints should not be resolved, and a failed remote lookup should not block the remaining endpoints',
   );
 });
 

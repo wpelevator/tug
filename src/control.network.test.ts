@@ -154,6 +154,52 @@ const stack = {
   },
 };
 
+test('replacing a node identity updates and validates its address', async () => {
+  const s = await server();
+  try {
+    const firstKey = await generateKeyPair();
+    const firstCsr = await createCsr(firstKey.privateKeyPem);
+    const created = await json(
+      await s.post('/api/v1/nodes/n1/identity', {
+        csr: firstCsr,
+        mode: 'create',
+        address: '10.0.0.1',
+      }),
+    );
+    assert.equal(
+      created.node.address,
+      '10.0.0.1',
+      'registration should store the supplied address',
+    );
+
+    const secondKey = await generateKeyPair();
+    const secondCsr = await createCsr(secondKey.privateKeyPem);
+    const replaced = await json(
+      await s.post('/api/v1/nodes/n1/identity', {
+        csr: secondCsr,
+        mode: 'replace',
+        address: '10.0.0.2',
+      }),
+    );
+    assert.equal(
+      replaced.node.address,
+      '10.0.0.2',
+      'replacing an identity should update the node address when one is supplied',
+    );
+
+    const badKey = await generateKeyPair();
+    const badCsr = await createCsr(badKey.privateKeyPem);
+    const bad = await s.post('/api/v1/nodes/n1/identity', {
+      csr: badCsr,
+      mode: 'replace',
+      address: 'bad:host',
+    });
+    assert.equal(bad.status, 400, 'a malformed replacement address should be rejected');
+  } finally {
+    await s.close();
+  }
+});
+
 test('service endpoints use node addresses by default once the node reports the service serving', async () => {
   const s = await server();
   try {

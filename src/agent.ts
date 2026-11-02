@@ -1255,16 +1255,17 @@ async function warnPublicPorts(
 }
 
 /** Docker `extra_hosts` values must be IPs, so resolve hostname node addresses on this agent. */
-async function endpointAddressesForAgent(
+export async function endpointAddressesForAgent(
   endpoints: Record<string, ServiceEndpoint[]> = {},
-  localServices: Set<string>,
+  localServices: Set<string> = new Set(),
+  lookup: (host: string) => Promise<{ address: string }> = (host) => dns.lookup(host),
 ): Promise<Record<string, ServiceEndpoint[]>> {
   const cache = new Map<string, Promise<string>>();
   const resolve = (address: string): Promise<string> => {
     if (net.isIP(address)) return Promise.resolve(address);
     let resolved = cache.get(address);
     if (!resolved) {
-      resolved = dns.lookup(address).then(
+      resolved = lookup(address).then(
         ({ address: ip }) => ip,
         (error: unknown) => {
           throw new Error(
