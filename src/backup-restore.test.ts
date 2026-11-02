@@ -176,6 +176,68 @@ test('writers are the services depending on a service, or mounting a volume and 
   assert.deepEqual(discoverWriters(state.compose, 'volume:uploads'), ['web'], 'web mounts uploads');
 });
 
+test('restore planning and queueing use the latest successful placement before the scheduler ticks', async () => {
+  const f = await fixture();
+  f.catalog('service:db', 'snap1', '2026-11-01T09:00:00Z');
+  const original = f.db.get<{ state_json: string }>(
+    "SELECT state_json FROM desired_states WHERE deployment_id='dep1'",
+  )!;
+  const moved = JSON.stringify(JSON.parse(original.state_json)).replaceAll('app1', 'app2');
+  const ts = '2026-11-01T10:00:00Z';
+  f.db.run(
+    "INSERT INTO nodes(id,name,status,last_seen_at,created_at) VALUES('n2','app2','online',?,?)",
+    ts,
+    ts,
+  );
+  f.db.run(
+    "INSERT INTO deployments(id,project_id,version,state,created_at) VALUES('dep2','site','v2','succeeded',?)",
+    ts,
+  );
+  f.db.run(
+    'INSERT INTO desired_states(id,project_id,deployment_id,version,state_json,created_at) VALUES(?,?,?,?,?,?)',
+    'ds2',
+    'site',
+    'dep2',
+    'v2',
+    moved,
+    ts,
+  );
+  f.db.run("UPDATE projects SET current_deployment_id='dep2' WHERE id='site'");
+
+  const plan = f.restores.plan(request());
+  assert.ok(!('error' in plan), 'the restored target must remain available after moving');
+  assert.equal(
+    plan.node,
+    'app2',
+    'restore plans must immediately use the latest successful placement',
+  );
+
+  f.db.run(
+    "UPDATE backup_schedules SET node_id='n1' WHERE project_id='site' AND target='service:db'",
+  );
+  const result = f.backups.queueRestore(
+    'site',
+    'service:db',
+    { snapshotId: 'snap1', mode: 'in-place' },
+    'rst1',
+  );
+  assert.ok(
+    !('error' in result),
+    'restore queueing must accept a valid target after placement changes',
+  );
+  assert.equal(
+    result.nodeId,
+    'n2',
+    'restore commands must be queued on the current node even if the schedule was stale',
+  );
+  assert.equal(
+    f.db.get<{ node_id: string }>('SELECT node_id FROM commands WHERE id=?', result.commandId)
+      ?.node_id,
+    'n2',
+    'the persisted restore command must target the replacement node',
+  );
+});
+
 test('latest never resolves to a safety snapshot taken before a restore', async () => {
   const f = await fixture();
   f.catalog('service:db', 'snapGOOD', '2026-11-01T08:00:00Z');

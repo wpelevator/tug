@@ -79,6 +79,8 @@ tug restore db --confirm             # latest backup of the db service
 tug restore uploads --scratch --confirm   # files into a new volume, touching nothing live
 ```
 
+A restore plan and its queued restore refresh backup placement from the latest successful deployment before choosing a node, so moving a project does not leave a restore aimed at the previous node until the next scheduler tick. Check the printed target before confirming.
+
 Restores are as generic as backups. A service is restored by running its `x-tug.backup.restore` command in the running container with the stored file on standard input (`restic dump` piped in), so a MariaDB service uses `restore: sh -c 'mariadb -uroot -p"$MARIADB_ROOT_PASSWORD"'`. A volume is emptied and filled from the snapshot, or restored into a new volume with `--scratch`. A service without a `restore` command is refused rather than guessed at.
 
 `tug restore` returns when the data is back and the services it stopped report serving again, or after five minutes with a warning if they do not, so a script can probe the site as soon as it returns. An in-place restore is deliberately careful:
