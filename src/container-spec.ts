@@ -165,9 +165,9 @@ function volumeSpecs(desired: DesiredState, node: string, used: ReadonlySet<stri
     const def = desired.compose.volumes?.[key] || {};
     const xe = def['x-tug'] || {};
     const labels = {
+      ...((def.labels as Record<string, string> | undefined) || {}),
       [LABEL_PROJECT]: desired.project,
       'tug.volume': key,
-      ...((def.labels as Record<string, string> | undefined) || {}),
     };
     if (def.external) {
       out.push({

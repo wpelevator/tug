@@ -13,6 +13,18 @@ const plan = (compose: ComposeFile, opts = {}, version = 'v1') =>
     opts,
   );
 
+test('managed volume ownership labels cannot be overridden', () => {
+  const resources = plan({
+    services: { app: { image: 'x', volumes: ['data:/data'], ...place } },
+    volumes: { data: { labels: { 'tug.project': 'other', 'tug.volume': 'other', custom: 'ok' } } },
+  });
+  assert.deepEqual(
+    resources.volumes[0].labels,
+    { 'tug.project': 'p', 'tug.volume': 'data', custom: 'ok' },
+    'managed volume ownership must reflect the actual project and volume',
+  );
+});
+
 test('the config hash ignores the deployment revision but follows definition and secret versions', () => {
   const c: ComposeFile = {
     services: { web: { image: 'x', environment: { K: '@@tug:secret:K@@' }, ...place } },
