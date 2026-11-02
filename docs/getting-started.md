@@ -45,10 +45,10 @@ In CI, set `TUG_CREDENTIAL` (the encoded credential) or `TUG_CREDENTIAL_FILE` in
 If you can SSH to the host:
 
 ```bash
-tug node-install root@198.51.100.7 --name app1 --address 198.51.100.7 --install-docker
+tug node-install root@198.51.100.7 --name app1 --address 10.0.0.7 --install-docker
 ```
 
-The node generates its own private key, your admin credential authorizes it, and the signed certificate is installed back over SSH. The command waits for the node's first report. It is safe to run again after a failure.
+The node generates its own private key, your admin credential authorizes it, and the signed certificate is installed back over SSH. `--address` is the node's private inter-node IP on your existing network; other nodes and ingress upstreams use it, and Tug binds published ports to it. It must be reachable from nodes that need cross-node service traffic. The command waits for the node's first report. It is safe to run again after a failure.
 
 If you cannot SSH to it (cloud-init, autoscaling, a host behind NAT), prepare an enrollment credential and run the printed command on the host:
 
@@ -59,7 +59,7 @@ tug node-prepare-enrollment --name app1 --install-docker # prints cloud-init use
 
 The join key inside is single-use, bound to the node name and valid for one hour. Mint one per instance, and treat saved user-data as a secret.
 
-Agents only dial out to control, so nodes behind NAT work. Check with `tug status`; a node that is reporting shows a recent `last_seen_at`.
+Agents only dial out to control, so the control channel works through NAT. Cross-node workload traffic is separate: service names and remote ingress upstreams require reachable private node `address` values on your network, and Tug does not encrypt that traffic. Check with `tug status`; a node that is reporting shows a recent `last_seen_at`.
 
 ## 4. Deploy
 
@@ -113,6 +113,6 @@ No credential becomes invalid because the address changed. The control name only
 
 - [Control plane](control-plane.md): mutual TLS, the CA, backups and restore of control itself.
 - [Nodes](nodes.md): certificates, renewal, enrollment and recovery in detail.
-- [Networking](networking.md): the WireGuard mesh, cross-node service names and ingress.
+- [Networking](networking.md): your private inter-node network, cross-node service names and ingress.
 - [Backups](backups.md): scheduled workload backups with restic.
 - [CLI reference](cli.md) and [Configuration](configuration.md).

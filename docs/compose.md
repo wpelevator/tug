@@ -1,6 +1,6 @@
 # Compose extensions
 
-Tug deploys standard Docker Compose files with an `x-tug` extension on services and volumes for placement and health checks. Compose is used only on the operator machine, where `tug deploy` normalizes the file; nodes run no Compose. Each agent turns the services placed on its node into Docker Engine API container definitions, without `x-tug`, `build`, `deploy` and `container_name`, with `extra_hosts` added for services on other nodes and `image` set to the built or declared image. Published `ports` without a host IP are bound to the node's overlay IP, `127.0.0.1` or the node's `address` instead of every interface; write the host IP (for example `"0.0.0.0:80:80"`) to publish on purpose. See [Published ports](networking.md#published-ports-private-by-default).
+Tug deploys standard Docker Compose files with an `x-tug` extension on services and volumes for placement and health checks. Compose is used only on the operator machine, where `tug deploy` normalizes the file; nodes run no Compose. Each agent turns the services placed on its node into Docker Engine API container definitions, without `x-tug`, `build`, `deploy` and `container_name`, with `extra_hosts` added for services on other nodes and `image` set to the built or declared image. Published `ports` without a host IP are bound to the node's `address` or `127.0.0.1` instead of every interface; write the host IP (for example `"0.0.0.0:80:80"`) to publish on purpose. See [Published ports](networking.md#published-ports-private-by-default).
 
 ## Services
 
@@ -25,7 +25,7 @@ services:
 - `placement.labels`: node labels (tags) that select the nodes running the service. Nodes must carry all listed labels. Combined with `replicas: N`, the control plane spreads the service across N matching nodes; `global: true` runs one replica on every matching node. Nodes whose agent has not been seen within `TUG_STALE_SECONDS` are skipped when labels or `global` are resolved (at deploy and on `tug scale`), so a dead host cannot hold a rollout open. Explicit `placement.nodes` still pins a service to named nodes.
 - `global`: run one replica on every node matching `placement.labels` (or every node when no labels are given).
 - `replicas`: optional; in this version it must equal the number of placement nodes (one container per node).
-- `ingress`: publishes the service on a hostname through the managed Caddy edge (see [Networking](networking.md#layer-c-ingress-and-tls)). `host` is a fully qualified hostname, unique across the file; `port` is the service's container port or published host port and must appear in `ports`; `tls` is `auto` (default, ACME), `custom` or `off`. `tls: custom` also needs `cert` and `key`, the names of project secrets holding the PEM certificate chain and private key, which must exist before you deploy.
+- `ingress`: publishes the service on a hostname through the managed Caddy edge (see [Networking](networking.md#layer-b-ingress-and-tls)). `host` is a fully qualified hostname, unique across the file; `port` is the service's container port or published host port and must appear in `ports`; `tls` is `auto` (default, ACME), `custom` or `off`. `tls: custom` also needs `cert` and `key`, the names of project secrets holding the PEM certificate chain and private key, which must exist before you deploy.
 - `rollout`: `strategy: recreate` (default) or `rolling`, plus `drain`; see [Rolling rollouts](#rolling-rollouts). The top-level `x-tug: { rollback: auto }` is described under [Automatic rollback](#automatic-rollback).
 - `health`: checked by the agent after the container starts; the service is `serving` only once it passes.
   - `type: docker` waits for the container to be running and, if it defines a Docker `HEALTHCHECK`, healthy.
@@ -45,7 +45,7 @@ services:
         tls: auto            # auto | custom | off
 ```
 
-Services that run on a different node than a given service are reachable from it by name (`db` or `db.<project>.tug`) when the mesh and cross-node service names are on, as long as the target publishes its port (Tug binds it to the overlay address, not the internet). The agent adds these names to the containers as hosts-file (`extra_hosts`) entries, not DNS records; see [Networking](networking.md#layer-b-cross-node-service-names).
+Services that run on a different node than a given service are reachable from it by name (`db` or `db.<project>.tug`) by default, as long as the target publishes its port and the client's node can route to the target node's private `address`. Tug binds the port to that address; the operator's firewall controls access to it. Set `TUG_SERVICE_NAMES=false` on control to disable the injected names. The agent adds these names to the containers as hosts-file (`extra_hosts`) entries, not DNS records; see [Networking](networking.md#layer-a-cross-node-service-names).
 
 Services with `build:` are built by control from uploaded source, or on the operator machine with `deploy --build-local`. Each build receives an immutable tag distinct from the display version and is delivered as a saved image archive from control. Build services require a source context or local image upload. Published `image:` tags are resolved once on control to `image@sha256:…` before deployment publication; explicit SHA-256 references remain pinned. Multi-platform indexes remain intact. Agents pull the stored digest from the upstream registry, so rollback and nodes added later use that same manifest. Private registry credentials use the encrypted project secret described in [Control plane](control-plane.md#published-images-and-private-registries). Uploaded source contexts must contain regular files/directories within the build root; symlinks and escaping build paths are rejected.
 
@@ -121,7 +121,7 @@ volumes:
     driver: local
     driver_opts:
       type: nfs
-      o: addr=10.210.0.1,rw,hard
+      o: addr=10.0.0.10,rw,hard
       device: ":/srv/uploads"
 ```
 

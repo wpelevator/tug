@@ -1,9 +1,10 @@
 #!/usr/bin/env node
-// Verifies, from the host, that the fake VPSes reached each other over WireGuard, that a service
-// resolves by name across nodes, that ingress routes to a service on another node, and that a key
-// rotation heals the mesh. Everything runs through `docker compose exec` into the fake VPSes.
-import { api as mtlsApi, loadCredential } from './mtls-fetch.js';
+// Verifies, from the host, that a service resolves by name across nodes, that nginx publishes its
+// port on the app node's plain address, and that Caddy routes to that service from another node.
+// Everything runs through `docker compose exec` into the fake VPSes.
 import { spawnSync } from 'node:child_process';
+import { isIP } from 'node:net';
+import { api as mtlsApi, loadCredential } from './mtls-fetch.js';
 
 const project = process.env.COMPOSE_PROJECT_NAME || 'tug-it-net';
 const control = process.env.TUG_CONTROL_URL || 'https://127.0.0.1:18080';
@@ -41,34 +42,15 @@ async function until(label, fn, timeoutMs = 120000) {
 const api = (route, body) => mtlsApi(credential, control, route, body);
 
 const nodes = (await api('/api/v1/nodes')).nodes;
-const ip = Object.fromEntries(nodes.map((n) => [n.name, n.overlay_ip]));
+const addresses = Object.fromEntries(nodes.map((n) => [n.name, n.address]));
 for (const name of ['vps-a', 'vps-b', 'vps-c']) {
-  if (!ip[name]) throw new Error(`${name} has no overlay address: ${JSON.stringify(nodes)}`);
+  if (!addresses[name] || isIP(addresses[name]) === 0)
+    throw new Error(`${name} has no numeric node address: ${JSON.stringify(nodes)}`);
 }
-console.log('overlay addresses', ip);
-
-const pairs = [
-  ['vps-a', 'vps-b'],
-  ['vps-b', 'vps-a'],
-  ['vps-a', 'vps-c'],
-  ['vps-c', 'vps-b'],
-];
-async function meshReachable(label) {
-  for (const [from, to] of pairs) {
-    await until(`${label}: ${from} pings ${to} (${ip[to]}) over the mesh`, async () =>
-      sh(from, `ping -c 1 -W 2 ${ip[to]}`),
-    );
-  }
-}
-await meshReachable('mesh');
-
-await until('vps-a has a WireGuard handshake with vps-b', async () => {
-  const r = sh('vps-a', 'wg show wg0 latest-handshakes');
-  return { ok: r.out.split('\n').some((l) => /\s[1-9]\d+$/.test(l)), out: r.out };
-});
+console.log('node addresses', addresses);
 
 await until(
-  'service DNS: client on vps-b resolves web on vps-a and fetches it over the mesh',
+  'service DNS: client on vps-b resolves web on vps-a and fetches it through its node address',
   async () => {
     const r = sh(
       'vps-b',
@@ -78,22 +60,20 @@ await until(
   },
 );
 
+await until("nginx's private published port binds to vps-a's plain address", async () => {
+  const r = sh(
+    'vps-a',
+    `c=$(docker ps -q --filter label=tug.service=web | head -1); [ -n "$c" ] && docker port "$c" 80/tcp`,
+  );
+  return {
+    ok: r.ok && r.out.trim() === `${addresses['vps-a']}:8080`,
+    out: `expected ${addresses['vps-a']}:8080\n${r.out}`,
+  };
+});
+
 await until('ingress: Caddy on vps-c routes app.test to web on vps-a', async () => {
   const r = sh('vps-c', `curl -fsS -m 5 -H 'Host: app.test' http://127.0.0.1/`);
   return { ok: r.ok && r.out.includes('Welcome to nginx'), out: r.out };
 });
 
-// Key rotation: the node generates a new keypair, peers pick it up, traffic recovers.
-const before = sh('vps-b', 'wg show wg0 public-key').out.trim();
-const rotated = await api('/api/v1/nodes/vps-b/rotate-wg-key', {});
-await until('rotate-wg-key command succeeds', async () => {
-  const cmd = await api(`/api/v1/commands/${rotated.commandId}`);
-  return { ok: cmd.state === 'succeeded', out: JSON.stringify(cmd) };
-});
-await until('vps-b public key changed', async () => {
-  const now = sh('vps-b', 'wg show wg0 public-key').out.trim();
-  return { ok: now !== '' && now !== before, out: now };
-});
-await meshReachable('after rotation');
-
-console.log(JSON.stringify({ ok: true, overlay: ip }, null, 2));
+console.log(JSON.stringify({ ok: true, addresses }, null, 2));

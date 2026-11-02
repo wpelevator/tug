@@ -35,7 +35,6 @@ import type {
   ProjectRow,
   SecretRow,
   VolumeRow,
-  WgPeerRow,
 } from './db.ts';
 import { encrypt, decrypt, loadOrCreateMasterKey } from './secrets.ts';
 import {
@@ -64,18 +63,7 @@ import {
 } from './pki.ts';
 import { EXPIRY_WARN_DAYS, certificateExpiry, diagnoseNode } from './diagnostics.ts';
 import { serverTlsOptions } from './tls-server.ts';
-import {
-  DEFAULT_MESH_CIDR,
-  DEFAULT_WG_PORT,
-  WG_INTERFACE,
-  WG_KEEPALIVE,
-  allocateOverlayIp,
-  isWgKey,
-  parseCidr,
-  wgEndpoint,
-  isNodeEndpoint,
-  isNodeHost,
-} from './mesh.ts';
+import { isNodeHost } from './node-address.ts';
 import { buildIngressWork, resolveServiceEndpoints } from './ingress.ts';
 import { parseStatusReport } from './status-report.ts';
 import type { NodeView } from './ingress.ts';
@@ -128,7 +116,6 @@ import type {
   DesiredState,
   EnrollRequest,
   EnrollResponse,
-  NetworkConfig,
   NodeInfo,
   PortBinding,
   EnrollmentCredentialResponse,
@@ -140,7 +127,6 @@ import type {
   StatusReport,
   StreamMessage,
   WakeResponse,
-  WgKeyRequest,
   WorkResponse,
 } from './protocol.ts';
 
@@ -613,13 +599,8 @@ export async function createApp(
   });
   const dbFile = path.join(DATA_DIR, 'tug.db');
   const masterKeyFile = path.join(DATA_DIR, 'master.key');
-  // Networking layers are opt-in; with all of them off the work response is unchanged.
-  const MESH = process.env.TUG_MESH === 'true';
-  const MESH_CIDR = process.env.TUG_MESH_CIDR || DEFAULT_MESH_CIDR;
-  const WG_PORT = Number(process.env.TUG_WG_PORT || DEFAULT_WG_PORT);
-  const SERVICE_DNS = (process.env.TUG_SERVICE_NAMES ?? String(MESH)) === 'true';
+  const SERVICE_DNS = process.env.TUG_SERVICE_NAMES !== 'false';
   const ACME_EMAIL = process.env.TUG_ACME_EMAIL || undefined;
-  if (MESH) parseCidr(MESH_CIDR);
 
   const db = await (options.openDatabase || openDb)(dbFile);
   const wakeHub = new WakeHub();
@@ -1308,51 +1289,7 @@ export async function createApp(
     !!row.last_seen_at &&
     Date.parse(row.last_seen_at) < Date.now() - Number(process.env.TUG_STALE_SECONDS || 60) * 1000;
   const NODE_INFO_SQL =
-    'SELECT id,name,address,public_address,overlay_ip,labels_json,status,created_at,updated_at FROM nodes WHERE id=?';
-
-  /** Allocates the node's stable overlay IP on first registration (retrying if a concurrent register took it). */
-  function ensureOverlayIp(nodeId: string): void {
-    if (!MESH) return;
-    for (let attempt = 0; attempt < 5; attempt++) {
-      const row = db.get<Pick<NodeRow, 'overlay_ip'>>(
-        'SELECT overlay_ip FROM nodes WHERE id=?',
-        nodeId,
-      );
-      if (row?.overlay_ip) return;
-      const used = db
-        .all<{ overlay_ip: string }>('SELECT overlay_ip FROM nodes WHERE overlay_ip IS NOT NULL')
-        .map((r) => r.overlay_ip);
-      try {
-        db.run(
-          'UPDATE nodes SET overlay_ip=? WHERE id=? AND overlay_ip IS NULL',
-          allocateOverlayIp(MESH_CIDR, used),
-          nodeId,
-        );
-        return;
-      } catch (e) {
-        if (!isUniqueViolation(e)) throw e;
-      }
-    }
-    throw new Error('could not allocate an overlay address');
-  }
-  /** Stores (or refreshes) the node's WireGuard peer entry; the private key never reaches control. */
-  function syncWgPeer(nodeId: string, publicKey?: string): void {
-    if (!MESH) return;
-    const node = db.get<NodeRow>('SELECT * FROM nodes WHERE id=?', nodeId);
-    const existing = db.get<WgPeerRow>('SELECT * FROM wg_peers WHERE node_id=?', nodeId);
-    const key = publicKey ?? existing?.public_key;
-    if (!node?.overlay_ip || !key) return;
-    db.run(
-      `INSERT INTO wg_peers(node_id,public_key,overlay_ip,endpoint,allowed_ips,updated_at) VALUES(?,?,?,?,?,?)
-      ON CONFLICT(node_id) DO UPDATE SET public_key=excluded.public_key,overlay_ip=excluded.overlay_ip,endpoint=excluded.endpoint,allowed_ips=excluded.allowed_ips,updated_at=excluded.updated_at`,
-      nodeId,
-      key,
-      node.overlay_ip,
-      wgEndpoint(node.public_address, WG_PORT) ?? null,
-      `${node.overlay_ip}/32`,
-      now(),
-    );
-  }
+    'SELECT id,name,address,labels_json,status,created_at,updated_at FROM nodes WHERE id=?';
 
   const NODE_RENEW_MIN_INTERVAL_MS = () =>
     Number(process.env.TUG_RENEW_MIN_INTERVAL_MS ?? 60 * 60 * 1000);
@@ -1363,8 +1300,6 @@ export async function createApp(
       id: row.id,
       name: row.name,
       address: row.address,
-      public_address: row.public_address,
-      overlay_ip: row.overlay_ip,
       labels: row.labels_json ? (JSON.parse(row.labels_json) as string[]) : [],
       status: row.status,
       created_at: row.created_at,
@@ -1380,26 +1315,19 @@ export async function createApp(
     keyHash: string;
     notAfter: Date;
     address?: string;
-    publicAddress?: string;
-    wgPublicKey?: string;
     labels?: string[];
   }): void {
     if (!NODE_NAME.test(input.name))
       throw httpError(400, 'node name must be 1-63 letters, numbers, dots, underscores or hyphens');
     if (input.address && !isNodeHost(input.address))
       throw httpError(400, 'address must be an IP address or hostname without a port');
-    if (input.publicAddress && !isNodeEndpoint(input.publicAddress))
-      throw httpError(400, 'publicAddress must be an IP address or hostname with an optional port');
-    if (input.wgPublicKey !== undefined && !isWgKey(input.wgPublicKey))
-      throw httpError(400, 'wgPublicKey must be a base64 WireGuard public key');
     const ts = now();
     db.run(
-      `INSERT INTO nodes(id,name,address,public_address,status,labels_json,key_hash,cert_not_after,created_at,updated_at)
-      VALUES(?,?,?,?,?,?,?,?,?,?)`,
+      `INSERT INTO nodes(id,name,address,status,labels_json,key_hash,cert_not_after,created_at,updated_at)
+      VALUES(?,?,?,?,?,?,?,?,?)`,
       input.id,
       input.name,
       input.address || null,
-      input.publicAddress || null,
       'registered',
       JSON.stringify(Array.isArray(input.labels) ? input.labels : []),
       input.keyHash,
@@ -1407,8 +1335,6 @@ export async function createApp(
       ts,
       ts,
     );
-    ensureOverlayIp(input.id);
-    syncWgPeer(input.id, input.wgPublicKey);
     wakeAll();
   }
   const identityResponse = (nodeId: string, cert: string): IdentityResponse => ({
@@ -1450,7 +1376,6 @@ export async function createApp(
             keyHash: signed.keyHash,
             notAfter: signed.notAfter,
             address: body.address,
-            publicAddress: body.publicAddress,
             labels: body.labels,
           });
         }
@@ -1557,8 +1482,6 @@ export async function createApp(
           keyHash: signed.keyHash,
           notAfter: signed.notAfter,
           address: body.address,
-          publicAddress: body.publicAddress,
-          wgPublicKey: body.wgPublicKey,
           labels: fresh.labels_json ? (JSON.parse(fresh.labels_json) as string[]) : [],
         });
         db.run(
@@ -1624,14 +1547,14 @@ export async function createApp(
       metadata: { node: node.name },
     });
     reconcileSockets();
-    // Healthy peers drop the node from their mesh and ingress configuration on their next work fetch.
+    // Other nodes drop the node from service endpoints and ingress configuration on their next work fetch.
     endpointSnapshot = JSON.stringify(endpointsFor(currentDesiredStates()));
     wakeAll();
     res.json({ ok: true, node: node.name });
   });
   api('get', '/api/v1/nodes', null, async (req, res) => {
     const rows = db.all<NodeRow>(
-      'SELECT id,name,address,public_address,overlay_ip,ingress,ingress_status_json,status,labels_json,last_seen_at,disabled_at,cert_not_after,created_at,updated_at FROM nodes ORDER BY name',
+      'SELECT id,name,address,ingress,ingress_status_json,status,labels_json,last_seen_at,disabled_at,cert_not_after,created_at,updated_at FROM nodes ORDER BY name',
     );
     res.json({
       nodes: rows.map((row) => {
@@ -1673,16 +1596,7 @@ export async function createApp(
     wakeHub.wake(nodeId, projectId ?? undefined);
     return commandId;
   }
-  // The private key lives only on the node, so rotation is a command the agent executes: it
-  // generates a new keypair, reports the public key and peers pick it up from their next work response.
-  api('post', '/api/v1/nodes/:name/rotate-wg-key', null, async (req, res) => {
-    if (!MESH)
-      return res.status(409).json({ error: 'the WireGuard mesh is not enabled (TUG_MESH=true)' });
-    const node = findNode(String(req.params.name));
-    if (!node) return res.status(404).json({ error: 'node not found' });
-    res.json({ commandId: queueCommand(node.id, null, 'wg.rotate-key'), nodeId: node.id });
-  });
-  // Removes a retired node: its identity, WireGuard peer, statuses and queued commands. Refused while a current deployment still places
+  // Removes a retired node: its identity, statuses and queued commands. Refused while a current deployment still places
   // something on it (redeploy without it first) or while its agent is still reporting, unless force=true.
   api('delete', '/api/v1/nodes/:name', null, async (req, res) => {
     const node = db.get<Pick<NodeRow, 'id' | 'name' | 'last_seen_at'>>(
@@ -1709,7 +1623,6 @@ export async function createApp(
       });
     db.run('DELETE FROM commands WHERE node_id=?', node.id);
     db.run('DELETE FROM node_statuses WHERE node_id=?', node.id);
-    db.run('DELETE FROM wg_peers WHERE node_id=?', node.id);
     db.run('DELETE FROM nodes WHERE id=?', node.id);
     db.run(
       'UPDATE enrollment_credentials SET revoked_at=COALESCE(revoked_at,?) WHERE name=? AND node_id IS NULL',
@@ -1732,22 +1645,6 @@ export async function createApp(
     db.run('UPDATE nodes SET ingress=?,updated_at=? WHERE id=?', enabled ? 1 : 0, now(), node.id);
     wakeHub.wake(node.id);
     res.json({ ok: true, node: node.name, ingress: enabled });
-  });
-  post('/agent/v1/wireguard/key', authAgent, async (req, res) => {
-    if (!MESH) return res.status(409).json({ error: 'the WireGuard mesh is not enabled' });
-    const { publicKey }: Partial<WgKeyRequest> = req.body;
-    if (!isWgKey(publicKey))
-      return res.status(400).json({ error: 'publicKey must be a base64 WireGuard public key' });
-    try {
-      syncWgPeer(req.node!.id, publicKey);
-      wakeAll();
-      res.json({ ok: true });
-    } catch (e) {
-      sendError(
-        res,
-        isUniqueViolation(e) ? httpError(409, 'public key already registered to another node') : e,
-      );
-    }
   });
   api('post', '/api/v1/credentials', null, async (req, res) => {
     const request = parseCredentialRequest(req.body);
@@ -2965,19 +2862,6 @@ export async function createApp(
         await runCommand('docker', ['version', '--format', '{{.Server.Version}}'])
       ).out.trim(),
     }));
-    if (MESH) {
-      await check('mesh', async () => {
-        const nodes = db.all<{ name: string; overlay_ip: string | null; has_key: number }>(
-          'SELECT n.name, n.overlay_ip, EXISTS(SELECT 1 FROM wg_peers w WHERE w.node_id=n.id) AS has_key FROM nodes n',
-        );
-        const missing = nodes.filter((n) => !n.has_key).map((n) => n.name);
-        if (missing.length)
-          throw new Error(
-            `nodes without a reported WireGuard key (is TUG_MESH=true on their agents?): ${missing.join(', ')}`,
-          );
-        return { cidr: MESH_CIDR, port: WG_PORT, nodes: nodes.length };
-      });
-    }
     const ingressNodes = db.all<Pick<NodeRow, 'name' | 'ingress_status_json'>>(
       'SELECT name,ingress_status_json FROM nodes WHERE ingress=1',
     );
@@ -3024,12 +2908,9 @@ export async function createApp(
     const staleBefore = new Date(
       Date.now() - Number(process.env.TUG_STALE_SECONDS || 60) * 1000,
     ).toISOString();
-    const nodes = db.all<NodeRow & { has_key: number }>(
-      'SELECT n.*, EXISTS(SELECT 1 FROM wg_peers w WHERE w.node_id=n.id) AS has_key FROM nodes n WHERE n.disabled_at IS NULL',
-    );
+    const nodes = db.all<NodeRow>('SELECT * FROM nodes WHERE disabled_at IS NULL');
     const views: NodeView[] = nodes.map((n) => ({
       name: n.name,
-      overlayIp: MESH && n.has_key ? n.overlay_ip : null,
       address: n.address,
       lastSeenAt: n.last_seen_at,
     }));
@@ -3044,26 +2925,6 @@ export async function createApp(
       }));
     return resolveServiceEndpoints(states, views, statuses, staleBefore);
   }
-  function networkFor(node: NodeRow): NetworkConfig | undefined {
-    if (!MESH || !node.overlay_ip) return undefined;
-    const peers = db.all<WgPeerRow & { name: string }>(
-      'SELECT w.*, n.name FROM wg_peers w JOIN nodes n ON n.id=w.node_id WHERE w.node_id != ? AND n.disabled_at IS NULL ORDER BY n.name',
-      node.id,
-    );
-    return {
-      interface: WG_INTERFACE,
-      overlayIp: node.overlay_ip,
-      cidr: MESH_CIDR,
-      listenPort: WG_PORT,
-      peers: peers.map((p) => ({
-        node: p.name,
-        publicKey: p.public_key,
-        endpoint: p.endpoint ?? undefined,
-        allowedIps: p.allowed_ips.split(','),
-        persistentKeepalive: WG_KEEPALIVE,
-      })),
-    };
-  }
   /** Names of all nodes and of the ingress nodes, for port binding and upstream decisions. */
   function nodeTopology(): { nodes: string[]; ingressNodes: string[] } {
     const rows = db.all<Pick<NodeRow, 'name' | 'ingress'>>(
@@ -3076,15 +2937,13 @@ export async function createApp(
   }
   /** Where this node's published ports listen: the address other nodes and the ingress reach it on, or loopback. */
   function portBindingFor(node: NodeRow, states: DesiredState[]): PortBinding {
-    const hasKey =
-      MESH && node.overlay_ip && db.get('SELECT 1 FROM wg_peers WHERE node_id=?', node.id);
     const { nodes, ingressNodes } = nodeTopology();
     const loopback: Record<string, string[]> = {};
     for (const state of states) {
       const services = loopbackIngressServices(state, node.name, ingressNodes, nodes);
       if (services.length) loopback[state.project] = services;
     }
-    return { address: (hasKey ? node.overlay_ip : node.address) || null, loopback };
+    return { address: node.address || null, loopback };
   }
   function ingressFor(node: NodeRow, states: DesiredState[]) {
     const secrets = new Map<string, string>();
@@ -3168,8 +3027,6 @@ export async function createApp(
       commands,
       retainedImages,
     };
-    const network = networkFor(node);
-    if (network) work.network = network;
     work.ports = portBindingFor(node, desiredStates);
     const holds = restores.holds();
     if (Object.keys(holds).length) work.holds = holds;

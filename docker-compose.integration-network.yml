@@ -1,19 +1,9 @@
-# Override for docker-compose.integration.yml that turns on the WireGuard mesh, service DNS and a
-# Caddy ingress node (vps-c). Used by tools/scripts/integration-network-test.sh.
+# Override for docker-compose.integration.yml that enables cross-node service DNS and a Caddy
+# ingress node (vps-c). Used by tools/scripts/integration-network-test.sh.
 services:
   control:
     environment:
-      TUG_MESH: "true"
+      TUG_SERVICE_NAMES: "true"
   provisioner:
     environment:
-      TUG_PUBLIC_ADDRESS_FROM_NAME: "true"
       TUG_INGRESS_NODES: vps-c
-  vps-a:
-    environment:
-      TUG_MESH: "true"
-  vps-b:
-    environment:
-      TUG_MESH: "true"
-  vps-c:
-    environment:
-      TUG_MESH: "true"

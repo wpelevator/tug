@@ -9,19 +9,17 @@ Commands to run each suite are in [Development](development.md). Entries marked 
 | Tier | What runs | Needs | Status |
 |---|---|---|---|
 | 1. Mocked | Unit tests: control API on SQLite, agent logic against a fake Docker runner, install scripts against fake executables, synthetic image archives | Node only, seconds | Exists; metric assertions and the backlog below are proposed |
-| 2. Docker integration | Control plus fake VPSes (privileged containers with their own Docker daemon), real WireGuard and Caddy, registry-free image delivery, the built `dist/` CLI and the shipped runtime image | Docker, minutes | Exists and runs in CI; a shared load probe and more scenarios are proposed |
-| 3. Real hosts | Two disposable VPSes: SSH installation, WireGuard between machines, Let's Encrypt, real latency | Two cloud hosts | Run by hand so far; an on-demand automated run is proposed |
+| 2. Docker integration | Control plus fake VPSes (privileged containers with their own Docker daemon), plain-address cross-node networking and Caddy, registry-free image delivery, the built `dist/` CLI and the shipped runtime image | Docker, minutes | Exists and runs in CI; a shared load probe and more scenarios are proposed |
+| 3. Real hosts | Two disposable VPSes: SSH installation, an operator-provided private network, Let's Encrypt, real latency | Two cloud hosts | Run by hand so far; an on-demand automated run is proposed |
 
 ## What the layers have found
 
 | Finding | Found by | Guarded by |
 |---|---|---|
 | The runtime image shipped without the Compose plugin, so every real deploy failed (the former runtime ran Compose on nodes; agents now use the Docker Engine API and the plugin is no longer part of the image) | Real hosts | Tier 2: `npm run test:smoke:image` runs the shipped image's binaries, database code and mTLS dependencies without any host plugins, for Debian and Alpine |
-| Reinstalling a mesh node failed the UDP preflight because Tug's own agent holds the WireGuard port | Real hosts | Tier 1: `src/cli-install.test.ts` runs the generated script against fake `ss`, `docker` and `wg` |
 | `deploy --build-local` was rejected on containerd image stores, where `docker save` lists a build attestation as an extra top-level entry | Local integration run on Docker Desktop | Tier 1: `src/artifacts.test.ts` builds synthetic archives, including the rejected variants |
 | The first rolling deploy started two revisions of the same image | Real hosts | Not guarded yet, see backlog item 1 |
-| After control loses its data, agents would not re-report their WireGuard keys | Reading the code while resetting control for the real-host run; worked around, not reproduced | Not guarded yet, see backlog item 2 |
-| A control database from before scoped credentials lacks columns the current control writes | Real hosts | Not guarded yet, see backlog item 3 |
+| A control database from before scoped credentials lacks columns the current control writes | Real hosts | Not guarded yet, see backlog item 2 |
 | `depends_on.condition: service_healthy` fails the deploy when the image has no Docker `HEALTHCHECK`, and the deploy error omitted the compose message | Real hosts | Tier 1: `src/control.rollout.test.ts` asserts the deployment error includes the node apply error |
 
 ## Tier 1: mocked tests
@@ -29,7 +27,7 @@ Commands to run each suite are in [Development](development.md). Entries marked 
 ### Conventions that exist
 
 - **Control** runs in-process on a random port with a temporary data directory and real SQLite, so tests exercise the HTTP API without Docker. Agent endpoints are driven directly, with the test acting as the agent (`src/control.rollback.test.ts`, `src/control.network.test.ts`). These in-process tests skip TLS: a test identity shim (`tests/helpers.ts`) supplies the principal a certificate would, and it still resolves against the database. Real certificates, handshakes, key authorization, enrollment, renewal and node IDs are covered by `src/pki.test.ts` and `src/control.mtls.test.ts`, and by the subprocess CLI tests that start a real mTLS control (`startMtlsControl`).
-- **The agent** takes its Docker Engine API client (`DockerApi`; the in-memory Engine in `tests/fake-docker.ts`), host runner and HTTP client as injectable dependencies, so tests assert the exact Engine calls issued for a reconcile (`src/agent.test.ts`, `src/agent.images.test.ts`, `src/agent.network.test.ts`).
+- **The agent** takes its Docker Engine API client (`DockerApi`; the in-memory Engine in `tests/fake-docker.ts`) and HTTP client as injectable dependencies, so tests assert the exact Engine calls issued for a reconcile (`src/agent.test.ts`, `src/agent.images.test.ts`, `src/agent.network.test.ts`).
 - **Shell scripts** are tested by running the generated text against fake executables placed first on `PATH`, instead of asserting on strings (`src/cli-install.test.ts`).
 - **Image archives** are built in the test, so malformed and hostile layouts can be checked without Docker (`src/artifacts.test.ts`).
 - **The CLI** is run against a stub `ssh` that records its arguments (`src/cli.templates.test.ts`).
@@ -54,11 +52,9 @@ Inject the clock and sleep into the rollout code so drain and poll timing is tes
 
 ### Backlog of mocked tests (proposed)
 
-1. **One revision per deployment as endpoints settle.** A rolling service on one node gets an `extra_hosts` entry in its container definition for every service on another node that is serving. Those entries are part of the revision's identity, so when the other node's service becomes ready between two polls, the agent starts a second revision of the same image. On the real hosts the first deploy ended with two revisions of the same image, and the surviving one carries such an entry, which points to this cause. The old revision drained and no request failed, but the app was started twice. Decide whether those entries should be excluded from the identity, and pin the decision with a test that counts the revisions started. This applies once rolling deploys (M3) are merged.
-2. **The agent re-reports its WireGuard key when control does not know it.** The agent skips reporting when its local record matches its live key. By reading the code, after control loses data, for example a restore from an older backup, the agent never relearns its key and the node would not join the mesh. This has not been reproduced yet, and the test would confirm it. Test with a fake control that has no overlay address for a node whose key the agent has already recorded.
-3. **Control on a database from an earlier version.** Tug has no migrations by design, but control should say so clearly instead of failing on the first write. Decide between refusing to start with a message that names the fix and another behavior, then test it.
-4. **Preflight messages name the remedy.** When the mesh port check refuses because the agent's state is incomplete, the message should say how to start clean: stop the old agent and delete the `wg0` interface that still holds the port. Assert the message contains it.
-5. **Rollout metrics from the fakes**, once M3 is merged: at most two revisions of a service at once, host ports released after the drain, unchanged services never stopped, a failed candidate removed while the previous revision keeps serving, and exactly one automatic rollback.
+1. **One revision per deployment as endpoints settle.** A rolling service on one node gets an `extra_hosts` entry in its container definition for every service on another node that is serving. Those entries are part of the revision's identity, so when the other node's service becomes ready between two polls, the agent starts a second revision of the same image. On the real hosts the first deploy ended with two revisions of the same image, and the surviving one carries such an entry, which points to this cause. The old revision drained and no request failed, but the app was started twice. Decide whether those entries should be excluded from the identity, and pin the decision with a test that counts the revisions started.
+2. **Control on a database from an earlier version.** Tug has no migrations by design, but control should say so clearly instead of failing on the first write. Decide between refusing to start with a message that names the fix and another behavior, then test it.
+3. **Rollout metrics from the fakes**: at most two revisions of a service at once, host ports released after the drain, unchanged services never stopped, a failed candidate removed while the previous revision keeps serving, and exactly one automatic rollback.
 
 ### Adding a tier 1 test
 
@@ -86,7 +82,7 @@ Each tier 2 and tier 3 run should write a JSON report with these keys, keep it a
 
 `npm run test:integration:backups` runs the backup executor and `tug run` against the local Docker daemon, with no fake VPS: a real MariaDB is dumped through the generic `command` path into a real restic repository on disk and restored back, a volume is archived, restored in place and into a scratch volume, and a one-off container is run with a service's environment and mounts. It checks what mocks cannot: that a failed or cut-short stream leaves no snapshot, that a wrong repository password does not initialize a new repository, that retention prunes, that helper containers are removed, and that a one-off container carries none of the service's labels. It pulls `restic/restic`, `mariadb` and `alpine`, and runs as the `Integration (backups and one-off runs)` CI job. It does not use a real S3 bucket.
 
-Exists: the fake VPS suite with pinned published images, the registry-free image delivery suite (remote and local builds, rollback, agent restart, backup and restore), the WireGuard mesh suite, and the packaging smoke tests for the built CLI and the runtime image. The rolling-deploy suite added with M3 already sends continuous requests through the ingress during a rollout and fails on any error.
+Exists: the fake VPS suite with pinned published images, the registry-free image delivery suite (remote and local builds, rollback, agent restart, backup and restore), the plain-address networking suite (cross-node service names, ingress and private published-port binding), and the packaging smoke tests for the built CLI and the runtime image. The rolling-deploy suite added with M3 already sends continuous requests through the ingress during a rollout and fails on any error.
 
 Proposed:
 
@@ -99,7 +95,7 @@ Proposed:
 
 ## Tier 3: real hosts
 
-Real hosts are the only place that shows WireGuard between separate machines, real certificate issuance, real network latency and the state a previous install leaves behind. Proposed: a manually triggered GitHub workflow that creates two throwaway DigitalOcean droplets, runs the scenarios, writes the report and always destroys the droplets, even on failure. A run should cost cents. It needs a DigitalOcean token and an SSH key as repository secrets, and should use Let's Encrypt's staging CA to stay clear of production rate limits.
+Real hosts are the only place that shows routing between separate machines on an operator-provided private network, real certificate issuance, real network latency and the state a previous install leaves behind. Proposed: a manually triggered GitHub workflow that creates two throwaway DigitalOcean droplets, runs the scenarios, writes the report and always destroys the droplets, even on failure. A run should cost cents. It needs a DigitalOcean token and an SSH key as repository secrets, and should use Let's Encrypt's staging CA to stay clear of production rate limits.
 
 The scripts from the first run are the starting point: a request loop from a developer machine and one on the ingress host, a generator for the test application, and a driver for the CLI. They are not in the repository yet.
 

@@ -21,8 +21,7 @@ const FRESH = '2026-01-01T00:00:10.000Z';
 const STALE_BEFORE = '2026-01-01T00:00:00.000Z';
 const node = (name: string, extra: Partial<NodeView> = {}): NodeView => ({
   name,
-  overlayIp: `10.210.0.${name.length}`,
-  address: null,
+  address: `192.168.1.${name.length}`,
   lastSeenAt: FRESH,
   ...extra,
 });
@@ -86,8 +85,8 @@ test('endpoints list only fresh nodes whose copy of the service reports serving'
   );
   assert.deepEqual(
     all.blog.db,
-    [{ node: 'dbnode', address: '10.210.0.6' }],
-    'name resolves to the placement node overlay address',
+    [{ node: 'dbnode', address: '192.168.1.6' }],
+    'name should resolve to the placement node address',
   );
 
   const notServing: ReportedStatus = {
@@ -126,11 +125,8 @@ test('endpoints list only fresh nodes whose copy of the service reports serving'
   );
 });
 
-test('endpoints fall back to the node address without a mesh and skip unreachable nodes', () => {
-  const nodes = [
-    node('app1', { overlayIp: null, address: '192.168.1.5' }),
-    node('app22', { overlayIp: null, address: null }),
-  ];
+test('endpoints use node addresses and skip nodes without an address', () => {
+  const nodes = [node('app1', { address: '192.168.1.5' }), node('app22', { address: null })];
   const eps = resolveServiceEndpoints(
     [state()],
     nodes,
@@ -140,16 +136,16 @@ test('endpoints fall back to the node address without a mesh and skip unreachabl
   assert.deepEqual(
     eps.blog.web,
     [{ node: 'app1', address: '192.168.1.5' }],
-    'node with no overlay or address cannot be an endpoint',
+    'a node without an address should not become an endpoint',
   );
 });
 
-test('ingress dials a local service on its bound address when other nodes also reach it, and remote ones on their overlay address', () => {
+test('ingress dials local and remote services on their bound node addresses', () => {
   const eps = {
     blog: {
       web: [
-        { node: 'app1', address: '10.210.0.4' },
-        { node: 'app22', address: '10.210.0.5' },
+        { node: 'app1', address: '192.168.1.4' },
+        { node: 'app22', address: '192.168.1.5' },
       ],
     },
   };
@@ -169,14 +165,14 @@ test('ingress dials a local service on its bound address when other nodes also r
         service: 'web',
         host: 'app.example.com',
         tls: 'auto',
-        upstreams: ['10.210.0.4:8080', '10.210.0.5:8080'],
+        upstreams: ['192.168.1.4:8080', '192.168.1.5:8080'],
       },
     ],
-    'web runs on two nodes, so its port is bound to the overlay address and the local upstream uses it too; container port 80 resolves to published 8080',
+    'web runs on two nodes, so its port is bound to the node address and the local upstream uses it too; container port 80 resolves to published 8080',
   );
   assert.equal(
     work.caddyfile,
-    `app.example.com {\n\treverse_proxy 10.210.0.4:8080 10.210.0.5:8080 {\n\t\tlb_policy round_robin\n\t}\n}\n`,
+    `app.example.com {\n\treverse_proxy 192.168.1.4:8080 192.168.1.5:8080 {\n\t\tlb_policy round_robin\n\t}\n}\n`,
     'the Caddyfile lists the same upstreams',
   );
   assert.deepEqual(work.warnings, []);
@@ -192,7 +188,7 @@ test('ingress dials 127.0.0.1 for a service whose ingress port listens on loopba
       },
     },
   };
-  const eps = { blog: { web: [{ node: 'edge', address: '10.210.0.4' }] } };
+  const eps = { blog: { web: [{ node: 'edge', address: '192.168.1.4' }] } };
   const work = buildIngressWork({
     states: [state(local)],
     endpoints: eps,
@@ -216,8 +212,8 @@ test('ingress dials 127.0.0.1 for a service whose ingress port listens on loopba
   });
   assert.deepEqual(
     twoEdges.routes[0].upstreams,
-    ['10.210.0.4:8080'],
-    'with a second ingress node the port is bound to the overlay address, so the local Caddy dials that too',
+    ['192.168.1.4:8080'],
+    'with a second ingress node the port is bound to the node address, so the local Caddy dials that too',
   );
   const v6 = buildIngressWork({
     states: [state()],
@@ -295,7 +291,7 @@ test('custom TLS ships cert and key from the project secrets and skips routes mi
       },
     },
   };
-  const eps = { blog: { web: [{ node: 'app1', address: '10.210.0.4' }] } };
+  const eps = { blog: { web: [{ node: 'app1', address: '192.168.1.4' }] } };
   const ok = buildIngressWork({
     states: [state(c)],
     endpoints: eps,

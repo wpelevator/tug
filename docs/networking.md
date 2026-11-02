@@ -1,58 +1,45 @@
-# Networking: mesh, cross-node service names and ingress
+# Networking: cross-node service names and ingress
 
-Three independent, opt-in layers let services on different hosts find each other and let the internet find them. With every layer off, deploys behave exactly as before. The control plane stays single-writer: it allocates addresses, stores peers and renders configuration, but never carries data-plane traffic.
+Two layers let services on different hosts find each other and let the internet find them. Both use the private network you already operate; Tug does not create an overlay network. The control plane stays single-writer: it resolves endpoints and renders configuration, but never carries workload traffic.
 
 | Layer | What it adds | Turned on by |
 |---|---|---|
-| A. WireGuard mesh | Every node gets an overlay IP and a `wg0` tunnel to every other node | `TUG_MESH=true` on control and on each agent |
-| B. Cross-node service names | Services on other nodes resolve by name to their node's address (hosts-file entries, not DNS), only while healthy | on by default with the mesh; `TUG_SERVICE_NAMES=true\|false` on control overrides |
-| C. Ingress and TLS | A managed Caddy on an ingress node routes hostnames to services anywhere, with automatic HTTPS | `tug node-ingress <node>` plus `x-tug.ingress` on a service |
+| A. Cross-node service names | Services on other nodes resolve by name to their node's `address` (hosts-file entries, not DNS), only while healthy | On by default; set `TUG_SERVICE_NAMES=false` on control to opt out |
+| B. Ingress and TLS | A managed Caddy on an ingress node routes hostnames to services anywhere, with automatic HTTPS | `tug node-ingress <node>` plus `x-tug.ingress` on a service |
 
 Independently of the layers, [published ports are private by default](#published-ports-private-by-default): Tug binds them to the address other nodes and the ingress use, never to every interface unless you wrote that.
 
-## Layer A: WireGuard mesh
+## Bring your own network
 
-Control owns addressing. When `TUG_MESH=true`, registering or enrolling a node allocates a stable `nodes.overlay_ip` from `TUG_MESH_CIDR` (default `10.210.0.0/16`, first free host address; replacing the node's identity keeps it). The default does not overlap the integration subnet `10.89.240.0/24`, Docker's default `172.16.0.0/12` pools or the usual home and VPN ranges; pick another CIDR if it collides with a network you route to. The mesh needs at least a `/29`.
+A node's `address` is its sole inter-node address. Set it with `node-install --address`, the node's `address` config key or `TUG_NODE_ADDRESS` at enrollment to a private IP on one of the host's interfaces. Every node that runs a client or an ingress upstream must be able to route to that IP. A hostname is also accepted, but it must resolve on the node to an address Docker can bind. Do not use a cloud VM's public 1:1 NAT address when that address is absent from its interfaces; register its private interface address instead.
 
-Keys never leave the node. The agent generates an X25519 keypair locally, keeps the private key in `<state dir>/wireguard/private.key` (mode `0600`) and sends only the public key: at enrollment (`wgPublicKey`), or on its first poll with `POST /agent/v1/wireguard/key` for nodes registered by the CLI or `node-install`. Control stores it in the `wg_peers` table (`node_id`, `public_key`, `overlay_ip`, `endpoint`, `allowed_ips`).
+The network can be a VPC, LAN, existing VPN or another routed private network. Tug does not allocate inter-node addresses, create tunnels, configure routes or provide NAT traversal for workload traffic. Agents can still dial out to control through NAT, but cross-node service names and remote ingress upstreams work only where this workload network is reachable.
 
-Every `GET /agent/v1/work` response then carries a `network` block (see `NetworkConfig` in `src/protocol.ts`): this node's overlay IP, the mesh CIDR, the listen port and one peer per other node with a key. Each poll the agent compares that with `wg show wg0 dump` and:
+**Tug does not encrypt node-to-node workload traffic.** Mutual TLS protects connections to control, not connections between application containers, published ports and ingress upstreams. Use application-layer TLS or an operator-managed encrypted network where the traffic needs confidentiality or integrity.
 
-1. creates `wg0` only when it is missing, assigns `<overlay ip>/<prefix>` (idempotent `ip address replace`) and brings it up with MTU 1420;
-2. runs `wg syncconf` only when the interface key, listen port or peer set differs, so quiet polls change nothing and established tunnels are never torn down;
-3. gives every peer `AllowedIPs = <peer overlay ip>/32` and `PersistentKeepalive = 25`.
+Firewall the workload network so only the required peers can reach the published service ports. Allow the ingress nodes to reach their upstream ports, and allow application nodes to reach only the services they consume; there is no need to open every port between every node. Publish ports 80 and 443 on ingress nodes only as required by the configured HTTP and ACME flows. Keep databases and other internal services off public interfaces and use a provider firewall as a second boundary: Docker's iptables rules can bypass host firewalls such as ufw. An explicit `0.0.0.0` or `[::]` host IP in Compose is a request for all-interface exposure.
 
-A peer's `Endpoint` is the node's `public_address` (the WireGuard port is appended when the address has none). A node without a public address is behind NAT: it has no endpoint in other nodes' configs, but it dials out to everyone who does, and the keepalive keeps its mapping open so they can reply. At least one node in each connected pair must therefore have a reachable `public_address`. Peers whose configured endpoint changes are updated; endpoints WireGuard learned by roaming are left alone.
+A single-node project needs no inter-node network. When only the managed Caddy on the same node reaches an ingress port, Tug binds that port to loopback.
 
-Containers reach other nodes through the host: traffic leaves the container, is routed by the host over `wg0` to the peer's overlay IP and is masqueraded by Docker, so the target sees the source node's overlay address. This is the host-routed model. Routable container networks (advertising per-project subnets in `AllowedIPs`) are deferred.
+## Layer A: cross-node service names
 
-`control-install --mesh` sets `TUG_MESH=true` on control. Retire a node with `tug node-remove`, which drops its overlay peer so the others stop dialing it.
+Decision: `extra_hosts` injection, not a DNS service. The names are hosts-file entries written into containers at creation, so there is no DNS server, no round-robin answer and no update between reconciliations; "service DNS" is reserved for a possible future implementation. Names for services on the same node are Docker's own network DNS and are unrelated. Cross-node names add no long-running process and need nothing new on the nodes; the cost is that records only change when the agent re-renders the project, which already happens on every poll.
 
-**Running the agent.** The agent needs `wg` and `ip` (both are in the Tug image), `NET_ADMIN`, and the host network namespace so that `wg0` exists on the host. `node-install --mesh` and `node-prepare-enrollment --mesh` generate the right `docker run` (`--network host --cap-add NET_ADMIN -e TUG_MESH=true`). The host needs WireGuard support in the kernel (built in since Linux 5.6; older kernels need the `wireguard` module or DKMS package).
-
-**Key rotation.** `tug node-rotate-wg-key <node>` queues a `wg.rotate-key` command. The agent generates a new keypair, reports the public key and returns it in the command result; every other node picks up the new key on its next poll, and the node itself resyncs `wg0` with the new private key. Expect a few seconds of lost traffic to that node. A rotation that fails after the key was replaced is retried by the normal key report on the next poll.
-
-**Firewall.** Open UDP `51820` (or `TUG_WG_PORT` on control) between nodes that act as endpoints. Allow outbound UDP from nodes behind NAT. Nothing else is required between nodes, and agents still only dial out to control over its single mTLS port. `node-install --mesh` checks that kernel support exists and that the UDP port is free, or already held by this node's own running Tug mesh agent, so repeating the install to upgrade or repair an agent works.
-
-## Layer B: cross-node service names
-
-Decision: `extra_hosts` injection, not a DNS service. The names are hosts-file entries written into containers at creation, so there is no DNS server, no round-robin answer and no update between reconciliations; "service DNS" is reserved for a possible DNS implementation (see [M12](roadmap.md)). Names for services on the same node are Docker's own network DNS and are unrelated. It adds no long-running process, needs nothing new on the nodes and degrades gracefully; the cost is that records only change when the agent re-renders the project, which already happens on every poll.
-
-When cross-node service names are on (default with the mesh; force with `TUG_SERVICE_NAMES=true|false`), the work response carries `serviceEndpoints`: for each project on the node, each service to the list of `{ node, address }` where
+Cross-node service names are enabled by default. Set `TUG_SERVICE_NAMES=false` on control to disable them. While enabled, the work response carries `serviceEndpoints`: for each project on the node, each service to the list of `{ node, address }` where
 
 - the service is placed on that node,
 - the node has polled within `TUG_STALE_SECONDS`, and
 - the node's latest status reports that service as `rolloutState: serving` (so a failing health check withdraws the record).
 
-`address` is the node's overlay IP, or its `address` column when it has no mesh key. The agent's container definition (`containerSpecs`) adds `extra_hosts` to every service on the node for every service that runs elsewhere, as both `<service>` and `<service>.<project>.tug`. Services placed on the same node keep resolving through the project network's Docker DNS, and entries you wrote yourself in `extra_hosts` win. A service on several nodes gets one entry per serving node.
+`address` is the node's configured `address`. The agent resolves a hostname address on the node before writing it into `extra_hosts`, so the resulting entry is a `name:ip` value; a hostname must therefore resolve on the node. The agent's container definition (`containerSpecs`) adds `extra_hosts` to every service on the node for every service that runs elsewhere, as both `<service>` and `<service>.<project>.tug`. Services placed on the same node keep resolving through the project network's Docker DNS, and entries you wrote yourself in `extra_hosts` win. A service on several nodes gets one entry per serving node.
 
 Consequences:
 
-- The name resolves to the node's address, not the container. The target service must publish its port (`ports: ["3306:3306"]`) and clients connect to the published host port. Tug binds that port to the same address the name resolves to ([Published ports](#published-ports-private-by-default)), so it is not on the internet. Rolling services are the exception, see [Rolling services and service names](#rolling-services-and-service-names).
+- The name resolves to the node's address, not the container. The target service must publish its port (`ports: ["3306:3306"]`) and clients connect to the published host port. Tug binds that port to the same address the name resolves to ([Published ports](#published-ports-private-by-default)); the operator's network and firewall determine who can reach it. Rolling services are the exception, see [Rolling services and service names](#rolling-services-and-service-names).
 - `/etc/hosts` has no load balancing: most resolvers use the first entry, so multi-node services give failover on node loss rather than round robin. Real load balancing is a non-goal.
 - Records appear after the target reports `serving` and the client's node re-renders its container definitions on its next poll, which recreates the client container if its `extra_hosts` changed. Order dependent services with health checks and expect one extra recreate on first deploy.
 
-## Layer C: ingress and TLS
+## Layer B: ingress and TLS
 
 Decision: Caddy, as one managed container per ingress node, configured by a Caddyfile that control renders.
 
@@ -73,11 +60,11 @@ services:
 
 An ingress hostname belongs to one project: a deploy or rollback is refused with `409` if another project's current deployment already routes the host (case-insensitive). `tug node-ingress edge1` marks a node as an ingress node (`--disable` removes the role). `port` may be the container port or the published host port; control resolves it to the published host port, and `validateCompose` rejects an ingress port that is not published, because the edge reaches services on `<node address>:<published port>`.
 
-Caddy dials each upstream where its port is bound ([Published ports](#published-ports-private-by-default)): `127.0.0.1` for a service whose ingress port listens on loopback on the ingress node, otherwise the node's overlay address (or `address`, without the mesh), including for services on the ingress node itself.
+Caddy dials each upstream where its port is bound ([Published ports](#published-ports-private-by-default)): `127.0.0.1` for a service whose ingress port listens on loopback on the ingress node, otherwise the node's `address`, including for services on the ingress node itself. Remote addresses must be reachable from the ingress node over the operator's network.
 
 Control aggregates the `ingress` blocks of every project's current deployment, and for each ingress node renders:
 
-- one site block per host with `reverse_proxy` to every serving endpoint, using `127.0.0.1` for loopback-bound services on the ingress node and the overlay (or plain node) address for the rest;
+- one site block per host with `reverse_proxy` to every serving endpoint, using `127.0.0.1` for loopback-bound services on the ingress node and the node `address` for the rest;
 - no route at all for a host without a serving upstream (reported in `ingress.warnings` rather than serving errors), and only the first project for a host claimed twice;
 - with `TUG_ACME_EMAIL`, a global `email` for ACME registration.
 
@@ -91,7 +78,7 @@ The agent on an ingress node creates the `tug-caddy` container with host network
 
 For services with `x-tug.rollout.strategy: rolling`, the upstream port is the one the serving revision reports instead of the declared published port (see below).
 
-Ingress works without the mesh: upstreams then use each node's `address`, which must be reachable from the ingress node.
+Caddy's automatic HTTPS protects the client-to-ingress connection. It does not encrypt the subsequent HTTP connection from Caddy to a service on another node; that upstream connection uses the operator's network.
 
 ## Published ports: private by default
 
@@ -99,26 +86,22 @@ A `ports` entry such as `"3306:3306"` would listen on every interface of the nod
 
 | Situation | Bound to |
 |---|---|
-| Mesh on and the node has reported its WireGuard key | the node's overlay IP |
 | The service's ingress port, when only the managed Caddy on this node dials it | `127.0.0.1` |
 | Otherwise | the node's `address` (a warning event when it is public) |
-| The node has no `address` and no mesh key | `127.0.0.1` |
+| The node has no `address` | `127.0.0.1` |
 
-The address is always the one other nodes resolve the service to and the ingress dials, so cross-node service names and upstreams keep working.
+When a node `address` is configured, it is the same one other nodes resolve the service to and the ingress dials, so cross-node service names and upstreams keep working when the private network is reachable.
 
 "Only the managed Caddy on this node" means: this node is the only ingress node, the service runs on it, and every service of the project runs only on nodes where this service also runs, so no other node reaches it through a service name. That is the [small reference topology](roadmap.md#reference-topology) (app, database and Caddy on one node). Only the entry that publishes `x-tug.ingress.port` moves to loopback; other ports of the service follow the rest of the table.
 
 Details:
 
-- Short syntax gets the address prefixed (`10.210.0.2:3306:3306`, `10.210.0.2:5353:53/udp`, `10.210.0.2:8000-8010:8000-8010`); a container-only entry such as `"80"` becomes `10.210.0.2::80`, and an IPv6 address is bracketed. Long syntax gets `host_ip`.
+- Short syntax gets the address prefixed (`10.0.0.8:3306:3306`, `10.0.0.8:5353:53/udp`, `10.0.0.8:8000-8010:8000-8010`); a container-only entry such as `"80"` becomes `10.0.0.8::80`, and an IPv6 address is bracketed. Long syntax gets `host_ip`.
 - An entry that already names a host IP is left exactly as written, including `0.0.0.0` and `[::]`. That is how you publish something on purpose: `"0.0.0.0:2222:22"`.
-- Control sends the binding in the work response (`ports`, `PortBinding` in `src/protocol.ts`): the address and, per project, the loopback services. A hostname `address` is resolved on the node, only when some port of the project binds to it; if it does not resolve the project fails to apply rather than falling back to every interface. The address must belong to one of the node's interfaces, otherwise Docker cannot bind it (`cannot assign requested address`). On a cloud VM whose public IP is 1:1 NAT (not on an interface), register the private address, or use the mesh.
-- Without the mesh and with a public `address`, ports are bound to that public address and the agent sends one `ports.public` warning event naming the services (again whenever the set changes). Turn on the mesh, register a private `address`, or write the host IP in `ports` to make the exposure explicit.
+- Control sends the binding in the work response (`ports`, `PortBinding` in `src/protocol.ts`): the address and, per project, the loopback services. A hostname `address` is resolved on the node, only when some port of the project binds to it; if it does not resolve the project fails to apply rather than falling back to every interface. The address must belong to one of the node's interfaces, otherwise Docker cannot bind it (`cannot assign requested address`).
+- With a public `address`, ports are bound to that public address and the agent sends one `ports.public` warning event naming the services (again whenever the set changes). Register a private `address`, or write the host IP in `ports` to make the exposure explicit.
 - Rolling revisions keep the host IP when their host port is remapped, so revision ports (`TUG_ROLLOUT_PORTS`) are bound the same way.
-- With the mesh, ports bind to the address on `wg0`. After a host reboot Docker may try to start containers before the agent has brought `wg0` up; those fail to bind and the agent's next reconcile starts them.
 - `tug doctor --nodes` runs a `ports.public` check on every agent: it lists containers of Tug projects (and their rolling revisions) listening on `0.0.0.0`, `::` or a public IP. It is a warning, not a failure, because an explicit `0.0.0.0` may be intended.
-
-M12 (container networking over the mesh) will remove most published ports for internal traffic.
 
 ## Rolling services and service names
 
@@ -129,7 +112,7 @@ Decision: each revision of a rolling service publishes the ingress port on its o
 What this means for names:
 
 - `extra_hosts` entries are `name -> node address` with no port, so a rollout does not change them. Dependents on other nodes are never recreated by a rollout, and a rollout never restarts services that did not change. This is why per-revision ports are safe for `extra_hosts` injection even though a hosts file cannot carry ports.
-- The name of a rolling service on another node still resolves (to the node address, as long as that node reports the service serving), but clients dialing `web:8080` find nothing on the declared port, because rolling revisions do not hold it. Cross-node clients of a rolling service should use its ingress hostname. Giving rolling services a stable name and port would need a per-node proxy that owns the declared port, which is not implemented.
+- The name of a rolling service on another node still resolves (to the node address, as long as that node reports the service serving), but clients dialing `web:8080` find nothing on the declared port, because rolling revisions do not hold it. Cross-node clients of a rolling service should use its ingress hostname. Giving rolling services a stable name and port would need another mechanism that owns the declared port; it is not implemented.
 - On the same node, services in the main project reach a rolling service by name over the shared project network: every revision joins `<project>_default` with the service name as an alias, so the name resolves to whichever revisions are running. During the overlap (start, health check and drain) that can be both revisions, and a not-yet-healthy new revision can receive same-node name traffic. Put anything that must not see an unhealthy revision behind the ingress.
 - Reaching a rolling service by its declared host port (for example `curl localhost:8080` on the node) does not work; the port moves with every rollout.
 - The injected `extra_hosts` are part of a revision's identity, so a rolling service rolls again when another node's service starts or stops serving. On a real first deploy `web` rolled once without the `client` entry and again as soon as `client` on the edge node became serving. The extra rollout is graceful, because the ingress only switches to a healthy revision, but it does start a new container.
@@ -142,30 +125,26 @@ Ingress takeover timing: the new port reaches Caddy after the app node reports i
 sequenceDiagram
     participant Op as Operator
     participant Ctrl as Control plane
-    participant A as Agent app1 (mesh)
-    participant E as Agent edge1 (mesh + ingress)
+    participant A as Agent app1
+    participant E as Agent edge1 (ingress)
     participant Caddy as Caddy on edge1
 
-    Op->>Ctrl: node-install --mesh app1 / edge1 (register, overlay IP allocated)
-    A->>A: generate keypair, keep private key in state dir
-    A->>Ctrl: POST /agent/v1/wireguard/key (public key only)
-    E->>Ctrl: POST /agent/v1/wireguard/key (public key only)
+    Op->>Ctrl: node-install app1 / edge1 with private address values
     Op->>Ctrl: node-ingress edge1
     Op->>Ctrl: deploy (web on app1 with x-tug.ingress)
     loop every poll
         A->>Ctrl: GET /agent/v1/work
-        Ctrl-->>A: desiredStates + network (peers) + serviceEndpoints
-        A->>A: wg syncconf if peers changed, then reconcile containers with extra_hosts
+        Ctrl-->>A: desiredStates + serviceEndpoints + port bindings
+        A->>A: reconcile containers with extra_hosts and private-address ports
         A->>Ctrl: POST /agent/v1/status (web serving)
         E->>Ctrl: GET /agent/v1/work
-        Ctrl-->>E: network + ingress (Caddyfile, certs, routes)
-        E->>E: wg syncconf if peers changed
+        Ctrl-->>E: serviceEndpoints + ingress (Caddyfile, certs, routes) + port bindings
         E->>Caddy: docker cp config, caddy reload (only if config hash changed)
         E->>Ctrl: POST /agent/v1/status (ingress serving)
     end
-    Note over Caddy,A: client request: Caddy terminates TLS, proxies over wg0 to app1 overlay IP:8080
+    Note over Caddy,A: client request: Caddy terminates TLS, proxies over the operator's network to app1 address:8080
 ```
 
 ## Verifying
 
-`npm run test:integration:network` starts three privileged fake VPSes with the mesh on (`vps-c` as ingress node), deploys `docker-compose.network-sample.yml`, and checks pings and a WireGuard handshake between nodes, name resolution of `web` from a container on another node, Caddy on `vps-c` serving `app.test` from `vps-a`, and connectivity after `node-rotate-wg-key`. It needs a Docker host whose kernel has WireGuard. See [Development](development.md#integration-test).
+`npm run test:integration:network` starts three privileged fake VPSes with plain numeric node `address` values (`vps-c` as ingress node), deploys `docker-compose.network-sample.yml`, and checks a container on `vps-b` fetching `http://web:8080` by its cross-node service name, Caddy on `vps-c` serving `app.test` from `vps-a`, and published ports bound to the intended private node addresses rather than every interface. See [Development](development.md#integration-test).

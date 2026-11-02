@@ -6,7 +6,7 @@ import { decodeCredential } from './pki.ts';
 import type { Credential } from './pki.ts';
 import { errMessage } from './util.ts';
 
-export type SettingType = 'string' | 'boolean' | 'port' | 'list' | 'path';
+export type SettingType = 'string' | 'boolean' | 'list' | 'path';
 export interface Setting {
   type: SettingType;
   /** The flag or positional argument the key stands for; the key is the camelCase of the long flag. */
@@ -44,11 +44,6 @@ export const NODE_SETTINGS: Record<string, Setting> = {
     flag: '--address',
     commands: ['node-install', 'node-replace-identity', 'node-repair-identity', 'node-register'],
   },
-  publicAddress: {
-    type: 'string',
-    flag: '--public-address',
-    commands: ['node-install', 'node-replace-identity', 'node-repair-identity', 'node-register'],
-  },
   label: {
     type: 'list',
     flag: '--label',
@@ -59,22 +54,6 @@ export const NODE_SETTINGS: Record<string, Setting> = {
       'node-register',
       'node-prepare-enrollment',
     ],
-  },
-  mesh: {
-    type: 'boolean',
-    flag: '--mesh',
-    commands: [
-      'node-install',
-      'node-replace-identity',
-      'node-repair-identity',
-      'node-prepare-enrollment',
-      'control-install',
-    ],
-  },
-  wgPort: {
-    type: 'port',
-    flag: '--wg-port',
-    commands: ['node-install', 'node-replace-identity', 'node-repair-identity'],
   },
   installDocker: {
     type: 'boolean',
@@ -109,7 +88,7 @@ export const NODE_SETTINGS: Record<string, Setting> = {
     ],
   },
 };
-const NODE_SPECIFIC_KEYS = ['ssh', 'address', 'publicAddress'];
+const NODE_SPECIFIC_KEYS = ['ssh', 'address'];
 const SETTINGS: Record<string, Setting> = { ...COMMAND_SETTINGS, ...NODE_SETTINGS };
 
 /** Default file names, in lookup order; more than one present is an error. */
@@ -320,8 +299,6 @@ function settingValue(
     case 'boolean':
       if (typeof value !== 'boolean') throw new Error(`${where} must be true or false`);
       return value;
-    case 'port':
-      return String(integerOption(String(value), where, 1, 65535));
     case 'list':
       return (Array.isArray(value) ? value : [value]).map((item, index) =>
         text(item, Array.isArray(value) ? `${where}[${index}]` : where),

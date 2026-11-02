@@ -7,17 +7,10 @@ import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from './control.ts';
 import { testImageResolver, testControlUrl, testIdentity } from '../tests/helpers.ts';
-import { generateWgKeyPair } from './mesh.ts';
-import { createCsr, encodeCredential, generateKeyPair } from './pki.ts';
+import { createCsr, generateKeyPair } from './pki.ts';
 import { json } from '../tests/helpers.ts';
 
-const NETWORK_ENV = [
-  'TUG_MESH',
-  'TUG_MESH_CIDR',
-  'TUG_SERVICE_NAMES',
-  'TUG_WG_PORT',
-  'TUG_ACME_EMAIL',
-];
+const NETWORK_ENV = ['TUG_SERVICE_NAMES', 'TUG_ACME_EMAIL'];
 
 async function server(env: Record<string, string> = {}) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-net-'));
@@ -85,179 +78,65 @@ async function server(env: Record<string, string> = {}) {
   };
 }
 
-test('with every networking layer off, the work response and node info are unchanged', async () => {
+test('registration ignores removed WireGuard fields and work contains no mesh configuration', async () => {
   const s = await server();
   try {
-    const reg = await s.register('n1', { wgPublicKey: undefined });
-    assert.equal(reg.node.overlay_ip, null, 'no overlay address is allocated');
-    const w = await s.work(reg.nodeId);
+    const csr = await createCsr((await generateKeyPair()).privateKeyPem);
+    const reg = await json(
+      await s.post('/api/v1/nodes/n1/identity', {
+        csr,
+        mode: 'create',
+        publicAddress: '203.0.113.1',
+        wgPublicKey: 'removed',
+      }),
+    );
+    assert.equal(
+      'public_address' in reg.node,
+      false,
+      'node info should omit the removed public address',
+    );
+    assert.equal(
+      'overlay_ip' in reg.node,
+      false,
+      'node info should omit the removed overlay address',
+    );
+    const w = await s.work(reg.node.id);
     assert.deepEqual(
       Object.keys(w).sort(),
-      ['commands', 'desiredStates', 'nodeId', 'ports', 'retainedImages', 'serverTime'],
-      'no network, serviceEndpoints or ingress keys',
+      [
+        'commands',
+        'desiredStates',
+        'nodeId',
+        'ports',
+        'retainedImages',
+        'serverTime',
+        'serviceEndpoints',
+      ],
+      'work should include default service names but no network or ingress keys',
     );
     assert.deepEqual(
       w.ports,
       { address: null, loopback: {} },
-      'a node without an address or mesh key binds published ports to loopback',
+      'a node without an address should bind published ports to loopback',
     );
     assert.equal(
-      (
-        await s.post(
-          '/agent/v1/wireguard/key',
-          { publicKey: generateWgKeyPair().publicKey },
-          s.agent(reg.nodeId),
-        )
-      ).status,
-      409,
-      'key endpoint refuses when the mesh is off',
+      (await s.post('/agent/v1/wireguard/key', { publicKey: 'removed' }, s.agent(reg.node.id)))
+        .status,
+      404,
+      'the WireGuard key route should no longer exist',
     );
     assert.equal(
       (await s.post('/api/v1/nodes/n1/rotate-wg-key', {})).status,
-      409,
-      'rotation refuses when the mesh is off',
+      404,
+      'the WireGuard rotation route should no longer exist',
     );
-  } finally {
-    await s.close();
-  }
-});
-
-test('mesh allocates stable overlay IPs and each node receives every other node as a peer', async () => {
-  const s = await server({ TUG_MESH: 'true', TUG_WG_PORT: '51999' });
-  try {
-    const a = generateWgKeyPair();
-    const b = generateWgKeyPair();
-    const c = generateWgKeyPair();
-    const regA = await s.register('a', { publicAddress: '203.0.113.1', wgPublicKey: a.publicKey });
-    const regB = await s.register('b', { publicAddress: '203.0.113.2:4444' });
-    const regC = await s.register('c');
-    assert.deepEqual(
-      [regA.node.overlay_ip, regB.node.overlay_ip, regC.node.overlay_ip],
-      ['10.210.0.1', '10.210.0.2', '10.210.0.3'],
-      'sequential allocation from the default CIDR',
+    const diagnostics = await json(
+      await fetch(`${s.base}/api/v1/diagnostics`, { headers: s.agent('op-net-token') }),
     );
     assert.equal(
-      (await s.post('/agent/v1/wireguard/key', { publicKey: b.publicKey }, s.agent(regB.nodeId)))
-        .status,
-      200,
-      'agent reports its public key',
-    );
-    assert.equal(
-      (await s.post('/agent/v1/wireguard/key', { publicKey: c.publicKey }, s.agent(regC.nodeId)))
-        .status,
-      200,
-    );
-    assert.equal(
-      (await s.post('/agent/v1/wireguard/key', { publicKey: 'junk' }, s.agent(regC.nodeId))).status,
-      400,
-      'malformed keys are rejected',
-    );
-    assert.equal(
-      (await s.post('/agent/v1/wireguard/key', { publicKey: a.publicKey }, s.agent(regC.nodeId)))
-        .status,
-      409,
-      'a key cannot belong to two nodes',
-    );
-
-    const wA = await s.work(regA.nodeId);
-    assert.deepEqual(
-      wA.network,
-      {
-        interface: 'wg0',
-        overlayIp: '10.210.0.1',
-        cidr: '10.210.0.0/16',
-        listenPort: 51999,
-        peers: [
-          {
-            node: 'b',
-            publicKey: b.publicKey,
-            endpoint: '203.0.113.2:4444',
-            allowedIps: ['10.210.0.2/32'],
-            persistentKeepalive: 25,
-          },
-          {
-            node: 'c',
-            publicKey: c.publicKey,
-            allowedIps: ['10.210.0.3/32'],
-            persistentKeepalive: 25,
-          },
-        ],
-      },
-      'peer list excludes the node itself, uses the configured port for bare addresses and omits endpoints for NAT-ed nodes',
-    );
-
-    // re-registering keeps the overlay address and key
-    const again = await s.register('a');
-    assert.equal(again.node.overlay_ip, '10.210.0.1', 're-registration keeps the overlay IP');
-    const wB = await s.work(regB.nodeId);
-    assert.equal(
-      wB.network.peers.find((p: { node: string }) => p.node === 'a').endpoint,
-      '203.0.113.1:51999',
-      'replacing a node key keeps its metadata, so the peer endpoint is unchanged',
-    );
-    assert.equal(
-      wB.network.peers.find((p: { node: string }) => p.node === 'a').publicKey,
-      a.publicKey,
-      'the stored public key survives re-registration',
-    );
-  } finally {
-    await s.close();
-  }
-});
-
-test('enroll accepts the agent public key and rejects malformed ones', async () => {
-  const s = await server({ TUG_MESH: 'true' });
-  try {
-    const minted = await json(await s.post('/api/v1/nodes/enrollment-credential', { name: 'x' }));
-    const bootstrap = {
-      'x-tug-test-credential': encodeCredential(minted.credential),
-      'content-type': 'application/json',
-    };
-    const csr = await createCsr((await generateKeyPair()).privateKeyPem);
-    const enroll = (wgPublicKey: string) =>
-      fetch(`${s.base}/agent/v1/enroll`, {
-        method: 'POST',
-        headers: bootstrap,
-        body: JSON.stringify({ csr, wgPublicKey }),
-      });
-    assert.equal((await enroll('nope')).status, 400, 'bad key is a 400');
-    const pair = generateWgKeyPair();
-    const enrolled = await json(await enroll(pair.publicKey));
-    assert.equal(enrolled.node.overlay_ip, '10.210.0.1');
-    const other = await s.register('y', { wgPublicKey: generateWgKeyPair().publicKey });
-    const w = await s.work(other.nodeId);
-    assert.deepEqual(
-      w.network.peers.map((p: { publicKey: string }) => p.publicKey),
-      [pair.publicKey],
-      'enrolled node shows up as a peer with the key it sent',
-    );
-  } finally {
-    await s.close();
-  }
-});
-
-test('rotate-wg-key queues a command for the node and a new key replaces the old one in peers', async () => {
-  const s = await server({ TUG_MESH: 'true' });
-  try {
-    const k1 = generateWgKeyPair();
-    const k2 = generateWgKeyPair();
-    const a = await s.register('a', { wgPublicKey: k1.publicKey });
-    const b = await s.register('b', { wgPublicKey: generateWgKeyPair().publicKey });
-    const queued = await json(await s.post('/api/v1/nodes/a/rotate-wg-key', {}));
-    assert.equal(queued.nodeId, a.nodeId, 'the command targets node a by its immutable ID');
-    const w = await s.work(a.nodeId);
-    assert.deepEqual(
-      w.commands.map((c: { type: string }) => c.type),
-      ['wg.rotate-key'],
-      'agent receives the rotation command',
-    );
-    assert.equal((await s.post('/api/v1/nodes/ghost/rotate-wg-key', {})).status, 404);
-    await s.post('/agent/v1/wireguard/key', { publicKey: k2.publicKey }, s.agent(a.nodeId));
-    const peers = (await s.work(b.nodeId)).network.peers;
-    assert.deepEqual(
-      peers.map((p: { publicKey: string }) => p.publicKey),
-      [k2.publicKey],
-      'other nodes see only the rotated key',
+      diagnostics.checks.some((check: { name: string }) => check.name === 'mesh'),
+      false,
+      'doctor should not include a mesh check',
     );
   } finally {
     await s.close();
@@ -275,11 +154,11 @@ const stack = {
   },
 };
 
-test('service endpoints are published per project only once the node reports the service serving', async () => {
-  const s = await server({ TUG_MESH: 'true' });
+test('service endpoints use node addresses by default once the node reports the service serving', async () => {
+  const s = await server();
   try {
-    const app = await s.register('app', { wgPublicKey: generateWgKeyPair().publicKey });
-    const dbn = await s.register('dbn', { wgPublicKey: generateWgKeyPair().publicKey });
+    const app = await s.register('app', { address: '192.168.1.4' });
+    const dbn = await s.register('dbn', { address: '192.168.1.6' });
     const dep = await s.post('/api/v1/deployments', {
       project: 'blog',
       version: 'v1',
@@ -295,8 +174,8 @@ test('service endpoints are published per project only once the node reports the
     await s.report(dbn.nodeId, 'dbn', 'blog', ['db']);
     assert.deepEqual(
       (await s.work(app.nodeId)).serviceEndpoints,
-      { blog: { db: [{ node: 'dbn', address: dbn.node.overlay_ip }] } },
-      'db resolves to its node overlay IP once serving',
+      { blog: { db: [{ node: 'dbn', address: '192.168.1.6' }] } },
+      'db should resolve to its node address once serving',
     );
 
     await s.post(
@@ -326,11 +205,11 @@ test('service endpoints are published per project only once the node reports the
 });
 
 test('only ingress nodes get an edge config, built from all projects and serving upstreams', async () => {
-  const s = await server({ TUG_MESH: 'true', TUG_ACME_EMAIL: 'ops@example.com' });
+  const s = await server({ TUG_ACME_EMAIL: 'ops@example.com' });
   try {
-    const edge = await s.register('edge', { wgPublicKey: generateWgKeyPair().publicKey });
-    const app = await s.register('app', { wgPublicKey: generateWgKeyPair().publicKey });
-    await s.register('dbn', { wgPublicKey: generateWgKeyPair().publicKey });
+    const edge = await s.register('edge', { address: '192.168.1.2' });
+    const app = await s.register('app', { address: '192.168.1.5' });
+    await s.register('dbn', { address: '192.168.1.6' });
     await s.post('/api/v1/deployments', { project: 'blog', version: 'v1', compose: stack });
     assert.equal(
       (await s.work(edge.nodeId)).ingress,
@@ -348,9 +227,9 @@ test('only ingress nodes get an edge config, built from all projects and serving
     assert.match(
       w.ingress.caddyfile,
       new RegExp(
-        `email ops@example\\.com[\\s\\S]*app\\.example\\.com \\{\\n\\treverse_proxy ${app.node.overlay_ip}:8080`,
+        `email ops@example\\.com[\\s\\S]*app\\.example\\.com \\{\\n\\treverse_proxy 192.168.1.5:8080`,
       ),
-      'upstream is the app node overlay IP on the published port',
+      'upstream should be the app node address on the published port',
     );
 
     const nodes = (
@@ -369,8 +248,8 @@ test('only ingress nodes get an edge config, built from all projects and serving
   }
 });
 
-test('ingress works without the mesh using node addresses, and ingress status is stored and diagnosed', async () => {
-  const s = await server();
+test('ingress uses node addresses with service names disabled, and ingress status is stored and diagnosed', async () => {
+  const s = await server({ TUG_SERVICE_NAMES: 'false' });
   try {
     const edge = await s.register('edge');
     const app = await s.register('app', { address: '192.168.1.5' });
@@ -385,9 +264,13 @@ test('ingress works without the mesh using node addresses, and ingress status is
     assert.deepEqual(
       w.ingress.routes[0].upstreams,
       ['192.168.1.5:8080'],
-      'plain node address is the upstream when no mesh exists',
+      'the plain node address should be the ingress upstream',
     );
-    assert.equal(w.serviceEndpoints, undefined, 'service DNS stays off without the mesh');
+    assert.equal(
+      w.serviceEndpoints,
+      undefined,
+      'TUG_SERVICE_NAMES=false should disable service DNS',
+    );
 
     const diag = async () =>
       (
@@ -412,18 +295,11 @@ test('ingress works without the mesh using node addresses, and ingress status is
   }
 });
 
-test('the work response tells each node where to bind published ports', async () => {
-  const s = await server({ TUG_MESH: 'true' });
+test('the work response binds published ports to node addresses or loopback', async () => {
+  const s = await server();
   try {
-    const edge = await s.register('edge', {
-      address: '203.0.113.9',
-      wgPublicKey: generateWgKeyPair().publicKey,
-    });
-    const app = await s.register('app', {
-      address: '203.0.113.10',
-      wgPublicKey: generateWgKeyPair().publicKey,
-    });
-    const keyless = await s.register('keyless', { address: '192.168.1.7' });
+    const edge = await s.register('edge', { address: '192.168.1.9' });
+    const app = await s.register('app', { address: '192.168.1.10' });
     await s.post('/api/v1/nodes/edge/ingress', { enabled: true });
     const site = {
       services: {
@@ -437,32 +313,16 @@ test('the work response tells each node where to bind published ports', async ()
     await s.post('/api/v1/deployments', { project: 'blog', version: 'v1', compose: stack });
     assert.deepEqual(
       (await s.work(edge.nodeId)).ports,
-      { address: edge.node.overlay_ip, loopback: { site: ['web'] } },
-      'with the mesh the edge binds to its overlay IP, and a project wholly on the only ingress node puts its ingress port on loopback',
+      { address: '192.168.1.9', loopback: { site: ['web'] } },
+      'a project wholly on the only ingress node should bind its ingress port to loopback',
     );
     assert.deepEqual(
       (await s.work(app.nodeId)).ports,
-      { address: app.node.overlay_ip, loopback: {} },
-      'a non-ingress node binds to its overlay IP, not its public address',
-    );
-    assert.deepEqual(
-      (await s.work(keyless.nodeId)).ports,
-      { address: '192.168.1.7', loopback: {} },
-      'a node that has not reported a WireGuard key binds to its address, matching its service endpoint',
+      { address: '192.168.1.10', loopback: {} },
+      'a non-ingress node should bind published ports to its node address',
     );
   } finally {
     await s.close();
-  }
-  const plain = await server();
-  try {
-    const n = await plain.register('n1', { address: '203.0.113.20' });
-    assert.deepEqual(
-      (await plain.work(n.nodeId)).ports,
-      { address: '203.0.113.20', loopback: {} },
-      'without the mesh a node binds to its address (the agent warns when it is public)',
-    );
-  } finally {
-    await plain.close();
   }
 });
 

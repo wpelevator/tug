@@ -259,7 +259,6 @@ const SAMPLES: Record<string, { path: string; body?: unknown }> = {
     path: '/api/v1/nodes/enrollment-credential',
     body: {},
   },
-  'POST /api/v1/nodes/:name/rotate-wg-key': { path: '/api/v1/nodes/ghost/rotate-wg-key', body: {} },
   'POST /api/v1/nodes/:name/ingress': { path: '/api/v1/nodes/ghost/ingress', body: {} },
   'POST /api/v1/control/backups/run': { path: '/api/v1/control/backups/run', body: {} },
   'POST /api/v1/control/restore': { path: '/api/v1/control/restore', body: {} },

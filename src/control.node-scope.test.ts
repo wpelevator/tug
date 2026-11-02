@@ -154,22 +154,6 @@ test('backup credentials: only the node that owns the command can fetch them', a
   }
 });
 
-test('wireguard key: the handler acts on the authenticated node only', async () => {
-  const s = await setup();
-  try {
-    const key = await s.call('POST', '/agent/v1/wireguard/key', s.as('n2'), {
-      publicKey: 'x',
-      nodeId: 'n1',
-    });
-    assert.ok(
-      [400, 409].includes(key.status),
-      'a bad key or a disabled mesh is refused for n2 without touching n1',
-    );
-  } finally {
-    await s.close();
-  }
-});
-
 test('images: a node cannot download an archive it is not assigned', async () => {
   const s = await setup();
   try {

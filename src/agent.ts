@@ -55,17 +55,8 @@ import {
 import { ensureDir, errMessage, isPublicAddress, now, parseDuration } from './util.ts';
 import { openAgentDb } from './db.ts';
 import type { AppliedStateRow, Db, EventStateRow } from './db.ts';
-import { createHostRunner } from './runners.ts';
-import type { HostRunner, HttpClient } from './runners.ts';
+import type { HttpClient } from './runners.ts';
 import { CADDY_CONTAINER, reconcileIngress, removeIngress } from './ingress.ts';
-import {
-  WG_INTERFACE,
-  ensureWgKeys,
-  readReportedKey,
-  reconcileMesh,
-  rotateWgKeys,
-  writeReportedKey,
-} from './mesh.ts';
 import type {
   Command,
   CommandResult,
@@ -94,8 +85,6 @@ let NODE_NAME = process.env.TUG_NODE_NAME || process.env.HOSTNAME || 'node1';
 const STATE_DIR = process.env.TUG_STATE_DIR || '/var/lib/tug';
 const APPLY = process.env.TUG_APPLY !== 'false';
 const INTERVAL = Number(process.env.TUG_POLL_INTERVAL_MS || 5000);
-// Opt-in WireGuard mesh: needs `wg`/`ip` in the agent image, host networking and NET_ADMIN.
-const MESH = process.env.TUG_MESH === 'true';
 
 // Everything the reconcile/command logic needs from the outside world. Production wiring is
 // `defaultContext()`; tests pass a fake `docker` runner / `http` client and temp dirs.
@@ -108,10 +97,6 @@ export interface AgentContext {
   controlUrl: string;
   /** The node credential presented to control; absent only in tests with a fake `http`. */
   credential?: Credential;
-  /** Runs `wg` / `ip` for the mesh. */
-  host?: HostRunner;
-  /** Manage the WireGuard mesh (generate a key, report it, reconcile `wg0`). */
-  mesh?: boolean;
   caddyImage?: string;
   /** Host port range (`LOW-HIGH`) for rolling-rollout revisions; default 20000-20999. */
   rolloutPorts?: string;
@@ -129,8 +114,6 @@ export function defaultContext(doc: AgentDocument | undefined = activeDocument):
     apply: APPLY,
     controlUrl: transport.base,
     credential: doc,
-    host: createHostRunner(),
-    mesh: MESH,
     caddyImage: process.env.TUG_CADDY_IMAGE,
     rolloutPorts: process.env.TUG_ROLLOUT_PORTS,
   };
@@ -729,7 +712,7 @@ async function publicPortsCheck(ctx: AgentContext): Promise<DiagnosticCheck> {
           name: 'ports.public',
           ok: true,
           stdout: stdout.slice(-4000),
-          warning: `${listeners.length} published port${listeners.length === 1 ? ' of Tug projects listens' : 's of Tug projects listen'} on a public address; bind them to 127.0.0.1, the overlay IP or a private address unless that is intended`,
+          warning: `${listeners.length} published port${listeners.length === 1 ? ' of Tug projects listens' : 's of Tug projects listen'} on a public address; bind them to 127.0.0.1 or a private node address unless that is intended`,
         }
       : {
           name: 'ports.public',
@@ -777,13 +760,6 @@ export async function executeCommand(
       }
     }
     const extra: [string, () => Promise<{ out: string; err: string }>][] = [];
-    if (ctx.mesh && ctx.host) {
-      const host = ctx.host;
-      extra.push(
-        ['wireguard.version', () => host('wg', ['--version'])],
-        ['wireguard.interface', () => host('wg', ['show', WG_INTERFACE])],
-      );
-    }
     if (
       await fs.stat(path.join(ctx.stateDir, 'ingress')).then(
         () => true,
@@ -859,18 +835,6 @@ export async function executeCommand(
       state: 'succeeded',
       result: { project, volume, deleted: true },
     };
-  }
-  if (command.type === 'wg.rotate-key') {
-    if (!ctx.mesh)
-      throw new Error('the WireGuard mesh is not enabled on this agent (TUG_MESH=true)');
-    const { publicKey } = await rotateWgKeys(ctx.stateDir);
-    await api(ctx, '/agent/v1/wireguard/key', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ publicKey }),
-    });
-    await writeReportedKey(ctx.stateDir, publicKey);
-    return { commandId: command.id, state: 'succeeded', result: { publicKey } };
   }
   return {
     commandId: command.id,
@@ -1272,7 +1236,7 @@ async function warnPublicPorts(
     ? addressBoundServices(desiredState.compose, serviceNames, bind.loopback)
     : [];
   const message = exposed.length
-    ? `published ports of ${exposed.join(', ')} listen on public address ${bind.address}; enable the mesh, give the node a private address, or write the host IP in ports to make the exposure explicit`
+    ? `published ports of ${exposed.join(', ')} listen on public address ${bind.address}; give the node a private address, or write the host IP in ports to make the exposure explicit`
     : '';
   if ((publicPortWarnings.get(key) ?? '') === message) return;
   publicPortWarnings.set(key, message);
@@ -1290,40 +1254,40 @@ async function warnPublicPorts(
   }).catch(() => {});
 }
 
-/** Reports this node's WireGuard public key when control has not seen the current one yet. */
-export async function reportWgKey(ctx: AgentContext): Promise<void> {
-  const { publicKey } = await ensureWgKeys(ctx.stateDir);
-  if ((await readReportedKey(ctx.stateDir)) === publicKey) return;
-  await api(ctx, '/agent/v1/wireguard/key', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ publicKey }),
-  });
-  await writeReportedKey(ctx.stateDir, publicKey);
-}
-
-let lastNetworkError = '';
-async function networkStep(label: string, fn: () => Promise<unknown>): Promise<void> {
-  try {
-    await fn();
-    lastNetworkError = '';
-  } catch (e) {
-    const message = `${label}: ${errMessage(e)}`;
-    if (message !== lastNetworkError) console.error(message);
-    lastNetworkError = message;
-  }
+/** Docker `extra_hosts` values must be IPs, so resolve hostname node addresses on this agent. */
+async function endpointAddressesForAgent(
+  endpoints: Record<string, ServiceEndpoint[]> = {},
+): Promise<Record<string, ServiceEndpoint[]>> {
+  const cache = new Map<string, Promise<string>>();
+  const resolve = (address: string): Promise<string> => {
+    if (net.isIP(address)) return Promise.resolve(address);
+    let resolved = cache.get(address);
+    if (!resolved) {
+      resolved = dns.lookup(address).then(
+        ({ address: ip }) => ip,
+        (error: unknown) => {
+          throw new Error(
+            `cannot resolve node address ${address} for cross-node service names: ${errMessage(error)}`,
+            { cause: error },
+          );
+        },
+      );
+      cache.set(address, resolved);
+    }
+    return resolved;
+  };
+  return Object.fromEntries(
+    await Promise.all(
+      Object.entries(endpoints).map(async ([service, list]) => [
+        service,
+        await Promise.all(list.map(async (ep) => ({ ...ep, address: await resolve(ep.address) }))),
+      ]),
+    ),
+  );
 }
 
 export async function pollOnce(ctx: AgentContext = defaultContext()): Promise<ProjectStatus[]> {
-  if (ctx.mesh) await networkStep('wireguard key report failed', () => reportWgKey(ctx));
   const work = await api<WorkResponse & { desiredState?: DesiredState }>(ctx, '/agent/v1/work');
-  // The mesh comes up first so cross-node service endpoints are routable when containers start.
-  if (ctx.mesh && work.network) {
-    const network = work.network;
-    await networkStep('wireguard reconcile failed', () =>
-      reconcileMesh(ctx.host ?? createHostRunner(), ctx.stateDir, network),
-    );
-  }
   const projects: ProjectStatus[] = [];
   for (const desired of work.desiredStates || (work.desiredState ? [work.desiredState] : [])) {
     try {
@@ -1331,7 +1295,7 @@ export async function pollOnce(ctx: AgentContext = defaultContext()): Promise<Pr
         await reconcile(
           desired,
           ctx,
-          work.serviceEndpoints?.[desired.project],
+          await endpointAddressesForAgent(work.serviceEndpoints?.[desired.project]),
           work.ports,
           work.holds?.[desired.project],
         ),
@@ -1417,12 +1381,9 @@ async function enroll(joinKey: string): Promise<AgentDocument> {
   const transport = createTransport(decoded.credential, CONTROL_URL_OVERRIDE || decoded.connectUrl);
   console.log(`enrolling with ${decoded.credential.url} as ${decoded.name}`);
   const csr = await agentIdentityCsr(STATE_DIR);
-  const wgPublicKey = MESH ? (await ensureWgKeys(STATE_DIR)).publicKey : undefined;
   const body: EnrollRequest = {
     csr,
     address: process.env.TUG_NODE_ADDRESS,
-    publicAddress: process.env.TUG_NODE_PUBLIC_ADDRESS,
-    wgPublicKey,
   };
   try {
     const res = await transport.http(`${transport.base}/agent/v1/enroll`, {
@@ -1432,7 +1393,6 @@ async function enroll(joinKey: string): Promise<AgentDocument> {
     });
     if (!res.ok) throw new Error(`enroll failed: ${res.status} ${await res.text()}`);
     const doc = await installIdentity(STATE_DIR, (await res.json()) as EnrollResponse);
-    if (wgPublicKey) await writeReportedKey(STATE_DIR, wgPublicKey);
     console.log(`enrolled as node ${doc.nodeName}`);
     return doc;
   } finally {

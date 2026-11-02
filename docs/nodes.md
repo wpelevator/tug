@@ -4,7 +4,7 @@ A node is a registered Docker host on which Tug places services, and the agent i
 
 ## Node names and IDs
 
-A node has a **name** you choose (used in `x-tug.placement.nodes`, the CLI and the config file) and an **ID** that control generates (`node_` followed by random hex). The ID is immutable: it is never derived from the name, never changes when the identity is replaced, and is never reused. The node's certificate names its ID (`tug:node:<id>`), and every record control keeps for the node (status, commands, WireGuard peer, backup schedules and volumes) refers to the ID. When `node-remove` frees a name, a node created later with that name gets a new ID, so certificates issued for the removed node can never authenticate the new one, even if the same key is installed again, and leftover records of the removed node do not attach to it. `tug status` and `tug events` show IDs next to names where a record carries one.
+A node has a **name** you choose (used in `x-tug.placement.nodes`, the CLI and the config file) and an **ID** that control generates (`node_` followed by random hex). The ID is immutable: it is never derived from the name, never changes when the identity is replaced, and is never reused. The node's certificate names its ID (`tug:node:<id>`), and every record control keeps for the node (status, commands, backup schedules and volumes) refers to the ID. When `node-remove` frees a name, a node created later with that name gets a new ID, so certificates issued for the removed node can never authenticate the new one, even if the same key is installed again, and leftover records of the removed node do not attach to it. `tug status` and `tug events` show IDs next to names where a record carries one.
 
 ## Install over SSH (`node-install`)
 
@@ -14,7 +14,7 @@ tug node-install root@app1.example.com --name app1 --address 10.0.0.11 --install
 
 The node generates its own key and certificate request; an admin credential authorizes the identity at that moment and the certificate is installed back over SSH, so no bootstrap secret travels and the private key never leaves the node's state volume. In order, the command runs SSH preflight checks, runs `agent identity` on the host (printing the CSR for the pending key in `/var/lib/tug/agent-pending.json`), posts it to `POST /api/v1/nodes/:name/identity` with `mode: create`, pipes the response into `agent install-cert` (which validates that the certificate names this node, chains to the CA in the response and matches the pending key before durably writing `/var/lib/tug/agent.json`), writes `/etc/tug/agent.env` and starts the agent container. Every step is safe to repeat: rerunning after a partial failure reuses the pending key, and `create` with the identical key is an idempotent retry that keeps the first call's metadata. No secret appears in an SSH command line or log. The command then waits for a status report from the new identity (`--no-wait` skips it).
 
-`--address` is where other nodes and the ingress reach this node's services without the mesh, and the address its published ports bind to ([Published ports](networking.md#published-ports-private-by-default)); give an IP on one of the host's interfaces, preferably a private one. `--public-address` is only the WireGuard endpoint. Control rejects an `--address` that is not an IP or hostname without a port, and a `--public-address` that is not a host with an optional port.
+`--address` is the node's sole inter-node address: other nodes and the ingress use it to reach services, service names resolve to it, and published ports bind to it ([Published ports](networking.md#published-ports-private-by-default)). Give a private IP on one of the host's interfaces and make it reachable from the other nodes that need it. Control rejects an `--address` that is not an IP or hostname without a port. Tug does not create or encrypt this workload network; see [Bring your own network](networking.md#bring-your-own-network).
 
 Built application images are downloaded directly from control. Published images are pulled by their stored digest from upstream registries, with private credentials released through control when needed. No node registry login is required.
 
@@ -30,7 +30,7 @@ Node certificates last 90 days. The agent renews at two thirds of the lifetime p
 
 | Situation | Command |
 | --- | --- |
-| Cut a node off immediately, without SSH or deleting anything | `tug node-disable <node>` (also removes it from other nodes' WireGuard peers, service endpoints, ingress and label-based scheduling; explicit `placement.nodes` entries are left alone) |
+| Cut a node off immediately, without SSH or deleting anything | `tug node-disable <node>` (also removes it from service endpoints, ingress and label-based scheduling; explicit `placement.nodes` entries are left alone) |
 | Certificate expired, key lost or suspected compromised, node disabled, CA loss, or an older backup restored | `tug node-replace-identity <ssh-target> --name <node>` installs a new key (`mode: replace`); the old key's certificates stop working at once and their sockets close |
 | `agent.json` or `agent-pending.json` is corrupt | `tug node-repair-identity <ssh-target> --name <node>` moves the corrupt documents aside (never service volumes or agent event state) and replaces the identity |
 | Every node after a CA loss or older restore | recover root on the control-plane host (`control-install --recover-root`), then `tug node-replace-identity --all` |
@@ -48,11 +48,11 @@ nodeDefaults:
 nodes:
   app1:
     ssh: root@203.0.113.7
-    publicAddress: 203.0.113.7
+    address: 10.0.0.7
     label: [web, ingress]
 ```
 
-`tug node-install --name app1` then runs as if `root@203.0.113.7 --address ... --label web --label ingress --install-docker` had been typed; `tug node-register app1` and `tug node-prepare-enrollment --name app1` read the same entry. Flags override the file key by key, and a `label` list on the command line replaces the file's list. An `<ssh-target>` argument overrides `ssh`; without one, a node with no `ssh` in the file is an error that names the missing key. The argument is never guessed to be a node name, because `app1` is also a valid hostname. `nodeDefaults` apply to every node, declared or not. Batch identity commands (`node-install`, `node-replace-identity` and `node-repair-identity` with `--all`) use the same precedence for every supported key: explicit flags, then the node entry, then `nodeDefaults`, then command defaults. This includes `image`, `agentControlUrl`, `wgPort`, `installDocker` and `mesh`; `false` and empty lists remain explicit values.
+`tug node-install --name app1` then runs as if `root@203.0.113.7 --address 10.0.0.7 --label web --label ingress --install-docker` had been typed; `tug node-register app1` and `tug node-prepare-enrollment --name app1` read the same entry. Flags override the file key by key, and a `label` list on the command line replaces the file's list. An `<ssh-target>` argument overrides `ssh`; without one, a node with no `ssh` in the file is an error that names the missing key. The argument is never guessed to be a node name, because `app1` is also a valid hostname. `nodeDefaults` apply to every node, declared or not. Batch identity commands (`node-install`, `node-replace-identity` and `node-repair-identity` with `--all`) use the same precedence for every supported key: explicit flags, then the node entry, then `nodeDefaults`, then command defaults. This includes `image`, `agentControlUrl` and `installDocker`; `false` and empty lists remain explicit values.
 
 The control plane stays the source of truth. Only `node-install`, `node-replace-identity`, `node-repair-identity`, `node-register` and `node-prepare-enrollment` read `nodes`, as flag defaults; `status`, `deploy`, `scale`, `ps`, `logs`, `exec`, `node-remove` and every other command ask control and never consult the file. Re-running `node-install` with the same key is an idempotent retry that keeps the first call's metadata; `node-replace-identity` installs a new key and keeps the node's ID, metadata and placement. Editing the file without re-running anything changes nothing in control.
 
@@ -64,6 +64,7 @@ For hosts you cannot SSH to or do not want to touch: cloud-init and user-data pr
 tug node-prepare-enrollment --name app1
 # prints, e.g.:
 #   docker run -d --name tug-agent --restart unless-stopped \
+#     --network host \
 #     -v /var/run/docker.sock:/var/run/docker.sock \
 #     -v tug-agent:/var/lib/tug \
 #     -e TUG_JOIN_KEY=<key> \
@@ -81,7 +82,6 @@ Options:
 - `--ttl <seconds>` sets the key lifetime (default `3600`).
 - `--label <label>` sets node labels (repeatable).
 - `--image <tag>` sets the image in the printed command (default `ghcr.io/wpelevator/tug:<CLI version>`).
-- `--mesh` prints a mesh-capable command.
 - `--json` prints machine-readable output.
 - `--install-docker` prints a complete cloud-init document that installs Docker Engine before starting the agent. With `--json`, the result includes both `command` and `cloudInit` fields.
 
@@ -115,9 +115,9 @@ It adds Docker's official apt or dnf repository, installs Engine and Buildx, and
 
 `node-install`, `node-prepare-enrollment` and `node-register` accept a repeatable `--label <label>`. Labels are plain string tags stored on the node and listed by the node list API; services select nodes that carry all of their `x-tug.placement.labels` (see [Compose extensions](compose.md#services)). They are set when the node is created (`node-install`, `node-register --mode create` or the enrollment credential); `node-replace-identity` keeps them. They are unrelated to Docker container labels.
 
-## Joining the WireGuard mesh
+## Agent host networking
 
-The agent always runs with host networking (`--network host`): it dials container IPs for TCP and HTTP health checks, which a bridge-networked agent cannot reach on current Docker (29.x). Add `--mesh` to `node-install` or `node-prepare-enrollment` (and set `TUG_MESH=true` on control) to also give it `NET_ADMIN`, so it can create `wg0` and join the overlay. Give nodes that other nodes must dial a `--public-address`; nodes behind NAT can omit it. See [Networking](networking.md).
+The agent always runs with host networking (`--network host`) because it dials container IPs directly for TCP and HTTP health checks, which a bridge-networked agent cannot reach on current Docker (29.x). On Docker Desktop the daemon and container addresses live inside its VM, which is why the agent belongs in a container on that daemon rather than in a plain host process. Host networking needs no added Linux capability. Inter-node workload reachability is a separate concern owned by the operator's network; see [Networking](networking.md#bring-your-own-network).
 
 ## CSR in, certificate out (`node-register`)
 
@@ -125,7 +125,7 @@ The agent always runs with host networking (`--network host`): it dials containe
 
 ## Status and diagnostics
 
-Nodes are `online` while they contact control and become `stale` after `TUG_STALE_SECONDS` (default `60`) without an authenticated work fetch, status report or wake wait. Agents keep an outbound WebSocket open so control can wake them for deployments and commands; if WebSockets are unavailable they use an HTTP long poll, and `TUG_POLL_INTERVAL_MS` remains the periodic reconciliation fallback. `tug status` lists nodes, deployments and per-node project status; `tug doctor --nodes` (or `--node <name>`) runs Docker Engine (and, with the mesh or ingress, WireGuard and Caddy) checks through each agent and waits for the result; the wait defaults to 60 seconds. Online and offline are connectivity states only: a `stale` node has not contacted control recently, which does not prove the machine is off. `tug doctor` also reports each node's certificate expiry and, for nodes that are reporting now, the observed clock skew (see [Doctor](#doctor-certificate-expiry-and-clock-skew)).
+Nodes are `online` while they contact control and become `stale` after `TUG_STALE_SECONDS` (default `60`) without an authenticated work fetch, status report or wake wait. Agents keep an outbound WebSocket open so control can wake them for deployments and commands; if WebSockets are unavailable they use an HTTP long poll, and `TUG_POLL_INTERVAL_MS` remains the periodic reconciliation fallback. `tug status` lists nodes, deployments and per-node project status; `tug doctor --nodes` (or `--node <name>`) runs Docker Engine checks, plus Caddy checks on ingress nodes, through each agent and waits for the result; the wait defaults to 60 seconds. Online and offline are connectivity states only: a `stale` node has not contacted control recently, which does not prove the machine is off. `tug doctor` also reports each node's certificate expiry and, for nodes that are reporting now, the observed clock skew (see [Doctor](#doctor-certificate-expiry-and-clock-skew)).
 
 ### Doctor: certificate expiry and clock skew
 

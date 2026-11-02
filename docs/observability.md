@@ -13,7 +13,7 @@ Verified against the code on `main`.
 | Audit trail | Deployments and events record the acting credential, and `system:auto-rollback` for automatic rollbacks. See [Access control](access-control.md). | Answers who acted, not how the system behaves |
 | `tug status` | Prints `GET /api/v1/status` as JSON: projects, the 20 latest deployments, nodes with `status` and `last_seen_at`, and per-node project status including health, rollout state, port and rollout error. | Raw JSON. A node is marked `stale` only when this endpoint is called, using `TUG_STALE_SECONDS` (default 60) |
 | `tug events` | Lists events from `GET /api/v1/events`, newest first, at most 500 per call, 100 by default. | Agents report on change only, see [Events](#events) |
-| `tug doctor` | Local checks (Node.js, Docker, the Compose plugin `deploy` needs), control checks (SQLite, CA and server certificate expiry, each node's certificate expiry and connectivity, each online node's observed clock skew, master key, Docker, mesh keys, ingress state) and, with `--nodes` or `--node`, host diagnostics through each agent. It waits for those results. Clock skew is unknown, not zero, for a node that is offline. | A point-in-time check, not a time series |
+| `tug doctor` | Local checks (Node.js, Docker, the Compose plugin `deploy` needs), control checks (SQLite, CA and server certificate expiry, each node's certificate expiry and connectivity, each online node's observed clock skew, master key, Docker, ingress state) and, with `--nodes` or `--node`, host diagnostics through each agent. It waits for those results. Clock skew is unknown, not zero, for a node that is offline. | A point-in-time check, not a time series |
 | `tug logs <service>` | Queues a `logs.fetch` command on the service's node and prints the tail. | A tail through the poll-based command queue; no follow mode |
 | Reachability | Control has no unauthenticated route, not even a health check: every request needs a client certificate. Monitor TCP reachability of the mTLS port for liveness, and use an authenticated read (`tug doctor`, `tug status`) for readiness. | A TCP check proves the listener accepts connections, not that the database works |
 | Process logs | Control and agent write plain `console.log` and `console.error` text. | No timestamps, levels, structure or request ids |
@@ -98,7 +98,7 @@ The agent would read these from `docker stats --no-stream` and `docker inspect`,
 
 Why report through control: agents sit behind NAT and only dial out, so Prometheus often cannot reach them. Reporting through the existing authenticated channel needs no inbound port, no extra credential and no firewall change, and adds one scrape target regardless of node count. The cost is resolution: values are as fresh as the poll interval (`TUG_POLL_INTERVAL_MS`), and the status report grows with the number of services.
 
-The alternative is scraping an exporter on each agent directly over the WireGuard mesh from [Networking](networking.md). It gives finer resolution and keeps control out of the data path, but it requires the mesh, a listener on every node, a firewall rule on the mesh interface and a service-discovery list for Prometheus, and it does not work for nodes without the mesh or behind NAT. If both are ever wanted, the metric names above can be reused so dashboards do not change.
+The alternative is scraping an exporter on each agent directly over the operator's private network from [Networking](networking.md#bring-your-own-network). It gives finer resolution and keeps control out of the data path, but it requires a listener on every node, firewall rules that admit only Prometheus and a service-discovery list. It does not work where Prometheus cannot route to the node addresses, including nodes behind NAT. If both are ever wanted, the metric names above can be reused so dashboards do not change.
 
 ### Health endpoints
 
@@ -114,7 +114,7 @@ The managed Caddy would enable its metrics with the global option `servers { met
 
 Open questions:
 
-- Whether re-exporting parsed Caddy metrics through the status report is worth the complexity, compared with publishing Caddy's admin metrics port on the mesh and scraping it directly.
+- Whether re-exporting parsed Caddy metrics through the status report is worth the complexity, compared with publishing Caddy's admin metrics port on a private node address, firewalling it to Prometheus and scraping it directly.
 - Which certificate expiry signal Caddy exposes reliably across versions; the alert below assumes a `tug_ingress_certificate_expiry_timestamp_seconds` gauge that may have to be derived from the certificate files.
 - Label cardinality: one `host` label per route is bounded by the number of routes, but per-upstream labels are not planned.
 

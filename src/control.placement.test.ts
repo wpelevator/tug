@@ -257,15 +257,9 @@ test('node addresses cannot carry configuration syntax', async () => {
         `address ${JSON.stringify(address)} must be rejected`,
       );
     assert.equal(
-      (await register({ name: 'bad', publicAddress: '1.2.3.4 {\n#' })).status,
-      400,
-      'a public address with syntax must be rejected',
-    );
-    assert.equal(
-      (await register({ name: 'ok', address: '10.0.0.9', publicAddress: 'node.example.com:51820' }))
-        .status,
+      (await register({ name: 'ok', address: '10.0.0.9' })).status,
       200,
-      'plain host and host:port public addresses are accepted',
+      'a plain node address should be accepted',
     );
   } finally {
     await s.close();

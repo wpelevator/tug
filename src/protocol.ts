@@ -206,7 +206,6 @@ export type CommandType =
   | 'service.restart'
   | 'logs.fetch'
   | 'volume.delete'
-  | 'wg.rotate-key'
   | 'backup.check'
   | 'backup.run'
   | 'backup.restore'
@@ -318,7 +317,6 @@ export type CommandResultPayload =
   | { project: string; service: string; restarted: true }
   | { stdout: string; stderr: string }
   | { project: string; volume: string; deleted: true }
-  | { publicKey: string }
   | BackupJobResult
   | { error: string };
 
@@ -408,8 +406,6 @@ export interface WorkResponse {
   desiredStates: DesiredState[];
   commands: Command[];
   retainedImages?: string[];
-  /** WireGuard mesh config for this node; present only when the mesh is enabled on control. */
-  network?: NetworkConfig;
   /** Healthy cross-node endpoints per project and service; present only when service DNS is enabled. */
   serviceEndpoints?: ServiceEndpoints;
   /** Edge proxy config; present only for nodes marked as ingress nodes. */
@@ -425,38 +421,13 @@ export interface WorkResponse {
  * explicit host IP (including `0.0.0.0`) are never changed.
  */
 export interface PortBinding {
-  /** The node's overlay IP with the mesh, otherwise its `address` (an IP or a hostname the agent resolves); null binds to `127.0.0.1`. */
+  /** The node's `address` (an IP or a hostname the agent resolves); null binds to `127.0.0.1`. */
   address: string | null;
   /** Per project, services whose ingress port only the managed Caddy on this node dials; that port binds to `127.0.0.1`. */
   loopback: Record<string, string[]>;
 }
 
-// ---- Networking: WireGuard mesh, service DNS, ingress ------------------------------------------
-
-export interface WgPeer {
-  node: string;
-  publicKey: string;
-  /** `host:port` the peer can be dialed on; absent for nodes behind NAT (they dial out instead). */
-  endpoint?: string;
-  allowedIps: string[];
-  persistentKeepalive: number;
-}
-
-/** The `network` block of `GET /agent/v1/work`: everything an agent needs to reconcile `wg0`. */
-export interface NetworkConfig {
-  interface: string;
-  /** This node's overlay address, e.g. `10.210.0.2`. */
-  overlayIp: string;
-  /** Mesh CIDR, e.g. `10.210.0.0/16`; `overlayIp` is assigned to `wg0` with this prefix length. */
-  cidr: string;
-  listenPort: number;
-  peers: WgPeer[];
-}
-
-/** Body of `POST /agent/v1/wireguard/key` (also accepted as `wgPublicKey` on register and enroll). */
-export interface WgKeyRequest {
-  publicKey: string;
-}
+// ---- Networking: service DNS and ingress -------------------------------------------------------
 
 export interface ServiceEndpoint {
   node: string;
@@ -564,8 +535,6 @@ export interface NodeInfo {
   id: string;
   name: string;
   address: string | null;
-  public_address: string | null;
-  overlay_ip?: string | null;
   labels?: string[];
   status: string;
   created_at: string;
@@ -578,7 +547,6 @@ export interface IdentityRequest {
   /** `create` makes a new node (idempotent for the identical key); `replace` installs a new key on an existing node. */
   mode: 'create' | 'replace';
   address?: string;
-  publicAddress?: string;
   labels?: string[];
 }
 
@@ -596,9 +564,6 @@ export interface IdentityResponse {
 export interface EnrollRequest {
   csr: string;
   address?: string;
-  publicAddress?: string;
-  /** Base64 WireGuard public key; the private key never leaves the node. */
-  wgPublicKey?: string;
 }
 
 /** Response of `POST /agent/v1/enroll`. */

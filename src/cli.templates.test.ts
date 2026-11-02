@@ -96,14 +96,13 @@ test('control-install uses config controlUrl, with overlay, environment and flag
       'a credential alone should not replace the SSH fallback',
     );
     await install('https://ssh-alias:9555', '--port', '9555');
-    // nodeDefaults that name control-install options (image, mesh, installDocker) are its defaults too.
+    // nodeDefaults that name control-install options (image, installDocker) are its defaults too.
     await fs.writeFile(
       config,
-      'controlUrl: https://configured.test:9099\nnodeDefaults:\n  mesh: true\n  installDocker: true\n  image: config/image:1\n',
+      'controlUrl: https://configured.test:9099\nnodeDefaults:\n  installDocker: true\n  image: config/image:1\n',
     );
     await install('https://configured.test:9099');
     const defaulted = await fs.readFile(ssh.log, 'utf8');
-    assert.match(defaulted, /TUG_MESH: "true"/, 'a configured mesh default should reach control');
     assert.ok(defaulted.includes('config/image:1'), 'a configured image should be the default');
     assert.ok(defaulted.includes('download.docker.com'), 'a configured installDocker should apply');
     await install('https://configured.test:9099', '--image', 'cli/image:2');
@@ -168,7 +167,11 @@ test('install commands render the shipped templates (src in dev, dist in the ima
       'control installation must not configure a build registry',
     );
     assert.ok(script.includes('9099'), 'control-compose.yml rendered with the port');
-    assert.match(script, /TUG_MESH: "false"/, 'control-install leaves the mesh off by default');
+    assert.doesNotMatch(
+      script,
+      /TUG_MESH/,
+      'control installation should not configure a WireGuard mesh',
+    );
     assert.ok(
       script.includes(`image: ${JSON.stringify(defaultImage())}`),
       'control-install defaults to the published image for the CLI version',
@@ -208,22 +211,6 @@ test('install commands render the shipped templates (src in dev, dist in the ima
     );
 
     await fs.rm(ssh.log);
-    await cli(
-      'control-install',
-      'root@mesh.test',
-      '--mesh',
-      '--control-url',
-      'https://mesh.test:8443',
-      '--credential-out',
-      path.join(dir, 'root.out.json'),
-    );
-    assert.match(
-      await fs.readFile(ssh.log, 'utf8'),
-      /TUG_MESH: "true"/,
-      'control-install --mesh should enable the mesh on control',
-    );
-
-    await fs.rm(ssh.log);
     await cli('node-install', 'root@node.test', '--name', 'n-tpl', '--no-wait');
     script = await fs.readFile(ssh.log, 'utf8');
     assert.ok(script.includes('TUG_NODE_NAME=n-tpl'), 'agent.env rendered');
@@ -238,7 +225,11 @@ test('install commands render the shipped templates (src in dev, dist in the ima
       'node-install defaults to the published image for the CLI version',
     );
     assert.doesNotMatch(script, unrenderedVariable, 'no unrendered template variables');
-    assert.doesNotMatch(script, /NET_ADMIN|TUG_MESH/, 'agents join no mesh unless asked');
+    assert.doesNotMatch(
+      script,
+      /NET_ADMIN|TUG_MESH|wireguard|tugwgtest|udp\.51820\.free/,
+      'agent installation should omit WireGuard capabilities, environment and preflight checks',
+    );
     assert.match(
       script,
       /docker run -d --name tug-agent [^\n]*--network host /,
@@ -291,34 +282,20 @@ test('install commands render the shipped templates (src in dev, dist in the ima
     );
     assert.equal(joinKey.name, 'n-private-enroll', 'the join key is bound to one node name');
 
-    await fs.rm(ssh.log);
-    await cli('node-install', 'root@node2.test', '--name', 'n-mesh', '--mesh', '--no-wait');
-    script = await fs.readFile(ssh.log, 'utf8');
-    assert.ok(script.includes('TUG_MESH=true'), '--mesh sets TUG_MESH in agent.env');
-    assert.match(
-      script,
-      /--network host --cap-add NET_ADMIN/,
-      '--mesh runs the agent with host networking and NET_ADMIN',
-    );
-    assert.ok(
-      script.includes('tugwgtest type wireguard') && script.includes('udp.51820.free'),
-      '--mesh adds WireGuard kernel and UDP port preflight checks',
-    );
-    assert.ok(
-      script.includes('docker inspect --format') && script.includes('tug-agent'),
-      "the UDP check must let this node's own running Tug agent keep its WireGuard port, so an install can be repeated",
-    );
-    assert.doesNotMatch(script, unrenderedVariable, 'no unrendered template variables');
-
-    const enroll = await cli('node-prepare-enrollment', '--name', 'n-enr', '--mesh');
+    const enroll = await cli('node-prepare-enrollment', '--name', 'n-enr');
     assert.ok(
       enroll.stdout.includes(`'${defaultImage()}' agent`),
       'node-prepare-enrollment prints a docker run with the published image for the CLI version',
     );
     assert.match(
       enroll.stdout,
-      /--network host --cap-add NET_ADMIN -e TUG_MESH=true/,
-      'node-prepare-enrollment --mesh prints a mesh-capable docker run',
+      /--network host /,
+      'node-prepare-enrollment should print a host-networked docker run for health checks',
+    );
+    assert.doesNotMatch(
+      enroll.stdout,
+      /NET_ADMIN|TUG_MESH/,
+      'node-prepare-enrollment should not grant WireGuard capabilities or environment',
     );
 
     const cloud = await cli(
@@ -326,14 +303,18 @@ test('install commands render the shipped templates (src in dev, dist in the ima
       '--name',
       'n-cloud',
       '--install-docker',
-      '--mesh',
       '--json',
     );
     const payload = JSON.parse(cloud.stdout);
     assert.match(
       payload.command,
-      /--network host --cap-add NET_ADMIN/,
-      'JSON enrollment should contain the directly usable agent command',
+      /--network host /,
+      'JSON enrollment should contain a host-networked agent command',
+    );
+    assert.doesNotMatch(
+      payload.command,
+      /--cap-add|NET_ADMIN/,
+      'JSON enrollment should not grant the agent additional capabilities',
     );
     assert.match(
       payload.cloudInit,
@@ -416,8 +397,6 @@ test('batch identity commands apply every per-node setting and preserve explicit
     const configuredNodes = {
       nodeDefaults: {
         installDocker: true,
-        mesh: true,
-        wgPort: 51829,
         image: 'default-agent:test',
         agentControlUrl: 'https://default-control.test:8443',
         label: ['base'],
@@ -426,14 +405,12 @@ test('batch identity commands apply every per-node setting and preserve explicit
         'config-a': {
           ssh: 'root@config-a',
           address: '10.0.0.1',
-          publicAddress: '203.0.113.1',
           label: [],
           installDocker: false,
-          mesh: false,
           image: 'node-agent:test',
           agentControlUrl: 'https://node-control.test:8443',
         },
-        'config-b': { ssh: 'root@config-b', wgPort: 51831 },
+        'config-b': { ssh: 'root@config-b' },
         skipped: { label: ['no-ssh'] },
       },
     };
@@ -460,8 +437,13 @@ test('batch identity commands apply every per-node setting and preserve explicit
       );
       assert.doesNotMatch(
         a,
-        /download.docker.com|NET_ADMIN|TUG_MESH=true/,
-        `${verb} should honor false per-node Docker and mesh values`,
+        /download.docker.com/,
+        `${verb} should honor a false per-node Docker value`,
+      );
+      assert.doesNotMatch(
+        a,
+        /NET_ADMIN|TUG_MESH|wireguard|tugwgtest/,
+        `${verb} should omit WireGuard capabilities, environment and preflight checks`,
       );
       assert.match(b, /default-agent:test/, `${verb} should inherit the default image`);
       assert.match(
@@ -469,9 +451,8 @@ test('batch identity commands apply every per-node setting and preserve explicit
         /TUG_CONTROL_URL=https:\/\/default-control.test:8443/,
         `${verb} should inherit the default agent URL`,
       );
-      assert.match(b, /udp.51831.free/, `${verb} should apply the per-node WireGuard port`);
       assert.match(b, /download.docker.com/, `${verb} should inherit Docker installation`);
-      assert.match(b, /TUG_MESH=true/, `${verb} should inherit mesh membership`);
+      assert.match(b, /--network host /, `${verb} should retain host networking for health checks`);
     }
     await fs.rm(ssh.log, { force: true });
     const metadataTransport = createTransport(control.root, control.url);
@@ -482,7 +463,6 @@ test('batch identity commands apply every per-node setting and preserve explicit
         nodes: {
           name: string;
           address: string | null;
-          public_address: string | null;
           labels: string[];
         }[];
       };
@@ -492,11 +472,6 @@ test('batch identity commands apply every per-node setting and preserve explicit
       const a = nodes.find((node) => node.name === 'config-a')!;
       const b = nodes.find((node) => node.name === 'config-b')!;
       assert.equal(a.address, '10.0.0.1', 'batch install should register the configured address');
-      assert.equal(
-        a.public_address,
-        '203.0.113.1',
-        'batch install should register the configured public address',
-      );
       assert.deepEqual(a.labels, [], 'an empty per-node list should replace inherited labels');
       assert.deepEqual(b.labels, ['base'], 'a node without labels should inherit nodeDefaults');
     } finally {
@@ -523,14 +498,9 @@ test('batch identity commands apply every per-node setting and preserve explicit
           'flag-agent:test',
           '--agent-control-url',
           'https://flag-control.test',
-          '--wg-port',
-          '60000',
-          '--mesh',
           '--install-docker',
           '--address',
           '10.0.0.99',
-          '--public-address',
-          '203.0.113.99',
           '--label',
           'cli',
         )
@@ -543,7 +513,7 @@ test('batch identity commands apply every per-node setting and preserve explicit
     script = await fs.readFile(ssh.log, 'utf8');
     assert.doesNotMatch(
       script,
-      /node-agent:test|default-agent:test|node-control.test|default-control.test|udp.51831.free/,
+      /node-agent:test|default-agent:test|node-control.test|default-control.test/,
       'explicit flags should override every per-node and inherited connection setting',
     );
     for (const host of ['root@config-a', 'root@config-b']) {
@@ -559,18 +529,18 @@ test('batch identity commands apply every per-node setting and preserve explicit
       );
       assert.match(
         calls,
-        /udp.60000.free/,
-        'an explicit WireGuard port should apply to every node',
-      );
-      assert.match(
-        calls,
         /download.docker.com/,
         'an explicit Docker flag should override a false per-node value',
       );
       assert.match(
         calls,
-        /TUG_MESH=true/,
-        'an explicit mesh flag should override a false per-node value',
+        /--network host /,
+        'every explicitly configured agent should retain host networking for health checks',
+      );
+      assert.doesNotMatch(
+        calls,
+        /NET_ADMIN|TUG_MESH/,
+        'explicit connection settings should not add WireGuard capabilities or environment',
       );
     }
     const flagTransport = createTransport(control.root, control.url);
@@ -580,7 +550,6 @@ test('batch identity commands apply every per-node setting and preserve explicit
         nodes: {
           name: string;
           address: string | null;
-          public_address: string | null;
           labels: string[];
         }[];
       };
@@ -595,11 +564,6 @@ test('batch identity commands apply every per-node setting and preserve explicit
           node.address,
           '10.0.0.99',
           'explicit addresses should override per-node values',
-        );
-        assert.equal(
-          node.public_address,
-          '203.0.113.99',
-          'explicit public addresses should override per-node values',
         );
         assert.deepEqual(
           node.labels,

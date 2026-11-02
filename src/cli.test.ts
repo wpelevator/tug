@@ -177,11 +177,17 @@ test('CLI exposes flat commands and rejects malformed invocations before side ef
       ['control-install', 'root@host', '--registry', 'registry.example'],
       ['control-install', 'root@host', '--registry-auth-path', '/auth'],
       ['control-install', 'root@host', '--registry-container', 'registry'],
+      ['control-install', 'root@host', '--mesh'],
       ['node-install', 'root@host', '--name', 'n1', '--registry', 'registry.example'],
+      ['node-install', 'root@host', '--name', 'n1', '--mesh'],
+      ['node-install', 'root@host', '--name', 'n1', '--wg-port', '51820'],
+      ['node-register', 'n1', '--csr', 'node.csr', '--public-address', '203.0.113.7'],
+      ['node-rotate-wg-key', 'n1'],
       ['node-rotate-registry-token', 'n1'],
       ['node-revoke-registry-token', 'n1'],
       ['deploy', '--timeout', '0'],
       ['control-install', 'root@host', '--port', '65536'],
+      ['node-prepare-enrollment', '--name', 'n1', '--mesh'],
       ['node-prepare-enrollment', '--uses', 'NaN'],
       ['events', '--limit', '501'],
       ['control-restore', '/backup.tgz'],
@@ -437,27 +443,36 @@ test('the control port check passes for a free port or the control container, an
   await fs.rm(dir, { recursive: true, force: true });
 });
 
-test('the agent docker run shares the host network without NET_ADMIN unless the mesh is on', () => {
-  const plain = dockerRunSnippet('img:1', 'join-key');
+test('the agent docker run always shares the host network without extra capabilities', () => {
+  const command = dockerRunSnippet('img:1', 'join-key');
   assert.match(
-    plain,
+    command,
     /--network host /,
     'health checks dial container IPs, which a bridge-networked agent cannot reach',
   );
-  assert.doesNotMatch(plain, /NET_ADMIN|TUG_MESH/, 'only the mesh adds capabilities and TUG_MESH');
+  assert.doesNotMatch(
+    command,
+    /NET_ADMIN|TUG_MESH/,
+    'the agent needs host networking for health checks but no WireGuard capability or environment',
+  );
 });
 
 test('shell snippets quote user values and cloud-init stops enrollment after bootstrap failure', () => {
   const image = "registry.test/image:tag'; printf injected";
-  const command = dockerRunSnippet(image, 'join-key', true);
+  const command = dockerRunSnippet(image, 'join-key');
   assert.ok(
     command.includes(shellQuote(image)),
     'image reference should remain a single shell argument',
   );
   assert.match(
     command,
-    /--network host --cap-add NET_ADMIN/,
-    'mesh snippets should enable host networking and NET_ADMIN',
+    /--network host /,
+    'enrollment snippets should enable host networking for health checks',
+  );
+  assert.doesNotMatch(
+    command,
+    /--cap-add|NET_ADMIN/,
+    'enrollment snippets should not grant the agent additional capabilities',
   );
   const document = enrollmentCloudInit('set -eu\nexit 20\n', command);
   const parsed = yaml.load(document) as {

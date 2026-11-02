@@ -7,12 +7,11 @@ import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from './control.ts';
 import { json, testControlUrl, testIdentity, testImageResolver } from '../tests/helpers.ts';
-import { generateWgKeyPair } from './mesh.ts';
 
 async function server() {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-reports-'));
   process.env.TUG_DATA_DIR = dir;
-  process.env.TUG_MESH = 'true';
+  process.env.TUG_SERVICE_NAMES = 'true';
   const app = await createApp({
     identity: testIdentity,
     controlUrl: testControlUrl,
@@ -32,8 +31,7 @@ async function server() {
     const reg = await json(
       await call('POST', '/api/v1/nodes/register', {
         name,
-        publicAddress: '203.0.113.1',
-        wgPublicKey: generateWgKeyPair().publicKey,
+        address: `${name}.nodes.test`,
       }),
     );
     const headers = { 'x-tug-test-node': reg.nodeId, 'content-type': 'application/json' };
@@ -138,7 +136,7 @@ test('a node can only report services that are placed on it', async () => {
   }
 });
 
-test('disabling a node withdraws it from healthy peers and from service endpoints', async () => {
+test('disabling a node withdraws it from service endpoints', async () => {
   const s = await server();
   try {
     const a = await s.register('a');
@@ -151,15 +149,17 @@ test('disabling a node withdraws it from healthy peers and from service endpoint
     await a.status(serving('app'));
     const before = await b.work();
     assert.deepEqual(
-      before.network.peers.map((p: { node: string }) => p.node),
-      ['a'],
-      'a healthy node starts as a mesh peer',
+      before.serviceEndpoints.app.web,
+      [{ node: 'a', address: 'a.nodes.test' }],
+      'a healthy node should be published at its node address',
     );
-    assert.equal(before.serviceEndpoints.app.web.length, 1, 'and as a service endpoint');
     assert.equal((await s.call('POST', '/api/v1/nodes/a/disable', {})).status, 200);
     const after = await b.work();
-    assert.deepEqual(after.network.peers, [], 'a disabled node is no longer a WireGuard peer');
-    assert.deepEqual(after.serviceEndpoints, { app: {} }, 'nor a service endpoint');
+    assert.deepEqual(
+      after.serviceEndpoints,
+      { app: {} },
+      'a disabled node should no longer be a service endpoint',
+    );
   } finally {
     await s.close();
   }
