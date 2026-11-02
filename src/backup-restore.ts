@@ -157,6 +157,8 @@ export function createRestoreService(deps: RestoreDeps) {
 
   /** Validates a request and describes what a restore would do; nothing is changed. */
   function plan(request: RestoreRequest): RestorePlan | { error: string; status: number } {
+    // The most recent deployment may have moved the target since the last scheduler tick.
+    backups.sync();
     const desired = deployed(request.project);
     if (!desired)
       return { error: `project ${request.project} has no successful deployment`, status: 409 };
