@@ -22,8 +22,8 @@ export function shellQuote(value: unknown): string {
   return `'${String(value).replace(/'/g, `'\\''`)}'`;
 }
 
-export function dockerRunSnippet(image: string, joinKey: string): string {
-  return `docker run -d --name tug-agent --restart unless-stopped ${HOST_NETWORK_FLAG} -v /var/run/docker.sock:/var/run/docker.sock -v tug-agent:/var/lib/tug -e TUG_JOIN_KEY=${shellQuote(joinKey)} ${shellQuote(image)} agent`;
+export function dockerRunSnippet(image: string, joinKey: string, address?: string): string {
+  return `docker run -d --name tug-agent --restart unless-stopped ${HOST_NETWORK_FLAG} -v /var/run/docker.sock:/var/run/docker.sock -v tug-agent:/var/lib/tug -e TUG_JOIN_KEY=${shellQuote(joinKey)} ${address ? `-e TUG_NODE_ADDRESS=${shellQuote(address)} ` : ''}${shellQuote(image)} agent`;
 }
 
 /** The bootstrap runs in its own shell so its idempotent early exit cannot skip enrollment. */

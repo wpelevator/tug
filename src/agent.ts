@@ -1257,6 +1257,7 @@ async function warnPublicPorts(
 /** Docker `extra_hosts` values must be IPs, so resolve hostname node addresses on this agent. */
 async function endpointAddressesForAgent(
   endpoints: Record<string, ServiceEndpoint[]> = {},
+  localServices: Set<string>,
 ): Promise<Record<string, ServiceEndpoint[]>> {
   const cache = new Map<string, Promise<string>>();
   const resolve = (address: string): Promise<string> => {
@@ -1278,10 +1279,23 @@ async function endpointAddressesForAgent(
   };
   return Object.fromEntries(
     await Promise.all(
-      Object.entries(endpoints).map(async ([service, list]) => [
-        service,
-        await Promise.all(list.map(async (ep) => ({ ...ep, address: await resolve(ep.address) }))),
-      ]),
+      Object.entries(endpoints)
+        .filter(([service]) => !localServices.has(service))
+        .map(async ([service, list]) => [
+          service,
+          (
+            await Promise.all(
+              list.map(async (ep) => {
+                try {
+                  return { ...ep, address: await resolve(ep.address) };
+                } catch (error) {
+                  console.error(errMessage(error));
+                  return null;
+                }
+              }),
+            )
+          ).filter((ep): ep is ServiceEndpoint => ep !== null),
+        ]),
     ),
   );
 }
@@ -1295,7 +1309,14 @@ export async function pollOnce(ctx: AgentContext = defaultContext()): Promise<Pr
         await reconcile(
           desired,
           ctx,
-          await endpointAddressesForAgent(work.serviceEndpoints?.[desired.project]),
+          await endpointAddressesForAgent(
+            work.serviceEndpoints?.[desired.project],
+            new Set(
+              Object.entries(desired.services)
+                .filter(([, spec]) => spec.placement?.nodes?.includes(ctx.nodeName))
+                .map(([name]) => name),
+            ),
+          ),
           work.ports,
           work.holds?.[desired.project],
         ),

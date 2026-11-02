@@ -1638,6 +1638,24 @@ export async function createApp(
     wakeAll();
     res.json({ ok: true, node: node.name });
   });
+  api('post', '/api/v1/nodes/:name/address', null, async (req, res) => {
+    const node = findNode(String(req.params.name));
+    if (!node) return res.status(404).json({ error: 'node not found' });
+    const { address } = req.body;
+    if (!isNodeHost(address))
+      return res
+        .status(400)
+        .json({ error: 'address must be an IP address or hostname without a port' });
+    db.run('UPDATE nodes SET address=?,updated_at=? WHERE id=?', address, now(), node.id);
+    audit(req.actor!, {
+      type: 'node.address',
+      message: `node ${node.name} address changed`,
+      metadata: { node: node.name, address },
+    });
+    endpointSnapshot = JSON.stringify(endpointsFor(currentDesiredStates()));
+    wakeAll();
+    res.json({ ok: true, node: node.name, address });
+  });
   api('post', '/api/v1/nodes/:name/ingress', null, async (req, res) => {
     const node = findNode(String(req.params.name));
     if (!node) return res.status(404).json({ error: 'node not found' });

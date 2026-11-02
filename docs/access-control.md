@@ -72,6 +72,7 @@ The project column says how a scoped credential's allowed projects are checked: 
 | `GET /api/v1/nodes` | `admin` | Control-wide |
 | `POST /api/v1/nodes/:name/identity` | `admin` | Control-wide |
 | `POST /api/v1/nodes/:name/disable` | `admin` | Control-wide |
+| `POST /api/v1/nodes/:name/address` | `admin` | Control-wide |
 | `POST /api/v1/nodes/enrollment-credential` | `admin` | Control-wide |
 | `POST /api/v1/nodes/:name/ingress` | `admin` | Control-wide |
 | `DELETE /api/v1/nodes/:name` | `admin` | Control-wide |

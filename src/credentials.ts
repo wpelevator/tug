@@ -47,6 +47,7 @@ export const ROUTE_ROLES: Record<string, RouteRole> = {
   'POST /api/v1/nodes/enrollment-credential': 'admin',
   'POST /api/v1/nodes/:name/identity': 'admin',
   'POST /api/v1/nodes/:name/disable': 'admin',
+  'POST /api/v1/nodes/:name/address': 'admin',
   'POST /api/v1/nodes/:name/ingress': 'admin',
   'DELETE /api/v1/nodes/:name': 'admin',
   'POST /api/v1/backups/run': 'deploy',

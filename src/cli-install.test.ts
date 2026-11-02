@@ -22,3 +22,12 @@ test('defaultControlUrl derives the control address from the SSH target', () => 
     'an empty host is rejected',
   );
 });
+
+test('enrollment command includes a safely quoted node address when provided', async () => {
+  const { dockerRunSnippet } = await import('./cli-install.ts');
+  assert.match(
+    dockerRunSnippet('tug:test', 'key', '10.0.0.5'),
+    /-e TUG_NODE_ADDRESS='10\.0\.0\.5'/,
+    'the generated agent command should pass the node address',
+  );
+});

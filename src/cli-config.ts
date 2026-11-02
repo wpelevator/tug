@@ -42,7 +42,13 @@ export const NODE_SETTINGS: Record<string, Setting> = {
   address: {
     type: 'string',
     flag: '--address',
-    commands: ['node-install', 'node-replace-identity', 'node-repair-identity', 'node-register'],
+    commands: [
+      'node-install',
+      'node-replace-identity',
+      'node-repair-identity',
+      'node-register',
+      'node-prepare-enrollment',
+    ],
   },
   label: {
     type: 'list',

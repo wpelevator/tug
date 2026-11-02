@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { isNodeHost } from './node-address.ts';
 import { Command, Option } from 'commander';
 import { openAsBlob } from 'node:fs';
 import {
@@ -318,6 +319,18 @@ program
       console.log(JSON.stringify(r, null, 2));
     },
   );
+program
+  .command('node-address <name> <address>')
+  .description("update a node's inter-node address")
+  .action(async (name: string, address: string) => {
+    console.log(
+      JSON.stringify(
+        await request('POST', `/api/v1/nodes/${encodeURIComponent(name)}/address`, { address }),
+        null,
+        2,
+      ),
+    );
+  });
 program
   .command('node-disable <name>')
   .description(
@@ -647,6 +660,7 @@ program
     'mint a single-use, name-bound join key so a host you cannot SSH to can self-join with one docker run; a saved cloud-init document contains a credential',
   )
   .requiredOption('--name <name>', 'the node name the key is bound to; mint one key per instance')
+  .option('--address <addr>', 'private inter-node address for this node')
   .option(
     '--agent-control-url <url>',
     'connect-only URL the agent dials; the certificate is still verified against the credential URL',
@@ -663,12 +677,15 @@ program
     async (o: {
       name: string;
       agentControlUrl?: string;
+      address?: string;
       ttl: string;
       image?: string;
       label: string[];
       json?: boolean;
       installDocker?: boolean;
     }) => {
+      if (o.address !== undefined && !isNodeHost(o.address))
+        throw new Error('address must be an IP address or hostname without a port');
       const connectUrl = o.agentControlUrl ? normalizeControlUrl(o.agentControlUrl) : undefined;
       const minted = await request<EnrollmentCredentialResponse>(
         'POST',
@@ -686,7 +703,7 @@ program
         ...(connectUrl ? { connectUrl } : {}),
       };
       const joinKey = Buffer.from(JSON.stringify(keyPayload)).toString('base64url');
-      const command = dockerRunSnippet(resolveImage(o.image), joinKey);
+      const command = dockerRunSnippet(resolveImage(o.image), joinKey, o.address);
       const cloudInit = o.installDocker
         ? enrollmentCloudInit(await dockerBootstrap(), command)
         : undefined;

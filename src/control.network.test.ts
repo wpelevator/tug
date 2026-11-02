@@ -384,3 +384,23 @@ test('deploy rejects invalid ingress annotations and custom TLS without its secr
     await s.close();
   }
 });
+
+test('node address updates validate input and reach agent work', async () => {
+  const s = await server();
+  try {
+    const reg = await s.register('address-node', { address: '10.0.0.1' });
+    const bad = await s.post('/api/v1/nodes/address-node/address', { address: 'bad:port' });
+    assert.equal(bad.status, 400, 'invalid node addresses should be rejected');
+    const changed = await s.post('/api/v1/nodes/address-node/address', { address: '10.0.0.2' });
+    assert.equal(changed.status, 200, 'valid node addresses should be accepted');
+    assert.equal(
+      (await s.work(reg.nodeId)).ports.address,
+      '10.0.0.2',
+      'agent work should use the updated address',
+    );
+    const missing = await s.post('/api/v1/nodes/unknown/address', { address: '10.0.0.2' });
+    assert.equal(missing.status, 404, 'address updates should reject unknown nodes');
+  } finally {
+    await s.close();
+  }
+});

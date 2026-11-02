@@ -53,8 +53,8 @@ The node generates its own private key, your admin credential authorizes it, and
 If you cannot SSH to it (cloud-init, autoscaling, a host behind NAT), prepare an enrollment credential and run the printed command on the host:
 
 ```bash
-tug node-prepare-enrollment --name app1                  # prints a docker run
-tug node-prepare-enrollment --name app1 --install-docker # prints cloud-init user-data
+tug node-prepare-enrollment --name app1 --address 10.0.0.11                  # prints a docker run
+tug node-prepare-enrollment --name app1 --address 10.0.0.11 --install-docker # prints cloud-init user-data
 ```
 
 The join key inside is single-use, bound to the node name and valid for one hour. Mint one per instance, and treat saved user-data as a secret.

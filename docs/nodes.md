@@ -54,6 +54,8 @@ nodes:
 
 `tug node-install --name app1` then runs as if `root@203.0.113.7 --address 10.0.0.7 --label web --label ingress --install-docker` had been typed; `tug node-register app1` and `tug node-prepare-enrollment --name app1` read the same entry. Flags override the file key by key, and a `label` list on the command line replaces the file's list. An `<ssh-target>` argument overrides `ssh`; without one, a node with no `ssh` in the file is an error that names the missing key. The argument is never guessed to be a node name, because `app1` is also a valid hostname. `nodeDefaults` apply to every node, declared or not. Batch identity commands (`node-install`, `node-replace-identity` and `node-repair-identity` with `--all`) use the same precedence for every supported key: explicit flags, then the node entry, then `nodeDefaults`, then command defaults. This includes `image`, `agentControlUrl` and `installDocker`; `false` and empty lists remain explicit values.
 
+To change a registered node’s address, run `tug node-address app1 10.0.0.12`. Control wakes the agents so port bindings and service endpoints converge to the new address. The address must already be available on the node and reachable by its peers.
+
 The control plane stays the source of truth. Only `node-install`, `node-replace-identity`, `node-repair-identity`, `node-register` and `node-prepare-enrollment` read `nodes`, as flag defaults; `status`, `deploy`, `scale`, `ps`, `logs`, `exec`, `node-remove` and every other command ask control and never consult the file. Re-running `node-install` with the same key is an idempotent retry that keeps the first call's metadata; `node-replace-identity` installs a new key and keeps the node's ID, metadata and placement. Editing the file without re-running anything changes nothing in control.
 
 ## Self-service enrollment (`node-prepare-enrollment`)
@@ -61,13 +63,13 @@ The control plane stays the source of truth. Only `node-install`, `node-replace-
 For hosts you cannot SSH to or do not want to touch: cloud-init and user-data provisioning, autoscaling and golden images, hosts behind NAT or in private networks, and delegated onboarding by someone without admin credentials. Mint a join key with an admin credential, then run the printed `docker run` on the fresh host or put it in user-data. The agent dials out to control.
 
 ```bash
-tug node-prepare-enrollment --name app1
+tug node-prepare-enrollment --name app1 --address 10.0.0.11
 # prints, e.g.:
 #   docker run -d --name tug-agent --restart unless-stopped \
 #     --network host \
 #     -v /var/run/docker.sock:/var/run/docker.sock \
 #     -v tug-agent:/var/lib/tug \
-#     -e TUG_JOIN_KEY=<key> \
+#     -e TUG_JOIN_KEY=<key> -e TUG_NODE_ADDRESS=10.0.0.11 \
 #     ghcr.io/wpelevator/tug:<CLI version> agent
 ```
 
@@ -78,6 +80,7 @@ Join keys are single-use, name-bound and short-lived (default one hour). There i
 Options:
 
 - `--name <node>` (required) binds the node name.
+- `--address <addr>` supplies the private node address to the generated agent command and cloud-init. When omitted, set `TUG_NODE_ADDRESS` on the agent before its first enrollment if cross-node networking is needed.
 - `--agent-control-url <url>` sets `connectUrl`, a connect-only target; verification still uses the control name from the pinned CA.
 - `--ttl <seconds>` sets the key lifetime (default `3600`).
 - `--label <label>` sets node labels (repeatable).
@@ -91,7 +94,7 @@ To keep the key out of shell history and `docker inspect`, mount it as a `0600` 
 
 `control-install --install-docker` and `node-install --install-docker` run the same Docker bootstrap over SSH before Docker preflight or runtime-image transfer. Without the flag, Docker Engine must already work (and the Compose plugin on the control-plane host, which runs the control container with Compose). The SSH target must be root for installation; Tug does not modify group membership or configure passwordless sudo.
 
-For a host created by your cloud provider, save `tug node-prepare-enrollment --name app1 --install-docker` as user-data. Its stdout starts with `#cloud-config`, includes the bootstrap script and starts the agent only after Docker installation succeeds. The default version-matched Tug runtime image must be accessible from the host; an overridden development `tug:local` image must already be loaded there. Join keys are short-lived and should be treated as credentials when saving user-data.
+For a host created by your cloud provider, save `tug node-prepare-enrollment --name app1 --address 10.0.0.11 --install-docker` as user-data. Its stdout starts with `#cloud-config`, includes the bootstrap script and starts the agent only after Docker installation succeeds. The default version-matched Tug runtime image must be accessible from the host; an overridden development `tug:local` image must already be loaded there. Join keys are short-lived and should be treated as credentials when saving user-data.
 
 Bootstrap requires systemd and supports these releases:
 

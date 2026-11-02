@@ -11,7 +11,7 @@ Independently of the layers, [published ports are private by default](#published
 
 ## Bring your own network
 
-A node's `address` is its sole inter-node address. Set it with `node-install --address`, the node's `address` config key or `TUG_NODE_ADDRESS` at enrollment to a private IP on one of the host's interfaces. Every node that runs a client or an ingress upstream must be able to route to that IP. A hostname is also accepted, but it must resolve on the node to an address Docker can bind. Do not use a cloud VM's public 1:1 NAT address when that address is absent from its interfaces; register its private interface address instead.
+A node's `address` is its sole inter-node address. Set it with `node-install --address`, the node's `address` config key or `TUG_NODE_ADDRESS` at enrollment to a private IP on one of the host's interfaces. Every node that runs a client or an ingress upstream must be able to route to that IP. A hostname is also accepted, but it must resolve on the node to an address Docker can bind. Update a registered address with `tug node-address <name> <address>`. Do not use a cloud VM's public 1:1 NAT address when that address is absent from its interfaces; register its private interface address instead.
 
 The network can be a VPC, LAN, existing VPN or another routed private network. Tug does not allocate inter-node addresses, create tunnels, configure routes or provide NAT traversal for workload traffic. Agents can still dial out to control through NAT, but cross-node service names and remote ingress upstreams work only where this workload network is reachable.
 
@@ -31,7 +31,7 @@ Cross-node service names are enabled by default. Set `TUG_SERVICE_NAMES=false` o
 - the node has polled within `TUG_STALE_SECONDS`, and
 - the node's latest status reports that service as `rolloutState: serving` (so a failing health check withdraws the record).
 
-`address` is the node's configured `address`. The agent resolves a hostname address on the node before writing it into `extra_hosts`, so the resulting entry is a `name:ip` value; a hostname must therefore resolve on the node. The agent's container definition (`containerSpecs`) adds `extra_hosts` to every service on the node for every service that runs elsewhere, as both `<service>` and `<service>.<project>.tug`. Services placed on the same node keep resolving through the project network's Docker DNS, and entries you wrote yourself in `extra_hosts` win. A service on several nodes gets one entry per serving node.
+`address` is the node's configured `address`. The agent resolves a hostname address on the client node before writing it into `extra_hosts`; endpoints that cannot resolve are omitted until resolution succeeds, so the resulting entry is a `name:ip` value; a hostname must therefore resolve on the node. The agent's container definition (`containerSpecs`) adds `extra_hosts` to every service on the node for every service that runs elsewhere, as both `<service>` and `<service>.<project>.tug`. Services placed on the same node keep resolving through the project network's Docker DNS, and entries you wrote yourself in `extra_hosts` win. A service on several nodes gets one entry per serving node.
 
 Consequences:
 

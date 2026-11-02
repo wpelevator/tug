@@ -302,10 +302,21 @@ test('install commands render the shipped templates (src in dev, dist in the ima
       'node-prepare-enrollment',
       '--name',
       'n-cloud',
+      '--address',
+      '10.0.0.7',
       '--install-docker',
       '--json',
     );
     const payload = JSON.parse(cloud.stdout);
+    assert.match(
+      payload.command,
+      /TUG_NODE_ADDRESS='10\.0\.0\.7'/,
+      'enrollment command should provide the requested node address',
+    );
+    assert.ok(
+      payload.cloudInit.includes("TUG_NODE_ADDRESS='10.0.0.7'"),
+      'cloud-init should provide the requested node address',
+    );
     assert.match(
       payload.command,
       /--network host /,

@@ -134,3 +134,28 @@ test('an ingress node runs Caddy and reports its status; losing the role removes
     'no ingress status is reported for non-ingress nodes',
   );
 });
+
+test('unresolvable endpoints do not block local services or healthy remote endpoints', async () => {
+  const h = harness(() => ({
+    desiredStates: [desired],
+    serviceEndpoints: {
+      blog: {
+        web: [{ node: 'n1', address: 'missing.invalid' }],
+        db: [
+          { node: 'n2', address: 'missing.invalid' },
+          { node: 'n3', address: '192.168.10.3' },
+        ],
+      },
+    },
+  }));
+  const ctx = await makeCtx(h);
+  const result = await pollOnce(ctx);
+  assert.equal(result[0].health, 'serving', 'unresolvable endpoints should not fail the project');
+  const hosts = h.docker.service('blog', 'web')[0].body.HostConfig?.ExtraHosts as string[];
+  assert.ok(hosts.includes('db:192.168.10.3'), 'resolvable endpoints should remain available');
+  assert.equal(
+    hosts.some((host) => host.includes('missing.invalid')),
+    false,
+    'unresolvable endpoints should be omitted',
+  );
+});

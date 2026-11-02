@@ -254,6 +254,10 @@ const SAMPLES: Record<string, { path: string; body?: unknown }> = {
   'DELETE /api/v1/nodes/:name': { path: '/api/v1/nodes/ghost' },
   'GET /api/v1/nodes': { path: '/api/v1/nodes' },
   'POST /api/v1/nodes/:name/identity': { path: '/api/v1/nodes/x/identity', body: {} },
+  'POST /api/v1/nodes/:name/address': {
+    path: '/api/v1/nodes/x/address',
+    body: { address: '10.0.0.1' },
+  },
   'POST /api/v1/nodes/:name/disable': { path: '/api/v1/nodes/x/disable', body: {} },
   'POST /api/v1/nodes/enrollment-credential': {
     path: '/api/v1/nodes/enrollment-credential',
