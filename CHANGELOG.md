@@ -1,5 +1,27 @@
 # @wpelevator/tug
 
+## 0.10.0
+
+### Minor Changes
+
+- 355bf61: Use collision-free managed and scratch volume names. When an owned volume exists under the earlier naming scheme, Tug refuses to create an empty replacement so its data can be recovered.
+- 68e4ef6: Remove the Tug-managed WireGuard mesh and its CLI, API, configuration and runtime surfaces. Cross-node service names, ingress upstreams and private published ports now always use the node's operator-provided `address`; set it to an address on your existing private network. Service names are enabled by default and can be disabled with `TUG_SERVICE_NAMES=false`. Agents no longer need `NET_ADMIN` or WireGuard tools, but retain host networking for container health checks.
+- 355bf61: Add a human-readable status summary with deployment and node errors.
+- fb3f597: `controlUrl` is the one name for where the control plane is. `--advertise-url` and `TUG_ADVERTISE_URL` are removed: `tug control-install` advertises `--control-url`, `TUG_CONTROL_URL`, then the config file's `controlUrl` (else the SSH target's host and `--port`) and prints which it used, and the control container reads its own address from `TUG_CONTROL_URL`. Other commands still treat the same setting as the connect target, falling back to the URL in the credential. Clients verify a name generated from the CA, so the value is only an address.
+- 355bf61: Wait for managed ingress to apply routes before reporting deployment success.
+- 355bf61: Exclude known Tug credentials from local build snapshots.
+
+### Patch Changes
+
+- fb3f597: Config file keys now apply as defaults to every command that has the matching flag, and a flag on the command line always wins: `wait` also covers `backup-run` and the node install commands, `address`, `publicAddress` and `label` reach `node-replace-identity` and `node-repair-identity`, and `mesh`, `installDocker` and `image` from `nodeDefaults` reach `control-install`. A test checks that each key's command list matches the options the commands really have. In batch mode (`--all`) the node commands print only the final per-node results.
+- 236250a: `tug control-install` no longer requires `--advertise-url`: it defaults to the SSH target's host and the published port (`https://<host>:8443`) and prints the choice. Pass the flag to advertise a different address.
+- 355bf61: Bind scratch volumes to the restore that created them.
+- 355bf61: Fix restore targeting after moving a project to another node.
+- 68e4ef6: Allow node addresses in enrollment and address updates, and keep endpoint DNS failures from blocking unrelated services.
+- fb3f597: Use `controlUrl` from the YAML or JSON config as the default advertised address for `control-install`, with `--advertise-url` taking precedence. Apply all per-node settings consistently in batch identity commands and preserve explicit flag overrides.
+- 355bf61: Check volume ownership before deletion, backup, and restore.
+- 355bf61: Reject conflicting or unsafe existing project networks and volumes before starting workloads.
+
 ## 0.9.0
 
 ### Minor Changes
