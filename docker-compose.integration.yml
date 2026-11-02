@@ -21,7 +21,6 @@ services:
     restart: "no"
     environment:
       TUG_CONTROL_URL: https://control:8443
-      TUG_CONTROL_URL: https://control:8443
       TUG_DATA_DIR: /data
       TUG_TOKEN_DIR: /tokens
       TUG_NODES: vps-a,vps-b,vps-c

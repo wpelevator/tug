@@ -20,7 +20,6 @@ services:
     command: ["tools/scripts/integration-provision.js"]
     environment:
       TUG_CONTROL_URL: https://control:8443
-      TUG_CONTROL_URL: https://control:8443
       TUG_DATA_DIR: /data
       TUG_TOKEN_DIR: /tokens
       TUG_NODES: image-node
