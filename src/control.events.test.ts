@@ -6,7 +6,7 @@ import path from 'node:path';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from './control.ts';
-import { testImageResolver, testIdentity } from '../tests/helpers.ts';
+import { testImageResolver, testControlUrl, testIdentity } from '../tests/helpers.ts';
 import { openDb } from './db.ts';
 import { json } from '../tests/helpers.ts';
 
@@ -45,6 +45,7 @@ async function makeServer(
       }
       const app = await createApp({
         identity: testIdentity,
+        controlUrl: testControlUrl,
         ...options,
         images: { resolve: testImageResolver },
       });

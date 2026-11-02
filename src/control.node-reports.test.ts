@@ -6,14 +6,18 @@ import path from 'node:path';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createApp } from './control.ts';
-import { json, testIdentity, testImageResolver } from '../tests/helpers.ts';
+import { json, testControlUrl, testIdentity, testImageResolver } from '../tests/helpers.ts';
 import { generateWgKeyPair } from './mesh.ts';
 
 async function server() {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-reports-'));
   process.env.TUG_DATA_DIR = dir;
   process.env.TUG_MESH = 'true';
-  const app = await createApp({ identity: testIdentity, images: { resolve: testImageResolver } });
+  const app = await createApp({
+    identity: testIdentity,
+    controlUrl: testControlUrl,
+    images: { resolve: testImageResolver },
+  });
   const srv = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));
   });

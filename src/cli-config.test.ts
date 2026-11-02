@@ -67,6 +67,11 @@ test('a YAML config and the same content as JSON resolve to the same settings, a
     );
     assert.equal(fromYaml.project, 'shop', 'tug.yml should be discovered without --config');
     assert.equal(
+      fromYaml.requestedControlUrl,
+      'https://control.test',
+      'the shared control URL should be available for installation from YAML and JSON',
+    );
+    assert.equal(
       fromYaml.nodes.app1.ssh,
       'root@203.0.113.7',
       'node entries should be parsed from the nodes mapping',
@@ -174,6 +179,12 @@ test('unknown keys, wrong types and bad values fail naming the file and the key'
       ['colour: red', /colour is not a known setting/, 'unknown top-level key'],
       ['wait: "no"', /wait must be true or false/, 'non-boolean for a boolean setting'],
       [
+        'controlUrl: false',
+        /controlUrl must be a nonempty single-line string/,
+        'non-string control URL',
+      ],
+      ['controlUrl: ""', /controlUrl must be a nonempty single-line string/, 'empty control URL'],
+      [
         'nodes:\n  a:\n    wgPort: 70000',
         /nodes\.a\.wgPort must be an integer from 1 to 65535/,
         'port out of range',
@@ -271,6 +282,11 @@ function demoCommand(
     .command(name)
     .option('-f, --file <file>', 'compose file', 'docker-compose.yml')
     .option('--build-local')
+    .option('--address <addr>')
+    .option('--public-address <addr>')
+    .option('--install-docker')
+    .option('--image <tag>')
+    .option('--agent-control-url <url>')
     .option('--no-wait')
     .option('--mesh')
     .option('--label <label>', 'label', (v: string, a: string[]) => [...a, v], [] as string[])
@@ -316,6 +332,71 @@ test('config values are defaults that never override a flag, and only reach comm
     'docker-compose.yml',
     'a project key should not apply to node-install',
   );
+});
+
+test('every supported option setting reaches its commands and explicit flags take precedence', () => {
+  const cases: Record<
+    string,
+    {
+      configured: string | boolean | string[];
+      flags: string[];
+      expected: string | boolean | string[];
+    }
+  > = {
+    file: { configured: '/config/compose.yml', flags: ['--file', 'cli.yml'], expected: 'cli.yml' },
+    buildLocal: { configured: false, flags: ['--build-local'], expected: true },
+    wait: { configured: true, flags: ['--no-wait'], expected: false },
+    address: { configured: '10.0.0.1', flags: ['--address', '10.0.0.2'], expected: '10.0.0.2' },
+    publicAddress: {
+      configured: 'config.test',
+      flags: ['--public-address', 'cli.test'],
+      expected: 'cli.test',
+    },
+    label: {
+      configured: ['config'],
+      flags: ['--label', 'one', '--label', 'two'],
+      expected: ['one', 'two'],
+    },
+    mesh: { configured: false, flags: ['--mesh'], expected: true },
+    wgPort: { configured: '51821', flags: ['--wg-port', '60000'], expected: '60000' },
+    installDocker: { configured: false, flags: ['--install-docker'], expected: true },
+    image: { configured: 'config:tag', flags: ['--image', 'cli:tag'], expected: 'cli:tag' },
+    agentControlUrl: {
+      configured: 'https://config.test',
+      flags: ['--agent-control-url', 'https://cli.test'],
+      expected: 'https://cli.test',
+    },
+  };
+  const settings = { ...COMMAND_SETTINGS, ...NODE_SETTINGS };
+  assert.deepEqual(
+    Object.keys(cases).sort(),
+    Object.keys(settings)
+      .filter((key) => key !== 'ssh')
+      .sort(),
+    'every non-positional config setting should have a precedence case',
+  );
+  for (const [key, fixture] of Object.entries(cases)) {
+    for (const name of settings[key].commands) {
+      const configured = demoCommand(name);
+      applyConfigDefaults(configured.command, configured.opts, { [key]: fixture.configured });
+      assert.deepEqual(
+        configured.opts[key],
+        fixture.configured,
+        `${name} should use configured ${key}`,
+      );
+      const explicit = demoCommand(name, fixture.flags);
+      applyConfigDefaults(explicit.command, explicit.opts, { [key]: fixture.configured });
+      assert.deepEqual(
+        explicit.opts[key],
+        fixture.expected,
+        `${name} should prefer explicit ${key} flags over config`,
+      );
+      const unrelated = demoCommand('status');
+      const before = unrelated.opts[key];
+      applyConfigDefaults(unrelated.command, unrelated.opts, { [key]: fixture.configured });
+      assert.deepEqual(unrelated.opts[key], before, `status should ignore command-scoped ${key}`);
+    }
+  }
 });
 
 test('every config key is the camelCase of the flag it defaults, and every listed command has that flag', async () => {
@@ -455,4 +536,31 @@ test('node-install reads the ssh target from the config and reports a missing on
       'with the target resolved, the plaintext connect URL check should be the next failure',
     );
   });
+});
+
+test('every config key applies to every command that has its option, and to no other', async () => {
+  const run = (...args: string[]) =>
+    exec(process.execPath, [entry, ...args], { env: { ...process.env, TUG_CONFIG: '' } }).then(
+      (r) => r.stdout,
+      (e: { stdout?: string }) => e.stdout ?? '',
+    );
+  const names = [...(await run('--help')).matchAll(/^ {2}([a-z][a-z0-9-]*)(?: |$)/gm)]
+    .map((m) => m[1])
+    .filter((n) => n !== 'help');
+  const helps = new Map<string, string>();
+  for (let i = 0; i < names.length; i += 8)
+    await Promise.all(names.slice(i, i + 8).map(async (n) => helps.set(n, await run(n, '--help'))));
+  const hasOption = (command: string, flag: string) =>
+    new RegExp(`^\\s+(-\\w, )?--(no-)?${flag.replace(/^--(no-)?/, '')}(\\s|,|<|$)`, 'm').test(
+      helps.get(command) ?? '',
+    );
+  for (const [key, setting] of Object.entries({ ...COMMAND_SETTINGS, ...NODE_SETTINGS })) {
+    if (setting.flag.startsWith('<')) continue; // positional arguments such as the SSH target
+    const withOption = names.filter((n) => hasOption(n, setting.flag));
+    assert.deepEqual(
+      [...setting.commands].sort(),
+      withOption.sort(),
+      `${key} should apply to exactly the commands that have ${setting.flag}`,
+    );
+  }
 });

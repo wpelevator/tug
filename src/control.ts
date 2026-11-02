@@ -586,7 +586,7 @@ export async function createApp(
     openDatabase?: typeof openDb;
     /** Minimum time between event prunes triggered by agent reports; default one hour. */ eventPruneIntervalMs?: number;
     /** Override the live open/agent startup timeout in milliseconds. */ liveStartTimeoutMs?: number;
-    /** Credential-free HTTPS origin clients use to reach control; defaults to `TUG_ADVERTISE_URL`. */ advertiseUrl?: string;
+    /** Credential-free HTTPS origin clients connect to by default; defaults to `TUG_CONTROL_URL`. */ controlUrl?: string;
     /**
      * Replaces certificate-based identity resolution. Only for in-process tests that skip TLS; production never sets it.
      * It returns the principal URI and key hash a connection would have presented.
@@ -670,14 +670,16 @@ export async function createApp(
     path.join(DATA_DIR, 'pki'),
     !db.get('SELECT 1 FROM operator_credentials') && !db.get('SELECT 1 FROM nodes'),
   );
-  const advertiseUrl = () => {
-    const url = options.advertiseUrl ?? process.env.TUG_ADVERTISE_URL;
-    if (!url) throw httpError(500, 'TUG_ADVERTISE_URL is not set');
+  const configuredControlUrl = options.controlUrl ?? process.env.TUG_CONTROL_URL;
+  const controlUrl = () => {
+    const url = configuredControlUrl;
+    if (!url) throw httpError(500, 'TUG_CONTROL_URL is not set');
     return new URL(url).origin;
   };
 
   const app = express();
   app.locals.pki = pki;
+  app.locals.controlUrl = configuredControlUrl;
   app.locals.dataDir = DATA_DIR;
   /** Resolves a presented certificate (principal URI and key hash) to a principal from current database state. */
   function resolvePrincipal(uri: string, keyHash: string): Identity | null {
@@ -1413,7 +1415,7 @@ export async function createApp(
     node: nodeInfo(nodeId),
     certificate: cert,
     ca: pki.caPem,
-    url: advertiseUrl(),
+    url: controlUrl(),
   });
   // The node generates its key and CSR; an admin posts the CSR here. The private key is never transmitted.
   api('post', '/api/v1/nodes/:name/identity', null, async (req, res) => {
@@ -1492,7 +1494,7 @@ export async function createApp(
     const issued = await pki.issueClient(
       identityUri('enroll', rowId),
       ttlSeconds * 1000,
-      advertiseUrl(),
+      controlUrl(),
     );
     const expiresAt = issued.notAfter.toISOString();
     db.run(
@@ -1749,7 +1751,7 @@ export async function createApp(
   });
   api('post', '/api/v1/credentials', null, async (req, res) => {
     const request = parseCredentialRequest(req.body);
-    const created = await createCredential(db, pki, advertiseUrl(), request, req.actor!.name);
+    const created = await createCredential(db, pki, controlUrl(), request, req.actor!.name);
     audit(req.actor!, {
       type: 'credential.create',
       message: `credential ${created.name} (${created.role}${created.projects ? `, projects: ${created.projects.join(', ')}` : ''}) created by ${req.actor!.name}`,
@@ -3457,12 +3459,12 @@ async function ensureServerCredential(
 export async function listen(app: express.Express, port = PORT): Promise<https.Server> {
   const pki = app.locals.pki as Pki;
   const dataDir = app.locals.dataDir as string;
-  const advertiseUrl = process.env.TUG_ADVERTISE_URL;
-  if (!advertiseUrl)
+  const advertised = app.locals.controlUrl as string | undefined;
+  if (!advertised)
     throw new Error(
-      'TUG_ADVERTISE_URL is required: the credential-free https origin clients connect to',
+      'TUG_CONTROL_URL is required: the credential-free https origin clients connect to',
     );
-  const url = new URL(advertiseUrl);
+  const url = new URL(advertised);
   if (
     url.protocol !== 'https:' ||
     url.username ||
@@ -3472,9 +3474,9 @@ export async function listen(app: express.Express, port = PORT): Promise<https.S
     url.pathname !== '/'
   )
     throw new Error(
-      'TUG_ADVERTISE_URL must be a credential-free https origin such as https://control.example.com:8443',
+      'TUG_CONTROL_URL must be a credential-free https origin such as https://control.example.com:8443',
     );
-  const names = serverNames(advertiseUrl, (process.env.TUG_EXTRA_SANS || '').split(','));
+  const names = serverNames(advertised, (process.env.TUG_EXTRA_SANS || '').split(','));
   const credential = await ensureServerCredential(pki, dataDir, names);
   const server = https.createServer(
     serverTlsOptions({ cert: credential.cert, key: credential.key, ca: pki.caPem }),

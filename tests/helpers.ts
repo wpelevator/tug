@@ -20,7 +20,8 @@ export const json = (res: Response): Promise<any> => res.json();
 /** Unrelated control tests keep their display image fixtures without network access. Pinning is covered separately. */
 export const testImageResolver = async (image: string): Promise<string> => image;
 
-process.env.TUG_ADVERTISE_URL ||= 'https://127.0.0.1:8443';
+/** Passed to `createApp` so tests never touch TUG_CONTROL_URL, which CLI subprocesses read as a connect override. */
+export const testControlUrl = 'https://127.0.0.1:8443';
 
 /**
  * In-process stand-in for the TLS peer certificate, so HTTP-level tests can skip TLS. Real certificates, key hashes and
@@ -142,15 +143,15 @@ export async function startMtlsControl(
   options: { eventPruneIntervalMs?: number } = {},
 ) {
   process.env.TUG_DATA_DIR = dir;
-  process.env.TUG_ADVERTISE_URL = 'https://localhost:8443';
   const { createApp, listen } = await import('../src/control.ts');
   const { issueHostCredential } = await import('../src/control-credential.ts');
   const { createTransport } = await import('../src/agent-credential.ts');
-  const app = await createApp({ images: { resolve: testImageResolver }, ...options });
+  const controlUrl = 'https://localhost:8443';
+  const app = await createApp({ images: { resolve: testImageResolver }, controlUrl, ...options });
   const server = await listen(app, 0);
   const url = `https://127.0.0.1:${(server.address() as { port: number }).port}`;
   const root = decodeCredential(
-    await issueHostCredential({ name: 'root', role: 'admin', replace: false }),
+    await issueHostCredential({ name: 'root', role: 'admin', replace: false, controlUrl }),
   );
   const credentialFile = path.join(dir, 'root.credential.json');
   await fs.writeFile(credentialFile, JSON.stringify(root), { mode: 0o600 });

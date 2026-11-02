@@ -79,11 +79,11 @@ test "$live_key" = "$(cat /var/lib/tug/wireguard/reported.pub)"`)}
 }
 
 /**
- * The default `--advertise-url` for `control-install`: the SSH target's host and the published port. Accepts
+ * The default control URL for `control-install`: the SSH target's host and the published port. Accepts
  * `host`, `user@host`, `ssh://user@host:2222` and bracketed IPv6. An SSH alias from ~/.ssh/config is used as written,
- * so pass `--advertise-url` when the alias is not a name or address clients can reach.
+ * so pass `--control-url` when the alias is not a name or address clients can reach.
  */
-export function defaultAdvertiseUrl(sshTarget: string, port: number | string): string {
+export function defaultControlUrl(sshTarget: string, port: number | string): string {
   let host = sshTarget
     .trim()
     .replace(/^ssh:\/\//, '')

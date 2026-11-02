@@ -6,7 +6,7 @@ import path from 'node:path';
 import { createApp } from './control.ts';
 import { openDb } from './db.ts';
 import { decrypt } from './secrets.ts';
-import { json, testImageResolver, testIdentity } from '../tests/helpers.ts';
+import { json, testImageResolver, testControlUrl, testIdentity } from '../tests/helpers.ts';
 import { repositoryPassword } from './backup-destination.ts';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -14,7 +14,11 @@ import type { AddressInfo } from 'node:net';
 async function server() {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-bkdest-'));
   process.env.TUG_DATA_DIR = dir;
-  const app = await createApp({ identity: testIdentity, images: { resolve: testImageResolver } });
+  const app = await createApp({
+    identity: testIdentity,
+    controlUrl: testControlUrl,
+    images: { resolve: testImageResolver },
+  });
   const srv = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));
   });

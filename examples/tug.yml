@@ -1,6 +1,7 @@
 # Commit this file; keep the operator credential out of it.
 # `tug init <credential-file>` points tug.local.yml (untracked) at the credential; CI exports TUG_CREDENTIAL.
 # Each key is the camelCase of the CLI flag it supplies a default for; a flag always wins.
+# Where control is: the CLI connects here, and control-install advertises it (--control-url overrides).
 controlUrl: https://control.example.com
 project: site
 

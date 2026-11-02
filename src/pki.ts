@@ -215,9 +215,9 @@ export interface SubjectNames {
   ip: string[];
 }
 /** The DNS names and IP addresses a server certificate covers, from the public URL plus optional extras. */
-export function serverNames(advertiseUrl: string, extras: string[] = []): SubjectNames {
+export function serverNames(controlUrl: string, extras: string[] = []): SubjectNames {
   const names: SubjectNames = { dns: [], ip: [] };
-  const host = new URL(advertiseUrl).hostname.replace(/^\[|\]$/g, '');
+  const host = new URL(controlUrl).hostname.replace(/^\[|\]$/g, '');
   for (const entry of [host, ...extras.map((e) => e.trim()).filter(Boolean)]) {
     const bucket = net.isIP(entry) ? names.ip : names.dns;
     if (!bucket.includes(entry)) bucket.push(entry);

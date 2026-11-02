@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { createApp } from './control.ts';
-import { json, testIdentity } from '../tests/helpers.ts';
+import { json, testControlUrl, testIdentity } from '../tests/helpers.ts';
 import { resolveImage } from './registry.ts';
 
 async function server() {
@@ -16,6 +16,7 @@ async function server() {
   const calls: string[] = [];
   const app = await createApp({
     identity: testIdentity,
+    controlUrl: testControlUrl,
     images: {
       resolve: (image, credentials) => {
         calls.push(image);

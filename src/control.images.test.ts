@@ -11,7 +11,7 @@ import type { AddressInfo } from 'node:net';
 import * as tar from 'tar';
 import { createApp } from './control.ts';
 import { openDb } from './db.ts';
-import { json, testIdentity } from '../tests/helpers.ts';
+import { json, testControlUrl, testIdentity } from '../tests/helpers.ts';
 
 async function server(openDatabase?: typeof openDb) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-images-'));
@@ -30,6 +30,7 @@ async function server(openDatabase?: typeof openDb) {
   let buildGate: Promise<void> | undefined;
   const app = await createApp({
     identity: testIdentity,
+    controlUrl: testControlUrl,
     openDatabase,
     images: {
       build: async (options) => {

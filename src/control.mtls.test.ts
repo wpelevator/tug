@@ -16,13 +16,20 @@ import { testImageResolver } from '../tests/helpers.ts';
 async function start() {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-mtls-'));
   process.env.TUG_DATA_DIR = dir;
-  process.env.TUG_ADVERTISE_URL = 'https://localhost:8443';
   process.env.TUG_RENEW_MIN_INTERVAL_MS = '0';
-  const app = await createApp({ images: { resolve: testImageResolver } });
+  const app = await createApp({
+    images: { resolve: testImageResolver },
+    controlUrl: 'https://localhost:8443',
+  });
   const server: Server = await listen(app, 0);
   const port = (server.address() as AddressInfo).port;
   const root = decodeCredential(
-    await issueHostCredential({ name: 'root', role: 'admin', replace: false }),
+    await issueHostCredential({
+      name: 'root',
+      role: 'admin',
+      replace: false,
+      controlUrl: 'https://localhost:8443',
+    }),
   );
   /** Requests go to the loopback port while the certificate is still verified against the public name. */
   async function call(cred: Credential, method: string, route: string, body?: unknown) {
@@ -450,12 +457,22 @@ test('root recovery replaces only root and closes its old sessions within a seco
     });
     const second = decodeCredential(other.body.credential);
     await assert.rejects(
-      issueHostCredential({ name: 'root', role: 'admin', replace: false }),
+      issueHostCredential({
+        name: 'root',
+        role: 'admin',
+        replace: false,
+        controlUrl: 'https://localhost:8443',
+      }),
       /already used/,
       'issuance is create-only by default',
     );
     const recovered = decodeCredential(
-      await issueHostCredential({ name: 'root', role: 'admin', replace: true }),
+      await issueHostCredential({
+        name: 'root',
+        role: 'admin',
+        replace: true,
+        controlUrl: 'https://localhost:8443',
+      }),
     );
     assert.equal(
       (await s.call(recovered, 'GET', '/api/v1/credentials')).status,
