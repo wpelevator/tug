@@ -20,7 +20,7 @@ import {
   controlPortCheck,
   localImageBuildArgs,
 } from './cli-install.ts';
-import { createSourceArchive, prepareLocalImages } from './cli-build.ts';
+import { createLocalBuildSnapshot, createSourceArchive, prepareLocalImages } from './cli-build.ts';
 import { saveImageArchive } from './artifacts.ts';
 import { spawnSync } from 'node:child_process';
 import type { SpawnSyncOptions } from 'node:child_process';
@@ -1210,7 +1210,14 @@ program
         const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-local-build-'));
         try {
           const form = new FormData();
-          const localImages = await prepareLocalImages(compose, process.cwd(), directory);
+          const source = Object.values(compose.services).some((service) => service.build)
+            ? await createLocalBuildSnapshot(process.cwd(), directory, [
+                cfg.file,
+                cfg.localFile,
+                ...(cfg.credentialFile ? [cfg.credentialFile] : []),
+              ])
+            : process.cwd();
+          const localImages = await prepareLocalImages(compose, source, directory);
           for (const { field } of localImages)
             form.append(
               field,
