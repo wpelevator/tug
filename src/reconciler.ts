@@ -67,6 +67,18 @@ export async function ensureProjectResources(
   project: string,
   plan: NodePlan,
 ): Promise<void> {
+  // Check all volumes before creating resources or replacing containers. An older owned volume must
+  // never be silently replaced by a new, empty volume after the naming scheme changes.
+  for (const volume of plan.volumes) {
+    if (volume.external || (await docker.inspectVolume(volume.name))) continue;
+    const volumeKey = volume.labels['tug.volume'];
+    const legacyName = `tug_${project}_${volumeKey}`;
+    const legacy = await docker.inspectVolume(legacyName);
+    if (legacy?.Labels?.[LABEL_PROJECT] === project && legacy.Labels?.['tug.volume'] === volumeKey)
+      throw new Error(
+        `managed volume ${legacyName} uses an earlier Tug name; refusing to create empty volume ${volume.name}. Recover or copy its data before deploying`,
+      );
+  }
   let network = await docker.inspectNetwork(plan.network);
   if (!network) {
     await docker.createNetwork(plan.network, { [LABEL_PROJECT]: project });
