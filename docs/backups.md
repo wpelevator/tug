@@ -94,6 +94,17 @@ Only a snapshot this target produced can be restored into it (its `project:` and
 
 A scratch restore of a volume is also the restore drill: it proves a backup can be read without touching anything live. Databases are the same drill by hand: `restic dump <snapshot> wordpress.sql` into a throwaway container.
 
+## Recover a site on a replacement node
+
+This is a manual procedure, not automatic failover. A WordPress and MariaDB project was recovered this way with the published 0.9.0 release in the [real-host drill](real-host-evaluation.md#recovery-drill-with-the-published-090-release-2-november-2026). The original host was simulated as unavailable while control and the backup destination stayed available. Restore control first if it is also lost.
+
+1. Fence the lost node or otherwise ensure its old workloads cannot write to shared services. Enroll the replacement node and verify it is online. Keep the recovery site private or otherwise block public traffic while its new database and volumes are empty; do not expose a fresh WordPress installer.
+2. Change the project’s service and volume placement to the replacement node and deploy the same project using the retained images, configuration and secrets. The replacement uses fresh local volumes; deploying alone does not restore their contents. Keep the old backup repository and its password available.
+3. Check `tug backup-list` and run `tug restore db` and `tug restore wp-content` without `--confirm`. Verify each plan names the replacement node and the intended pre-loss snapshot. If the latest snapshot is not the desired one, use `--from` with the intended backup run or snapshot ID. Older releases may briefly show the former node until the backup scheduler catches up; never confirm a plan aimed at the wrong host.
+4. Restore the database and uploads with the printed commands and `--confirm`. Tug normally takes a safety backup before each in-place restore and stops the writers; wait for each restore to finish and investigate any warning before continuing. Verify known database content and uploaded files, probe the application, then re-enable traffic and update DNS or routing as needed.
+
+This does not restore data that was never backed up, external services, DNS, or changes after the selected snapshots. A live workload can write new data during recovery unless traffic and other writers are fenced; control alone cannot fence an unreachable or compromised host.
+
 ## Control plane backup
 
 `tug control-backup` covers the control plane only, not workload data. Take it with an `admin` operator credential and copy the archive off the control-plane host. The archive holds the master key, every secret and the private CA key (which can issue credentials for the whole installation), so treat it like a password vault and store it encrypted. Create a dedicated credential for the job: `tug credential-create backup --role admin` and store it at `/etc/tug/backup.credential.json` (mode `0600`). Example `/etc/cron.d/tug-control-backup` on the control-plane host (the runtime image runs the CLI; adjust to how you invoke `tug` there):
