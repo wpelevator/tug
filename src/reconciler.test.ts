@@ -7,10 +7,64 @@ import { reconcile } from './agent.ts';
 import type { AgentContext } from './agent.ts';
 import { buildDesiredState } from './compose.ts';
 import { containerSpecs, withHostPort } from './container-spec.ts';
-import { loadRolloutState, parsePortRange } from './reconciler.ts';
+import { ensureProjectResources, loadRolloutState, parsePortRange } from './reconciler.ts';
 import type { ComposeFile, SecretsResponse } from './protocol.ts';
 import type { HttpClient } from './runners.ts';
 import { FakeDocker, normalized } from '../tests/fake-docker.ts';
+
+test('project resources reject unsafe or foreign pre-existing resources', async () => {
+  const docker = new FakeDocker();
+  const plan = {
+    network: 'tug_alpha',
+    volumes: [
+      {
+        name: 'tug_alpha_data',
+        driver: 'local',
+        opts: {},
+        labels: { 'tug.project': 'alpha', 'tug.volume': 'data' },
+        external: false,
+      },
+    ],
+    specs: {},
+  };
+  docker.networks.set(plan.network, {
+    Name: plan.network,
+    Id: 'foreign',
+    Labels: { 'tug.project': 'other' },
+  });
+  await assert.rejects(
+    ensureProjectResources(docker, 'alpha', plan),
+    /not owned/,
+    'foreign networks must not be reused',
+  );
+  docker.networks.clear();
+  docker.volumes.set(plan.volumes[0].name, {
+    Name: plan.volumes[0].name,
+    Driver: 'local',
+    Labels: plan.volumes[0].labels,
+    Options: { type: 'none', o: 'bind', device: '/' },
+  });
+  await assert.rejects(
+    ensureProjectResources(docker, 'alpha', plan),
+    /does not match/,
+    'host-backed volumes must not be reused as ordinary volumes',
+  );
+  docker.volumes.set(plan.volumes[0].name, {
+    Name: plan.volumes[0].name,
+    Driver: 'local',
+    Labels: { 'tug.project': 'alpha_data', 'tug.volume': 'other' },
+    Options: {},
+  });
+  await assert.rejects(
+    ensureProjectResources(docker, 'alpha', plan),
+    /does not match/,
+    'colliding volume names must not grant access across projects',
+  );
+  docker.volumes.clear();
+  await ensureProjectResources(docker, 'alpha', plan);
+  await ensureProjectResources(docker, 'alpha', plan);
+  assert.equal(docker.volumes.size, 1, 'matching owned volumes must be reusable');
+});
 
 /** A host where containers whose image is in `unhealthy` fail their HTTP health check. */
 function fakeHost() {
