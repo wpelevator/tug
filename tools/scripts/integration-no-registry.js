@@ -93,6 +93,7 @@ async function deploy(content, ...options) {
       'reused-version',
       '--timeout',
       '180',
+      '--json',
       ...options,
     ),
   );
@@ -188,7 +189,9 @@ try {
     second.desiredState.services.web.image,
     'Reusing a version label must not overwrite the previous image',
   );
-  const rollback = JSON.parse(await cli('rollback', '--project', 'imagedemo', '--timeout', '180'));
+  const rollback = JSON.parse(
+    await cli('rollback', '--project', 'imagedemo', '--timeout', '180', '--json'),
+  );
   assert.equal(
     rollback.deployment.state,
     'succeeded',

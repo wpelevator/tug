@@ -92,6 +92,8 @@ Restores are as generic as backups. A service is restored by running its `x-tug.
 3. It takes a **safety backup** of the current data, tagged `trigger:pre-restore` and exempt from retention (skip with `--no-safety-backup`). If that fails, nothing has changed: the writers start again and the lock is dropped.
 4. It restores, then starts the writers and unlocks.
 
+While a writer is held, a service that health-checks through it (an nginx check that requests a PHP page, for example) is unhealthy, so its node reports a failed apply for the duration. Tug still sees the writer as held and continues, but the deployment looks failed until the hold ends. Give such services a health check that does not depend on the writer (a static `/healthz`) to keep them serving through a restore. If a writer never reports held within five minutes, the restore fails and the error names the node, the writer's state and the apply error that node reported.
+
 Only a snapshot this target produced can be restored into it (its `project:` and `target:` tags are checked). If the restore itself fails, the writers stay stopped and the project locked, because a half-restored database serving traffic is worse than an outage. The restore is `interrupted`; `tug restore resume <id>` tries again and `tug restore release <id>` starts the services anyway. Scheduled backups of a target are skipped while it is being restored. A restore is recorded with `restore.started`, `restore.completed`, `restore.failed` and `restore.released` events.
 
 A scratch restore of a volume is also the restore drill: it proves a backup can be read without touching anything live. Databases are the same drill by hand: `restic dump <snapshot> wordpress.sql` into a throwaway container.

@@ -116,6 +116,13 @@ async function fixture(options: { writers?: boolean } = {}) {
       }),
       ts,
     );
+  const reportApplyError = (error: string) =>
+    db.run(
+      `INSERT INTO node_statuses(id,node_id,project_id,observed_version,status_json,health,updated_at) VALUES('ns','n1','site','v1',?,'failed',?)
+       ON CONFLICT(node_id,project_id) DO UPDATE SET status_json=excluded.status_json`,
+      JSON.stringify({ project: 'site', health: 'failed', error }),
+      ts,
+    );
   /** A successful catalog entry for `target`, as a finished backup run would leave. */
   const catalog = (target: string, snapshot: string, finished: string, trigger = 'manual') =>
     db.run(
@@ -138,6 +145,7 @@ async function fixture(options: { writers?: boolean } = {}) {
     queued,
     woken,
     reportHeld,
+    reportApplyError,
     catalog,
     set: (iso: string) => (clock = at(iso)),
     state: (id: string) =>
@@ -461,6 +469,22 @@ test('writers that never stop fail the restore after the timeout and release the
   assert.match(f.state(id).error!, /did not stop in time/);
   assert.deepEqual(f.holds(), []);
   assert.equal(f.lock(), undefined);
+});
+
+test('a writer that never reports held is named with the apply error its node reported', async () => {
+  const f = await fixture();
+  f.catalog('service:db', 'snap1', '2026-11-01T09:00:00Z');
+  const plan = f.restores.plan(request());
+  assert.ok(!('error' in plan));
+  const id = (f.restores.start(request(), plan) as { restoreId: string }).restoreId;
+  f.reportApplyError('nginx: http health check failed');
+  f.set('2026-11-01T10:06:00Z');
+  f.restores.advance();
+  assert.match(
+    f.state(id).error!,
+    /web on app1: no state; the node's apply failed with: nginx: http health check failed/,
+    'the timeout should name the writer, its node and the node-reported error',
+  );
 });
 
 test('a scratch restore of a volume takes no lock and holds nothing', async () => {
