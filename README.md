@@ -7,7 +7,7 @@ Deploy Docker Compose applications to one or more ordinary Linux VPSes through a
 ## Features
 
 - One mutual-TLS port: every operator, CI job and node authenticates with a certificate from the control plane's private CA, and control authorizes it by public key. Scoped `read`/`deploy`/`admin` operator credentials for CI and teammates, an audit trail naming who acted, and SQLite metadata through Node's built-in driver.
-- Nodes join over SSH (`node-install`) or enroll themselves with a single `docker run` after `node-prepare-enrollment`, each with its own certificate and an immutable node ID. Agents only dial out, so nodes behind NAT work.
+- Nodes join over SSH (`node add`) or enroll themselves with a single `docker run` after `node enroll`, each with its own certificate and an immutable node ID. Agents only dial out, so nodes behind NAT work.
 - Agents pull desired state from control, reconcile containers through the Docker Engine API, run TCP/HTTP/Docker health checks and report status. An outbound WebSocket wakes them as soon as control queues work and carries live `exec`, followed logs, `ps` and `inspect` sessions, with long-poll and periodic-poll fallbacks for ordinary work.
 - `x-tug` placement of services and volumes on nodes, with immutable desired-state records per deployment.
 - Build application images on control from uploaded source, or locally with `deploy --build-local`. Both use a filtered source snapshot that excludes known Tug credentials; operators must still exclude other secrets. Agents download saved images directly from control. Published images are pinned to registry digests at deployment creation.
@@ -59,17 +59,18 @@ Install the CLI (Node >= 22.18), or run it without installing through `npx @wpel
 
 ```bash
 npm install -g @wpelevator/tug
-tug control-install root@203.0.113.5 --install-docker
-tug init tug-root.credential.json
-tug node-install root@198.51.100.7 --name app1 --address 10.0.0.7 --install-docker
-tug deploy -f docker-compose.yml
+tug setup root@203.0.113.5
+tug node add root@198.51.100.7
+tug deploy
 ```
+
+`tug setup` (short for `tug control setup`) installs control and imports the root credential, `tug node add` infers the node name from the SSH host and, in a terminal, offers to install Docker, choose the inter-node address and enable ingress before it changes anything, and `tug deploy` finds `docker-compose.yml` and prompts for missing secrets. Commands read `tug <subject> <verb>` (`tug node list`, `tug secret set`, `tug backup run`); see the [CLI reference](docs/cli.md).
 
 The CLI installs the matching `ghcr.io/wpelevator/tug:<version>` image on your hosts. Control serves mutual TLS directly on its port (`8443`): every operator, CI job and node authenticates with a certificate from a private CA created at install, and clients verify a name generated from that CA, so the address can be a bare IP and can change later. Do not terminate TLS in front of it.
 
-A `controlUrl` in `tug.yml` is the one name for where control is: `control-install` advertises it, and every other command connects to it. Pass `--control-url` (or set `TUG_CONTROL_URL`) to override it for one invocation. See [CLI configuration](docs/cli.md#config-file) for precedence and per-node defaults.
+A `controlUrl` in `tug.yml` is the one name for where control is: `tug setup` advertises it, and every other command connects to it. Pass `--control-url` (or set `TUG_CONTROL_URL`) to override it for one invocation. See [CLI configuration](docs/cli.md#config-file) for precedence and per-node defaults.
 
-The full walkthrough, including nodes you cannot SSH to (`tug node-prepare-enrollment`), CI credentials (`tug credential-create`), moving the control plane and recovery, is in [Getting started](docs/getting-started.md).
+The full walkthrough, including nodes you cannot SSH to (`tug node enroll`), CI credentials (`tug credential create`), moving the control plane and recovery, is in [Getting started](docs/getting-started.md).
 
 ## Documentation
 

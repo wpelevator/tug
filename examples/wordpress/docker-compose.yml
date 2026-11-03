@@ -1,8 +1,8 @@
 # WordPress + MariaDB on one node, with scheduled, restorable backups and nothing else to run.
 #
 # Deploy from this directory:  tug deploy -f docker-compose.yml
-# Secrets (tug secret-set NAME): DB_PASSWORD, DB_ROOT_PASSWORD
-# Backups also need a destination, set once per control plane: tug backup-destination-set (see README.md).
+# Secrets (tug secret set NAME): DB_PASSWORD, DB_ROOT_PASSWORD
+# Backups also need a destination, set once per control plane: tug backup destination set (see README.md).
 # Replace the node name "app" and the host "blog.example.com".
 
 x-tug:
@@ -36,7 +36,7 @@ services:
         command: mariadb-dump -uroot -p"$$MARIADB_ROOT_PASSWORD" --single-transaction --quick --routines --events --triggers --add-drop-database --databases wordpress
         filename: wordpress.sql
         verify: "-- Dump completed" # a dump cut short never becomes the latest good backup
-        # Run inside the container with the stored dump on stdin when you `tug restore db`.
+        # Run inside the container with the stored dump on stdin when you `tug restore run db`.
         restore: mariadb -uroot -p"$$MARIADB_ROOT_PASSWORD"
 
   wordpress:

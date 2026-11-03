@@ -1,8 +1,8 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import readline from 'node:readline';
-import { Writable } from 'node:stream';
+import { ask } from './cli-prompt.ts';
+import type { Prompter } from './cli-prompt.ts';
 
 /** `$$` is an escaped dollar; `${NAME}` is required only when it has no `:-`, `-`, `:+`, `+`, `:?` or `?` modifier. */
 const REFERENCE = /\$\$|\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g;
@@ -58,40 +58,10 @@ export function generateSecret(): string {
   return crypto.randomBytes(24).toString('base64url');
 }
 
-/** True when both ends are a terminal and the run is not CI, so asking a question can be answered. */
-export function canPrompt(env: NodeJS.ProcessEnv = process.env): boolean {
-  return !!process.stdin.isTTY && !!process.stdout.isTTY && !env.CI;
-}
-
-/** Ask a line of text on the terminal; with `hidden` the typed characters are not echoed. */
-export async function ask(question: string, hidden = false): Promise<string> {
-  const muted = { on: false };
-  const output = new Writable({
-    write(chunk, _encoding, callback) {
-      if (!muted.on) process.stdout.write(chunk);
-      callback();
-    },
-  });
-  const rl = readline.createInterface({ input: process.stdin, output, terminal: true });
-  try {
-    return await new Promise<string>((resolve, reject) => {
-      rl.once('close', () => reject(new Error('input closed before an answer was given')));
-      rl.question(question, (answer) => {
-        if (hidden) process.stdout.write('\n');
-        resolve(answer);
-      });
-      muted.on = hidden;
-    });
-  } finally {
-    rl.removeAllListeners('close');
-    rl.close();
-  }
-}
-
 /** Resolve each missing secret interactively; returns the values to store. */
 export async function promptForSecrets(
   names: readonly string[],
-  prompt: (question: string, hidden?: boolean) => Promise<string> = ask,
+  prompt: Prompter = ask,
 ): Promise<Record<string, string>> {
   const values: Record<string, string> = {};
   for (const name of names) {

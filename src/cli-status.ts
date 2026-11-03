@@ -79,3 +79,40 @@ export function formatStatus(status: StatusResponse): string {
     lines.push(`  ${node.name}: ${node.status}; last seen ${node.last_seen_at || 'never'}`);
   return lines.join('\n');
 }
+
+export interface NodeListing {
+  name: string;
+  status: string;
+  address: string | null;
+  ingress: number | boolean;
+  labels: string[];
+  last_seen_at: string | null;
+  disabled_at?: string | null;
+}
+
+/** A table of the registered nodes: state, inter-node address, ingress role, labels and last contact. */
+export function formatNodes(nodes: NodeListing[]): string {
+  if (!nodes.length) return 'No nodes';
+  const rows = [
+    ['NODE', 'STATUS', 'ADDRESS', 'INGRESS', 'LABELS', 'LAST SEEN'],
+    ...[...nodes]
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .map((node) => [
+        node.name,
+        node.disabled_at ? 'disabled' : node.status,
+        node.address || '-',
+        node.ingress ? 'yes' : 'no',
+        node.labels.join(',') || '-',
+        node.last_seen_at || 'never',
+      ]),
+  ];
+  const widths = rows[0].map((_, column) => Math.max(...rows.map((row) => row[column].length)));
+  return rows
+    .map((row) =>
+      row
+        .map((cell, column) => cell.padEnd(widths[column]))
+        .join('  ')
+        .trimEnd(),
+    )
+    .join('\n');
+}

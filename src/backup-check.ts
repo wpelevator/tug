@@ -1,4 +1,4 @@
-/** The part of `GET /api/v1/backups` that `tug backup-list --check` judges. */
+/** The part of `GET /api/v1/backups` that `tug backup list --check` judges. */
 export interface BackupCheckInput {
   destinationConfigured: boolean;
   targets: { target: string; enabled: boolean; problem?: string | null }[];

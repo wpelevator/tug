@@ -35,7 +35,7 @@ done
 TUG_CONFIG=$(mktemp)
 export TUG_CONFIG TUG_CREDENTIAL_FILE="$CRED" TUG_CONTROL_URL="$CONTROL"
 node -e 'require("node:fs").writeFileSync(process.env.TUG_CONFIG, "{}")'
-node src/cli.ts secret-set SAMPLE_SECRET --project sample --value integration-secret
+node src/cli.ts secret set SAMPLE_SECRET --project sample --value integration-secret
 node src/cli.ts deploy -f docker-compose.sample.yml --project sample
 node tools/scripts/integration-verify.js
 

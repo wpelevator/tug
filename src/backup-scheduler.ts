@@ -367,7 +367,7 @@ export function createBackupService(deps: BackupServiceDeps) {
           'warn',
           'backup.no_destination',
           schedule.project_id,
-          `backup of ${schedule.target} skipped: no backup destination is configured; run tug backup-destination-set`,
+          `backup of ${schedule.target} skipped: no backup destination is configured; run tug backup destination set`,
           {
             runId,
             target: schedule.target,

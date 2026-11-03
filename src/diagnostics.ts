@@ -96,9 +96,7 @@ export function diagnoseNode(
   // A disabled node's certificate is irrelevant until it is replaced, so it never fails the diagnostics.
   const report = connectivity === 'disabled' ? warnings : problems;
   if (certificate?.state === 'expired')
-    report.push(
-      `certificate expired ${certificate.notAfter}; run node-replace-identity ${node.name}`,
-    );
+    report.push(`certificate expired ${certificate.notAfter}; run tug node replace ${node.name}`);
   else if (certificate?.state === 'expiring')
     warnings.push(
       `certificate expires in ${certificate.daysLeft} days and has not renewed; check the agent logs on node ${node.name}`,

@@ -14,7 +14,7 @@ npm run test:smoke:dist
 
 Code style is enforced by Prettier (`.prettierrc.json`: 100 columns, single quotes, trailing commas; indentation comes from `.editorconfig`). `npm run lint` runs ESLint and then `prettier --check .`, and CI runs it, so an unformatted file fails the build. `npm run format` rewrites files with Prettier and then applies ESLint's autofixes. `eslint-config-prettier` switches off the ESLint rules that would fight the formatter, so ESLint only reports correctness problems. Prettier covers TypeScript, JavaScript and JSON; Markdown, YAML, the install templates and generated files are listed in `.prettierignore`. Prettier moves a trailing `// eslint-disable-line` comment when it rewraps a statement, so put suppressions on their own line above the code they cover (`// eslint-disable-next-line`).
 
-`npm test` runs `node --test 'src/**/*.test.ts'`. `npm run typecheck` runs `tsc --noEmit` over `src/` and `tests/` with `strict` on. `npm run build` compiles `src/` to `dist/` (JavaScript plus `.d.ts`) and copies `src/templates` to `dist/templates`. `npm run test:smoke:dist` builds and checks that `control-install` and `node-install` render their templates from `dist/`.
+`npm test` runs `node --test 'src/**/*.test.ts'`. `npm run typecheck` runs `tsc --noEmit` over `src/` and `tests/` with `strict` on. `npm run build` compiles `src/` to `dist/` (JavaScript plus `.d.ts`) and copies `src/templates` to `dist/templates`. `npm run test:smoke:dist` builds and checks that `control setup` and `node add` render their templates from `dist/`.
 
 Import specifiers in the source use the `.ts` extension (`import { x } from './util.ts'`) because Node's type stripping does not remap `.js` to `.ts`; `tsc` rewrites them to `.js` in `dist/` (`rewriteRelativeImportExtensions`). Only erasable TypeScript syntax is allowed (`erasableSyntaxOnly`: no enums or constructor parameter properties).
 
@@ -24,7 +24,7 @@ Unit tests sit next to the source files as `src/*.test.ts`. The agent integratio
 
 The Dockerfiles are multi-stage: a build stage runs `npm ci && npm run build`, and the final image ships `dist/` plus production dependencies only, with entrypoint `node dist/main.js`. `tsc` does not copy `src/templates/*`, so `npm run build` copies them next to the emitted `dist/cli.js`; the CLI resolves them relative to the running file, so `node src/cli.ts` and `node dist/cli.js` both work.
 
-The runtime image ships the Docker client (control uses it to load, tag and remove image archives through the mounted socket) and the compiled `tug-runtime` entry (`dist/main.js`). It deliberately has no Compose plugin: agents drive the Docker Engine API, and the control-plane host runs the control container with the host's own Compose (`control-install` checks for it). `Dockerfile.alpine` provides the same runtime on Alpine.
+The runtime image ships the Docker client (control uses it to load, tag and remove image archives through the mounted socket) and the compiled `tug-runtime` entry (`dist/main.js`). It deliberately has no Compose plugin: agents drive the Docker Engine API, and the control-plane host runs the control container with the host's own Compose (`control setup` checks for it). `Dockerfile.alpine` provides the same runtime on Alpine.
 
 Run `npm run test:smoke:image` to build the actual shipped runtime image and execute its Docker client and Node binaries, the compiled control/agent database initialization (a writable snapshot and read-only validation) and `tools/scripts/verify-mtls-runtime.js`, which issues certificates with `@peculiar/x509`, serves mTLS with the production TLS options and calls it through the undici transport, including the loopback connect-target override that still verifies the generated control name. Nothing from the host socket or CLI plugins is mounted. To test an already-built image, set `TUG_RUNTIME_IMAGE=<tag>`; to check the Alpine image, set `TUG_RUNTIME_DOCKERFILE=Dockerfile.alpine`. CI runs this packaging smoke before the integration test, so the fake-VPS image cannot mask missing runtime tools.
 
@@ -36,7 +36,7 @@ Run `npm run test:smoke:image` to build the actual shipped runtime image and exe
 
 The `.github/actions/setup` composite action installs Node.js with the npm download cache (keyed on the lockfile) and runs `npm ci`; every job uses it. The integration jobs prebuild their images with `.github/actions/build-images` (Buildx and the GitHub Actions layer cache, scopes `runtime` and `fake-vps`) and set `TUG_COMPOSE_BUILD=` so the integration scripts run `docker compose up` (on the CI host, to start the test stack) without `--build`; the Compose files tag those images `tug-runtime:integration` and `tug-fake-vps:integration`. Locally the variable is unset and the scripts keep passing `--build`. Only pushes to `main` write the cache, because a pull request can read the default branch's cache but not another pull request's. The release workflow's `edge` job exports the `runtime` scope and the versioned `image` job reads it. The Dockerfiles pin the Node.js major (`node:24-*`), so an upstream LTS bump cannot silently invalidate the cache or change the shipped runtime.
 
-Published images are `ghcr.io/wpelevator/tug`. To test an unreleased CLI against a checkout, use `--build-local-image` on `control-install` and `node-install` (builds `tug:local` from the working directory and copies it over SSH). The dev Compose files (`docker-compose*.yml`) and the integration tests always build the image from the checkout with `build: .` and never pull from GHCR.
+Published images are `ghcr.io/wpelevator/tug`. To test an unreleased CLI against a checkout, use `--build-local-image` on `control setup` and `node add` (builds `tug:local` from the working directory and copies it over SSH). The dev Compose files (`docker-compose*.yml`) and the integration tests always build the image from the checkout with `build: .` and never pull from GHCR.
 
 ## Compose stack
 
@@ -52,7 +52,7 @@ docker compose up --build control
 docker compose exec control node dist/main.js control issue-credential --name root --role admin > tug-root.credential.json
 node src/cli.ts init tug-root.credential.json
 # prepare a node, then start the agent with the join key it prints:
-node src/cli.ts node-prepare-enrollment --name dev-node --agent-control-url https://127.0.0.1:8443
+node src/cli.ts node enroll --name dev-node --agent-control-url https://127.0.0.1:8443
 TUG_JOIN_KEY=... docker compose --profile agent up agent
 ```
 
@@ -67,12 +67,12 @@ node src/main.ts control issue-credential --name root --role admin > tug-root.cr
 node src/cli.ts init tug-root.credential.json
 ```
 
-Host mode shares `./data` (or `TUG_DATA_DIR`) between control and `issue-credential`. Register a development node the way `node-install` does, with the node making its own key:
+Host mode shares `./data` (or `TUG_DATA_DIR`) between control and `issue-credential`. Register a development node the way `node add` does, with the node making its own key:
 
 ```bash
 export TUG_STATE_DIR=$PWD/data/agent TUG_NODE_NAME=dev-node
 node src/main.ts agent identity > dev-node.csr
-node src/cli.ts node-register dev-node --csr dev-node.csr --address 127.0.0.1 | node src/main.ts agent install-cert
+node src/cli.ts node register dev-node --csr dev-node.csr --address 127.0.0.1 | node src/main.ts agent install-cert
 ```
 
 Start an agent that reports status without applying Docker changes:
@@ -121,7 +121,7 @@ Layers `docker-compose.integration-rollout.yml` over the same stack with a singl
 
 ## Test VPS with Lima
 
-`template-vps.yml` is a [Lima](https://lima-vm.io/) template for an Ubuntu VM with Docker and Node.js installed, useful as a real SSH target for `control-install` and `node-install`:
+`template-vps.yml` is a [Lima](https://lima-vm.io/) template for an Ubuntu VM with Docker and Node.js installed, useful as a real SSH target for `control setup` and `node add`:
 
 ```bash
 limactl start --name=vps template-vps.yml

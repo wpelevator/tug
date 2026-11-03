@@ -148,7 +148,7 @@ export async function startMtlsControl(
   );
   const credentialFile = path.join(dir, 'root.credential.json');
   await fs.writeFile(credentialFile, JSON.stringify(root), { mode: 0o600 });
-  /** Registers a node the way `node-install` does and returns its credential. */
+  /** Registers a node the way `tug node add` does and returns its credential. */
   const registerNode = async (name: string) => {
     const keys = await generateKeyPair();
     const transport = createTransport(root, url);

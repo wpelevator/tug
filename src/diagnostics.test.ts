@@ -93,8 +93,8 @@ test('node certificate expiry fails when expired, warns when renewal is overdue 
   const expired = diagnoseNode(node({ cert_not_after: iso(-DAY) }), NOW, 60);
   assert.match(
     expired.problems[0],
-    /certificate expired.*node-replace-identity n1/,
-    'an expired node certificate fails and points at node-replace-identity',
+    /certificate expired.*node replace n1/,
+    'an expired node certificate fails and points at node replace',
   );
   const expiring = diagnoseNode(node({ cert_not_after: iso(5 * DAY) }), NOW, 60);
   assert.equal(expiring.problems.length, 0, 'a soon-expiring certificate is not a failure yet');

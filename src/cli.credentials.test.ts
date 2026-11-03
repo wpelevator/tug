@@ -20,26 +20,30 @@ test('token commands reject malformed invocations before contacting control', as
   };
   try {
     const help = (await exec(process.execPath, [entry, '--help'], { env, cwd: dir })).stdout;
-    for (const name of ['credential-create', 'credential-list', 'credential-revoke'])
-      assert.ok(help.includes(name), `help should list flat command ${name}`);
-    const createHelp = (
-      await exec(process.execPath, [entry, 'credential-create', '--help'], { env, cwd: dir })
+    assert.ok(help.includes('credential'), 'help should list the credential group');
+    const groups = (
+      await exec(process.execPath, [entry, 'credential', '--help'], { env, cwd: dir })
     ).stdout;
-    assert.match(createHelp, /--role/, 'credential-create help should document --role');
-    assert.match(createHelp, /--expires-in-days/, 'credential-create help should document expiry');
+    for (const name of ['create', 'list', 'revoke'])
+      assert.ok(groups.includes(name), `help for the credential group should list ${name}`);
+    const createHelp = (
+      await exec(process.execPath, [entry, 'credential', 'create', '--help'], { env, cwd: dir })
+    ).stdout;
+    assert.match(createHelp, /--role/, 'credential create help should document --role');
+    assert.match(createHelp, /--expires-in-days/, 'credential create help should document expiry');
     for (const args of [
-      ['credential-create', 'ci'],
-      ['credential-create', 'ci', '--role', 'owner'],
-      ['credential-create', 'bad name', '--role', 'read'],
-      ['credential-create', 'operator-x/y', '--role', 'read'],
-      ['credential-create', 'ci', '--role', 'deploy', '--project', 'bad/name'],
-      ['credential-create', 'ci', '--role', 'admin', '--project', 'site'],
-      ['credential-create', 'ci', '--role', 'read', '--expires-in-days', '0'],
-      ['credential-create', 'ci', '--role', 'read', '--expires-in-days', 'soon'],
-      ['credential-create', 'ci', '--role', 'read', 'extra'],
-      ['credential-list', 'extra'],
-      ['credential-revoke'],
-      ['credential-revoke', 'a', 'b'],
+      ['credential', 'create', 'ci'],
+      ['credential', 'create', 'ci', '--role', 'owner'],
+      ['credential', 'create', 'bad name', '--role', 'read'],
+      ['credential', 'create', 'operator-x/y', '--role', 'read'],
+      ['credential', 'create', 'ci', '--role', 'deploy', '--project', 'bad/name'],
+      ['credential', 'create', 'ci', '--role', 'admin', '--project', 'site'],
+      ['credential', 'create', 'ci', '--role', 'read', '--expires-in-days', '0'],
+      ['credential', 'create', 'ci', '--role', 'read', '--expires-in-days', 'soon'],
+      ['credential', 'create', 'ci', '--role', 'read', 'extra'],
+      ['credential', 'list', 'extra'],
+      ['credential', 'revoke'],
+      ['credential', 'revoke', 'a', 'b'],
       ['events', '--all', '--project', 'site'],
     ]) {
       await assert.rejects(
@@ -61,7 +65,7 @@ test('token commands reject malformed invocations before contacting control', as
   }
 });
 
-test('credential-create, credential-list and credential-revoke work against control and a scoped credential works as TUG_TOKEN', async () => {
+test('credential create, credential list and credential revoke work against control and a scoped credential works as TUG_TOKEN', async () => {
   const data = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-cli-tokens-'));
   const control = await startMtlsControl(data);
   const tug = (credential: string, ...args: string[]) =>
@@ -76,7 +80,8 @@ test('credential-create, credential-list and credential-revoke work against cont
   try {
     const created = await tug(
       OPERATOR,
-      'credential-create',
+      'credential',
+      'create',
       'ci-deploy',
       '--role',
       'deploy',
@@ -91,30 +96,30 @@ test('credential-create, credential-list and credential-revoke work against cont
     assert.match(
       body.credential,
       /^[A-Za-z0-9_-]{200,}$/,
-      'credential-create should print the new credential once on stdout',
+      'credential create should print the new credential once on stdout',
     );
     assert.deepEqual(
       body.projects,
       ['blog', 'site'],
-      'credential-create should send every repeated --project',
+      'credential create should send every repeated --project',
     );
-    assert.ok(body.expiresAt, 'credential-create should send the expiry');
+    assert.ok(body.expiresAt, 'credential create should send the expiry');
     assert.match(
       created.stderr,
       /not shown again/,
-      'credential-create should warn on stderr that the secret is shown once',
+      'credential create should warn on stderr that the secret is shown once',
     );
 
-    const listed = await tug(OPERATOR, 'credential-list');
+    const listed = await tug(OPERATOR, 'credential', 'list');
     assert.ok(
       !listed.stdout.includes(body.credential) && !listed.stdout.includes('token_hash'),
-      'credential-list must never print secrets or hashes',
+      'credential list must never print secrets or hashes',
     );
     assert.equal(
       JSON.parse(listed.stdout).credentials.find((t: { name: string }) => t.name === 'ci-deploy')
         .name,
       'ci-deploy',
-      'credential-list should show the credential by name',
+      'credential list should show the credential by name',
     );
 
     const status = await tug(body.credential, 'status', '--json');
@@ -123,7 +128,7 @@ test('credential-create, credential-list and credential-revoke work against cont
       'a scoped credential should work anywhere TUG_TOKEN does',
     );
     await assert.rejects(
-      tug(body.credential, 'credential-list'),
+      tug(body.credential, 'credential', 'list'),
       /403/,
       'a deploy credential cannot list tokens',
     );
@@ -142,9 +147,9 @@ test('credential-create, credential-list and credential-revoke work against cont
     assert.equal(events[0].actor, 'root', 'tug events should show who acted');
 
     assert.equal(
-      JSON.parse((await tug(OPERATOR, 'credential-revoke', 'ci-deploy')).stdout).ok,
+      JSON.parse((await tug(OPERATOR, 'credential', 'revoke', 'ci-deploy')).stdout).ok,
       true,
-      'credential-revoke should confirm',
+      'credential revoke should confirm',
     );
     await assert.rejects(
       tug(body.credential, 'status', '--json'),
@@ -152,7 +157,7 @@ test('credential-create, credential-list and credential-revoke work against cont
       'the revoked credential should stop working: the connection gate refuses it',
     );
     await assert.rejects(
-      tug(OPERATOR, 'credential-revoke', 'ghost'),
+      tug(OPERATOR, 'credential', 'revoke', 'ghost'),
       /404/,
       'revoking an unknown token should fail',
     );
@@ -165,19 +170,22 @@ test('credential-create, credential-list and credential-revoke work against cont
 test('backup commands are listed in help', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-backup-help-'));
   const env = { ...process.env, TUG_CONFIG: path.join(dir, 'missing.json') };
-  const help = (await exec(process.execPath, [entry, '--help'], { env, cwd: dir })).stdout;
-  for (const name of [
-    'backup-run',
-    'backup-list',
-    'backup-destination-set',
-    'backup-repository-password',
-    'restore',
-    'restore-list',
-    'restore-resume',
-    'restore-release',
-    'run',
-  ])
-    assert.ok(help.includes(name), `help should list ${name}`);
+  const groupHelp = async (...group: string[]) =>
+    (await exec(process.execPath, [entry, ...group, '--help'], { env, cwd: dir })).stdout;
+  for (const [group, verbs] of [
+    ['backup', ['run', 'list', 'password', 'destination']],
+    ['backup destination', ['set', 'show', 'remove']],
+    ['restore', ['run', 'list', 'resume', 'release']],
+  ] as const) {
+    const help = await groupHelp(...group.split(' '));
+    for (const verb of verbs)
+      assert.match(help, new RegExp(`^  ${verb}\\b`, 'm'), `${group} help should list ${verb}`);
+  }
+  assert.match(
+    (await exec(process.execPath, [entry, '--help'], { env, cwd: dir })).stdout,
+    /^ {2}run\b/m,
+    'help should list the one-off run command',
+  );
 });
 
 test('backup destination commands set, show and remove the destination without echoing secrets', async () => {
@@ -193,7 +201,9 @@ test('backup destination commands set, show and remove the destination without e
   const run = (...args: string[]) => exec(process.execPath, [entry, ...args], { env, cwd: dir });
   try {
     const set = await run(
-      'backup-destination-set',
+      'backup',
+      'destination',
+      'set',
       's3:https://s3.example.com/bucket/tug',
       '--env',
       'AWS_ACCESS_KEY_ID',
@@ -201,15 +211,15 @@ test('backup destination commands set, show and remove the destination without e
       'AWS_SECRET_ACCESS_KEY',
     );
     assert.ok(!set.stdout.includes('cli-secret-value'), 'set should not print the secret');
-    const shown = JSON.parse((await run('backup-destination-show')).stdout);
+    const shown = JSON.parse((await run('backup', 'destination', 'show')).stdout);
     assert.equal(shown.url, 's3:https://s3.example.com/bucket/tug', 'show prints the url');
     assert.deepEqual(shown.envNames, ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY']);
     await assert.rejects(
-      run('backup-destination-set', 's3:https://s3.example.com/bucket/tug'),
+      run('backup', 'destination', 'set', 's3:https://s3.example.com/bucket/tug'),
       /need AWS_ACCESS_KEY_ID/,
       'a destination without its credentials is refused by control',
     );
-    const removed = JSON.parse((await run('backup-destination-remove')).stdout);
+    const removed = JSON.parse((await run('backup', 'destination', 'remove')).stdout);
     assert.equal(removed.removed, true, 'remove deletes the destination');
   } finally {
     await control.close();

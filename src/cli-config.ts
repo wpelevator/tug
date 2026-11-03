@@ -22,14 +22,7 @@ export const COMMAND_SETTINGS: Record<string, Setting> = {
   wait: {
     type: 'boolean',
     flag: '--no-wait',
-    commands: [
-      'deploy',
-      'rollback',
-      'backup-run',
-      'node-install',
-      'node-replace-identity',
-      'node-repair-identity',
-    ],
+    commands: ['deploy', 'rollback', 'backup run', 'node add', 'node replace', 'node repair'],
   },
 };
 /** Per-node connection data (`nodes.<name>`); `nodeDefaults` takes the subset that is not node-specific. */
@@ -37,61 +30,32 @@ export const NODE_SETTINGS: Record<string, Setting> = {
   ssh: {
     type: 'string',
     flag: '<ssh-target>',
-    commands: ['node-install', 'node-replace-identity', 'node-repair-identity'],
+    commands: ['node add', 'node replace', 'node repair'],
   },
   address: {
     type: 'string',
     flag: '--address',
-    commands: [
-      'node-install',
-      'node-replace-identity',
-      'node-repair-identity',
-      'node-register',
-      'node-prepare-enrollment',
-    ],
+    commands: ['node add', 'node replace', 'node repair', 'node register', 'node enroll'],
   },
   label: {
     type: 'list',
     flag: '--label',
-    commands: [
-      'node-install',
-      'node-replace-identity',
-      'node-repair-identity',
-      'node-register',
-      'node-prepare-enrollment',
-    ],
+    commands: ['node add', 'node replace', 'node repair', 'node register', 'node enroll'],
   },
   installDocker: {
     type: 'boolean',
     flag: '--install-docker',
-    commands: [
-      'node-install',
-      'node-replace-identity',
-      'node-repair-identity',
-      'node-prepare-enrollment',
-      'control-install',
-    ],
+    commands: ['node add', 'node replace', 'node repair', 'node enroll', 'control setup'],
   },
   image: {
     type: 'string',
     flag: '--image',
-    commands: [
-      'node-install',
-      'node-replace-identity',
-      'node-repair-identity',
-      'node-prepare-enrollment',
-      'control-install',
-    ],
+    commands: ['node add', 'node replace', 'node repair', 'node enroll', 'control setup'],
   },
   agentControlUrl: {
     type: 'string',
     flag: '--agent-control-url',
-    commands: [
-      'node-install',
-      'node-replace-identity',
-      'node-repair-identity',
-      'node-prepare-enrollment',
-    ],
+    commands: ['node add', 'node replace', 'node repair', 'node enroll'],
   },
 };
 const NODE_SPECIFIC_KEYS = ['ssh', 'address'];
@@ -203,10 +167,25 @@ export function nodeSettings(config: ResolvedCliConfig, name?: string): SettingV
   return { ...config.nodeDefaults, ...(name ? config.nodes[name] : undefined) };
 }
 
-interface OptionSource {
+interface Named {
   name(): string;
+  parent?: Named | null;
+}
+interface OptionSource extends Named {
   options: readonly { attributeName(): string }[];
   getOptionValueSource(key: string): string | undefined;
+}
+
+/** Top-level shortcuts that run a grouped command, so config keys and validation treat them alike. */
+const SHORTCUTS: Record<string, string> = { setup: 'control setup' };
+
+/** The space-joined command names from the first subject down, such as `node add`; `setup` is `control setup`. */
+export function commandPath(command: Named): string {
+  const names = [command.name()];
+  for (let parent = command.parent; parent?.parent; parent = parent.parent)
+    names.unshift(parent.name());
+  const path = names.join(' ');
+  return SHORTCUTS[path] ?? path;
 }
 
 /**
@@ -221,7 +200,7 @@ export function applyConfigDefaults(
   const attributes = new Set(command.options.map((option) => option.attributeName()));
   for (const [key, value] of Object.entries(settings)) {
     if (
-      SETTINGS[key]?.commands.includes(command.name()) &&
+      SETTINGS[key]?.commands.includes(commandPath(command)) &&
       attributes.has(key) &&
       command.getOptionValueSource(key) !== 'cli'
     )

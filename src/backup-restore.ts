@@ -353,7 +353,7 @@ export function createRestoreService(deps: RestoreDeps) {
       'error',
       'restore.failed',
       restore,
-      `restore of ${restore.target} failed: ${error}${dataChanged ? '; the writers stay held until tug restore-release' : ''}`,
+      `restore of ${restore.target} failed: ${error}${dataChanged ? '; the writers stay held until tug restore release' : ''}`,
       { error, held: dataChanged },
     );
   }

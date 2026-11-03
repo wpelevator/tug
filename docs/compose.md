@@ -111,7 +111,7 @@ volumes:
         nodes: [vps-c]
 ```
 
-Control records volumes per project. A volume is included in a node's Compose file only when a service on that node uses it and, if the volume has `placement.nodes`, the node is listed. `tug volume-remove` refuses to remove a persistent volume without `--delete-data`, and refuses any volume still referenced by a service in the current deployment. `--delete-data` queues a `docker volume rm` on the volume's placement node.
+Control records volumes per project. A volume is included in a node's Compose file only when a service on that node uses it and, if the volume has `placement.nodes`, the node is listed. `tug volume remove` refuses to remove a persistent volume without `--delete-data`, and refuses any volume still referenced by a service in the current deployment. `--delete-data` queues a `docker volume rm` on the volume's placement node.
 
 Before starting workloads, the agent verifies that an existing Tug project network belongs to the project and that each existing non-external volume has the expected project and volume labels, driver and options. A mismatch stops reconciliation with an error instead of silently reusing the resource. Volume deletion also checks those ownership labels. Tug reserves the `tug.project`, `tug.volume` and `tug.restore` labels on managed volumes. External volumes are intentionally selected by name and are not checked as Tug-owned resources.
 
@@ -231,7 +231,7 @@ volumes:
         nodes: [app]
 ```
 
-Set `DB_PASSWORD` and `DB_ROOT_PASSWORD` with `tug secret-set` before deploying. The MariaDB flag keeps the buffer pool small enough for a 1 GB host that is also running the agent. Do not add `condition: service_healthy` unless the database image defines a Docker `HEALTHCHECK`.
+Set `DB_PASSWORD` and `DB_ROOT_PASSWORD` with `tug secret set` before deploying. The MariaDB flag keeps the buffer pool small enough for a 1 GB host that is also running the agent. Do not add `condition: service_healthy` unless the database image defines a Docker `HEALTHCHECK`.
 
 ## Not supported
 

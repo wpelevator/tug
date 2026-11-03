@@ -47,7 +47,7 @@ async function start() {
       void transport.close();
     }
   }
-  /** Registers a node the way `node-install` does: the node makes its key, an admin posts the CSR. */
+  /** Registers a node the way `node add` does: the node makes its key, an admin posts the CSR. */
   async function newNode(name: string, mode: 'create' | 'replace' = 'create', keyPem?: string) {
     const keys = keyPem ? { privateKeyPem: keyPem } : await generateKeyPair();
     const csr = await createCsr(keys.privateKeyPem);
@@ -263,7 +263,7 @@ test('node IDs are immutable and never reused: a removed node name gets a new ID
       'the agent work response names the immutable node ID',
     );
     const removed = await s.call(s.root, 'DELETE', '/api/v1/nodes/n1?force=true');
-    assert.equal(removed.status, 200, 'node-remove deletes an unplaced node');
+    assert.equal(removed.status, 200, 'node remove deletes an unplaced node');
     assert.equal(
       (await s.call(replaced.credential, 'GET', '/agent/v1/work')).status,
       0,
@@ -275,7 +275,7 @@ test('node IDs are immutable and never reused: a removed node name gets a new ID
     assert.notEqual(
       second.id,
       first.id,
-      'a name freed by node-remove never gets the old node ID back',
+      'a name freed by node remove never gets the old node ID back',
     );
     assert.equal(
       (await s.call(again.credential, 'GET', '/agent/v1/work')).status,

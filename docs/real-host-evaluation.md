@@ -23,7 +23,7 @@ This did not exercise the original specification's topology (plan.md, since remo
 
 ## What I followed, and what I actually did
 
-The README quick start says install control over SSH, `tug init` against an HTTPS URL, set a secret, `node-install`, deploy, then use `status`, `events`, `logs`, `restart` and `doctor`. The hosts were already past install. Control is bound to `10.110.0.3:8080`, not the public address. Port 8080 on `142.93.140.20` refuses connections. The working operator path is an SSH tunnel to `127.0.0.1:18082` and a config file outside the repo (`/tmp/tug-real-m4/config.json`, project still set to `realcheck`). That tunnel pattern is one example buried in the CLI and nodes docs. It is not the quick start.
+The README quick start says install control over SSH, `tug init` against an HTTPS URL, set a secret, `node add`, deploy, then use `status`, `events`, `logs`, `restart` and `doctor`. The hosts were already past install. Control is bound to `10.110.0.3:8080`, not the public address. Port 8080 on `142.93.140.20` refuses connections. The working operator path is an SSH tunnel to `127.0.0.1:18082` and a config file outside the repo (`/tmp/tug-real-m4/config.json`, project still set to `realcheck`). That tunnel pattern is one example buried in the CLI and nodes docs. It is not the quick start.
 
 The agents are `tug:m4-amd64`, not `ghcr.io/wpelevator/tug:0.2.0`. `tug doctor` on the laptop reports Docker Compose v5.6.1. The same command's control check reports v2.32.4, which is the plugin inside the runtime image. `tug status` does not show the image tag or the CLI version the node is running. An operator comparing those two Compose versions will think the install is inconsistent. It is, but status will not say so.
 
@@ -33,8 +33,8 @@ I did not reinstall from the published image. The cluster was already serving, a
 
 - Two projects on one ingress node. Caddy picked up `a.178.128.250.108.sslip.io` and `b.178.128.250.108.sslip.io` without dropping the existing `178.128.250.108.sslip.io` route.
 - Certificates issued with `TUG_ACME_EMAIL` unset. DNS for `*.178.128.250.108.sslip.io` is the whole trick, and it is not mentioned in the docs.
-- `secret-set` from stdin, before the project row existed. Values stayed out of argv. `secret-list` shows names and versions only.
-- Placement, persistent volume records, and `volume-list` naming the node.
+- `secret set` from stdin, before the project row existed. Values stayed out of argv. `secret list` shows names and versions only.
+- Placement, persistent volume records, and `volume list` naming the node.
 - Health checks: TCP to MariaDB, HTTP to WordPress. Once the compose file was one Compose would accept, both deploys converged without raising the 300 second default timeout.
 - Binding the app port to the overlay address on `app` (`10.210.0.1:8080:80`) and to `127.0.0.1:8080:80` on `edge` kept port 8080 off the public interfaces. Caddy still reached both sites.
 
@@ -100,13 +100,13 @@ On the image these hosts are running, those polls also wrote `service.pulling`, 
 
 M5 (`exec`, `logs -f`, `ps`) is the stated next milestone, and this run needed it on the first failure. Completing the WordPress install was a POST to `install.php` from the laptop, which is fine. Finding out why the container never started was not. Current `main` now puts the last apply error in the deployment failure and waits for `doctor --node`, but it still has no live shell or log stream.
 
-`volume-list` records the volume and the node. It does not show whether the Docker volume exists or how large it is. I did not test `volume-remove`. I also did not re-run rolling deploys, rollback, or `--build-local` on these sites. Those already passed on the nginx fixture. They are not what a WordPress install hits first.
+`volume list` records the volume and the node. It does not show whether the Docker volume exists or how large it is. I did not test `volume remove`. I also did not re-run rolling deploys, rollback, or `--build-local` on these sites. Those already passed on the nginx fixture. They are not what a WordPress install hits first.
 
 ## Documentation
 
 The pages disagree with the path that works.
 
-- The README's steps 1 and 2 assume a public HTTPS control URL. This cluster's API is HTTP on a VPC address, on purpose. The quick start should show the tunnel, and it should say that `control-install` publishes `PORT:8080` on all interfaces unless you change the rendered compose. The bind to `10.110.0.3` is not a documented flag.
+- The README's steps 1 and 2 assume a public HTTPS control URL. This cluster's API is HTTP on a VPC address, on purpose. The quick start should show the tunnel, and it should say that `control setup` publishes `PORT:8080` on all interfaces unless you change the rendered compose. The bind to `10.110.0.3` is not a documented flag.
 - There is no compose example with a database, a secret, a volume, and an ingress host. The samples are nginx, busybox, and redis, placed on `vps-a`, `vps-b`, and `vps-c`. These nodes are named `app` and `edge`. A person copying the sample will fail placement and learn nothing about `depends_on` or TLS.
 - `sslip.io` is how both real-host runs got a trusted certificate without owning a domain. It belongs in the networking page next to `tls: auto`, including the rate-limit warning: sslip.io is one registered domain, and Let's Encrypt's per-domain cap is shared with everyone else using it. Two hostnames worked today. A third batch might not.
 - Preflight checks free disk (2048 MB under `/var/lib` for control, 1024 MB for a node) and never checks RAM. Both hosts have 1 GB and no swap. An unmodified MariaDB on the control host, next to the agent and the control container, is a bad idea. The control-plane page says the control VPS is not in the request path. It does not say not to put a database on that same 1 GB machine. This cluster does, because there are only two machines.
@@ -131,13 +131,13 @@ I would not treat this run as evidence for rolling deploys, image build, or roll
 
 | Check | Result |
 |---|---|
-| `node-install --mesh --label ...` on two hosts (`a`: `app`,`storage`; `b`: `app`) | Both online with labels; WireGuard mesh up |
+| `node add --mesh --label ...` on two hosts (`a`: `app`,`storage`; `b`: `app`) | Both online with labels; WireGuard mesh up |
 | `global: true` + `placement.labels: [app]` | One `web` replica on each labelled node |
 | `replicas: 1` + labels | One `worker`, on the alphabetically first matching node |
 | `tug scale worker 2` / `1` | Second replica started on `b`, then removed; `0` and unknown services rejected |
 | NFS volume (`x-tug.type: nfs`, exporter `a`; the volume type has since been removed) | `b` mounted `10.210.0.1:/srv/tug/shared` over the WireGuard overlay (NFSv3); a file written on `b` appeared on `a`; the exporter bind-mounted the directory |
 | `ps`, `inspect`, `exec`, `logs -f` against real nodes | Worked |
-| `node-prepare-enrollment --install-docker --mesh` cloud-config on a host with Docker purged | Docker Engine and Compose installed, agent started, node enrolled with its label |
+| `node enroll --install-docker --mesh` cloud-config on a host with Docker purged | Docker Engine and Compose installed, agent started, node enrolled with its label |
 | Enrolled node with no public address behind `ufw` deny-incoming | WireGuard handshake and overlay ping to `a` worked; NFS mount worked |
 
 What this does not prove: the cloud-config was applied by re-running cloud-init (`cloud-init clean`, then its stages) with the config in `cloud.cfg.d`, not from first-boot user data, and the agent image came through an SSH-tunnelled throwaway registry. The firewalled node has a public IP, so this is not NAT. Debian, Fedora and Rocky bootstraps, arm64, and certificate renewal were not run.
@@ -145,8 +145,8 @@ What this does not prove: the cloud-config was applied by re-running cloud-init 
 ### Findings
 
 - **Fixed: dead nodes held rollouts open.** After `b`'s host was repurposed as `c`, the old `b` stayed registered with its labels. The next deploy placed `global` replicas on `b`, which never answered, and the deployment stayed `rolling_out` until cancelled. Label and `global` placement, and `tug scale`, now skip nodes not seen within `TUG_STALE_SECONDS`. `scale` also no longer spreads a labelled service onto nodes that do not match its labels when none match.
-- **Fixed: there was no way to remove a node.** `tug node-remove <node>` now deletes it (refused while a current deployment places something on it, or while its agent still reports, unless `--force`). Run on the hosts: removing the dead `b` succeeded and `a`'s WireGuard peer for it was dropped, while removing `a` was refused with the services placed on it.
-- **Fixed: `control-install` could not enable the mesh.** `TUG_MESH` had to be added to the generated compose file by hand; `control-install --mesh` now does it (unit-tested only).
+- **Fixed: there was no way to remove a node.** `tug node remove <node>` now deletes it (refused while a current deployment places something on it, or while its agent still reports, unless `--force`). Run on the hosts: removing the dead `b` succeeded and `a`'s WireGuard peer for it was dropped, while removing `a` was refused with the services placed on it.
+- **Fixed: `control setup` could not enable the mesh.** `TUG_MESH` had to be added to the generated compose file by hand; `control setup --mesh` now does it (unit-tested only).
 - **Closed by removal: NFS needed host preparation Tug does not do.** The exporter needed an NFS server and `/etc/exports`, consumers `nfs-common`. The `nfs` volume type was removed rather than growing a host installer.
 - **Open: `cloud-init clean` regenerates SSH host keys.** Expected, but it makes the next SSH to the host fail strict checking.
 
@@ -163,7 +163,7 @@ A single freshly wiped Ubuntu 24.04 host (Docker 29.9.2, 1 GB RAM) with control 
 
 ### Second node and S3
 
-The second host (a cloud-init rebuilt Ubuntu 24.04, Docker 29.9.2) was wiped and joined with `node-install` from the PR 27 branch; its agent came up with `net=host`. `node-install` over an already registered node name worked.
+The second host (a cloud-init rebuilt Ubuntu 24.04, Docker 29.9.2) was wiped and joined with `node add` from the PR 27 branch; its agent came up with `net=host`. `node add` over an already registered node name worked.
 
 | Check | Result |
 |---|---|
@@ -175,7 +175,7 @@ The store was RustFS in a container on the second node with random credentials, 
 
 ### Findings
 
-- **Fixed: health checks cannot reach containers from a bridge-networked agent.** At the time, `node-install` started the agent on the default bridge. On Docker 29.9.2 it could not dial the container IPs of a project's Compose network, so every TCP or HTTP health check timed out (`tcp timeout 172.19.0.2:3306`) while MariaDB was ready, and the first deploy failed. Restarting the agent with `--network host` fixed it. Earlier runs on older Docker did not hit this. Current `node-install` and `node-prepare-enrollment` always start the agent with `--network host` for these health checks; no added network capability is required.
+- **Fixed: health checks cannot reach containers from a bridge-networked agent.** At the time, `node add` started the agent on the default bridge. On Docker 29.9.2 it could not dial the container IPs of a project's Compose network, so every TCP or HTTP health check timed out (`tcp timeout 172.19.0.2:3306`) while MariaDB was ready, and the first deploy failed. Restarting the agent with `--network host` fixed it. Earlier runs on older Docker did not hit this. Current `node add` and `node enroll` always start the agent with `--network host` for these health checks; no added network capability is required.
 - **Open: `--build-local-image` builds for the CLI machine's architecture.** On an arm64 Mac it produced an arm64 image that the amd64 host could not run (`exec format error`). It should build for the target's architecture.
 - **Open: a deploy that fails health leaves the project half-up.** The containers kept running after the failed deployment, which hid the real cause until the agent's view was checked.
 
@@ -187,10 +187,10 @@ The `examples/wordpress` project on two freshly reimaged 1 GB droplets, with the
 
 | Step | Result on both sites |
 |---|---|
-| `control-install --install-docker --build-local-image`, `node-install` for both nodes | Worked on Ubuntu 26.04: Docker CE 29.9.2 came from Docker's own `resolute` suite, control and both agents came up, nodes registered online |
+| `control setup --install-docker --build-local-image`, `node add` for both nodes | Worked on Ubuntu 26.04: Docker CE 29.9.2 came from Docker's own `resolute` suite, control and both agents came up, nodes registered online |
 | `tug deploy` of the example | Converged with health checks passing; WordPress answered `302` to its installer, then served after a scripted install |
-| `backup-run` | Database dump (`mariadb-dump` run in the container, 107 KiB) and the uploads volume (14.1 MiB) both succeeded in about ten seconds |
-| `backup-list --check` | Exit 0 with a healthy target list |
+| `backup run` | Database dump (`mariadb-dump` run in the container, 107 KiB) and the uploads volume (14.1 MiB) both succeeded in about ten seconds |
+| `backup list --check` | Exit 0 with a healthy target list |
 | Damage: update the site title in the database, delete the active theme, create a stray file | The site rendered a blank page, as expected |
 | `restore db --confirm` | Completed in about 17 to 19 seconds: WordPress stopped, safety backup, dump loaded, WordPress started |
 | `restore wp-content --confirm` | Completed; the site title was present **immediately** when the command returned, with no sleep. The theme was back and the stray file gone |
@@ -207,7 +207,7 @@ The `examples/wordpress` project on two freshly reimaged 1 GB droplets, with the
 - **Named volumes need no ownership fixing.** The S3 server runs as uid 10001. As a bind mount it failed with `Permission denied`; as a named volume deployed by Tug it started cleanly.
 - **Scratch-restore volumes are left behind**, as documented. They were removed by hand.
 
-Not covered by this run: a real AWS S3 bucket (the S3 server is `rustfs`, which speaks the same protocol), a failing backup on a real host (`backup-list --check` was only seen exiting 0 here; its failing path is covered by unit tests), a control restart or a long control outage, a node behind NAT, ingress and certificates (the hosts had no DNS names, so the sites were reached on their private addresses), and a project that spans both nodes.
+Not covered by this run: a real AWS S3 bucket (the S3 server is `rustfs`, which speaks the same protocol), a failing backup on a real host (`backup list --check` was only seen exiting 0 here; its failing path is covered by unit tests), a control restart or a long control outage, a node behind NAT, ingress and certificates (the hosts had no DNS names, so the sites were reached on their private addresses), and a project that spans both nodes.
 
 ## Recovery drill with the published 0.9.0 release, 2 November 2026
 
@@ -219,6 +219,6 @@ Immediately after the replacement deployment succeeded, the restore plan still n
 
 For control recovery, an updated control backup was copied off-host. The test control container was stopped and removed, and its data directory was moved aside intact. A new control was bootstrapped on the same machine with fresh storage and a temporary credential. The backup was copied into its mounted data directory, restored through the API and activated by restarting control. The original credential and CA worked again, the replacement agent reconnected, the recovered backup repository credentials matched the escrowed copy, and the WordPress site still returned HTTP 200. This first pass demonstrates fresh-directory recovery on the same machine, not loss of its underlying disk. The test did not verify certificate renewal, automatic off-host backup, or a restore after the backup destination itself is lost. No measured recovery time or data-loss objective is claimed from this exploratory run.
 
-A second control-backup cycle included a small Tug-built image. After restoring that backup into another fresh control data directory, the disposable probe container and its local image were removed from the replacement node. Its agent downloaded the retained artifact from restored control and recreated the container; the file baked into the image contained the expected marker. An initial remote-build attempt launched from the repository directory with an absolute Compose path failed with `source context has unsafe entries or exceeds expanded limits`; running the same deployment from its own clean context directory succeeded. The cause of the first rejection was not established.
+A second control backup cycle included a small Tug-built image. After restoring that backup into another fresh control data directory, the disposable probe container and its local image were removed from the replacement node. Its agent downloaded the retained artifact from restored control and recreated the container; the file baked into the image contained the expected marker. An initial remote-build attempt launched from the repository directory with an absolute Compose path failed with `source context has unsafe entries or exceeds expanded limits`; running the same deployment from its own clean context directory succeeded. The cause of the first rejection was not established.
 
-A further control recovery used the other VPS: a separate control container was bootstrapped on a distinct port and empty data directory without replacing that host’s pre-existing control instance. The off-host backup containing the built image was copied into the new data directory, restored using the temporary bootstrap credential, and activated by restart. The original test control was stopped to prevent two active authorities. The original operator credential then worked with a control URL override, and `node-replace-identity` repointed the replacement agent to the recovered control; the node reported online and the backup catalog was present. The probe’s local container and image were deleted once more, and the agent re-downloaded the restored built image from control on the new host; the image marker matched and WordPress returned HTTP 200. This confirms manual cross-host control recovery for this topology, but the replacement host also held the test object store and site, so it did not test simultaneous loss of that host or its object store. `node-install` for the existing node returned 409 and required the identity-replacement command.
+A further control recovery used the other VPS: a separate control container was bootstrapped on a distinct port and empty data directory without replacing that host’s pre-existing control instance. The off-host backup containing the built image was copied into the new data directory, restored using the temporary bootstrap credential, and activated by restart. The original test control was stopped to prevent two active authorities. The original operator credential then worked with a control URL override, and `node replace` repointed the replacement agent to the recovered control; the node reported online and the backup catalog was present. The probe’s local container and image were deleted once more, and the agent re-downloaded the restored built image from control on the new host; the image marker matched and WordPress returned HTTP 200. This confirms manual cross-host control recovery for this topology, but the replacement host also held the test object store and site, so it did not test simultaneous loss of that host or its object store. `node add` for the existing node returned 409 and required the identity-replacement command.

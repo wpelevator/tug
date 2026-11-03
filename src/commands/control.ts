@@ -1,0 +1,162 @@
+import { spawnSync } from 'node:child_process';
+import type { Command } from 'commander';
+import { canPrompt, confirm } from '../cli-prompt.ts';
+import { CONTROL_CONTAINER, defaultControlUrl, shellQuote as sh } from '../cli-install.ts';
+import { resolveImage } from '../image.ts';
+import { decodeCredential, writeFileDurable } from '../pki.ts';
+import { loadTemplate } from '../util.ts';
+import { collect, loadCfg, print, request, runLocal, templatesDir } from './context.ts';
+import type { InstallOpts } from './context.ts';
+import { bootstrapDocker, hostHasDocker, preflightRemote, transferTugImage } from './host.ts';
+import { importCredential } from './init.ts';
+
+interface SetupOpts extends InstallOpts {
+  extraSan: string[];
+  port: string;
+  credentialOut?: string;
+  import: boolean;
+  recoverRoot?: boolean;
+  yes?: boolean;
+}
+
+/** `control setup`, also registered as the top-level shortcut `setup`. */
+function addSetup(parent: Command, description: string): void {
+  parent
+    .command('setup <sshTarget>')
+    .description(description)
+    .option(
+      '--extra-san <name>',
+      'additional DNS name or IP for the server certificate (repeatable)',
+      collect,
+      [],
+    )
+    .option(
+      '--image <tag>',
+      "Tug image to run (default: ghcr.io/wpelevator/tug:<this CLI's version>)",
+    )
+    .option(
+      '--install-docker',
+      'install missing Docker Engine and Compose on supported Debian, Ubuntu, Fedora and RHEL-compatible hosts (root required); in a terminal you are asked when they are missing',
+    )
+    .option(
+      '--build-local-image',
+      'build the image from the current checkout and copy it to the host over SSH (tags it tug:local unless --image is set); for development',
+    )
+    .option('--port <port>', 'published mTLS port', '8443')
+    .option(
+      '--credential-out <file>',
+      'also write the root credential to this 0600 file (for example to hand it to CI)',
+    )
+    .option(
+      '--no-import',
+      'do not import the root credential into the local config (requires --credential-out)',
+    )
+    .option(
+      '--recover-root',
+      "replace root's key from the control host without the API (lost credential); other admins are unaffected",
+    )
+    .option('-y, --yes', 'do not ask for confirmation in a terminal')
+    .action(async (sshTarget: string, o: SetupOpts, command: Command) => {
+      const cfg = await loadCfg();
+      if (!o.import && !o.credentialOut)
+        throw new Error('--no-import needs --credential-out, or the root credential would be lost');
+      // The control URL clients use: --control-url, TUG_CONTROL_URL or the config's controlUrl, else the SSH target's host
+      // and the published port. Clients verify a name generated from the CA, so this is only an address.
+      const controlUrl = cfg.requestedControlUrl ?? defaultControlUrl(sshTarget, o.port);
+      console.error(
+        `control URL: ${controlUrl} (${cfg.requestedControlUrl ? 'from --control-url, TUG_CONTROL_URL or the config file' : 'from the SSH target and --port'}); clients connect there by default`,
+      );
+      const interactive = canPrompt();
+      let missingDocker = false;
+      if (!o.installDocker && interactive && !hostHasDocker(sshTarget, true)) {
+        missingDocker = true;
+        o.installDocker = await confirm(
+          `Docker with the Compose plugin is not installed on ${sshTarget}. Install it now (needs root)?`,
+        );
+      }
+      const image = resolveImage(o.image, o.buildLocalImage);
+      console.error(
+        [
+          'Control plan',
+          `  host:        ${sshTarget}`,
+          `  control URL: ${controlUrl}`,
+          `  mTLS port:   ${o.port}`,
+          `  image:       ${image}`,
+          `  docker:      ${o.installDocker ? 'install Engine and Compose' : missingDocker ? 'not installed (the preflight will fail)' : 'must already be installed'}`,
+          `  credential:  ${[o.import ? 'imported into the local config' : '', o.credentialOut ? `written to ${o.credentialOut}` : ''].filter(Boolean).join(' and ')}`,
+        ].join('\n'),
+      );
+      if (interactive && !o.yes && !(await confirm('Install the control plane?')))
+        throw new Error('cancelled; nothing was changed');
+      if (o.installDocker) await bootstrapDocker(sshTarget, true);
+      preflightRemote(sshTarget, { ports: [Number(o.port)], minDiskMb: 2048, compose: true });
+      if (o.buildLocalImage) await transferTugImage(sshTarget, image);
+      const yamlValue = (value: string) => JSON.stringify(value);
+      const compose = await loadTemplate(templatesDir, 'control-compose.yml', {
+        IMAGE: yamlValue(image),
+        CONTROL_URL: yamlValue(new URL(controlUrl).origin),
+        EXTRA_SANS: yamlValue(o.extraSan.join(',')),
+        PORT: o.port,
+      });
+      const remote = await loadTemplate(templatesDir, 'control-install.sh', {
+        COMPOSE: compose,
+        CONTAINER_SH: sh(CONTROL_CONTAINER),
+      });
+      runLocal('ssh', ['--', sshTarget, remote]);
+      // Upgrades never reissue root: fresh installs create it, `--recover-root` replaces its key. Output goes straight to files.
+      const issue = `docker exec ${sh(CONTROL_CONTAINER)} node dist/main.js control issue-credential --name root --role admin${o.recoverRoot ? ' --replace' : ''}`;
+      const out = spawnSync('ssh', ['--', sshTarget, issue], { encoding: 'utf8' });
+      if (out.status !== 0) {
+        if (!o.recoverRoot && /already used/.test(String(out.stderr)))
+          console.error(
+            'control already has a root credential; upgrade complete (pass --recover-root to replace it)',
+          );
+        else throw new Error(`issuing the root credential failed: ${String(out.stderr).trim()}`);
+      } else {
+        const text = `${String(out.stdout).trim()}\n`;
+        decodeCredential(text);
+        if (o.credentialOut) {
+          await writeFileDurable(o.credentialOut, text, 0o600);
+          console.error(`root credential written to ${o.credentialOut}`);
+        }
+        if (o.import) {
+          const { controlUrl: connectUrl, project } = command.optsWithGlobals<{
+            controlUrl?: string;
+            project?: string;
+          }>();
+          await importCredential(cfg, text, { controlUrl: connectUrl, project });
+        }
+      }
+      print({ ok: true, sshTarget, url: controlUrl });
+    });
+}
+
+export function registerControl(program: Command): void {
+  const description =
+    'install the control plane on a Docker-capable host over SSH and import the root credential into the local config; it listens for mTLS only, so front it with TCP passthrough rather than a terminating proxy';
+  const control = program
+    .command('control')
+    .description('install, back up and restore the control plane');
+  addSetup(control, description);
+  addSetup(program, 'shortcut for `tug control setup`');
+  control
+    .command('backup')
+    .description(
+      'create a control-plane backup (state, PKI, master key and retained image archives; not workload volumes)',
+    )
+    .action(async () => print(await request('POST', '/api/v1/control/backups/run', {})));
+  control
+    .command('restore <artifactRef>')
+    .description(
+      'restore a control-plane backup on the control-plane host; requires a control restart',
+    )
+    .option('--confirm')
+    .action(async (artifactRef: string, o: { confirm?: boolean }) =>
+      print(
+        await request('POST', '/api/v1/control/restore', {
+          artifactRef,
+          confirm: Boolean(o.confirm),
+        }),
+      ),
+    );
+}

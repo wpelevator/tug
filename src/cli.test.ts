@@ -54,7 +54,7 @@ test('connection resolution consistently uses explicit options, then environment
     assert.equal(
       explicit.requestedControlUrl,
       'https://flag.test',
-      'the control URL given on the command line is the one control-install advertises',
+      'the control URL given on the command line is the one control setup advertises',
     );
     assert.equal(
       explicit.project,
@@ -155,42 +155,37 @@ test('CLI exposes flat commands and rejects malformed invocations before side ef
   };
   try {
     const { stdout } = await exec(process.execPath, [entry, '--help'], { env, cwd: dir });
-    for (const name of [
-      'control-install',
-      'node-prepare-enrollment',
-      'node-register',
-      'secret-set',
-      'volume-remove',
-      'control-restore',
-    ])
-      assert.ok(stdout.includes(name), `help should list flat command ${name}`);
+    for (const name of ['setup', 'control', 'node', 'secret', 'backup', 'restore', 'credential'])
+      assert.match(stdout, new RegExp(`^  ${name}\\b`, 'm'), `help should list ${name}`);
     assert.doesNotMatch(
       stdout,
-      /node:|secret:|volume:|control:\s/,
-      'help should not advertise colon commands',
+      /node:|secret:|volume:|control-install|node-install/,
+      'help should not advertise colon or flat legacy commands',
     );
     for (const args of [
       ['status', 'typo'],
       ['node', 'install'],
+      ['node-install', 'root@host'],
+      ['secret-set', 'KEY'],
       ['secret:set', 'KEY'],
       ['deploy', '--no-build-upload'],
-      ['control-install', 'root@host', '--registry', 'registry.example'],
-      ['control-install', 'root@host', '--registry-auth-path', '/auth'],
-      ['control-install', 'root@host', '--registry-container', 'registry'],
-      ['control-install', 'root@host', '--mesh'],
-      ['node-install', 'root@host', '--name', 'n1', '--registry', 'registry.example'],
-      ['node-install', 'root@host', '--name', 'n1', '--mesh'],
-      ['node-install', 'root@host', '--name', 'n1', '--wg-port', '51820'],
-      ['node-register', 'n1', '--csr', 'node.csr', '--public-address', '203.0.113.7'],
-      ['node-rotate-wg-key', 'n1'],
-      ['node-rotate-registry-token', 'n1'],
-      ['node-revoke-registry-token', 'n1'],
+      ['control', 'setup', 'root@host', '--registry', 'registry.example'],
+      ['control', 'setup', 'root@host', '--registry-auth-path', '/auth'],
+      ['control', 'setup', 'root@host', '--registry-container', 'registry'],
+      ['control', 'setup', 'root@host', '--mesh'],
+      ['node', 'add', 'root@host', '--name', 'n1', '--registry', 'registry.example'],
+      ['node', 'add', 'root@host', '--name', 'n1', '--mesh'],
+      ['node', 'add', 'root@host', '--name', 'n1', '--wg-port', '51820'],
+      ['node', 'register', 'n1', '--csr', 'node.csr', '--public-address', '203.0.113.7'],
+      ['node', 'rotate-wg-key', 'n1'],
+      ['node', 'rotate-registry-token', 'n1'],
+      ['node', 'revoke-registry-token', 'n1'],
       ['deploy', '--timeout', '0'],
-      ['control-install', 'root@host', '--port', '65536'],
-      ['node-prepare-enrollment', '--name', 'n1', '--mesh'],
-      ['node-prepare-enrollment', '--uses', 'NaN'],
+      ['control', 'setup', 'root@host', '--port', '65536'],
+      ['node', 'enroll', '--name', 'n1', '--mesh'],
+      ['node', 'enroll', '--uses', 'NaN'],
       ['events', '--limit', '501'],
-      ['control-restore', '/backup.tgz'],
+      ['control', 'restore', '/backup.tgz'],
     ]) {
       await assert.rejects(
         exec(process.execPath, [entry, ...args], { env, cwd: dir }),
@@ -477,7 +472,7 @@ test('the control port check passes for a free port or the control container, an
   assert.equal(
     await run(true, true),
     0,
-    'the port held by the existing control container passes, so control-install can upgrade in place',
+    'the port held by the existing control container passes, so control setup can upgrade in place',
   );
   assert.notEqual(
     await run(true, false),
