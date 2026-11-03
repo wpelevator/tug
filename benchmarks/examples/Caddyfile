@@ -1,0 +1,7 @@
+{
+  auto_https off
+}
+https://caddy:443 {
+  tls /certs/server.crt /certs/server.key
+  reverse_proxy web:{$WEB_PORT}
+}

@@ -94,7 +94,7 @@ tug logs wordpress --follow
 
 The named volume holds data on `app1`; it is not copied to another node automatically. Back it up and restore or move its data deliberately if you replace the server.
 
-See the [examples directory](examples/) for stack-specific applications. Everything `x-tug` can express is in [Compose extensions](docs/compose.md).
+See the [examples directory](examples/) for stack-specific applications and [local stack benchmarks](docs/testing.md#example-stack-benchmarks) for measured behavior of those examples. Everything `x-tug` can express is in [Compose extensions](docs/compose.md).
 
 ## Everyday commands
 

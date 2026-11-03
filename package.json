@@ -36,7 +36,9 @@
     "release": "changeset publish",
     "test:integration:rollout": "node tools/scripts/integration-rollout.js",
     "test:integration:no-registry": "node tools/scripts/integration-no-registry.js",
-    "test:smoke:image": "node tools/scripts/smoke-runtime-image.js"
+    "test:smoke:image": "node tools/scripts/smoke-runtime-image.js",
+    "test:benchmarks": "node --test 'benchmarks/**/*.test.mjs'",
+    "benchmark:examples": "node benchmarks/examples/run.mjs"
   },
   "dependencies": {
     "@peculiar/x509": "^3.1.0",

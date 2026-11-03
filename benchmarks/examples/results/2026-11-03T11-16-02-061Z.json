@@ -1,0 +1,2607 @@
+{
+  "timestamp": "2026-11-03T11:16:02.061Z",
+  "settings": {
+    "seconds": 5,
+    "rounds": 3,
+    "concurrency": [1, 16, 64],
+    "stacks": ["node", "django", "laravel", "wordpress"]
+  },
+  "workloads": {
+    "node": [
+      {
+        "name": "cached-files",
+        "path": "/files",
+        "expectation": {
+          "type": "file-list",
+          "id": "40de2e4e-819b-433d-bf99-632b8c5811da",
+          "name": "benchmark.txt"
+        }
+      },
+      {
+        "name": "download",
+        "path": "/files/40de2e4e-819b-433d-bf99-632b8c5811da",
+        "expectation": {
+          "type": "download",
+          "body": "pad-launch benchmark fixture\n"
+        }
+      }
+    ],
+    "django": [
+      {
+        "name": "cached-files",
+        "path": "/files",
+        "expectation": {
+          "type": "file-list",
+          "id": "de813bb1-3fc5-40f1-8caa-1a6305974d67",
+          "name": "benchmark.txt"
+        }
+      },
+      {
+        "name": "download",
+        "path": "/files/de813bb1-3fc5-40f1-8caa-1a6305974d67",
+        "expectation": {
+          "type": "download",
+          "body": "pad-launch benchmark fixture\n"
+        }
+      }
+    ],
+    "laravel": [
+      {
+        "name": "cached-files",
+        "path": "/files",
+        "expectation": {
+          "type": "file-list",
+          "id": "ea5cf65c-3bb3-42e7-8a8b-770dfbc22d2f",
+          "name": "benchmark.txt"
+        }
+      },
+      {
+        "name": "download",
+        "path": "/files/ea5cf65c-3bb3-42e7-8a8b-770dfbc22d2f",
+        "expectation": {
+          "type": "download",
+          "body": "pad-launch benchmark fixture\n"
+        }
+      }
+    ],
+    "wordpress": [
+      {
+        "name": "homepage",
+        "path": "/",
+        "expectation": {
+          "type": "wordpress",
+          "title": "Benchmark Site",
+          "marker": "Hello world!"
+        }
+      }
+    ]
+  },
+  "runs": [
+    {
+      "stack": "node",
+      "workload": "cached-files",
+      "concurrency": 1,
+      "round": 1,
+      "requests": 6732,
+      "errors": 0,
+      "connections": 1,
+      "elapsedMs": 5000.142502,
+      "requestsPerSecond": 1346.3616281550528,
+      "meanMs": 0.7185304414735572,
+      "p50Ms": 0.6025419999996302,
+      "p95Ms": 1.2440839999999298,
+      "p99Ms": 2.466374999999971,
+      "clientCpuPercent": 29.480879783133833,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 1.745538,
+          "sampledMemoryMiB": 32.859375
+        },
+        "web": {
+          "cpuSeconds": 2.543103,
+          "sampledMemoryMiB": 129.34375
+        },
+        "db": {
+          "cpuSeconds": 0.08252,
+          "sampledMemoryMiB": 110.703125
+        },
+        "redis": {
+          "cpuSeconds": 0.278463,
+          "sampledMemoryMiB": 30.58984375
+        },
+        "s3": {
+          "cpuSeconds": 0.036987,
+          "sampledMemoryMiB": 24.0625
+        }
+      },
+      "cpuUsecPerRequest": 696.1691919191919
+    },
+    {
+      "stack": "node",
+      "workload": "download",
+      "concurrency": 1,
+      "round": 1,
+      "requests": 1862,
+      "errors": 0,
+      "connections": 1,
+      "elapsedMs": 5001.560502,
+      "requestsPerSecond": 372.2838100739624,
+      "meanMs": 2.6382062303974174,
+      "p50Ms": 2.522624999999607,
+      "p95Ms": 3.69825000000003,
+      "p99Ms": 5.463082999999642,
+      "clientCpuPercent": 16.343399218566525,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 0.800061,
+          "sampledMemoryMiB": 30.3984375
+        },
+        "web": {
+          "cpuSeconds": 3.014812,
+          "sampledMemoryMiB": 167.23046875
+        },
+        "db": {
+          "cpuSeconds": 0.380966,
+          "sampledMemoryMiB": 108.44921875
+        },
+        "redis": {
+          "cpuSeconds": 0.048289,
+          "sampledMemoryMiB": 30.98046875
+        },
+        "s3": {
+          "cpuSeconds": 1.300626,
+          "sampledMemoryMiB": 124.94921875
+        }
+      },
+      "cpuUsecPerRequest": 2977.8485499462945
+    },
+    {
+      "stack": "node",
+      "workload": "download",
+      "concurrency": 1,
+      "round": 2,
+      "requests": 2034,
+      "errors": 0,
+      "connections": 1,
+      "elapsedMs": 5000.363960000001,
+      "requestsPerSecond": 406.7703903697442,
+      "meanMs": 2.414571092428723,
+      "p50Ms": 2.280583000000661,
+      "p95Ms": 3.449292000000014,
+      "p99Ms": 5.854500000000002,
+      "clientCpuPercent": 16.547635464519264,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 0.840377,
+          "sampledMemoryMiB": 30.18359375
+        },
+        "web": {
+          "cpuSeconds": 2.80823,
+          "sampledMemoryMiB": 175.10546875
+        },
+        "db": {
+          "cpuSeconds": 0.401664,
+          "sampledMemoryMiB": 107.5
+        },
+        "redis": {
+          "cpuSeconds": 0.046514,
+          "sampledMemoryMiB": 28.24609375
+        },
+        "s3": {
+          "cpuSeconds": 1.412636,
+          "sampledMemoryMiB": 297.859375
+        }
+      },
+      "cpuUsecPerRequest": 2708.663225172075
+    },
+    {
+      "stack": "node",
+      "workload": "cached-files",
+      "concurrency": 1,
+      "round": 2,
+      "requests": 7107,
+      "errors": 0,
+      "connections": 1,
+      "elapsedMs": 5000.231793999999,
+      "requestsPerSecond": 1421.334108656324,
+      "meanMs": 0.6811890953988974,
+      "p50Ms": 0.5731659999992189,
+      "p95Ms": 1.1249579999998787,
+      "p99Ms": 2.1181249999999636,
+      "clientCpuPercent": 28.04543984706322,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 1.769033,
+          "sampledMemoryMiB": 33.4765625
+        },
+        "web": {
+          "cpuSeconds": 2.354112,
+          "sampledMemoryMiB": 175.15625
+        },
+        "db": {
+          "cpuSeconds": 0.085155,
+          "sampledMemoryMiB": 109.38671875
+        },
+        "redis": {
+          "cpuSeconds": 0.289521,
+          "sampledMemoryMiB": 27.75390625
+        },
+        "s3": {
+          "cpuSeconds": 0.121159,
+          "sampledMemoryMiB": 331.49609375
+        }
+      },
+      "cpuUsecPerRequest": 649.9197973828619
+    },
+    {
+      "stack": "node",
+      "workload": "cached-files",
+      "concurrency": 1,
+      "round": 3,
+      "requests": 8076,
+      "errors": 0,
+      "connections": 1,
+      "elapsedMs": 5000.142793999999,
+      "requestsPerSecond": 1615.1538731435678,
+      "meanMs": 0.5999088079494783,
+      "p50Ms": 0.5236659999999347,
+      "p95Ms": 0.8987500000000068,
+      "p99Ms": 1.8959999999997308,
+      "clientCpuPercent": 27.298780379590898,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 1.809073,
+          "sampledMemoryMiB": 33.984375
+        },
+        "web": {
+          "cpuSeconds": 2.420429,
+          "sampledMemoryMiB": 196.4453125
+        },
+        "db": {
+          "cpuSeconds": 0.078532,
+          "sampledMemoryMiB": 111.26171875
+        },
+        "redis": {
+          "cpuSeconds": 0.279723,
+          "sampledMemoryMiB": 27.703125
+        },
+        "s3": {
+          "cpuSeconds": 0.025765,
+          "sampledMemoryMiB": 328.21875
+        }
+      },
+      "cpuUsecPerRequest": 571.2632491332342
+    },
+    {
+      "stack": "node",
+      "workload": "download",
+      "concurrency": 1,
+      "round": 3,
+      "requests": 2605,
+      "errors": 0,
+      "connections": 1,
+      "elapsedMs": 5000.102793999999,
+      "requestsPerSecond": 520.9892890854037,
+      "meanMs": 1.8878991166986516,
+      "p50Ms": 1.639791999999943,
+      "p95Ms": 3.0302500000000236,
+      "p99Ms": 4.533124999999984,
+      "clientCpuPercent": 15.650138251937708,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 0.843861,
+          "sampledMemoryMiB": 31.2890625
+        },
+        "web": {
+          "cpuSeconds": 2.61655,
+          "sampledMemoryMiB": 196.12109375
+        },
+        "db": {
+          "cpuSeconds": 0.339165,
+          "sampledMemoryMiB": 112.93359375
+        },
+        "redis": {
+          "cpuSeconds": 0.044371,
+          "sampledMemoryMiB": 30.5078125
+        },
+        "s3": {
+          "cpuSeconds": 1.44714,
+          "sampledMemoryMiB": 350.4921875
+        }
+      },
+      "cpuUsecPerRequest": 2031.1274472168907
+    },
+    {
+      "stack": "node",
+      "workload": "cached-files",
+      "concurrency": 16,
+      "round": 1,
+      "requests": 39526,
+      "errors": 0,
+      "connections": 16,
+      "elapsedMs": 5002.313669,
+      "requestsPerSecond": 7901.543688663079,
+      "meanMs": 2.004762691165297,
+      "p50Ms": 1.5129159999996773,
+      "p95Ms": 3.9892079999999623,
+      "p99Ms": 8.475375,
+      "clientCpuPercent": 75.20555984551156,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 5.948741,
+          "sampledMemoryMiB": 37.59375
+        },
+        "web": {
+          "cpuSeconds": 5.217578,
+          "sampledMemoryMiB": 208.3984375
+        },
+        "db": {
+          "cpuSeconds": 0.135726,
+          "sampledMemoryMiB": 110.01171875
+        },
+        "redis": {
+          "cpuSeconds": 0.365858,
+          "sampledMemoryMiB": 30.7421875
+        },
+        "s3": {
+          "cpuSeconds": 0.031098,
+          "sampledMemoryMiB": 372.62890625
+        }
+      },
+      "cpuUsecPerRequest": 295.9824166371502
+    },
+    {
+      "stack": "node",
+      "workload": "download",
+      "concurrency": 16,
+      "round": 1,
+      "requests": 7314,
+      "errors": 0,
+      "connections": 16,
+      "elapsedMs": 5006.060085,
+      "requestsPerSecond": 1461.0292077626953,
+      "meanMs": 10.884382577112357,
+      "p50Ms": 9.812083000000712,
+      "p95Ms": 18.709917000000132,
+      "p99Ms": 31.061541999999918,
+      "clientCpuPercent": 30.791460226750353,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 1.989631,
+          "sampledMemoryMiB": 37.18359375
+        },
+        "web": {
+          "cpuSeconds": 5.113672,
+          "sampledMemoryMiB": 214.05078125
+        },
+        "db": {
+          "cpuSeconds": 0.869423,
+          "sampledMemoryMiB": 124.56640625
+        },
+        "redis": {
+          "cpuSeconds": 0.052517,
+          "sampledMemoryMiB": 27.8515625
+        },
+        "s3": {
+          "cpuSeconds": 3.711342,
+          "sampledMemoryMiB": 674.44921875
+        }
+      },
+      "cpuUsecPerRequest": 1604.6739130434783
+    },
+    {
+      "stack": "node",
+      "workload": "download",
+      "concurrency": 16,
+      "round": 2,
+      "requests": 8225,
+      "errors": 0,
+      "connections": 16,
+      "elapsedMs": 5007.050418,
+      "requestsPerSecond": 1642.683678684699,
+      "meanMs": 9.67897891063831,
+      "p50Ms": 8.977917000000161,
+      "p95Ms": 13.903334000000086,
+      "p99Ms": 28.24716699999999,
+      "clientCpuPercent": 29.9854979411154,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 2.035637,
+          "sampledMemoryMiB": 33.578125
+        },
+        "web": {
+          "cpuSeconds": 4.991064,
+          "sampledMemoryMiB": 217.3125
+        },
+        "db": {
+          "cpuSeconds": 0.831969,
+          "sampledMemoryMiB": 128.16796875
+        },
+        "redis": {
+          "cpuSeconds": 0.045216,
+          "sampledMemoryMiB": 27.6796875
+        },
+        "s3": {
+          "cpuSeconds": 3.49175,
+          "sampledMemoryMiB": 716.609375
+        }
+      },
+      "cpuUsecPerRequest": 1385.4876595744681
+    },
+    {
+      "stack": "node",
+      "workload": "cached-files",
+      "concurrency": 16,
+      "round": 2,
+      "requests": 48934,
+      "errors": 0,
+      "connections": 16,
+      "elapsedMs": 5002.827461,
+      "requestsPerSecond": 9781.268768805137,
+      "meanMs": 1.62011517915966,
+      "p50Ms": 1.3665420000002086,
+      "p95Ms": 3.2167920000001686,
+      "p99Ms": 5.234541000000263,
+      "clientCpuPercent": 75.83533570917209,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 6.148672,
+          "sampledMemoryMiB": 39.25390625
+        },
+        "web": {
+          "cpuSeconds": 5.375946,
+          "sampledMemoryMiB": 213.40625
+        },
+        "db": {
+          "cpuSeconds": 0.082113,
+          "sampledMemoryMiB": 124.74609375
+        },
+        "redis": {
+          "cpuSeconds": 0.318834,
+          "sampledMemoryMiB": 30.859375
+        },
+        "s3": {
+          "cpuSeconds": 0.029092,
+          "sampledMemoryMiB": 721.16796875
+        }
+      },
+      "cpuUsecPerRequest": 244.3016512036621
+    },
+    {
+      "stack": "node",
+      "workload": "cached-files",
+      "concurrency": 16,
+      "round": 3,
+      "requests": 49720,
+      "errors": 0,
+      "connections": 16,
+      "elapsedMs": 5001.242711,
+      "requestsPerSecond": 9941.529110483518,
+      "meanMs": 1.593807240285584,
+      "p50Ms": 1.3553750000000946,
+      "p95Ms": 3.158791000000292,
+      "p99Ms": 5.039749999999998,
+      "clientCpuPercent": 75.30344391638145,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 6.138916,
+          "sampledMemoryMiB": 34.65625
+        },
+        "web": {
+          "cpuSeconds": 5.37137,
+          "sampledMemoryMiB": 219.7109375
+        },
+        "db": {
+          "cpuSeconds": 0.069105,
+          "sampledMemoryMiB": 124.40234375
+        },
+        "redis": {
+          "cpuSeconds": 0.313316,
+          "sampledMemoryMiB": 30.62890625
+        },
+        "s3": {
+          "cpuSeconds": 0.028448,
+          "sampledMemoryMiB": 720.67578125
+        }
+      },
+      "cpuUsecPerRequest": 239.7657884151247
+    },
+    {
+      "stack": "node",
+      "workload": "download",
+      "concurrency": 16,
+      "round": 3,
+      "requests": 8358,
+      "errors": 0,
+      "connections": 16,
+      "elapsedMs": 5007.142543,
+      "requestsPerSecond": 1669.2155112868734,
+      "meanMs": 9.526448452261358,
+      "p50Ms": 9.02416600000015,
+      "p95Ms": 13.608041999999841,
+      "p99Ms": 24.257874999999785,
+      "clientCpuPercent": 30.10577364344069,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 2.035594,
+          "sampledMemoryMiB": 33.8828125
+        },
+        "web": {
+          "cpuSeconds": 5.029979,
+          "sampledMemoryMiB": 222.26171875
+        },
+        "db": {
+          "cpuSeconds": 0.844746,
+          "sampledMemoryMiB": 124.67578125
+        },
+        "redis": {
+          "cpuSeconds": 0.04388,
+          "sampledMemoryMiB": 27.83203125
+        },
+        "s3": {
+          "cpuSeconds": 3.505225,
+          "sampledMemoryMiB": 721.421875
+        }
+      },
+      "cpuUsecPerRequest": 1371.072505384063
+    },
+    {
+      "stack": "node",
+      "workload": "cached-files",
+      "concurrency": 64,
+      "round": 1,
+      "requests": 50349,
+      "errors": 0,
+      "connections": 64,
+      "elapsedMs": 5004.457294,
+      "requestsPerSecond": 10060.831183506149,
+      "meanMs": 6.309089544797286,
+      "p50Ms": 5.40566600000011,
+      "p95Ms": 10.216292000000067,
+      "p99Ms": 17.33729200000016,
+      "clientCpuPercent": 77.13084103300973,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 6.3065,
+          "sampledMemoryMiB": 45.86328125
+        },
+        "web": {
+          "cpuSeconds": 5.409949,
+          "sampledMemoryMiB": 219.4609375
+        },
+        "db": {
+          "cpuSeconds": 0.078042,
+          "sampledMemoryMiB": 124.93359375
+        },
+        "redis": {
+          "cpuSeconds": 0.155273,
+          "sampledMemoryMiB": 27.578125
+        },
+        "s3": {
+          "cpuSeconds": 0.032221,
+          "sampledMemoryMiB": 719.6328125
+        }
+      },
+      "cpuUsecPerRequest": 237.9786093070369
+    },
+    {
+      "stack": "node",
+      "workload": "download",
+      "concurrency": 64,
+      "round": 1,
+      "requests": 7419,
+      "errors": 0,
+      "connections": 64,
+      "elapsedMs": 5036.376877,
+      "requestsPerSecond": 1473.0827698540402,
+      "meanMs": 43.010451090308685,
+      "p50Ms": 39.69920899999988,
+      "p95Ms": 62.40312499999982,
+      "p99Ms": 105.18245800000022,
+      "clientCpuPercent": 31.608039645917867,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 2.057095,
+          "sampledMemoryMiB": 45.65234375
+        },
+        "web": {
+          "cpuSeconds": 5.110156,
+          "sampledMemoryMiB": 222.3515625
+        },
+        "db": {
+          "cpuSeconds": 0.799723,
+          "sampledMemoryMiB": 128.3203125
+        },
+        "redis": {
+          "cpuSeconds": 0.052828,
+          "sampledMemoryMiB": 27.6953125
+        },
+        "s3": {
+          "cpuSeconds": 3.517617,
+          "sampledMemoryMiB": 721.1171875
+        }
+      },
+      "cpuUsecPerRequest": 1555.1178056341826
+    },
+    {
+      "stack": "node",
+      "workload": "download",
+      "concurrency": 64,
+      "round": 2,
+      "requests": 7590,
+      "errors": 0,
+      "connections": 64,
+      "elapsedMs": 5032.152711,
+      "requestsPerSecond": 1508.3008080038371,
+      "meanMs": 41.965022058366266,
+      "p50Ms": 37.53304100000014,
+      "p95Ms": 60.67900000000003,
+      "p99Ms": 118.63979199999994,
+      "clientCpuPercent": 31.90060183370298,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 2.040072,
+          "sampledMemoryMiB": 49.421875
+        },
+        "web": {
+          "cpuSeconds": 5.055178,
+          "sampledMemoryMiB": 225.46484375
+        },
+        "db": {
+          "cpuSeconds": 0.854826,
+          "sampledMemoryMiB": 124.66015625
+        },
+        "redis": {
+          "cpuSeconds": 0.046894,
+          "sampledMemoryMiB": 31.02734375
+        },
+        "s3": {
+          "cpuSeconds": 3.542295,
+          "sampledMemoryMiB": 721.62890625
+        }
+      },
+      "cpuUsecPerRequest": 1520.324769433465
+    },
+    {
+      "stack": "node",
+      "workload": "cached-files",
+      "concurrency": 64,
+      "round": 2,
+      "requests": 46949,
+      "errors": 0,
+      "connections": 64,
+      "elapsedMs": 5004.994294,
+      "requestsPerSecond": 9380.430274672357,
+      "meanMs": 6.766621217768201,
+      "p50Ms": 5.86304100000001,
+      "p95Ms": 11.096041000000241,
+      "p99Ms": 19.97591599999987,
+      "clientCpuPercent": 78.49089867513842,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 6.307572,
+          "sampledMemoryMiB": 50.6875
+        },
+        "web": {
+          "cpuSeconds": 5.39427,
+          "sampledMemoryMiB": 222.66796875
+        },
+        "db": {
+          "cpuSeconds": 0.074543,
+          "sampledMemoryMiB": 128.34375
+        },
+        "redis": {
+          "cpuSeconds": 0.160661,
+          "sampledMemoryMiB": 27.7265625
+        },
+        "s3": {
+          "cpuSeconds": 0.029409,
+          "sampledMemoryMiB": 721.8671875
+        }
+      },
+      "cpuUsecPerRequest": 254.88199961660524
+    },
+    {
+      "stack": "node",
+      "workload": "cached-files",
+      "concurrency": 64,
+      "round": 3,
+      "requests": 47581,
+      "errors": 0,
+      "connections": 64,
+      "elapsedMs": 5005.646669000001,
+      "requestsPerSecond": 9505.465156913573,
+      "meanMs": 6.669321426808996,
+      "p50Ms": 5.840166999999838,
+      "p95Ms": 10.02758300000005,
+      "p99Ms": 18.272125000000187,
+      "clientCpuPercent": 78.87506372455869,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 6.42943,
+          "sampledMemoryMiB": 49.05859375
+        },
+        "web": {
+          "cpuSeconds": 5.34562,
+          "sampledMemoryMiB": 226.64453125
+        },
+        "db": {
+          "cpuSeconds": 0.083917,
+          "sampledMemoryMiB": 114.6875
+        },
+        "redis": {
+          "cpuSeconds": 0.16388,
+          "sampledMemoryMiB": 27.6171875
+        },
+        "s3": {
+          "cpuSeconds": 0.030085,
+          "sampledMemoryMiB": 721.390625
+        }
+      },
+      "cpuUsecPerRequest": 253.31396986191967
+    },
+    {
+      "stack": "node",
+      "workload": "download",
+      "concurrency": 64,
+      "round": 3,
+      "requests": 7504,
+      "errors": 0,
+      "connections": 64,
+      "elapsedMs": 5028.969669,
+      "requestsPerSecond": 1492.154555287297,
+      "meanMs": 42.486392242803795,
+      "p50Ms": 38.660041999999976,
+      "p95Ms": 71.80324999999993,
+      "p99Ms": 109.36437499999965,
+      "clientCpuPercent": 33.01658409743732,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 2.105188,
+          "sampledMemoryMiB": 51.07421875
+        },
+        "web": {
+          "cpuSeconds": 5.13073,
+          "sampledMemoryMiB": 223.90234375
+        },
+        "db": {
+          "cpuSeconds": 0.849212,
+          "sampledMemoryMiB": 127.73046875
+        },
+        "redis": {
+          "cpuSeconds": 0.046017,
+          "sampledMemoryMiB": 27.9140625
+        },
+        "s3": {
+          "cpuSeconds": 3.516941,
+          "sampledMemoryMiB": 722.48046875
+        }
+      },
+      "cpuUsecPerRequest": 1552.2505330490405
+    },
+    {
+      "stack": "django",
+      "workload": "cached-files",
+      "concurrency": 1,
+      "round": 1,
+      "requests": 4554,
+      "errors": 0,
+      "connections": 1,
+      "elapsedMs": 5000.747753,
+      "requestsPerSecond": 910.663809680864,
+      "meanMs": 1.0745291627140985,
+      "p50Ms": 0.9847909999998592,
+      "p95Ms": 1.4404169999997976,
+      "p99Ms": 2.590834000000541,
+      "clientCpuPercent": 21.959975872432295,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 2.761061,
+          "sampledMemoryMiB": 20.11328125
+        },
+        "web": {
+          "cpuSeconds": 2.119323,
+          "sampledMemoryMiB": 112.9765625
+        },
+        "db": {
+          "cpuSeconds": 0.082626,
+          "sampledMemoryMiB": 72.9609375
+        },
+        "redis": {
+          "cpuSeconds": 0.195515,
+          "sampledMemoryMiB": 13.24609375
+        },
+        "s3": {
+          "cpuSeconds": 0.030479,
+          "sampledMemoryMiB": 31.7265625
+        }
+      },
+      "cpuUsecPerRequest": 1139.4387351778655
+    },
+    {
+      "stack": "django",
+      "workload": "download",
+      "concurrency": 1,
+      "round": 1,
+      "requests": 363,
+      "errors": 0,
+      "connections": 1,
+      "elapsedMs": 5011.1237519999995,
+      "requestsPerSecond": 72.43884165804573,
+      "meanMs": 13.749927451790658,
+      "p50Ms": 12.763875000000098,
+      "p95Ms": 17.160167,
+      "p99Ms": 38.01125000000002,
+      "clientCpuPercent": 4.424596377439453,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 0.3257,
+          "sampledMemoryMiB": 19.5
+        },
+        "web": {
+          "cpuSeconds": 3.333341,
+          "sampledMemoryMiB": 112.93359375
+        },
+        "db": {
+          "cpuSeconds": 1.639635,
+          "sampledMemoryMiB": 74.8515625
+        },
+        "redis": {
+          "cpuSeconds": 0.042257,
+          "sampledMemoryMiB": 9.90625
+        },
+        "s3": {
+          "cpuSeconds": 0.334191,
+          "sampledMemoryMiB": 54.41015625
+        }
+      },
+      "cpuUsecPerRequest": 15633.950413223141
+    },
+    {
+      "stack": "django",
+      "workload": "download",
+      "concurrency": 1,
+      "round": 2,
+      "requests": 323,
+      "errors": 0,
+      "connections": 1,
+      "elapsedMs": 5010.458378,
+      "requestsPerSecond": 64.4651597982,
+      "meanMs": 15.449815634674932,
+      "p50Ms": 14.451041999999688,
+      "p95Ms": 18.29166699999996,
+      "p99Ms": 44.799125000000004,
+      "clientCpuPercent": 4.61498694441405,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 0.351031,
+          "sampledMemoryMiB": 23.265625
+        },
+        "web": {
+          "cpuSeconds": 3.293028,
+          "sampledMemoryMiB": 116.43359375
+        },
+        "db": {
+          "cpuSeconds": 1.693588,
+          "sampledMemoryMiB": 74.9609375
+        },
+        "redis": {
+          "cpuSeconds": 0.044333,
+          "sampledMemoryMiB": 13.02734375
+        },
+        "s3": {
+          "cpuSeconds": 0.342797,
+          "sampledMemoryMiB": 86.53125
+        }
+      },
+      "cpuUsecPerRequest": 17723.767801857586
+    },
+    {
+      "stack": "django",
+      "workload": "cached-files",
+      "concurrency": 1,
+      "round": 2,
+      "requests": 2883,
+      "errors": 0,
+      "connections": 1,
+      "elapsedMs": 5000.146167999999,
+      "requestsPerSecond": 576.5831443989899,
+      "meanMs": 1.6934283735691955,
+      "p50Ms": 1.3409580000000005,
+      "p95Ms": 3.4188330000000065,
+      "p99Ms": 6.574333999999908,
+      "clientCpuPercent": 24.167313502423998,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 2.535187,
+          "sampledMemoryMiB": 23.08984375
+        },
+        "web": {
+          "cpuSeconds": 2.032181,
+          "sampledMemoryMiB": 116.39453125
+        },
+        "db": {
+          "cpuSeconds": 0.135738,
+          "sampledMemoryMiB": 75.3125
+        },
+        "redis": {
+          "cpuSeconds": 0.211904,
+          "sampledMemoryMiB": 12.96875
+        },
+        "s3": {
+          "cpuSeconds": 0.167223,
+          "sampledMemoryMiB": 96.1171875
+        }
+      },
+      "cpuUsecPerRequest": 1762.8279569892472
+    },
+    {
+      "stack": "django",
+      "workload": "cached-files",
+      "concurrency": 1,
+      "round": 3,
+      "requests": 3611,
+      "errors": 0,
+      "connections": 1,
+      "elapsedMs": 5000.463169,
+      "requestsPerSecond": 722.1331060662793,
+      "meanMs": 1.3528986518969799,
+      "p50Ms": 1.170832999999675,
+      "p95Ms": 2.300583999999617,
+      "p99Ms": 4.0080840000000535,
+      "clientCpuPercent": 22.974891748472754,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 2.739899,
+          "sampledMemoryMiB": 23.5390625
+        },
+        "web": {
+          "cpuSeconds": 2.136121,
+          "sampledMemoryMiB": 113.03125
+        },
+        "db": {
+          "cpuSeconds": 0.147069,
+          "sampledMemoryMiB": 74.79296875
+        },
+        "redis": {
+          "cpuSeconds": 0.208789,
+          "sampledMemoryMiB": 9.8203125
+        },
+        "s3": {
+          "cpuSeconds": 0.047273,
+          "sampledMemoryMiB": 96.33984375
+        }
+      },
+      "cpuUsecPerRequest": 1461.9637219606757
+    },
+    {
+      "stack": "django",
+      "workload": "download",
+      "concurrency": 1,
+      "round": 3,
+      "requests": 297,
+      "errors": 0,
+      "connections": 1,
+      "elapsedMs": 5000.363503,
+      "requestsPerSecond": 59.395681898288586,
+      "meanMs": 16.763637498316502,
+      "p50Ms": 15.425916999999572,
+      "p95Ms": 22.55600000000004,
+      "p99Ms": 48.27266700000018,
+      "clientCpuPercent": 4.904983404763484,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 0.365542,
+          "sampledMemoryMiB": 19.37890625
+        },
+        "web": {
+          "cpuSeconds": 3.224722,
+          "sampledMemoryMiB": 116.796875
+        },
+        "db": {
+          "cpuSeconds": 1.662308,
+          "sampledMemoryMiB": 73.05859375
+        },
+        "redis": {
+          "cpuSeconds": 0.053837,
+          "sampledMemoryMiB": 13.54296875
+        },
+        "s3": {
+          "cpuSeconds": 0.36279,
+          "sampledMemoryMiB": 115.09765625
+        }
+      },
+      "cpuUsecPerRequest": 19088.21212121212
+    },
+    {
+      "stack": "django",
+      "workload": "cached-files",
+      "concurrency": 16,
+      "round": 1,
+      "requests": 10246,
+      "errors": 0,
+      "connections": 16,
+      "elapsedMs": 5009.8502929999995,
+      "requestsPerSecond": 2045.170893492805,
+      "meanMs": 7.76429386131175,
+      "p50Ms": 7.093792000000121,
+      "p95Ms": 10.703292000000033,
+      "p99Ms": 21.917832999999973,
+      "clientCpuPercent": 43.35450907654498,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 5.26709,
+          "sampledMemoryMiB": 26.62890625
+        },
+        "web": {
+          "cpuSeconds": 4.236023,
+          "sampledMemoryMiB": 116.3359375
+        },
+        "db": {
+          "cpuSeconds": 0.09743,
+          "sampledMemoryMiB": 75.3515625
+        },
+        "redis": {
+          "cpuSeconds": 0.403261,
+          "sampledMemoryMiB": 13.0234375
+        },
+        "s3": {
+          "cpuSeconds": 0.03618,
+          "sampledMemoryMiB": 128.53515625
+        }
+      },
+      "cpuUsecPerRequest": 979.8930314268983
+    },
+    {
+      "stack": "django",
+      "workload": "download",
+      "concurrency": 16,
+      "round": 1,
+      "requests": 362,
+      "errors": 0,
+      "connections": 16,
+      "elapsedMs": 5243.752752,
+      "requestsPerSecond": 69.03452872790977,
+      "meanMs": 226.25253430939233,
+      "p50Ms": 218.5883329999997,
+      "p95Ms": 277.166541,
+      "p99Ms": 298.6882909999997,
+      "clientCpuPercent": 5.53845716484689,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 0.424257,
+          "sampledMemoryMiB": 23.3203125
+        },
+        "web": {
+          "cpuSeconds": 3.636186,
+          "sampledMemoryMiB": 113.74609375
+        },
+        "db": {
+          "cpuSeconds": 1.897991,
+          "sampledMemoryMiB": 74.078125
+        },
+        "redis": {
+          "cpuSeconds": 0.049067,
+          "sampledMemoryMiB": 10.078125
+        },
+        "s3": {
+          "cpuSeconds": 0.389513,
+          "sampledMemoryMiB": 143.93359375
+        }
+      },
+      "cpuUsecPerRequest": 17671.309392265193
+    },
+    {
+      "stack": "django",
+      "workload": "download",
+      "concurrency": 16,
+      "round": 2,
+      "requests": 383,
+      "errors": 0,
+      "connections": 16,
+      "elapsedMs": 5219.713044,
+      "requestsPerSecond": 73.37568114788496,
+      "meanMs": 212.90672625065292,
+      "p50Ms": 202.90966600000002,
+      "p95Ms": 254.71695899999986,
+      "p99Ms": 314.1424159999999,
+      "clientCpuPercent": 5.228946451639459,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 0.375591,
+          "sampledMemoryMiB": 27.8125
+        },
+        "web": {
+          "cpuSeconds": 3.625074,
+          "sampledMemoryMiB": 117.01171875
+        },
+        "db": {
+          "cpuSeconds": 1.866657,
+          "sampledMemoryMiB": 73.9609375
+        },
+        "redis": {
+          "cpuSeconds": 0.045946,
+          "sampledMemoryMiB": 13.16015625
+        },
+        "s3": {
+          "cpuSeconds": 0.373344,
+          "sampledMemoryMiB": 180.03125
+        }
+      },
+      "cpuUsecPerRequest": 16414.130548302874
+    },
+    {
+      "stack": "django",
+      "workload": "cached-files",
+      "concurrency": 16,
+      "round": 2,
+      "requests": 11041,
+      "errors": 0,
+      "connections": 16,
+      "elapsedMs": 5006.058877,
+      "requestsPerSecond": 2205.5273961573107,
+      "meanMs": 7.204073369894029,
+      "p50Ms": 6.745417000000089,
+      "p95Ms": 9.406167000000096,
+      "p99Ms": 16.73137500000007,
+      "clientCpuPercent": 44.86577276026711,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 5.381601,
+          "sampledMemoryMiB": 24.45703125
+        },
+        "web": {
+          "cpuSeconds": 4.282683,
+          "sampledMemoryMiB": 117.078125
+        },
+        "db": {
+          "cpuSeconds": 0.083917,
+          "sampledMemoryMiB": 72.58203125
+        },
+        "redis": {
+          "cpuSeconds": 0.405013,
+          "sampledMemoryMiB": 13.26171875
+        },
+        "s3": {
+          "cpuSeconds": 0.03038,
+          "sampledMemoryMiB": 195.859375
+        }
+      },
+      "cpuUsecPerRequest": 922.3434471515261
+    },
+    {
+      "stack": "django",
+      "workload": "cached-files",
+      "concurrency": 16,
+      "round": 3,
+      "requests": 11172,
+      "errors": 0,
+      "connections": 16,
+      "elapsedMs": 5008.534044,
+      "requestsPerSecond": 2230.5928045719397,
+      "meanMs": 7.121638990153954,
+      "p50Ms": 6.675042000000076,
+      "p95Ms": 9.890833000000384,
+      "p99Ms": 13.82699999999977,
+      "clientCpuPercent": 44.702201888437436,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 5.431813,
+          "sampledMemoryMiB": 29.03125
+        },
+        "web": {
+          "cpuSeconds": 4.316348,
+          "sampledMemoryMiB": 116.984375
+        },
+        "db": {
+          "cpuSeconds": 0.072884,
+          "sampledMemoryMiB": 75.91015625
+        },
+        "redis": {
+          "cpuSeconds": 0.40983,
+          "sampledMemoryMiB": 10.13671875
+        },
+        "s3": {
+          "cpuSeconds": 0.033576,
+          "sampledMemoryMiB": 195.67578125
+        }
+      },
+      "cpuUsecPerRequest": 918.765753669889
+    },
+    {
+      "stack": "django",
+      "workload": "download",
+      "concurrency": 16,
+      "round": 3,
+      "requests": 366,
+      "errors": 0,
+      "connections": 16,
+      "elapsedMs": 5182.450503,
+      "requestsPerSecond": 70.62296104673477,
+      "meanMs": 221.6176633797815,
+      "p50Ms": 217.7943750000004,
+      "p95Ms": 289.328625,
+      "p99Ms": 301.33116599999994,
+      "clientCpuPercent": 5.560631979662537,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 0.415027,
+          "sampledMemoryMiB": 28.91015625
+        },
+        "web": {
+          "cpuSeconds": 3.569852,
+          "sampledMemoryMiB": 113.546875
+        },
+        "db": {
+          "cpuSeconds": 1.842143,
+          "sampledMemoryMiB": 76.80859375
+        },
+        "redis": {
+          "cpuSeconds": 0.054771,
+          "sampledMemoryMiB": 12.78515625
+        },
+        "s3": {
+          "cpuSeconds": 0.388074,
+          "sampledMemoryMiB": 218.17578125
+        }
+      },
+      "cpuUsecPerRequest": 17130.784153005465
+    },
+    {
+      "stack": "django",
+      "workload": "cached-files",
+      "concurrency": 64,
+      "round": 1,
+      "requests": 10769,
+      "errors": 0,
+      "connections": 64,
+      "elapsedMs": 5022.011836000001,
+      "requestsPerSecond": 2144.3597410111715,
+      "meanMs": 29.53880225099826,
+      "p50Ms": 28.41899999999987,
+      "p95Ms": 34.486665999999786,
+      "p99Ms": 70.07925100000011,
+      "clientCpuPercent": 46.20962824827559,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 5.272531,
+          "sampledMemoryMiB": 34.33203125
+        },
+        "web": {
+          "cpuSeconds": 4.260108,
+          "sampledMemoryMiB": 113.90234375
+        },
+        "db": {
+          "cpuSeconds": 0.074938,
+          "sampledMemoryMiB": 72.87890625
+        },
+        "redis": {
+          "cpuSeconds": 0.404289,
+          "sampledMemoryMiB": 13.03125
+        },
+        "s3": {
+          "cpuSeconds": 0.061146,
+          "sampledMemoryMiB": 233.984375
+        }
+      },
+      "cpuUsecPerRequest": 935.3711579533847
+    },
+    {
+      "stack": "django",
+      "workload": "download",
+      "concurrency": 64,
+      "round": 1,
+      "requests": 401,
+      "errors": 0,
+      "connections": 64,
+      "elapsedMs": 5840.469003,
+      "requestsPerSecond": 68.6588696548211,
+      "meanMs": 863.2467112394013,
+      "p50Ms": 915.7448750000003,
+      "p95Ms": 987.3903760000001,
+      "p99Ms": 1005.0153760000001,
+      "clientCpuPercent": 6.228095719935456,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 0.479294,
+          "sampledMemoryMiB": 33.859375
+        },
+        "web": {
+          "cpuSeconds": 3.984701,
+          "sampledMemoryMiB": 114.296875
+        },
+        "db": {
+          "cpuSeconds": 2.036789,
+          "sampledMemoryMiB": 79.359375
+        },
+        "redis": {
+          "cpuSeconds": 0.044548,
+          "sampledMemoryMiB": 12.78125
+        },
+        "s3": {
+          "cpuSeconds": 0.457865,
+          "sampledMemoryMiB": 244.97265625
+        }
+      },
+      "cpuUsecPerRequest": 17464.331670822943
+    },
+    {
+      "stack": "django",
+      "workload": "download",
+      "concurrency": 64,
+      "round": 2,
+      "requests": 436,
+      "errors": 0,
+      "connections": 64,
+      "elapsedMs": 5841.24442,
+      "requestsPerSecond": 74.64162918900765,
+      "meanMs": 790.6318323623859,
+      "p50Ms": 821.4504580000003,
+      "p95Ms": 922.5635009999999,
+      "p99Ms": 925.8811259999998,
+      "clientCpuPercent": 5.979239608672291,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 0.46977,
+          "sampledMemoryMiB": 31.92578125
+        },
+        "web": {
+          "cpuSeconds": 4.020671,
+          "sampledMemoryMiB": 113.75390625
+        },
+        "db": {
+          "cpuSeconds": 2.014243,
+          "sampledMemoryMiB": 76.99609375
+        },
+        "redis": {
+          "cpuSeconds": 0.046379,
+          "sampledMemoryMiB": 13.0234375
+        },
+        "s3": {
+          "cpuSeconds": 0.44122,
+          "sampledMemoryMiB": 252.64453125
+        }
+      },
+      "cpuUsecPerRequest": 16037.34633027523
+    },
+    {
+      "stack": "django",
+      "workload": "cached-files",
+      "concurrency": 64,
+      "round": 2,
+      "requests": 11022,
+      "errors": 0,
+      "connections": 64,
+      "elapsedMs": 5027.085502999999,
+      "requestsPerSecond": 2192.522882975122,
+      "meanMs": 28.915393565868193,
+      "p50Ms": 27.36587499999996,
+      "p95Ms": 33.500916000000416,
+      "p99Ms": 63.08595800000012,
+      "clientCpuPercent": 45.96209868762203,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 5.333282,
+          "sampledMemoryMiB": 37.57421875
+        },
+        "web": {
+          "cpuSeconds": 4.265165,
+          "sampledMemoryMiB": 113.7734375
+        },
+        "db": {
+          "cpuSeconds": 0.069992,
+          "sampledMemoryMiB": 75.9296875
+        },
+        "redis": {
+          "cpuSeconds": 0.40439,
+          "sampledMemoryMiB": 10.3671875
+        },
+        "s3": {
+          "cpuSeconds": 0.03007,
+          "sampledMemoryMiB": 259.19921875
+        }
+      },
+      "cpuUsecPerRequest": 916.6121393576483
+    },
+    {
+      "stack": "django",
+      "workload": "cached-files",
+      "concurrency": 64,
+      "round": 3,
+      "requests": 11298,
+      "errors": 0,
+      "connections": 64,
+      "elapsedMs": 5021.042169,
+      "requestsPerSecond": 2250.1304748552093,
+      "meanMs": 28.177750042928007,
+      "p50Ms": 26.15262500000017,
+      "p95Ms": 35.321040999999695,
+      "p99Ms": 59.59808299999986,
+      "clientCpuPercent": 46.06661171421044,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 5.353278,
+          "sampledMemoryMiB": 34.0859375
+        },
+        "web": {
+          "cpuSeconds": 4.240906,
+          "sampledMemoryMiB": 114.10546875
+        },
+        "db": {
+          "cpuSeconds": 0.070042,
+          "sampledMemoryMiB": 76.375
+        },
+        "redis": {
+          "cpuSeconds": 0.398562,
+          "sampledMemoryMiB": 13.01953125
+        },
+        "s3": {
+          "cpuSeconds": 0.031441,
+          "sampledMemoryMiB": 256.62890625
+        }
+      },
+      "cpuUsecPerRequest": 893.4527349973447
+    },
+    {
+      "stack": "django",
+      "workload": "download",
+      "concurrency": 64,
+      "round": 3,
+      "requests": 432,
+      "errors": 0,
+      "connections": 64,
+      "elapsedMs": 5933.473211,
+      "requestsPerSecond": 72.80727234078009,
+      "meanMs": 808.9893843472221,
+      "p50Ms": 834.636375,
+      "p95Ms": 982.9630010000001,
+      "p99Ms": 1008.1077500000001,
+      "clientCpuPercent": 5.843322918476053,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 0.474508,
+          "sampledMemoryMiB": 35.15234375
+        },
+        "web": {
+          "cpuSeconds": 4.089802,
+          "sampledMemoryMiB": 117.23046875
+        },
+        "db": {
+          "cpuSeconds": 2.048505,
+          "sampledMemoryMiB": 74.74609375
+        },
+        "redis": {
+          "cpuSeconds": 0.047645,
+          "sampledMemoryMiB": 13.5234375
+        },
+        "s3": {
+          "cpuSeconds": 0.456446,
+          "sampledMemoryMiB": 263.1640625
+        }
+      },
+      "cpuUsecPerRequest": 16474.319444444445
+    },
+    {
+      "stack": "laravel",
+      "workload": "cached-files",
+      "concurrency": 1,
+      "round": 1,
+      "requests": 414,
+      "errors": 0,
+      "connections": 1,
+      "elapsedMs": 5007.413334999999,
+      "requestsPerSecond": 82.67741692228411,
+      "meanMs": 11.887608185990349,
+      "p50Ms": 7.002916999999911,
+      "p95Ms": 29.457292000000052,
+      "p99Ms": 71.57483400000001,
+      "clientCpuPercent": 15.5452515684927,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 1.104155,
+          "sampledMemoryMiB": 16.30078125
+        },
+        "web": {
+          "cpuSeconds": 3.088156,
+          "sampledMemoryMiB": 106.578125
+        },
+        "db": {
+          "cpuSeconds": 0.506715,
+          "sampledMemoryMiB": 153.51953125
+        },
+        "redis": {
+          "cpuSeconds": 0.348756,
+          "sampledMemoryMiB": 10.125
+        },
+        "s3": {
+          "cpuSeconds": 0.292895,
+          "sampledMemoryMiB": 21.296875
+        }
+      },
+      "cpuUsecPerRequest": 12900.185990338165
+    },
+    {
+      "stack": "laravel",
+      "workload": "download",
+      "concurrency": 1,
+      "round": 1,
+      "requests": 539,
+      "errors": 0,
+      "connections": 1,
+      "elapsedMs": 5008.086085999999,
+      "requestsPerSecond": 107.62594546981995,
+      "meanMs": 9.223591372912795,
+      "p50Ms": 8.741708000000017,
+      "p95Ms": 12.358292000000006,
+      "p99Ms": 20.053583000000117,
+      "clientCpuPercent": 7.4741526717438305,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 0.531096,
+          "sampledMemoryMiB": 16.4296875
+        },
+        "web": {
+          "cpuSeconds": 3.559229,
+          "sampledMemoryMiB": 110.0546875
+        },
+        "db": {
+          "cpuSeconds": 0.39868,
+          "sampledMemoryMiB": 152.33203125
+        },
+        "redis": {
+          "cpuSeconds": 0.051236,
+          "sampledMemoryMiB": 9.609375
+        },
+        "s3": {
+          "cpuSeconds": 0.742868,
+          "sampledMemoryMiB": 61.484375
+        }
+      },
+      "cpuUsecPerRequest": 9801.686456400743
+    },
+    {
+      "stack": "laravel",
+      "workload": "download",
+      "concurrency": 1,
+      "round": 2,
+      "requests": 559,
+      "errors": 0,
+      "connections": 1,
+      "elapsedMs": 5000.048127,
+      "requestsPerSecond": 111.79892389063798,
+      "meanMs": 8.88695660822901,
+      "p50Ms": 8.563499999999976,
+      "p95Ms": 11.170500000000175,
+      "p99Ms": 14.338665999999648,
+      "clientCpuPercent": 7.105571606031063,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 0.518121,
+          "sampledMemoryMiB": 16.33203125
+        },
+        "web": {
+          "cpuSeconds": 3.588132,
+          "sampledMemoryMiB": 107.71875
+        },
+        "db": {
+          "cpuSeconds": 0.374997,
+          "sampledMemoryMiB": 151.875
+        },
+        "redis": {
+          "cpuSeconds": 0.043247,
+          "sampledMemoryMiB": 12.80078125
+        },
+        "s3": {
+          "cpuSeconds": 0.727808,
+          "sampledMemoryMiB": 129.46484375
+        }
+      },
+      "cpuUsecPerRequest": 9395.894454382826
+    },
+    {
+      "stack": "laravel",
+      "workload": "cached-files",
+      "concurrency": 1,
+      "round": 2,
+      "requests": 1259,
+      "errors": 0,
+      "connections": 1,
+      "elapsedMs": 5000.999586,
+      "requestsPerSecond": 251.7496709106906,
+      "meanMs": 3.9268162382843474,
+      "p50Ms": 3.6425829999998314,
+      "p95Ms": 5.188457999999997,
+      "p99Ms": 7.974083000000007,
+      "clientCpuPercent": 11.284664001569867,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 0.983321,
+          "sampledMemoryMiB": 20.37890625
+        },
+        "web": {
+          "cpuSeconds": 3.964183,
+          "sampledMemoryMiB": 111.9765625
+        },
+        "db": {
+          "cpuSeconds": 0.086938,
+          "sampledMemoryMiB": 155.2421875
+        },
+        "redis": {
+          "cpuSeconds": 0.21206,
+          "sampledMemoryMiB": 12.99609375
+        },
+        "s3": {
+          "cpuSeconds": 0.095063,
+          "sampledMemoryMiB": 158.33203125
+        }
+      },
+      "cpuUsecPerRequest": 4242.7045274027005
+    },
+    {
+      "stack": "laravel",
+      "workload": "cached-files",
+      "concurrency": 1,
+      "round": 3,
+      "requests": 1292,
+      "errors": 0,
+      "connections": 1,
+      "elapsedMs": 5000.692003,
+      "requestsPerSecond": 258.36424223385626,
+      "meanMs": 3.8284120410216773,
+      "p50Ms": 3.616417000000183,
+      "p95Ms": 4.83541600000035,
+      "p99Ms": 7.02841699999999,
+      "clientCpuPercent": 11.155316097558908,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 0.970733,
+          "sampledMemoryMiB": 20.390625
+        },
+        "web": {
+          "cpuSeconds": 3.97646,
+          "sampledMemoryMiB": 112.734375
+        },
+        "db": {
+          "cpuSeconds": 0.081742,
+          "sampledMemoryMiB": 154.94921875
+        },
+        "redis": {
+          "cpuSeconds": 0.211942,
+          "sampledMemoryMiB": 10.4609375
+        },
+        "s3": {
+          "cpuSeconds": 0.023154,
+          "sampledMemoryMiB": 158.9375
+        }
+      },
+      "cpuUsecPerRequest": 4074.3273993808048
+    },
+    {
+      "stack": "laravel",
+      "workload": "download",
+      "concurrency": 1,
+      "round": 3,
+      "requests": 621,
+      "errors": 0,
+      "connections": 1,
+      "elapsedMs": 5000.586502,
+      "requestsPerSecond": 124.18543299903504,
+      "meanMs": 8.002543692431543,
+      "p50Ms": 7.705124999999953,
+      "p95Ms": 9.253916000000004,
+      "p99Ms": 14.671749999999975,
+      "clientCpuPercent": 6.77984472150223,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 0.506741,
+          "sampledMemoryMiB": 17.3125
+        },
+        "web": {
+          "cpuSeconds": 3.632357,
+          "sampledMemoryMiB": 109.9140625
+        },
+        "db": {
+          "cpuSeconds": 0.378312,
+          "sampledMemoryMiB": 155.875
+        },
+        "redis": {
+          "cpuSeconds": 0.042376,
+          "sampledMemoryMiB": 13.32421875
+        },
+        "s3": {
+          "cpuSeconds": 0.695209,
+          "sampledMemoryMiB": 201.90234375
+        }
+      },
+      "cpuUsecPerRequest": 8462.149758454107
+    },
+    {
+      "stack": "laravel",
+      "workload": "cached-files",
+      "concurrency": 16,
+      "round": 1,
+      "requests": 1596,
+      "errors": 0,
+      "connections": 16,
+      "elapsedMs": 5049.704544,
+      "requestsPerSecond": 316.05809529912966,
+      "meanMs": 50.18410145112789,
+      "p50Ms": 48.638124999999945,
+      "p95Ms": 57.964333000000124,
+      "p99Ms": 83.054833,
+      "clientCpuPercent": 13.604182066775588,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 1.235617,
+          "sampledMemoryMiB": 20.2421875
+        },
+        "web": {
+          "cpuSeconds": 4.869432,
+          "sampledMemoryMiB": 110.2265625
+        },
+        "db": {
+          "cpuSeconds": 0.087793,
+          "sampledMemoryMiB": 155.66796875
+        },
+        "redis": {
+          "cpuSeconds": 0.255683,
+          "sampledMemoryMiB": 10.20703125
+        },
+        "s3": {
+          "cpuSeconds": 0.024577,
+          "sampledMemoryMiB": 230.203125
+        }
+      },
+      "cpuUsecPerRequest": 4055.8283208020052
+    },
+    {
+      "stack": "laravel",
+      "workload": "download",
+      "concurrency": 16,
+      "round": 1,
+      "requests": 705,
+      "errors": 0,
+      "connections": 16,
+      "elapsedMs": 5105.436252,
+      "requestsPerSecond": 138.0881016237983,
+      "meanMs": 114.2413161234043,
+      "p50Ms": 112.05533299999979,
+      "p95Ms": 123.70749999999953,
+      "p99Ms": 173.5634170000003,
+      "clientCpuPercent": 7.945765650116279,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 0.578574,
+          "sampledMemoryMiB": 23.7109375
+        },
+        "web": {
+          "cpuSeconds": 4.066706,
+          "sampledMemoryMiB": 112.23046875
+        },
+        "db": {
+          "cpuSeconds": 0.416543,
+          "sampledMemoryMiB": 152.16015625
+        },
+        "redis": {
+          "cpuSeconds": 0.046885,
+          "sampledMemoryMiB": 13.23046875
+        },
+        "s3": {
+          "cpuSeconds": 0.779691,
+          "sampledMemoryMiB": 283.265625
+        }
+      },
+      "cpuUsecPerRequest": 8352.339007092198
+    },
+    {
+      "stack": "laravel",
+      "workload": "download",
+      "concurrency": 16,
+      "round": 2,
+      "requests": 707,
+      "errors": 0,
+      "connections": 16,
+      "elapsedMs": 5109.476793999999,
+      "requestsPerSecond": 138.37033193500793,
+      "meanMs": 113.95798389674687,
+      "p50Ms": 111.82316700000001,
+      "p95Ms": 126.90141599999993,
+      "p99Ms": 173.13212499999986,
+      "clientCpuPercent": 7.754238172981906,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 0.58258,
+          "sampledMemoryMiB": 24.73828125
+        },
+        "web": {
+          "cpuSeconds": 4.052475,
+          "sampledMemoryMiB": 115.7890625
+        },
+        "db": {
+          "cpuSeconds": 0.393426,
+          "sampledMemoryMiB": 152.2265625
+        },
+        "redis": {
+          "cpuSeconds": 0.040694,
+          "sampledMemoryMiB": 13.0546875
+        },
+        "s3": {
+          "cpuSeconds": 0.782978,
+          "sampledMemoryMiB": 346.2265625
+        }
+      },
+      "cpuUsecPerRequest": 8277.444130127298
+    },
+    {
+      "stack": "laravel",
+      "workload": "cached-files",
+      "concurrency": 16,
+      "round": 2,
+      "requests": 1601,
+      "errors": 0,
+      "connections": 16,
+      "elapsedMs": 5046.407086,
+      "requestsPerSecond": 317.2554200872093,
+      "meanMs": 50.00810832104936,
+      "p50Ms": 48.57708400000001,
+      "p95Ms": 58.159415999999965,
+      "p99Ms": 78.26029199999994,
+      "clientCpuPercent": 13.316127465504277,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 1.212983,
+          "sampledMemoryMiB": 21.27734375
+        },
+        "web": {
+          "cpuSeconds": 4.957095,
+          "sampledMemoryMiB": 116.47265625
+        },
+        "db": {
+          "cpuSeconds": 0.085352,
+          "sampledMemoryMiB": 155.0703125
+        },
+        "redis": {
+          "cpuSeconds": 0.253135,
+          "sampledMemoryMiB": 12.80859375
+        },
+        "s3": {
+          "cpuSeconds": 0.025764,
+          "sampledMemoryMiB": 348.09375
+        }
+      },
+      "cpuUsecPerRequest": 4081.4047470331043
+    },
+    {
+      "stack": "laravel",
+      "workload": "cached-files",
+      "concurrency": 16,
+      "round": 3,
+      "requests": 1509,
+      "errors": 0,
+      "connections": 16,
+      "elapsedMs": 5049.280294,
+      "requestsPerSecond": 298.85447274399223,
+      "meanMs": 53.052632671968176,
+      "p50Ms": 50.383082999999715,
+      "p95Ms": 67.20974999999999,
+      "p99Ms": 89.41941700000007,
+      "clientCpuPercent": 13.851518618031388,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 1.237065,
+          "sampledMemoryMiB": 23.73828125
+        },
+        "web": {
+          "cpuSeconds": 4.851264,
+          "sampledMemoryMiB": 117.078125
+        },
+        "db": {
+          "cpuSeconds": 0.088054,
+          "sampledMemoryMiB": 154.91015625
+        },
+        "redis": {
+          "cpuSeconds": 0.263048,
+          "sampledMemoryMiB": 12.9140625
+        },
+        "s3": {
+          "cpuSeconds": 0.027356,
+          "sampledMemoryMiB": 351.3125
+        }
+      },
+      "cpuUsecPerRequest": 4285.478462557985
+    },
+    {
+      "stack": "laravel",
+      "workload": "download",
+      "concurrency": 16,
+      "round": 3,
+      "requests": 646,
+      "errors": 0,
+      "connections": 16,
+      "elapsedMs": 5123.316878,
+      "requestsPerSecond": 126.09019027770549,
+      "meanMs": 125.0288263544893,
+      "p50Ms": 122.04716700000063,
+      "p95Ms": 150.4124999999999,
+      "p99Ms": 187.703125,
+      "clientCpuPercent": 8.227970473779468,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 0.597151,
+          "sampledMemoryMiB": 20.78515625
+        },
+        "web": {
+          "cpuSeconds": 4.051104,
+          "sampledMemoryMiB": 116.4765625
+        },
+        "db": {
+          "cpuSeconds": 0.425672,
+          "sampledMemoryMiB": 155.4453125
+        },
+        "redis": {
+          "cpuSeconds": 0.040809,
+          "sampledMemoryMiB": 9.84765625
+        },
+        "s3": {
+          "cpuSeconds": 0.793313,
+          "sampledMemoryMiB": 353.97265625
+        }
+      },
+      "cpuUsecPerRequest": 9145.586687306502
+    },
+    {
+      "stack": "laravel",
+      "workload": "cached-files",
+      "concurrency": 64,
+      "round": 1,
+      "requests": 1628,
+      "errors": 0,
+      "connections": 64,
+      "elapsedMs": 5203.541252,
+      "requestsPerSecond": 312.86385965985613,
+      "meanMs": 199.29175396068803,
+      "p50Ms": 193.78420800000004,
+      "p95Ms": 249.2867500000002,
+      "p99Ms": 269.79454199999986,
+      "clientCpuPercent": 14.552724064769267,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 1.277702,
+          "sampledMemoryMiB": 28.89453125
+        },
+        "web": {
+          "cpuSeconds": 5.005761,
+          "sampledMemoryMiB": 113.41796875
+        },
+        "db": {
+          "cpuSeconds": 0.103238,
+          "sampledMemoryMiB": 152.1875
+        },
+        "redis": {
+          "cpuSeconds": 0.262908,
+          "sampledMemoryMiB": 13.0546875
+        },
+        "s3": {
+          "cpuSeconds": 0.027102,
+          "sampledMemoryMiB": 357.9453125
+        }
+      },
+      "cpuUsecPerRequest": 4101.173832923833
+    },
+    {
+      "stack": "laravel",
+      "workload": "download",
+      "concurrency": 64,
+      "round": 1,
+      "requests": 629,
+      "errors": 0,
+      "connections": 64,
+      "elapsedMs": 5532.4806690000005,
+      "requestsPerSecond": 113.6922183071436,
+      "meanMs": 531.2024122511928,
+      "p50Ms": 547.7793749999996,
+      "p95Ms": 629.9274589999998,
+      "p99Ms": 632.8083749999998,
+      "clientCpuPercent": 9.087442506886777,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 0.675545,
+          "sampledMemoryMiB": 28.09765625
+        },
+        "web": {
+          "cpuSeconds": 4.283409,
+          "sampledMemoryMiB": 114.27734375
+        },
+        "db": {
+          "cpuSeconds": 0.498956,
+          "sampledMemoryMiB": 155.44140625
+        },
+        "redis": {
+          "cpuSeconds": 0.046719,
+          "sampledMemoryMiB": 13.07421875
+        },
+        "s3": {
+          "cpuSeconds": 0.898471,
+          "sampledMemoryMiB": 368.26953125
+        }
+      },
+      "cpuUsecPerRequest": 10179.809220985691
+    },
+    {
+      "stack": "laravel",
+      "workload": "download",
+      "concurrency": 64,
+      "round": 2,
+      "requests": 656,
+      "errors": 0,
+      "connections": 64,
+      "elapsedMs": 5589.532211,
+      "requestsPerSecond": 117.36223627247651,
+      "meanMs": 512.5358549161582,
+      "p50Ms": 527.963542,
+      "p95Ms": 579.377583,
+      "p99Ms": 588.5696250000001,
+      "clientCpuPercent": 9.456712655841962,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 0.701663,
+          "sampledMemoryMiB": 31.83203125
+        },
+        "web": {
+          "cpuSeconds": 4.344533,
+          "sampledMemoryMiB": 117.328125
+        },
+        "db": {
+          "cpuSeconds": 0.46361,
+          "sampledMemoryMiB": 155.6875
+        },
+        "redis": {
+          "cpuSeconds": 0.054303,
+          "sampledMemoryMiB": 10.046875
+        },
+        "s3": {
+          "cpuSeconds": 0.917422,
+          "sampledMemoryMiB": 378.96875
+        }
+      },
+      "cpuUsecPerRequest": 9880.38262195122
+    },
+    {
+      "stack": "laravel",
+      "workload": "cached-files",
+      "concurrency": 64,
+      "round": 2,
+      "requests": 1553,
+      "errors": 0,
+      "connections": 64,
+      "elapsedMs": 5189.075961,
+      "requestsPerSecond": 299.2825720170644,
+      "meanMs": 208.6756677797811,
+      "p50Ms": 203.91662499999984,
+      "p95Ms": 243.01799999999992,
+      "p99Ms": 272.6344999999999,
+      "clientCpuPercent": 14.929613785239404,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 1.279064,
+          "sampledMemoryMiB": 31.5625
+        },
+        "web": {
+          "cpuSeconds": 4.9281,
+          "sampledMemoryMiB": 117.59765625
+        },
+        "db": {
+          "cpuSeconds": 0.086786,
+          "sampledMemoryMiB": 155.63671875
+        },
+        "redis": {
+          "cpuSeconds": 0.264391,
+          "sampledMemoryMiB": 9.93359375
+        },
+        "s3": {
+          "cpuSeconds": 0.026448,
+          "sampledMemoryMiB": 389.33203125
+        }
+      },
+      "cpuUsecPerRequest": 4240.044430135222
+    },
+    {
+      "stack": "laravel",
+      "workload": "cached-files",
+      "concurrency": 64,
+      "round": 3,
+      "requests": 1518,
+      "errors": 0,
+      "connections": 64,
+      "elapsedMs": 5222.64271,
+      "requestsPerSecond": 290.6574476353563,
+      "meanMs": 214.26150506982887,
+      "p50Ms": 203.89045799999985,
+      "p95Ms": 269.8115829999999,
+      "p99Ms": 345.5874590000001,
+      "clientCpuPercent": 14.83584160402962,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 1.297798,
+          "sampledMemoryMiB": 32.828125
+        },
+        "web": {
+          "cpuSeconds": 4.911818,
+          "sampledMemoryMiB": 117.59765625
+        },
+        "db": {
+          "cpuSeconds": 0.087705,
+          "sampledMemoryMiB": 155.7109375
+        },
+        "redis": {
+          "cpuSeconds": 0.289439,
+          "sampledMemoryMiB": 10.10546875
+        },
+        "s3": {
+          "cpuSeconds": 0.024769,
+          "sampledMemoryMiB": 393.00390625
+        }
+      },
+      "cpuUsecPerRequest": 4355.420948616601
+    },
+    {
+      "stack": "laravel",
+      "workload": "download",
+      "concurrency": 64,
+      "round": 3,
+      "requests": 699,
+      "errors": 0,
+      "connections": 64,
+      "elapsedMs": 5491.646711,
+      "requestsPerSecond": 127.28422580423344,
+      "meanMs": 476.95456377539324,
+      "p50Ms": 466.1681249999999,
+      "p95Ms": 620.2104169999998,
+      "p99Ms": 665.0365419999998,
+      "clientCpuPercent": 9.213429534469556,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 0.669802,
+          "sampledMemoryMiB": 28.55078125
+        },
+        "web": {
+          "cpuSeconds": 4.310994,
+          "sampledMemoryMiB": 115.40234375
+        },
+        "db": {
+          "cpuSeconds": 0.449971,
+          "sampledMemoryMiB": 152.45703125
+        },
+        "redis": {
+          "cpuSeconds": 0.054423,
+          "sampledMemoryMiB": 10.2421875
+        },
+        "s3": {
+          "cpuSeconds": 0.859655,
+          "sampledMemoryMiB": 439.92578125
+        }
+      },
+      "cpuUsecPerRequest": 9077.03147353362
+    },
+    {
+      "stack": "wordpress",
+      "workload": "homepage",
+      "concurrency": 1,
+      "round": 1,
+      "requests": 197,
+      "errors": 0,
+      "connections": 1,
+      "elapsedMs": 5004.366502999999,
+      "requestsPerSecond": 39.36562197870663,
+      "meanMs": 25.33112415736039,
+      "p50Ms": 24.51266600000008,
+      "p95Ms": 30.599334,
+      "p99Ms": 38.315041000000065,
+      "clientCpuPercent": 4.795172373089478,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 0.196061,
+          "sampledMemoryMiB": 19.21875
+        },
+        "web": {
+          "cpuSeconds": 4.090602,
+          "sampledMemoryMiB": 301.05859375
+        },
+        "db": {
+          "cpuSeconds": 0.592622,
+          "sampledMemoryMiB": 117.95703125
+        }
+      },
+      "cpuUsecPerRequest": 24767.94416243655
+    },
+    {
+      "stack": "wordpress",
+      "workload": "homepage",
+      "concurrency": 1,
+      "round": 2,
+      "requests": 185,
+      "errors": 0,
+      "connections": 1,
+      "elapsedMs": 5002.331544,
+      "requestsPerSecond": 36.98275461607429,
+      "meanMs": 26.959630681081066,
+      "p50Ms": 25.583416000000398,
+      "p95Ms": 33.71854200000007,
+      "p99Ms": 51.96070800000007,
+      "clientCpuPercent": 4.965944336455601,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 0.201708,
+          "sampledMemoryMiB": 19.19140625
+        },
+        "web": {
+          "cpuSeconds": 4.067984,
+          "sampledMemoryMiB": 322.93359375
+        },
+        "db": {
+          "cpuSeconds": 0.658773,
+          "sampledMemoryMiB": 118
+        }
+      },
+      "cpuUsecPerRequest": 26640.35135135135
+    },
+    {
+      "stack": "wordpress",
+      "workload": "homepage",
+      "concurrency": 1,
+      "round": 3,
+      "requests": 205,
+      "errors": 0,
+      "connections": 1,
+      "elapsedMs": 5010.685460000001,
+      "requestsPerSecond": 40.91256608232599,
+      "meanMs": 24.36998494634144,
+      "p50Ms": 23.466166999999984,
+      "p95Ms": 28.300958000000037,
+      "p99Ms": 39.59212499999967,
+      "clientCpuPercent": 4.873285340884278,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 0.202804,
+          "sampledMemoryMiB": 19.32421875
+        },
+        "web": {
+          "cpuSeconds": 4.127975,
+          "sampledMemoryMiB": 337.2578125
+        },
+        "db": {
+          "cpuSeconds": 0.601193,
+          "sampledMemoryMiB": 121.296875
+        }
+      },
+      "cpuUsecPerRequest": 24058.4
+    },
+    {
+      "stack": "wordpress",
+      "workload": "homepage",
+      "concurrency": 16,
+      "round": 1,
+      "requests": 961,
+      "errors": 0,
+      "connections": 16,
+      "elapsedMs": 5060.990460999999,
+      "requestsPerSecond": 189.88378014253684,
+      "meanMs": 83.48752370655568,
+      "p50Ms": 79.58658299999979,
+      "p95Ms": 136.1655420000002,
+      "p99Ms": 172.890917,
+      "clientCpuPercent": 18.093533411226083,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 0.788815,
+          "sampledMemoryMiB": 22.36328125
+        },
+        "web": {
+          "cpuSeconds": 23.982131,
+          "sampledMemoryMiB": 381.5703125
+        },
+        "db": {
+          "cpuSeconds": 2.474379,
+          "sampledMemoryMiB": 125.7265625
+        }
+      },
+      "cpuUsecPerRequest": 28351.014568158167
+    },
+    {
+      "stack": "wordpress",
+      "workload": "homepage",
+      "concurrency": 16,
+      "round": 2,
+      "requests": 1098,
+      "errors": 0,
+      "connections": 16,
+      "elapsedMs": 5043.0804610000005,
+      "requestsPerSecond": 217.7240693443697,
+      "meanMs": 72.83380328142067,
+      "p50Ms": 71.65300000000002,
+      "p95Ms": 110.296375,
+      "p99Ms": 143.267292,
+      "clientCpuPercent": 15.92368010406011,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 0.748354,
+          "sampledMemoryMiB": 19.1328125
+        },
+        "web": {
+          "cpuSeconds": 24.314205,
+          "sampledMemoryMiB": 381.00390625
+        },
+        "db": {
+          "cpuSeconds": 2.332917,
+          "sampledMemoryMiB": 129.7890625
+        }
+      },
+      "cpuUsecPerRequest": 24950.342440801458
+    },
+    {
+      "stack": "wordpress",
+      "workload": "homepage",
+      "concurrency": 16,
+      "round": 3,
+      "requests": 1111,
+      "errors": 0,
+      "connections": 16,
+      "elapsedMs": 5049.03646,
+      "requestsPerSecond": 220.0419840105492,
+      "meanMs": 72.14967124212419,
+      "p50Ms": 69.2599580000001,
+      "p95Ms": 114.91054199999996,
+      "p99Ms": 178.90879200000018,
+      "clientCpuPercent": 15.714661723793533,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 0.73083,
+          "sampledMemoryMiB": 20.703125
+        },
+        "web": {
+          "cpuSeconds": 24.286424,
+          "sampledMemoryMiB": 380.90625
+        },
+        "db": {
+          "cpuSeconds": 2.299744,
+          "sampledMemoryMiB": 129.5625
+        }
+      },
+      "cpuUsecPerRequest": 24587.756975697568
+    }
+  ],
+  "status": "failed",
+  "docker": {
+    "ServerVersion": "29.9.2",
+    "OperatingSystem": "Docker Desktop",
+    "Architecture": "aarch64",
+    "NCPU": 6,
+    "MemTotal": 8320028672,
+    "ContainersRunning": 22,
+    "KernelVersion": "7.0.14-linuxkit"
+  },
+  "images": {
+    "node": [
+      {
+        "Id": "sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf",
+        "RepoTags": ["redis:7-alpine"],
+        "RepoDigests": [
+          "redis@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf"
+        ]
+      },
+      {
+        "Id": "sha256:b967e9082597844beeda541836831cdc80c599298f94fc6fa2a955d15e348243",
+        "RepoTags": ["tug-examples-bench-11138-1793704562063-web:latest"],
+        "RepoDigests": [
+          "tug-examples-bench-11138-1793704562063-web@sha256:b967e9082597844beeda541836831cdc80c599298f94fc6fa2a955d15e348243"
+        ]
+      },
+      {
+        "Id": "sha256:0e194b7a204a000a77d7289e43c64cffbabbbecf89d4b9f705ce141ffdee9e15",
+        "RepoTags": ["chrislusf/seaweedfs:3.91"],
+        "RepoDigests": [
+          "chrislusf/seaweedfs@sha256:0e194b7a204a000a77d7289e43c64cffbabbbecf89d4b9f705ce141ffdee9e15"
+        ]
+      },
+      {
+        "Id": "sha256:0cefaabd882e42bcb2a2f3dc56d3ce4770560ba62fd7f197f1a2e008fd5731ab",
+        "RepoTags": ["postgres:16-alpine"],
+        "RepoDigests": [
+          "postgres@sha256:0cefaabd882e42bcb2a2f3dc56d3ce4770560ba62fd7f197f1a2e008fd5731ab"
+        ]
+      },
+      {
+        "Id": "sha256:e70b164da81ef698b3ad19af799ea6086ce6d9e48ed4079eb9fe26f6fbf14ee5",
+        "RepoTags": ["caddy:2-alpine"],
+        "RepoDigests": [
+          "caddy@sha256:e70b164da81ef698b3ad19af799ea6086ce6d9e48ed4079eb9fe26f6fbf14ee5"
+        ]
+      },
+      {
+        "Id": "sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85",
+        "RepoTags": ["node:24-alpine"],
+        "RepoDigests": [
+          "node@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85"
+        ]
+      },
+      {
+        "Id": "sha256:28b68e55560be291d61e78294d93919cd5abf0228d1a16c9932ef1d3ba744339",
+        "RepoTags": ["tug-examples-bench-11138-1793704562063-migrate:latest"],
+        "RepoDigests": [
+          "tug-examples-bench-11138-1793704562063-migrate@sha256:28b68e55560be291d61e78294d93919cd5abf0228d1a16c9932ef1d3ba744339"
+        ]
+      },
+      {
+        "Id": "sha256:bc6b7bba44ce38f9604ede49c584824af919047ea03fbcc7c7610671fdef95d8",
+        "RepoTags": ["amazon/aws-cli:2.27.41"],
+        "RepoDigests": [
+          "amazon/aws-cli@sha256:bc6b7bba44ce38f9604ede49c584824af919047ea03fbcc7c7610671fdef95d8"
+        ]
+      }
+    ],
+    "django": [
+      {
+        "Id": "sha256:bc6b7bba44ce38f9604ede49c584824af919047ea03fbcc7c7610671fdef95d8",
+        "RepoTags": ["amazon/aws-cli:2.27.41"],
+        "RepoDigests": [
+          "amazon/aws-cli@sha256:bc6b7bba44ce38f9604ede49c584824af919047ea03fbcc7c7610671fdef95d8"
+        ]
+      },
+      {
+        "Id": "sha256:0e194b7a204a000a77d7289e43c64cffbabbbecf89d4b9f705ce141ffdee9e15",
+        "RepoTags": ["chrislusf/seaweedfs:3.91"],
+        "RepoDigests": [
+          "chrislusf/seaweedfs@sha256:0e194b7a204a000a77d7289e43c64cffbabbbecf89d4b9f705ce141ffdee9e15"
+        ]
+      },
+      {
+        "Id": "sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85",
+        "RepoTags": ["node:24-alpine"],
+        "RepoDigests": [
+          "node@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85"
+        ]
+      },
+      {
+        "Id": "sha256:26623df90219277c1fb7daaa1f714297ef6626ffa9f8e32b532e2db68a8bb389",
+        "RepoTags": ["tug-examples-bench-11138-1793704562063-web:latest"],
+        "RepoDigests": [
+          "tug-examples-bench-11138-1793704562063-web@sha256:26623df90219277c1fb7daaa1f714297ef6626ffa9f8e32b532e2db68a8bb389"
+        ]
+      },
+      {
+        "Id": "sha256:0cefaabd882e42bcb2a2f3dc56d3ce4770560ba62fd7f197f1a2e008fd5731ab",
+        "RepoTags": ["postgres:16-alpine"],
+        "RepoDigests": [
+          "postgres@sha256:0cefaabd882e42bcb2a2f3dc56d3ce4770560ba62fd7f197f1a2e008fd5731ab"
+        ]
+      },
+      {
+        "Id": "sha256:e773f49ec07f496e87a0da372d9f279a9e3e9b19c1e3963ccc4d12a6809f83be",
+        "RepoTags": ["tug-examples-bench-11138-1793704562063-migrate:latest"],
+        "RepoDigests": [
+          "tug-examples-bench-11138-1793704562063-migrate@sha256:e773f49ec07f496e87a0da372d9f279a9e3e9b19c1e3963ccc4d12a6809f83be"
+        ]
+      },
+      {
+        "Id": "sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf",
+        "RepoTags": ["redis:7-alpine"],
+        "RepoDigests": [
+          "redis@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf"
+        ]
+      },
+      {
+        "Id": "sha256:e70b164da81ef698b3ad19af799ea6086ce6d9e48ed4079eb9fe26f6fbf14ee5",
+        "RepoTags": ["caddy:2-alpine"],
+        "RepoDigests": [
+          "caddy@sha256:e70b164da81ef698b3ad19af799ea6086ce6d9e48ed4079eb9fe26f6fbf14ee5"
+        ]
+      }
+    ],
+    "laravel": [
+      {
+        "Id": "sha256:0e194b7a204a000a77d7289e43c64cffbabbbecf89d4b9f705ce141ffdee9e15",
+        "RepoTags": ["chrislusf/seaweedfs:3.91"],
+        "RepoDigests": [
+          "chrislusf/seaweedfs@sha256:0e194b7a204a000a77d7289e43c64cffbabbbecf89d4b9f705ce141ffdee9e15"
+        ]
+      },
+      {
+        "Id": "sha256:bc6b7bba44ce38f9604ede49c584824af919047ea03fbcc7c7610671fdef95d8",
+        "RepoTags": ["amazon/aws-cli:2.27.41"],
+        "RepoDigests": [
+          "amazon/aws-cli@sha256:bc6b7bba44ce38f9604ede49c584824af919047ea03fbcc7c7610671fdef95d8"
+        ]
+      },
+      {
+        "Id": "sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf",
+        "RepoTags": ["redis:7-alpine"],
+        "RepoDigests": [
+          "redis@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf"
+        ]
+      },
+      {
+        "Id": "sha256:bc474f00629f0123c10f9e1bca193a45d18af15a274cf0656acda64f1086c3b6",
+        "RepoTags": [
+          "mariadb:11.4.8",
+          "mariadb@sha256:bc474f00629f0123c10f9e1bca193a45d18af15a274cf0656acda64f1086c3b6"
+        ],
+        "RepoDigests": [
+          "mariadb@sha256:bc474f00629f0123c10f9e1bca193a45d18af15a274cf0656acda64f1086c3b6"
+        ]
+      },
+      {
+        "Id": "sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85",
+        "RepoTags": ["node:24-alpine"],
+        "RepoDigests": [
+          "node@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85"
+        ]
+      },
+      {
+        "Id": "sha256:e70b164da81ef698b3ad19af799ea6086ce6d9e48ed4079eb9fe26f6fbf14ee5",
+        "RepoTags": ["caddy:2-alpine"],
+        "RepoDigests": [
+          "caddy@sha256:e70b164da81ef698b3ad19af799ea6086ce6d9e48ed4079eb9fe26f6fbf14ee5"
+        ]
+      },
+      {
+        "Id": "sha256:073f111b6f5c45efb102d2310a3a99577cf3ee6a4b23c16a785926f22baf3073",
+        "RepoTags": ["tug-examples-bench-11138-1793704562063-web:latest"],
+        "RepoDigests": [
+          "tug-examples-bench-11138-1793704562063-web@sha256:073f111b6f5c45efb102d2310a3a99577cf3ee6a4b23c16a785926f22baf3073"
+        ]
+      },
+      {
+        "Id": "sha256:295377d91172ea4571200b0c817d4f21cf322f86e3eaedd0fbf93ce327829a36",
+        "RepoTags": ["tug-examples-bench-11138-1793704562063-migrate:latest"],
+        "RepoDigests": [
+          "tug-examples-bench-11138-1793704562063-migrate@sha256:295377d91172ea4571200b0c817d4f21cf322f86e3eaedd0fbf93ce327829a36"
+        ]
+      }
+    ],
+    "wordpress": [
+      {
+        "Id": "sha256:e70b164da81ef698b3ad19af799ea6086ce6d9e48ed4079eb9fe26f6fbf14ee5",
+        "RepoTags": ["caddy:2-alpine"],
+        "RepoDigests": [
+          "caddy@sha256:e70b164da81ef698b3ad19af799ea6086ce6d9e48ed4079eb9fe26f6fbf14ee5"
+        ]
+      },
+      {
+        "Id": "sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85",
+        "RepoTags": ["node:24-alpine"],
+        "RepoDigests": [
+          "node@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85"
+        ]
+      },
+      {
+        "Id": "sha256:bc474f00629f0123c10f9e1bca193a45d18af15a274cf0656acda64f1086c3b6",
+        "RepoTags": [
+          "mariadb:11.4.8",
+          "mariadb@sha256:bc474f00629f0123c10f9e1bca193a45d18af15a274cf0656acda64f1086c3b6"
+        ],
+        "RepoDigests": [
+          "mariadb@sha256:bc474f00629f0123c10f9e1bca193a45d18af15a274cf0656acda64f1086c3b6"
+        ]
+      },
+      {
+        "Id": "sha256:30bff39330d1693b0ce13d32fc9b7bb67193064f040b7d60d3494e136fa599d4",
+        "RepoTags": [
+          "wordpress:6.8.3-apache",
+          "wordpress@sha256:30bff39330d1693b0ce13d32fc9b7bb67193064f040b7d60d3494e136fa599d4"
+        ],
+        "RepoDigests": [
+          "wordpress@sha256:30bff39330d1693b0ce13d32fc9b7bb67193064f040b7d60d3494e136fa599d4"
+        ]
+      },
+      {
+        "Id": "sha256:6bcc7bb91f5157c4b915e74ee131873e99c1c1ff48f602e4a6f6cd17827305cb",
+        "RepoTags": ["wordpress:cli-php8.3"],
+        "RepoDigests": [
+          "wordpress@sha256:6bcc7bb91f5157c4b915e74ee131873e99c1c1ff48f602e4a6f6cd17827305cb"
+        ]
+      }
+    ]
+  },
+  "error": "Error: load exited 1: {\"requests\":689,\"errors\":11,\"connections\":64,\"elapsedMs\":7798.89642,\"requestsPerSecond\":88.34583290952337,\"meanMs\":473.8801592089985,\"p50Ms\":247.2828340000001,\"p95Ms\":2515.2431259999994,\"p99Ms\":4653.047544,\"clientCpuPercent\":14.421681471697248}\n\n Container tug-examples-bench-11138-1793704562063-load-run-25dd6af57b61 Creating \n Container tug-examples-bench-11138-1793704562063-load-run-25dd6af57b61 Created \n\n\n    at ChildProcess.<anonymous> (file:///Users/kaspars/Projects/pad-launch/benchmarks/examples/run.mjs:111:18)\n    at ChildProcess.emit (node:events:514:20)\n    at maybeClose (node:internal/child_process:1156:16)\n    at Socket.<anonymous> (node:internal/child_process:526:11)\n    at Socket.emit (node:events:514:20)\n    at Pipe.<anonymous> (node:net:362:12)",
+  "logs": "caddy-1  | {\"level\":\"info\",\"ts\":1793705178.7336373,\"msg\":\"maxprocs: Leaving GOMAXPROCS=6: CPU quota undefined\"}\ncaddy-1  | {\"level\":\"info\",\"ts\":1793705178.733897,\"msg\":\"GOMEMLIMIT is updated\",\"GOMEMLIMIT\":7488025804,\"previous\":9223372036854775807}\ncaddy-1  | {\"level\":\"info\",\"ts\":1793705178.7339053,\"msg\":\"using config from file\",\"file\":\"/etc/caddy/Caddyfile\"}\ncaddy-1  | {\"level\":\"info\",\"ts\":1793705178.733911,\"msg\":\"adapted config to JSON\",\"adapter\":\"caddyfile\"}\ncaddy-1  | {\"level\":\"warn\",\"ts\":1793705178.7339213,\"msg\":\"Caddyfile input is not formatted; run 'caddy fmt --overwrite' to fix inconsistencies\",\"adapter\":\"caddyfile\",\"file\":\"/etc/caddy/Caddyfile\",\"line\":2}\ncaddy-1  | {\"level\":\"info\",\"ts\":1793705178.7422698,\"logger\":\"admin\",\"msg\":\"admin endpoint started\",\"address\":\"localhost:2019\",\"enforce_origin\":false,\"origins\":[\"//localhost:2019\",\"//[::1]:2019\",\"//127.0.0.1:2019\"]}\ncaddy-1  | {\"level\":\"info\",\"ts\":1793705178.7438784,\"logger\":\"tls.cache.maintenance\",\"msg\":\"started background certificate maintenance\",\"cache\":\"0x60a314e28300\"}\ncaddy-1  | {\"level\":\"info\",\"ts\":1793705178.7460032,\"logger\":\"http.auto_https\",\"msg\":\"automatic HTTPS is completely disabled for server\",\"server_name\":\"srv0\"}\ncaddy-1  | {\"level\":\"info\",\"ts\":1793705178.7462692,\"logger\":\"http\",\"msg\":\"enabling HTTP/3 listener\",\"addr\":\":443\"}\ncaddy-1  | {\"level\":\"info\",\"ts\":1793705178.7464592,\"logger\":\"http.log\",\"msg\":\"server running\",\"name\":\"srv0\",\"protocols\":[\"h1\",\"h2\",\"h3\"]}\ncaddy-1  | {\"level\":\"info\",\"ts\":1793705178.7489684,\"msg\":\"autosaved config (load with --resume flag)\",\"file\":\"/config/caddy/autosave.json\"}\ncaddy-1  | {\"level\":\"info\",\"ts\":1793705178.7489765,\"msg\":\"serving initial configuration\"}\ncaddy-1  | {\"level\":\"info\",\"ts\":1793705178.7508328,\"logger\":\"tls\",\"msg\":\"cleaning storage unit\",\"storage\":\"FileStorage:/data/caddy\"}\ncaddy-1  | {\"level\":\"info\",\"ts\":1793705178.751937,\"logger\":\"tls\",\"msg\":\"finished cleaning storage units\"}\ndb-1     | 2026-11-03 11:26:09+00:00 [Note] [Entrypoint]: Entrypoint script for MariaDB Server 1:11.4.8+maria~ubu2404 started.\ndb-1     | 2026-11-03 11:26:09+00:00 [Warn] [Entrypoint]: /sys/fs/cgroup///memory.pressure not writable, functionality unavailable to MariaDB\ndb-1     | 2026-11-03 11:26:09+00:00 [Note] [Entrypoint]: Switching to dedicated user 'mysql'\ndb-1     | 2026-11-03 11:26:09+00:00 [Note] [Entrypoint]: Entrypoint script for MariaDB Server 1:11.4.8+maria~ubu2404 started.\ndb-1     | 2026-11-03 11:26:10+00:00 [Note] [Entrypoint]: Initializing database files\ndb-1     | 2026-11-03 11:26:10 0 [Warning] mariadbd: io_uring_queue_init() failed with EPERM: sysctl kernel.io_uring_disabled has the value 2, or 1 and the user of the process is not a member of sysctl kernel.io_uring_group. (see man 2 io_uring_setup).\ndb-1     | create_uring failed: falling back to libaio\ndb-1     | 2026-11-03 11:26:10+00:00 [Note] [Entrypoint]: Database files initialized\ndb-1     | 2026-11-03 11:26:10+00:00 [Note] [Entrypoint]: Starting temporary server\ndb-1     | 2026-11-03 11:26:10+00:00 [Note] [Entrypoint]: Waiting for server startup\ndb-1     | 2026-11-03 11:26:10 0 [Note] Starting MariaDB 11.4.8-MariaDB-ubu2404 source revision c4ed889b74ed95fa8b4eaf96610d4c1480b346a4 server_uid xr2NAB6zGrUnDHeIdOwYHFRzUkI= as process 94\ndb-1     | 2026-11-03 11:26:10 0 [Note] InnoDB: Compressed tables use zlib 1.3\ndb-1     | 2026-11-03 11:26:10 0 [Note] InnoDB: Number of transaction pools: 1\ndb-1     | 2026-11-03 11:26:10 0 [Note] InnoDB: Using ARMv8 crc32 + pmull instructions\ndb-1     | 2026-11-03 11:26:10 0 [Warning] mariadbd: io_uring_queue_init() failed with EPERM: sysctl kernel.io_uring_disabled has the value 2, or 1 and the user of the process is not a member of sysctl kernel.io_uring_group. (see man 2 io_uring_setup).\ndb-1     | create_uring failed: falling back to libaio\ndb-1     | 2026-11-03 11:26:10 0 [Note] InnoDB: Using Linux native AIO\ndb-1     | 2026-11-03 11:26:10 0 [Note] InnoDB: innodb_buffer_pool_size_max=96m, innodb_buffer_pool_size=96m\ndb-1     | 2026-11-03 11:26:10 0 [Note] InnoDB: Completed initialization of buffer pool\ndb-1     | 2026-11-03 11:26:10 0 [Note] InnoDB: File system buffers for log disabled (block size=512 bytes)\ndb-1     | 2026-11-03 11:26:11 0 [Note] InnoDB: End of log at LSN=46300\ndb-1     | 2026-11-03 11:26:11 0 [Note] InnoDB: Opened 3 undo tablespaces\ndb-1     | 2026-11-03 11:26:11 0 [Note] InnoDB: 128 rollback segments in 3 undo tablespaces are active.\ndb-1     | 2026-11-03 11:26:11 0 [Note] InnoDB: Setting file './ibtmp1' size to 12.000MiB. Physically writing the file full; Please wait ...\ndb-1     | 2026-11-03 11:26:11 0 [Note] InnoDB: File './ibtmp1' size is now 12.000MiB.\ndb-1     | 2026-11-03 11:26:11 0 [Note] InnoDB: log sequence number 46300; transaction id 14\ndb-1     | 2026-11-03 11:26:11 0 [Note] Plugin 'FEEDBACK' is disabled.\ndb-1     | 2026-11-03 11:26:11 0 [Note] Plugin 'wsrep-provider' is disabled.\ndb-1     | 2026-11-03 11:26:13 0 [Note] mariadbd: Event Scheduler: Loaded 0 events\ndb-1     | 2026-11-03 11:26:13 0 [Note] mariadbd: ready for connections.\ndb-1     | Version: '11.4.8-MariaDB-ubu2404'  socket: '/run/mysqld/mysqld.sock'  port: 0  mariadb.org binary distribution\ndb-1     | 2026-11-03 11:26:13+00:00 [Note] [Entrypoint]: Temporary server started.\ndb-1     | 2026-11-03 11:26:14+00:00 [Note] [Entrypoint]: Creating database wordpress\ndb-1     | 2026-11-03 11:26:14+00:00 [Note] [Entrypoint]: Creating user wordpress\ndb-1     | 2026-11-03 11:26:14+00:00 [Note] [Entrypoint]: Giving user wordpress access to schema wordpress\ndb-1     | 2026-11-03 11:26:14+00:00 [Note] [Entrypoint]: Securing system users (equivalent to running mysql_secure_installation)\ndb-1     | \ndb-1     | 2026-11-03 11:26:14+00:00 [Note] [Entrypoint]: Stopping temporary server\ndb-1     | 2026-11-03 11:26:14 0 [Note] mariadbd (initiated by: unknown): Normal shutdown\ndb-1     | 2026-11-03 11:26:14 0 [Note] InnoDB: FTS optimize thread exiting.\ndb-1     | 2026-11-03 11:26:14 0 [Note] InnoDB: Starting shutdown...\ndb-1     | 2026-11-03 11:26:14 0 [Note] InnoDB: Dumping buffer pool(s) to /var/lib/mysql/ib_buffer_pool\ndb-1     | 2026-11-03 11:26:14 0 [Note] InnoDB: Buffer pool(s) dump completed at 261103 11:26:14\ndb-1     | 2026-11-03 11:26:14 0 [Note] InnoDB: Removed temporary tablespace data file: \"./ibtmp1\"\ndb-1     | 2026-11-03 11:26:14 0 [Note] InnoDB: Shutdown completed; log sequence number 47875; transaction id 15\ndb-1     | 2026-11-03 11:26:14 0 [Note] mariadbd: Shutdown complete\ndb-1     | 2026-11-03 11:26:14+00:00 [Note] [Entrypoint]: Temporary server stopped\ndb-1     | \ndb-1     | 2026-11-03 11:26:14+00:00 [Note] [Entrypoint]: MariaDB init process done. Ready for start up.\ndb-1     | \ndb-1     | 2026-11-03 11:26:14 0 [Note] Starting MariaDB 11.4.8-MariaDB-ubu2404 source revision c4ed889b74ed95fa8b4eaf96610d4c1480b346a4 server_uid xr2NAB6zGrUnDHeIdOwYHFRzUkI= as process 1\ndb-1     | 2026-11-03 11:26:14 0 [Note] InnoDB: Compressed tables use zlib 1.3\ndb-1     | 2026-11-03 11:26:14 0 [Note] InnoDB: Number of transaction pools: 1\ndb-1     | 2026-11-03 11:26:14 0 [Note] InnoDB: Using ARMv8 crc32 + pmull instructions\ndb-1     | 2026-11-03 11:26:14 0 [Warning] mariadbd: io_uring_queue_init() failed with EPERM: sysctl kernel.io_uring_disabled has the value 2, or 1 and the user of the process is not a member of sysctl kernel.io_uring_group. (see man 2 io_uring_setup).\ndb-1     | create_uring failed: falling back to libaio\ndb-1     | 2026-11-03 11:26:14 0 [Note] InnoDB: Using Linux native AIO\ndb-1     | 2026-11-03 11:26:14 0 [Note] InnoDB: innodb_buffer_pool_size_max=96m, innodb_buffer_pool_size=96m\ndb-1     | 2026-11-03 11:26:14 0 [Note] InnoDB: Completed initialization of buffer pool\ndb-1     | 2026-11-03 11:26:14 0 [Note] InnoDB: File system buffers for log disabled (block size=512 bytes)\ndb-1     | 2026-11-03 11:26:14 0 [Note] InnoDB: End of log at LSN=47875\ndb-1     | 2026-11-03 11:26:14 0 [Note] InnoDB: Opened 3 undo tablespaces\ndb-1     | 2026-11-03 11:26:14 0 [Note] InnoDB: 128 rollback segments in 3 undo tablespaces are active.\ndb-1     | 2026-11-03 11:26:14 0 [Note] InnoDB: Setting file './ibtmp1' size to 12.000MiB. Physically writing the file full; Please wait ...\ndb-1     | 2026-11-03 11:26:14 0 [Note] InnoDB: File './ibtmp1' size is now 12.000MiB.\ndb-1     | 2026-11-03 11:26:14 0 [Note] InnoDB: log sequence number 47875; transaction id 15\ndb-1     | 2026-11-03 11:26:14 0 [Note] Plugin 'FEEDBACK' is disabled.\ndb-1     | 2026-11-03 11:26:14 0 [Note] InnoDB: Loading buffer pool(s) from /var/lib/mysql/ib_buffer_pool\ndb-1     | 2026-11-03 11:26:14 0 [Note] Plugin 'wsrep-provider' is disabled.\ndb-1     | 2026-11-03 11:26:14 0 [Note] InnoDB: Buffer pool(s) load completed at 261103 11:26:14\ndb-1     | 2026-11-03 11:26:15 0 [Note] Server socket created on IP: '0.0.0.0', port: '3306'.\ndb-1     | 2026-11-03 11:26:15 0 [Note] Server socket created on IP: '::', port: '3306'.\ndb-1     | 2026-11-03 11:26:15 0 [Note] mariadbd: Event Scheduler: Loaded 0 events\ndb-1     | 2026-11-03 11:26:15 0 [Note] mariadbd: ready for connections.\ndb-1     | Version: '11.4.8-MariaDB-ubu2404'  socket: '/run/mysqld/mysqld.sock'  port: 3306  mariadb.org binary distribution\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:25 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:25 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:25 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:25 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:25 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:25 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:25 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:25 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:25 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:27 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:27 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:27 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:27 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:27 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:27 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:27 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:27 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:27 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:27 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:25 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:27 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:27 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:27 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:27 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:27 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:27 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:27 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:27 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:27 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:27 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:27 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:27 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:27 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:27 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:27 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:27 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:25 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:25 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:27 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:27 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:27 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:25 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:27 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:27 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:28 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:25 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:28 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:28 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:28 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:28 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:28 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:28 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:28 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:28 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:28 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:27 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:28 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:27 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:27 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 127.0.0.1 - - [03/Nov/2026:11:27:29 +0000] \"OPTIONS * HTTP/1.0\" 200 126 \"-\" \"Apache/2.4.65 (Debian) PHP/8.3.28 (internal dummy connection)\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:27 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:27 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:27 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:27 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 127.0.0.1 - - [03/Nov/2026:11:27:30 +0000] \"OPTIONS * HTTP/1.0\" 200 126 \"-\" \"Apache/2.4.65 (Debian) PHP/8.3.28 (internal dummy connection)\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:26 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 172.30.0.5 - - [03/Nov/2026:11:27:27 +0000] \"GET / HTTP/1.1\" 200 10647 \"-\" \"-\"\nweb-1    | 127.0.0.1 - - [03/Nov/2026:11:27:31 +0000] \"OPTIONS * HTTP/1.0\" 200 126 \"-\" \"Apache/2.4.65 (Debian) PHP/8.3.28 (internal dummy connection)\""
+}
