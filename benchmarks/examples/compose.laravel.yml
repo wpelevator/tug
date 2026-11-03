@@ -1,0 +1,61 @@
+services:
+  db:
+    image: mariadb:11.4.8
+    environment:
+      MARIADB_DATABASE: app
+      MARIADB_USER: app
+      MARIADB_PASSWORD: benchmark
+      MARIADB_ROOT_PASSWORD: benchmark-root
+    healthcheck:
+      test: [CMD, healthcheck.sh, --connect, --innodb_initialized]
+      interval: 2s
+      timeout: 2s
+      retries: 60
+  redis:
+    image: redis:7-alpine
+  s3:
+    image: chrislusf/seaweedfs:3.91
+    command: server -ip=s3 -ip.bind=0.0.0.0 -s3 -s3.port=9000
+  s3-init:
+    image: amazon/aws-cli:2.27.41
+    profiles: [setup]
+    environment:
+      AWS_ACCESS_KEY_ID: benchmark
+      AWS_SECRET_ACCESS_KEY: benchmark-secret
+      AWS_DEFAULT_REGION: us-east-1
+    entrypoint: [/bin/sh, -c]
+    command: ['i=0; until aws --cli-connect-timeout 2 --cli-read-timeout 5 --endpoint-url http://s3:9000 s3api list-buckets; do i=$$((i + 1)); if [ $$i -ge 60 ]; then exit 1; fi; sleep 1; done; aws --cli-connect-timeout 2 --cli-read-timeout 5 --endpoint-url http://s3:9000 s3api create-bucket --bucket tug-example']
+    depends_on: [s3]
+  web: &app
+    build: ../../examples/laravel
+    environment:
+      APP_KEY: base64:YmVuY2htYXJrLW9ubHkta2V5LTMyaW4tYnl0ZXMhISE=
+      APP_ENV: production
+      APP_DEBUG: 'false'
+      DB_CONNECTION: mysql
+      DB_HOST: db
+      DB_DATABASE: app
+      DB_USERNAME: app
+      DB_PASSWORD: benchmark
+      CACHE_STORE: redis
+      REDIS_CLIENT: predis
+      REDIS_HOST: redis
+      REDIS_CACHE_DB: '0'
+      SESSION_DRIVER: array
+      AWS_ACCESS_KEY_ID: benchmark
+      AWS_SECRET_ACCESS_KEY: benchmark-secret
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_BUCKET: tug-example
+      AWS_ENDPOINT: http://s3:9000
+      AWS_USE_PATH_STYLE_ENDPOINT: 'true'
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      s3:
+        condition: service_started
+  migrate:
+    <<: *app
+    profiles: [setup]
+    command: [php, artisan, migrate, --force]

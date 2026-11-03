@@ -1,0 +1,17 @@
+services:
+  caddy:
+    image: caddy:2-alpine
+    environment:
+      WEB_PORT: ${WEB_PORT:-8000}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./certs:/certs:ro
+    depends_on:
+      - web
+  load:
+    image: node:24-alpine
+    profiles: [load]
+    entrypoint: [node, /load.mjs]
+    volumes:
+      - ./load.mjs:/load.mjs:ro
+      - ./certs:/certs:ro

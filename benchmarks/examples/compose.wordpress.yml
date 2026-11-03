@@ -1,0 +1,47 @@
+services:
+  db:
+    image: mariadb:11.4.8
+    mem_limit: 384m
+    command: ['--innodb-buffer-pool-size=96M']
+    environment:
+      MARIADB_DATABASE: wordpress
+      MARIADB_USER: wordpress
+      MARIADB_PASSWORD: benchmark
+      MARIADB_ROOT_PASSWORD: benchmark-root
+    healthcheck:
+      test: [CMD, healthcheck.sh, --connect, --innodb_initialized]
+      interval: 2s
+      timeout: 2s
+      retries: 60
+  web:
+    image: wordpress:6.8.3-apache
+    mem_limit: 384m
+    environment: &wp-env
+      WORDPRESS_DB_HOST: db
+      WORDPRESS_DB_NAME: wordpress
+      WORDPRESS_DB_USER: wordpress
+      WORDPRESS_DB_PASSWORD: benchmark
+    volumes:
+      - wordpress:/var/www/html
+    depends_on:
+      db:
+        condition: service_healthy
+  install:
+    image: wordpress:cli-php8.3
+    profiles: [setup]
+    user: '33:33'
+    environment: *wp-env
+    volumes:
+      - wordpress:/var/www/html
+    entrypoint: [/bin/sh, -c]
+    command: ['i=0; until test -f /var/www/html/wp-config.php; do i=$$((i + 1)); if [ $$i -ge 60 ]; then exit 1; fi; sleep 1; done; wp core is-installed || wp core install --url=https://caddy --title="Benchmark Site" --admin_user=benchmark --admin_password=benchmark --admin_email=benchmark@example.test --skip-email']
+    depends_on:
+      db:
+        condition: service_healthy
+      web:
+        condition: service_started
+  caddy:
+    environment:
+      WEB_PORT: '80'
+volumes:
+  wordpress: {}

@@ -1,0 +1,110 @@
+{
+  "timestamp": "2026-11-03T11:29:37.492Z",
+  "settings": {
+    "seconds": 5,
+    "rounds": 1,
+    "concurrency": [64],
+    "stacks": ["wordpress"]
+  },
+  "workloads": {
+    "wordpress": [
+      {
+        "name": "homepage",
+        "path": "/",
+        "expectation": {
+          "type": "wordpress",
+          "title": "Benchmark Site",
+          "marker": "Hello world!"
+        }
+      }
+    ]
+  },
+  "runs": [
+    {
+      "stack": "wordpress",
+      "workload": "homepage",
+      "concurrency": 64,
+      "round": 1,
+      "requests": 325,
+      "errors": 0,
+      "connections": 64,
+      "elapsedMs": 6141.48092,
+      "requestsPerSecond": 52.918832482508144,
+      "meanMs": 1144.6950583938462,
+      "p50Ms": 1091.9198340000003,
+      "p95Ms": 2084.1915010000002,
+      "p99Ms": 2533.286876,
+      "clientCpuPercent": 16.41413550137676,
+      "services": {
+        "caddy": {
+          "cpuSeconds": 0.452345,
+          "sampledMemoryMiB": 27.71875
+        },
+        "web": {
+          "cpuSeconds": 23.376376,
+          "sampledMemoryMiB": 379.265625
+        },
+        "db": {
+          "cpuSeconds": 1.389494,
+          "sampledMemoryMiB": 141.3515625
+        }
+      },
+      "cpuUsecPerRequest": 77594.5076923077
+    }
+  ],
+  "status": "complete",
+  "docker": {
+    "ServerVersion": "29.9.2",
+    "OperatingSystem": "Docker Desktop",
+    "Architecture": "aarch64",
+    "NCPU": 6,
+    "MemTotal": 8320028672,
+    "ContainersRunning": 21,
+    "KernelVersion": "7.0.14-linuxkit"
+  },
+  "images": {
+    "wordpress": [
+      {
+        "Id": "sha256:30bff39330d1693b0ce13d32fc9b7bb67193064f040b7d60d3494e136fa599d4",
+        "RepoTags": [
+          "wordpress:6.8.3-apache",
+          "wordpress@sha256:30bff39330d1693b0ce13d32fc9b7bb67193064f040b7d60d3494e136fa599d4"
+        ],
+        "RepoDigests": [
+          "wordpress@sha256:30bff39330d1693b0ce13d32fc9b7bb67193064f040b7d60d3494e136fa599d4"
+        ]
+      },
+      {
+        "Id": "sha256:e70b164da81ef698b3ad19af799ea6086ce6d9e48ed4079eb9fe26f6fbf14ee5",
+        "RepoTags": ["caddy:2-alpine"],
+        "RepoDigests": [
+          "caddy@sha256:e70b164da81ef698b3ad19af799ea6086ce6d9e48ed4079eb9fe26f6fbf14ee5"
+        ]
+      },
+      {
+        "Id": "sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85",
+        "RepoTags": ["node:24-alpine"],
+        "RepoDigests": [
+          "node@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85"
+        ]
+      },
+      {
+        "Id": "sha256:6bcc7bb91f5157c4b915e74ee131873e99c1c1ff48f602e4a6f6cd17827305cb",
+        "RepoTags": ["wordpress:cli-php8.3"],
+        "RepoDigests": [
+          "wordpress@sha256:6bcc7bb91f5157c4b915e74ee131873e99c1c1ff48f602e4a6f6cd17827305cb"
+        ]
+      },
+      {
+        "Id": "sha256:bc474f00629f0123c10f9e1bca193a45d18af15a274cf0656acda64f1086c3b6",
+        "RepoTags": [
+          "mariadb:11.4.8",
+          "mariadb@sha256:bc474f00629f0123c10f9e1bca193a45d18af15a274cf0656acda64f1086c3b6"
+        ],
+        "RepoDigests": [
+          "mariadb@sha256:bc474f00629f0123c10f9e1bca193a45d18af15a274cf0656acda64f1086c3b6"
+        ]
+      }
+    ]
+  }
+}

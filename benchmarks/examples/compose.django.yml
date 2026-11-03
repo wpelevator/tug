@@ -1,0 +1,48 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: app
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: benchmark
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U app -d app]
+      interval: 2s
+      timeout: 2s
+      retries: 60
+  redis:
+    image: redis:7-alpine
+  s3:
+    image: chrislusf/seaweedfs:3.91
+    command: server -ip=s3 -ip.bind=0.0.0.0 -s3 -s3.port=9000
+  s3-init:
+    image: amazon/aws-cli:2.27.41
+    profiles: [setup]
+    environment:
+      AWS_ACCESS_KEY_ID: benchmark
+      AWS_SECRET_ACCESS_KEY: benchmark-secret
+      AWS_DEFAULT_REGION: us-east-1
+    entrypoint: [/bin/sh, -c]
+    command: ['i=0; until aws --cli-connect-timeout 2 --cli-read-timeout 5 --endpoint-url http://s3:9000 s3api list-buckets; do i=$$((i + 1)); if [ $$i -ge 60 ]; then exit 1; fi; sleep 1; done; aws --cli-connect-timeout 2 --cli-read-timeout 5 --endpoint-url http://s3:9000 s3api create-bucket --bucket tug-example']
+    depends_on: [s3]
+  web: &app
+    build: ../../examples/django/app
+    environment:
+      DB_PASSWORD: benchmark
+      APP_KEY: benchmark-local-only
+      S3_ACCESS_KEY: benchmark
+      S3_SECRET_KEY: benchmark-secret
+      S3_REGION: us-east-1
+      S3_BUCKET: tug-example
+      S3_ENDPOINT: http://s3:9000
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      s3:
+        condition: service_started
+  migrate:
+    <<: *app
+    profiles: [setup]
+    command: [python, manage.py, migrate, --noinput]
