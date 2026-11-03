@@ -1,4 +1,5 @@
 import { selectNodes, selectNode } from './selection.ts';
+import { withProgress } from '../cli-progress.ts';
 import type { Command } from 'commander';
 import { applyConfigDefaults, normalizeControlUrl, nodeSettings } from '../cli-config.ts';
 import { formatNodes } from '../cli-status.ts';
@@ -95,69 +96,78 @@ async function installNodeIdentity(
   /** False in batch mode, where only the final per-node results are printed. */
   printResult = true,
 ): Promise<boolean> {
-  const cfg = await loadCfg();
-  const connectUrl = o.agentControlUrl ? normalizeControlUrl(o.agentControlUrl) : undefined;
-  await transportFor(cfg).then((t) => t.close()); // fail before touching the host when there is no credential
-  assertImagePublished(resolveImage(o.image, o.buildLocalImage));
-  if (o.installDocker) await bootstrapDocker(sshTarget);
-  preflightRemote(sshTarget, {
-    controlUrl: connectUrl ?? cfg.credential?.url,
-  });
-  const image = resolveImage(o.image, o.buildLocalImage);
-  if (o.buildLocalImage) await transferTugImage(sshTarget, image);
-  const started = new Date().toISOString();
-  if (repair)
-    runLocal('ssh', [
-      '--',
-      sshTarget,
-      `mkdir -p ${AGENT_STATE} && cd ${AGENT_STATE} && for f in agent.json agent-pending.json; do [ -e "$f" ] && mv "$f" "$f.corrupt-$(date +%s)"; done; true`,
-    ]);
-  const agent = (command: string, interactive = false) =>
-    `mkdir -p ${AGENT_STATE} && docker run --rm ${interactive ? '-i ' : ''}-v ${AGENT_STATE}:${AGENT_STATE} ${sh(image)} agent ${command}`;
-  const csr = runCapture('ssh', ['--', sshTarget, agent('identity')]);
-  const response = await request<IdentityResponse>(
-    'POST',
-    `/api/v1/nodes/${encodeURIComponent(name)}/identity`,
-    { csr, mode, address: o.address, labels: o.label },
-  );
-  runCapture('ssh', ['--', sshTarget, agent('install-cert', true)], {
-    input: JSON.stringify(response),
-  });
-  const env = await loadTemplate(templatesDir, 'agent.env', {
-    CONTROL_URL_LINE: connectUrl ? `TUG_CONTROL_URL=${connectUrl}\n` : '',
-    NODE_NAME: name,
-  });
-  const remote = await loadTemplate(templatesDir, 'node-install.sh', {
-    ENV: env,
-    IMAGE_SH: sh(image),
-    RUN_FLAGS: `${HOST_NETWORK_FLAG} `,
-  });
-  runLocal('ssh', ['--', sshTarget, remote]);
-  if (o.ingress)
-    await request('POST', `/api/v1/nodes/${encodeURIComponent(name)}/ingress`, { enabled: true });
-  const result = { ok: true, node: response.node, ...(o.ingress ? { ingress: true } : {}) };
-  let reporting = !o.wait;
-  if (o.wait) {
-    // A report from the new identity: wait for a report after the install began, not a replaced node's stale status.
-    for (let i = 0; i < 30; i++) {
-      const { nodes } = await request<{ nodes: { name: string; last_seen_at: string | null }[] }>(
-        'GET',
-        '/api/v1/nodes',
-      );
-      const seen = nodes.find((n) => n.name === name)?.last_seen_at;
-      if (seen && seen > started) {
-        reporting = true;
-        break;
-      }
-      await new Promise((r) => setTimeout(r, 2000));
+  return withProgress(`Preparing node ${name}`, async (progress) => {
+    const cfg = await loadCfg();
+    const connectUrl = o.agentControlUrl ? normalizeControlUrl(o.agentControlUrl) : undefined;
+    await transportFor(cfg).then((t) => t.close()); // fail before touching the host when there is no credential
+    assertImagePublished(resolveImage(o.image, o.buildLocalImage));
+    if (o.installDocker) {
+      progress.stage(`Installing Docker on node ${name}`);
+      await bootstrapDocker(sshTarget);
     }
-    if (!reporting)
-      console.error(
-        `node ${name} has not reported yet; check \`docker logs tug-agent\` on the host`,
-      );
-  }
-  if (printResult) print(o.wait ? { ...result, reporting } : result);
-  return reporting;
+    progress.stage(`Checking host ${name}`);
+    await preflightRemote(sshTarget, {
+      controlUrl: connectUrl ?? cfg.credential?.url,
+    });
+    const image = resolveImage(o.image, o.buildLocalImage);
+    if (o.buildLocalImage) await transferTugImage(sshTarget, image, progress.stage);
+    const started = new Date().toISOString();
+    if (repair)
+      await runLocal('ssh', [
+        '--',
+        sshTarget,
+        `mkdir -p ${AGENT_STATE} && cd ${AGENT_STATE} && for f in agent.json agent-pending.json; do [ -e "$f" ] && mv "$f" "$f.corrupt-$(date +%s)"; done; true`,
+      ]);
+    const agent = (command: string, interactive = false) =>
+      `mkdir -p ${AGENT_STATE} && docker run --rm ${interactive ? '-i ' : ''}-v ${AGENT_STATE}:${AGENT_STATE} ${sh(image)} agent ${command}`;
+    progress.stage(`Creating identity for node ${name}`);
+    const csr = await runCapture('ssh', ['--', sshTarget, agent('identity')]);
+    const response = await request<IdentityResponse>(
+      'POST',
+      `/api/v1/nodes/${encodeURIComponent(name)}/identity`,
+      { csr, mode, address: o.address, labels: o.label },
+    );
+    await runCapture('ssh', ['--', sshTarget, agent('install-cert', true)], {
+      input: JSON.stringify(response),
+    });
+    const env = await loadTemplate(templatesDir, 'agent.env', {
+      CONTROL_URL_LINE: connectUrl ? `TUG_CONTROL_URL=${connectUrl}\n` : '',
+      NODE_NAME: name,
+    });
+    progress.stage(`Installing agent on node ${name}`);
+    const remote = await loadTemplate(templatesDir, 'node-install.sh', {
+      ENV: env,
+      IMAGE_SH: sh(image),
+      RUN_FLAGS: `${HOST_NETWORK_FLAG} `,
+    });
+    await runLocal('ssh', ['--', sshTarget, remote]);
+    if (o.ingress)
+      await request('POST', `/api/v1/nodes/${encodeURIComponent(name)}/ingress`, { enabled: true });
+    const result = { ok: true, node: response.node, ...(o.ingress ? { ingress: true } : {}) };
+    let reporting = !o.wait;
+    if (o.wait) {
+      progress.stage(`Waiting for node ${name} to report`);
+      // A report from the new identity: wait for a report after the install began, not a replaced node's stale status.
+      for (let i = 0; i < 30; i++) {
+        const { nodes } = await request<{ nodes: { name: string; last_seen_at: string | null }[] }>(
+          'GET',
+          '/api/v1/nodes',
+        );
+        const seen = nodes.find((n) => n.name === name)?.last_seen_at;
+        if (seen && seen > started) {
+          reporting = true;
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+      if (!reporting)
+        console.error(
+          `node ${name} has not reported yet; check \`docker logs tug-agent\` on the host`,
+        );
+    }
+    if (printResult) print(o.wait ? { ...result, reporting } : result);
+    return reporting;
+  });
 }
 
 /** The questions and probes `planNodeAdd` makes, injectable so the prompt flow is testable without a terminal or SSH. */
@@ -566,7 +576,9 @@ export function registerNode(program: Command): void {
         } catch (error) {
           if (!/node not found/.test(errMessage(error))) throw error;
         }
-        runLocal('ssh', ['--', sshTarget, teardownScript(Boolean(o.deleteData))]);
+        await withProgress(`Cleaning node host ${sshTarget}`, async () => {
+          await runLocal('ssh', ['--', sshTarget, teardownScript(Boolean(o.deleteData))]);
+        });
         print({ ...(removed as object), teardown: sshTarget, deleteData: Boolean(o.deleteData) });
       },
     );

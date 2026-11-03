@@ -10,7 +10,7 @@ Existing service and resource targets can be chosen directly in an interactive t
 
 ## What you can do with it
 
-- **Deploy a Compose file to your servers.** `tug deploy` builds or pulls your images, starts them on the right nodes, waits for health checks and tells you why if something fails. `tug rollback` returns to the previous version, and `x-tug: { rollback: auto }` does it for you.
+- **Deploy a Compose file to your servers.** `tug deploy` builds or pulls your images, starts them on the right nodes, waits for health checks and tells you why if something fails. It reports deployment stages and elapsed time while work is pending. `tug rollback` returns to the previous version, and `x-tug: { rollback: auto }` does it for you.
 - **Choose where things run.** Pin a database and its volume to one node, spread web containers over several, and let Tug's managed Caddy ingress serve them over HTTPS with certificates it obtains for you.
 - **Update without downtime.** Opt-in rolling rollouts start the new version, wait until it is healthy and only then switch traffic.
 - **Keep secrets out of your repository.** `tug secret set DB_PASSWORD` stores them encrypted and sends each one only to the nodes whose services use it.
@@ -35,6 +35,8 @@ tug deploy                          # deploy a Compose file in this directory
 The control plane and agent share the VPS with your application. Once your service is running, you can [add HTTPS](docs/networking.md#layer-b-ingress-and-tls), [back up your data](docs/backups.md) or [add another server](docs/service-placement.md).
 
 In a terminal Tug asks before it changes anything: whether to install Docker, which private address the node should use and whether it should handle ingress. It shows the plan and waits for you to confirm. `tug deploy` asks for any Compose variables, such as `${DB_PASSWORD}`, that no secret or `.env` provides. In CI or any other script nothing is ever asked, so pass the choices as flags (`--address`, `--ingress`, `--install-docker`, `-y`).
+
+Long-running deployments, rollbacks, setup, image transfers, backups, restores and agent command waits report their current stage and elapsed time to stderr every ten seconds. Progress also works in CI and keeps JSON results separate. See [CLI progress reporting](docs/cli.md).
 
 ## Your Compose file, plus a little `x-tug`
 

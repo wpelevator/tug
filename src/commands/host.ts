@@ -12,7 +12,7 @@ import {
 import type { AddressCandidate } from '../cli-onboarding.ts';
 import { runCapture, runLocal, templatesDir } from './context.ts';
 
-export function preflightRemote(
+export async function preflightRemote(
   target: string,
   {
     controlUrl,
@@ -26,7 +26,7 @@ export function preflightRemote(
     /** Requires the Compose plugin; only the control host runs Compose, nodes need the Docker Engine alone. */
     compose?: boolean;
   } = {},
-): void {
+): Promise<void> {
   const checks: [string, string, string][] = [
     [
       'docker.version',
@@ -70,19 +70,28 @@ export function preflightRemote(
   const script = `set -e
 ${checks.map(([name, cmd, fix]) => `echo "preflight: ${name}"; (${cmd}) || { echo "FAILED ${name}: ${fix}" >&2; exit 20; }`).join('\n')}
 `;
-  runLocal('ssh', ['--', target, script]);
+  await runLocal('ssh', ['--', target, script]);
 }
 
-export async function transferTugImage(target: string, imageTag: string): Promise<void> {
+export async function transferTugImage(
+  target: string,
+  imageTag: string,
+  stage: (label: string) => void,
+): Promise<void> {
+  stage(`Checking architecture on ${target}`);
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-runtime-'));
   const archive = path.join(directory, 'image.tar.gz');
   const remote = `/tmp/${path.basename(directory)}.tar.gz`;
   try {
-    const uname = runCapture('ssh', ['--', target, 'uname -m']);
-    runLocal('docker', localImageBuildArgs(imageTag, uname));
+    const uname = await runCapture('ssh', ['--', target, 'uname -m']);
+    stage(`Building Tug image ${imageTag}`);
+    await runLocal('docker', localImageBuildArgs(imageTag, uname));
+    stage(`Exporting Tug image ${imageTag}`);
     await saveImageArchive(imageTag, archive);
-    runLocal('scp', ['--', archive, `${target}:${remote}`]);
-    runLocal('ssh', [
+    stage(`Transferring Tug image to ${target}`);
+    await runLocal('scp', ['--', archive, `${target}:${remote}`]);
+    stage(`Loading Tug image on ${target}`);
+    await runLocal('ssh', [
       '--',
       target,
       `set -eu\ntrap ${sh(`rm -f ${sh(remote)}`)} EXIT\ndocker load --input ${sh(remote)}`,
@@ -98,7 +107,7 @@ export async function dockerBootstrap(): Promise<string> {
 
 /** Installs Docker over SSH; `compose` also installs the Compose plugin, which only the control host needs. */
 export async function bootstrapDocker(target: string, compose = false): Promise<void> {
-  runLocal('ssh', [
+  await runLocal('ssh', [
     '--',
     target,
     `${compose ? 'TUG_INSTALL_COMPOSE=1 ' : ''}sh -eu -c ${sh(await dockerBootstrap())}`,

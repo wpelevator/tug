@@ -172,6 +172,7 @@ export async function prepareLocalImages(
       await run('docker', ['image', 'rm', imageRef]);
     },
   },
+  onProgress?: (message: string) => void,
 ): Promise<LocalImageUpload[]> {
   const images: LocalImageUpload[] = [];
   const nonce = dependencies.nonce();
@@ -180,15 +181,18 @@ export async function prepareLocalImages(
     const field = `image-${images.length}`;
     const imageRef = `tug-build/${nonce}/${field}:local`;
     try {
+      onProgress?.(`Building image for ${service} locally`);
       await dependencies.build({
         contextDir,
         service,
         buildSpec: spec.build,
         imageRef,
       });
+      onProgress?.(`Exporting image for ${service}`);
       const archive = await dependencies.save(imageRef, path.join(directory, `${field}.tar.gz`));
       images.push({ service, imageRef, ...archive, field });
     } finally {
+      onProgress?.(`Cleaning up temporary image for ${service}`);
       try {
         await dependencies.remove(imageRef);
       } catch (error) {

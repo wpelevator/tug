@@ -316,6 +316,7 @@ test('local application builds skip published images and produce unique file-bac
   const builds: { service: string; imageRef: string; push?: boolean; contextDir: string }[] = [];
   const files: string[] = [];
   const removed: string[] = [];
+  const stages: string[] = [];
   const result = await prepareLocalImages(
     {
       services: {
@@ -329,6 +330,11 @@ test('local application builds skip published images and produce unique file-bac
     {
       nonce: () => 'unique-build',
       build: async (options) => {
+        assert.equal(
+          stages.at(-1),
+          `Building image for ${options.service} locally`,
+          'the service build stage must be visible before Docker starts',
+        );
         builds.push(options);
       },
       save: async (_image, file) => {
@@ -344,6 +350,19 @@ test('local application builds skip published images and produce unique file-bac
         removed.push(imageRef);
       },
     },
+    (message) => stages.push(message),
+  );
+  assert.deepEqual(
+    stages,
+    [
+      'Building image for web locally',
+      'Exporting image for web',
+      'Cleaning up temporary image for web',
+      'Building image for worker locally',
+      'Exporting image for worker',
+      'Cleaning up temporary image for worker',
+    ],
+    'local progress must identify build, export and cleanup for every build service only',
   );
   assert.deepEqual(
     builds.map((build) => build.service),

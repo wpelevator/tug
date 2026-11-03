@@ -77,6 +77,11 @@ test('control setup uses config controlUrl, with overlay, environment and flag o
   try {
     await fs.writeFile(config, 'controlUrl: https://configured.test:9099\n');
     const configured = await install('https://configured.test:9099');
+    assert.match(
+      configured.stderr,
+      /Checking control host root@ssh-alias.*Installing control on root@ssh-alias.*Issuing root credential on root@ssh-alias/s,
+      'control setup must identify host checks, installation and credential issuance on stderr',
+    );
     assert.doesNotMatch(
       configured.stderr,
       /from the SSH target/,
@@ -366,6 +371,21 @@ test('install commands render the shipped templates (src in dev, dist in the ima
       composeFile,
       '--no-wait',
       '--json',
+    );
+    assert.match(
+      deployment.stderr,
+      /\[0s\] Preparing deployment/,
+      'JSON deploys must report preparation to stderr',
+    );
+    assert.match(
+      deployment.stderr,
+      /Resolving images and preparing deployment on control/,
+      'image-only deploys must identify control-side preparation',
+    );
+    assert.doesNotMatch(
+      deployment.stderr,
+      /Deployment .*: rolling_out/,
+      'no-wait must skip rollout progress',
     );
     assert.equal(
       JSON.parse(deployment.stdout).deployment.version,

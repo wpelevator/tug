@@ -1,8 +1,8 @@
 import { canPrompt } from '../cli-prompt.ts';
 import { selectOne } from '../cli-selection.ts';
 import type { ServiceChoice } from './selection.ts';
-import { spawnSync } from 'node:child_process';
-import type { SpawnSyncOptions } from 'node:child_process';
+import { withProgress } from '../cli-progress.ts';
+export { runCapture, runLocal } from '../cli-process.ts';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ResolvedCliConfig } from '../cli-config.ts';
@@ -128,22 +128,10 @@ export async function projectOf(o: CommonOpts): Promise<string> {
   return o.project || (await loadCfg()).project || 'site';
 }
 export const print = (value: unknown): void => console.log(JSON.stringify(value, null, 2));
-export function runLocal(cmd: string, args: string[], opts: SpawnSyncOptions = {}): void {
-  const result = spawnSync(cmd, args, { stdio: 'inherit', ...opts });
-  if (result.status !== 0)
-    throw new Error(
-      `${cmd} failed${result.error ? `: ${result.error.message}` : ` (exit ${result.status ?? result.signal})`}`,
-    );
-}
-export function runCapture(cmd: string, args: string[], opts: SpawnSyncOptions = {}): string {
-  const result = spawnSync(cmd, args, { encoding: 'utf8', ...opts });
-  if (result.status !== 0)
-    throw new Error(`${cmd} ${args.join(' ')} failed\n${result.stderr || ''}`);
-  return String(result.stdout);
-}
 export async function waitForDeployment(
   deploymentId: string,
   timeoutSeconds = 300,
+  onProgress?: (deployment: DeploymentRecord) => void,
 ): Promise<DeploymentRecord> {
   const deadline = Date.now() + timeoutSeconds * 1000;
   while (Date.now() < deadline) {
@@ -159,6 +147,7 @@ export async function waitForDeployment(
         { cause: error },
       );
     }
+    onProgress?.(deployment);
     if ((TERMINAL_DEPLOYMENT_STATES as readonly string[]).includes(deployment.state)) {
       if (deployment.state !== 'succeeded')
         throw new Error(
@@ -176,13 +165,16 @@ export async function waitForCommand(
   commandId: string,
   timeoutSeconds = 60,
 ): Promise<CommandRecord> {
-  const deadline = Date.now() + timeoutSeconds * 1000;
-  while (Date.now() < deadline) {
-    const cmd = await request<CommandRecord | null>('GET', `/api/v1/commands/${commandId}`);
-    if (cmd?.state === 'succeeded' || cmd?.state === 'failed') return cmd;
-    await new Promise((r) => setTimeout(r, 1000));
-  }
-  throw new Error(`timed out waiting for command ${commandId}`);
+  return withProgress(`Waiting for command ${commandId}`, async (progress) => {
+    const deadline = Date.now() + timeoutSeconds * 1000;
+    while (Date.now() < deadline) {
+      const cmd = await request<CommandRecord | null>('GET', `/api/v1/commands/${commandId}`);
+      if (cmd) progress.stage(`Command ${commandId}: ${cmd.state}`);
+      if (cmd?.state === 'succeeded' || cmd?.state === 'failed') return cmd;
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+    throw new Error(`timed out waiting for command ${commandId}`);
+  });
 }
 export async function runLive(
   operation: LiveRequest['operation'],

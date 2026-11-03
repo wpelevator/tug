@@ -1,4 +1,5 @@
-import { spawnSync } from 'node:child_process';
+import { withProgress } from '../cli-progress.ts';
+import { runProcess } from '../cli-process.ts';
 import type { Command } from 'commander';
 import { canPrompt, confirm } from '../cli-prompt.ts';
 import { CONTROL_CONTAINER, defaultControlUrl, shellQuote as sh } from '../cli-install.ts';
@@ -89,46 +90,58 @@ function addSetup(parent: Command, description: string): void {
       );
       if (interactive && !o.yes && !(await confirm('Install the control plane?')))
         throw new Error('cancelled; nothing was changed');
-      if (o.installDocker) await bootstrapDocker(sshTarget, true);
-      preflightRemote(sshTarget, { ports: [Number(o.port)], minDiskMb: 2048, compose: true });
-      if (o.buildLocalImage) await transferTugImage(sshTarget, image);
-      const yamlValue = (value: string) => JSON.stringify(value);
-      const compose = await loadTemplate(templatesDir, 'control-compose.yml', {
-        IMAGE: yamlValue(image),
-        CONTROL_URL: yamlValue(new URL(controlUrl).origin),
-        EXTRA_SANS: yamlValue(o.extraSan.join(',')),
-        PORT: o.port,
-      });
-      const remote = await loadTemplate(templatesDir, 'control-install.sh', {
-        COMPOSE: compose,
-        CONTAINER_SH: sh(CONTROL_CONTAINER),
-      });
-      runLocal('ssh', ['--', sshTarget, remote]);
-      // Upgrades never reissue root: fresh installs create it, `--recover-root` replaces its key. Output goes straight to files.
-      const issue = `docker exec ${sh(CONTROL_CONTAINER)} node dist/main.js control issue-credential --name root --role admin${o.recoverRoot ? ' --replace' : ''}`;
-      const out = spawnSync('ssh', ['--', sshTarget, issue], { encoding: 'utf8' });
-      if (out.status !== 0) {
-        if (!o.recoverRoot && /already used/.test(String(out.stderr)))
-          console.error(
-            'control already has a root credential; upgrade complete (pass --recover-root to replace it)',
-          );
-        else throw new Error(`issuing the root credential failed: ${String(out.stderr).trim()}`);
-      } else {
-        const text = `${String(out.stdout).trim()}\n`;
-        decodeCredential(text);
-        if (o.credentialOut) {
-          await writeFileDurable(o.credentialOut, text, 0o600);
-          console.error(`root credential written to ${o.credentialOut}`);
+      return withProgress(`Preparing control on ${sshTarget}`, async (progress) => {
+        if (o.installDocker) {
+          progress.stage(`Installing Docker on ${sshTarget}`);
+          await bootstrapDocker(sshTarget, true);
         }
-        if (o.import) {
-          const { controlUrl: connectUrl, project } = command.optsWithGlobals<{
-            controlUrl?: string;
-            project?: string;
-          }>();
-          await importCredential(cfg, text, { controlUrl: connectUrl, project });
+        progress.stage(`Checking control host ${sshTarget}`);
+        await preflightRemote(sshTarget, {
+          ports: [Number(o.port)],
+          minDiskMb: 2048,
+          compose: true,
+        });
+        if (o.buildLocalImage) await transferTugImage(sshTarget, image, progress.stage);
+        const yamlValue = (value: string) => JSON.stringify(value);
+        const compose = await loadTemplate(templatesDir, 'control-compose.yml', {
+          IMAGE: yamlValue(image),
+          CONTROL_URL: yamlValue(new URL(controlUrl).origin),
+          EXTRA_SANS: yamlValue(o.extraSan.join(',')),
+          PORT: o.port,
+        });
+        const remote = await loadTemplate(templatesDir, 'control-install.sh', {
+          COMPOSE: compose,
+          CONTAINER_SH: sh(CONTROL_CONTAINER),
+        });
+        progress.stage(`Installing control on ${sshTarget}`);
+        await runLocal('ssh', ['--', sshTarget, remote]);
+        // Upgrades never reissue root: fresh installs create it, `--recover-root` replaces its key. Output goes straight to files.
+        const issue = `docker exec ${sh(CONTROL_CONTAINER)} node dist/main.js control issue-credential --name root --role admin${o.recoverRoot ? ' --replace' : ''}`;
+        progress.stage(`Issuing root credential on ${sshTarget}`);
+        const out = await runProcess('ssh', ['--', sshTarget, issue], { capture: true });
+        if (out.status !== 0) {
+          if (!o.recoverRoot && /already used/.test(String(out.stderr)))
+            console.error(
+              'control already has a root credential; upgrade complete (pass --recover-root to replace it)',
+            );
+          else throw new Error(`issuing the root credential failed: ${String(out.stderr).trim()}`);
+        } else {
+          const text = `${String(out.stdout).trim()}\n`;
+          decodeCredential(text);
+          if (o.credentialOut) {
+            await writeFileDurable(o.credentialOut, text, 0o600);
+            console.error(`root credential written to ${o.credentialOut}`);
+          }
+          if (o.import) {
+            const { controlUrl: connectUrl, project } = command.optsWithGlobals<{
+              controlUrl?: string;
+              project?: string;
+            }>();
+            await importCredential(cfg, text, { controlUrl: connectUrl, project });
+          }
         }
-      }
-      print({ ok: true, sshTarget, url: controlUrl });
+        print({ ok: true, sshTarget, url: controlUrl });
+      });
     });
 }
 
@@ -147,7 +160,9 @@ export function registerControl(program: Command): void {
     )
     .option('--no-images', 'leave the retained build archives out (deploy again to rebuild them)')
     .action(async (o: { images: boolean }) =>
-      print(await request('POST', '/api/v1/control/backups/run', { images: o.images })),
+      withProgress('Creating control-plane backup', async () =>
+        print(await request('POST', '/api/v1/control/backups/run', { images: o.images })),
+      ),
     );
   control
     .command('restore <artifactRef>')
@@ -156,11 +171,13 @@ export function registerControl(program: Command): void {
     )
     .option('--confirm')
     .action(async (artifactRef: string, o: { confirm?: boolean }) =>
-      print(
-        await request('POST', '/api/v1/control/restore', {
-          artifactRef,
-          confirm: Boolean(o.confirm),
-        }),
+      withProgress('Restoring control-plane backup', async () =>
+        print(
+          await request('POST', '/api/v1/control/restore', {
+            artifactRef,
+            confirm: Boolean(o.confirm),
+          }),
+        ),
       ),
     );
 }
