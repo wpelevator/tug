@@ -1,28 +1,42 @@
-# Backing up WordPress sites
+# Backups and recovery
 
 Tug schedules, verifies and restores backups itself. You mark a service or a volume with `x-tug.backup`, give control one S3-compatible destination, and agents run [restic](https://restic.net) on the node that holds the data. There is no backup container to build or keep alive.
 
-The working example is [`examples/wordpress`](../examples/wordpress/README.md): WordPress and MariaDB on one node with a nightly database dump, the uploads archived as files, and a restore command for each. The test suite checks that it validates; the same project was deployed, backed up and restored on a real node (see the example's README).
+## Plan for recovery
 
-## What to back up
+Workload snapshots and control-plane archives protect different things. Store both away from the VPS, and keep their credentials and passwords somewhere you can reach after the server is lost.
 
-| Data | Where it lives | How it is covered |
+| What | How to protect it | What to keep for recovery |
 | --- | --- | --- |
-| Database | `db-data` volume, MariaDB | `x-tug.backup.command` on the `db` service: a logical dump (`mariadb-dump --single-transaction`) streamed into restic. Never copy `/var/lib/mysql` of a running server. |
-| Uploads, plugins, themes | `wp-content` volume | `x-tug.backup` on the volume: mounted read-only and archived by restic. |
-| Secrets | Tug control database | `tug control backup` (below). Print each project's repository password with `tug backup password` and keep it in your password manager too: without it, and without control's master key, a repository cannot be decrypted. |
-| Control plane | Control-plane host | `tug control backup` (a control-plane backup, separate from the workload backups above): database, operator credential records, the private CA and master key, built images. It does not contain workload data. |
-| Compose file | Your Git repository | Already versioned. |
+| Database | Back up a logical dump from the running service with `x-tug.backup.command`; copying a live database volume is generally not consistent. | Repository password, storage credentials, a suitable restore command and application configuration. |
+| Files in a named volume | Mark the volume with `x-tug.backup`; live files are crash-consistent, not necessarily application-consistent. | Repository password and storage credentials; test a scratch restore. |
+| External object storage | Configure separate protection with the storage provider. | Provider credentials and a way to restore objects to a compatible point in time with the database. |
+| Control state, secrets, private CA and master key | Run `tug control backup` and copy the archive off-host encrypted; it does not include workload data. | The archive and an original operator credential; see [control recovery](control-plane.md#recover-control-on-another-host). |
+| Compose file and source | Keep them in version control. | Access to the repository and any external dependencies. |
 
-`wp-config.php` is rebuilt from environment variables on every start, so it is not backed up. If you set fixed `WORDPRESS_AUTH_KEY` and the other salts as secrets they survive a rebuild; otherwise users are logged out after a restore.
+Backups of different targets are separate snapshots, not an atomic point-in-time copy. Plan how to stop writes and coordinate external storage if your application needs consistency across them. [The WordPress example](../examples/wordpress/README.md) illustrates a database and files on one node.
 
-The WordPress HTTP health check calls `/wp-includes/version.php`, which executes PHP and returns directly without canonical-host redirects. Avoid `/wp-login.php` for this check: after installation it can redirect to the public site URL, making ingress availability depend on the site URL.
+## Set up your first backup
 
-Database and files are separate snapshots taken minutes apart. For a WordPress site that is normally consistent enough; if a post was published between them its media may be missing from one side.
+Choose S3-compatible storage reachable from the workload node and credentials allowed to use the bucket. Configure one destination for control, then mark each target in your Compose file as shown in the [backup reference](compose.md#backups). A top-level schedule only supplies defaults; it does not enable any targets. For a complete database and volume configuration, use the [WordPress example](../examples/wordpress/README.md).
+
+```sh
+# Supply the values through your shell or secret manager; do not commit them.
+export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
+tug backup destination set s3:https://s3.example.com/bucket/tug-backups --env AWS_ACCESS_KEY_ID --env AWS_SECRET_ACCESS_KEY
+tug deploy
+tug backup run
+tug backup list --check
+tug backup password
+```
+
+Replace the endpoint and bucket with your own. `backup run` waits for the configured targets and reports failure; inspect `backup list --check` to confirm each target succeeded. Store the printed repository password and storage credentials securely off-host. The password is derived from control's master key; losing both the password and master key makes the repository unreadable. `tug backup destination show` shows the destination without credential values. Credentials are encrypted on control and released to a node running a backup. Each project has its own restic repository under `<destination>/<project>`; commands use the [resolved project](cli.md#arguments-options-and-configuration).
+
+Also [back up control](#control-plane-backup), copy the archive off-host, and practice a [restore drill](#restore-drill). No backup notification is pushed automatically; monitor `tug backup list --check`.
 
 ## Backup destination
 
-Tug can already hold the destination that scheduled backups will use. Set it once on control with `tug backup destination set` and read it with `backup destination show` ([CLI](cli.md#backups)). Credentials are encrypted with the master key, are never returned by the API, and are released only to a node that is running a backup command for it. Every project gets its own restic repository at `<destination>/<project>`, so a leaked password exposes one site, and one project's prune never blocks another's backups. The password is derived from the master key; print it with `tug backup password` and escrow it.
+The destination is shared by the control plane and can be changed with `tug backup destination set`; setting it replaces the previous destination. Each project uses its own repository. The complete command and credential options are in the [CLI reference](cli.md#backups).
 
 ## Scheduled backups
 
@@ -32,24 +46,25 @@ Mark a service or a volume with `x-tug.backup` ([Compose extensions](compose.md#
 - **Volumes** are mounted read-only into the restic container and archived, with your `exclude` patterns. A volume that does not exist on the node fails the run instead of backing up an empty one. Live volumes are crash-consistent, which suits uploads and static files.
 - **Retention** runs after each successful backup (`restic forget --prune` per node and target). Snapshots tagged `trigger:pre-restore` are kept regardless.
 
-Before mounting a managed volume, backup and restore check its project and volume ownership labels; a scratch restore checks its scratch volume's project and restore labels. A conflicting or unlabelled volume is refused instead of being read or overwritten.
 - **Images** for restic come from `TUG_RESTIC_IMAGE` on control (default `restic/restic:0.17.3`); a digest reference is recommended. Nodes pull it outbound like any published image.
 - **Restic runs in a helper container** with a memory limit, labelled `tug.job`, removed when it finishes. An agent that restarts mid-job removes leftovers and reports the job failed.
 
+Before mounting a managed volume, backup and restore check its project and volume ownership labels; a scratch restore checks its scratch volume's project and restore labels. A conflicting or unlabelled volume is refused instead of being read or overwritten.
+
 ## Recipes
 
-Tug has no database support of its own; each recipe is just a `command` for the service container. Read the password from the container's environment, write the data to standard output, and give `verify` the line the tool prints on success.
+Tug has no database support of its own; each recipe is a command for the service container. In a Compose file use `$$` for variables that the container shell must expand: a single `$` is interpolated on the operator machine before deployment. Read credentials from the container environment, write the data to standard output, and give `verify` the line the tool prints on success.
 
 ```yaml
 # MariaDB (use mysqldump and MYSQL_ROOT_PASSWORD for MySQL)
 backup:
-  command: mariadb-dump -u root -p"$MARIADB_ROOT_PASSWORD" --single-transaction --quick --routines --events --triggers --add-drop-database --databases wordpress
+  command: mariadb-dump -u root -p"$$MARIADB_ROOT_PASSWORD" --single-transaction --quick --routines --events --triggers --add-drop-database --databases wordpress
   filename: wordpress.sql
   verify: "-- Dump completed"
 
 # PostgreSQL
 backup:
-  command: pg_dump -U "$POSTGRES_USER" --clean --if-exists "$POSTGRES_DB"
+  command: pg_dump -U "$$POSTGRES_USER" --clean --if-exists "$$POSTGRES_DB"
   filename: app.sql
   verify: "PostgreSQL database dump complete"
 
@@ -83,7 +98,7 @@ tug restore run uploads --scratch --confirm   # files into a new volume, touchin
 
 A restore plan and its queued restore refresh backup placement from the latest successful deployment before choosing a node, so moving a project does not leave a restore aimed at the previous node until the next scheduler tick. Check the printed target before confirming.
 
-Restores are as generic as backups. A service is restored by running its `x-tug.backup.restore` command in the running container with the stored file on standard input (`restic dump` piped in), so a MariaDB service uses `restore: sh -c 'mariadb -uroot -p"$MARIADB_ROOT_PASSWORD"'`. A volume is emptied and filled from the snapshot, or restored into a new volume with `--scratch`. A service without a `restore` command is refused rather than guessed at.
+Restores are as generic as backups. A service is restored by running its `x-tug.backup.restore` command in the running container with the stored file on standard input (`restic dump` piped in), so a MariaDB service uses `restore: sh -c 'mariadb -uroot -p"$$MARIADB_ROOT_PASSWORD"'`. A volume is emptied and filled from the snapshot, or restored into a new volume with `--scratch`. A service without a `restore` command is refused rather than guessed at.
 
 `tug restore` returns when the data is back and the services it stopped report serving again, or after five minutes with a warning if they do not, so a script can probe the site as soon as it returns. An in-place restore is deliberately careful:
 
@@ -121,14 +136,14 @@ Put the S3 credentials in the crontab environment or a `restic.env` file with mo
 
 ## Restore drill
 
-A backup you have not restored is a hope. Rehearse the restore on the live project so you know it works and how long it takes.
+A backup you have not restored is a hope. Start with an isolated restore so you can verify the backup without changing live data. Time the exercise and record what you needed.
 
 1. **Check the repository and the catalog.** `tug backup list` shows every target with its last success; the newest run should be recent and `succeeded`. `tug backup password` prints the repository and its password, so you can also inspect it directly with `restic snapshots` from any machine that can reach the bucket.
 2. **Restore files into a scratch volume.** `tug restore run wp-content --scratch --confirm` reads the latest snapshot into a new volume next to the live one and touches nothing live. List it with `docker run --rm -v <volume>:/data alpine ls /data` on the node, then remove the volume with `docker volume rm <volume>`.
-3. **Restore the database for real, in a quiet moment.** `tug restore run db` prints the plan; `tug restore run db --confirm` stops WordPress, takes a safety backup of the current data, loads the dump and starts WordPress again. Compare a number you know (the post count, the newest upload) with production.
+3. **Restore the database into an isolated throwaway database.** Use the original project repository and its escrowed password to read the snapshot with restic into a separate database container. Verify known data without connecting the test container to production services, mail or scheduled jobs. This manual end-to-end drill has not yet been validated on a fresh host.
 4. **Write down how long it took.** That is your real recovery time.
 
-To rehearse a database restore without touching the live one, use the original project repository and its escrowed password to dump the snapshot with restic into an isolated throwaway database container, then verify the recovered data and remove the container. Tug does not restore a snapshot into a different project: repositories and snapshot tags are project-specific. Keep the isolated database and any test application disconnected from production services, mail and scheduled jobs. This manual procedure has not yet been validated as a complete fresh-host recovery drill.
+Tug does not restore a snapshot into a different project: repositories and snapshot tags are project-specific. For an in-place restore, inspect `tug restore run db` first; confirmation stops writers, takes a safety backup and changes the live database. See [Restore](#restore).
 
 ## Known limits
 

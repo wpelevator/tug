@@ -2,6 +2,8 @@
 
 One WordPress site and its MariaDB on a single node, with encrypted daily backups to an S3-compatible bucket, a one-command restore, and a one-off command runner for `wp-cli`. There is no backup container and no backup script: Tug runs [restic](https://restic.net) itself.
 
+Start with a working control plane and node, a DNS name pointing to an ingress-enabled node with ports 80 and 443 reachable, and an S3-compatible backup destination. Run the commands below from this example directory with the intended Tug project selected; see [project configuration](../../docs/cli.md#arguments-options-and-configuration). The [single-VPS tutorial](../../docs/getting-started.md) covers initial setup.
+
 ```bash
 # 1. Secrets for the site
 tug secret set DB_PASSWORD
@@ -30,6 +32,8 @@ Print the project's repository password and keep it somewhere safe, apart from t
 | `volume:wp-content` | The volume is mounted read-only and archived, without `cache/`. | `x-tug.backup` on the volume |
 
 Both use the project defaults at the top of the file: 03:00 UTC daily, keeping 7 daily, 4 weekly and 6 monthly snapshots. To back up something else, add `x-tug.backup` to it; the [recipes](../../docs/backups.md#recipes) show PostgreSQL, SQLite and a directory as a tar stream.
+
+The database and files are separate snapshots. Writes between snapshots can leave them inconsistent, so coordinate or stop writes when a common recovery point matters. `wp-config.php` is rebuilt from environment variables; fixed WordPress authentication keys and salts need separate secret management if users' sessions must survive a rebuild. The HTTP check uses `/wp-includes/version.php` to avoid site URL redirects.
 
 ## Restore
 
