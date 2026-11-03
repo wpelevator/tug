@@ -144,7 +144,10 @@ export function registerControl(program: Command): void {
     .description(
       'create a control-plane backup (state, PKI, master key and retained image archives; not workload volumes)',
     )
-    .action(async () => print(await request('POST', '/api/v1/control/backups/run', {})));
+    .option('--no-images', 'leave the retained build archives out (deploy again to rebuild them)')
+    .action(async (o: { images: boolean }) =>
+      print(await request('POST', '/api/v1/control/backups/run', { images: o.images })),
+    );
   control
     .command('restore <artifactRef>')
     .description(

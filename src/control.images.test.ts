@@ -686,3 +686,61 @@ test('a build that loses its lease cannot publish or delete the replacement leas
     await s.close();
   }
 });
+test('image prune keeps the newest deployments, refuses rollback to pruned ones and backups can omit images', async () => {
+  const s = await server();
+  try {
+    const n1 = await s.node('n1');
+    const builds: string[] = [];
+    for (const version of ['v1', 'v2', 'v3']) {
+      const deployed = await json(await s.deploy(version));
+      builds.push(deployed.desiredState.services.app.artifact.buildId);
+      await s.report(n1.nodeId, deployed.desiredState);
+    }
+    const archive = (id: string) => path.join(s.dir, 'images', `${id}.tar.gz`);
+    const exists = (id: string) =>
+      fs.stat(archive(id)).then(
+        () => true,
+        () => false,
+      );
+
+    const dry = await json(await s.post('/api/v1/images/prune', { keep: 1, dryRun: true }));
+    assert.deepEqual(
+      dry.pruned.map((build: { id: string }) => build.id).sort(),
+      [builds[0], builds[1]].sort(),
+      'a dry run should list every archive older than the newest deployment',
+    );
+    assert.ok(await exists(builds[0]), 'a dry run must not delete anything');
+
+    const result = await json(await s.post('/api/v1/images/prune', { keep: 1 }));
+    assert.equal(result.pruned.length, 2, 'two older archives should be pruned');
+    assert.equal(result.freedBytes, s.bytes.length * 2, 'the freed size should be reported');
+    assert.ok(!(await exists(builds[0])) && !(await exists(builds[1])), 'old archives are deleted');
+    assert.ok(await exists(builds[2]), 'the current deployment archive is kept');
+
+    const rollback = await s.post('/api/v1/rollback', { project: 'app', force: true });
+    assert.equal(rollback.status, 409, 'rolling back to a pruned deployment should be refused');
+    assert.match(
+      (await json(rollback)).error,
+      /pruned.*deploy it again/,
+      'the refusal should say the archive was pruned and what to do',
+    );
+    assert.equal(
+      (await s.post('/api/v1/images/prune', { keep: 0 })).status,
+      400,
+      'keep must be a positive integer',
+    );
+
+    const backup = await json(await s.post('/api/v1/control/backups/run', { images: false }));
+    const entries: string[] = [];
+    await tar.t({
+      file: backup.artifactRef,
+      onReadEntry: (entry) => void entries.push(entry.path),
+    });
+    assert.ok(
+      !entries.some((entry) => entry.startsWith('images')),
+      'a backup taken with images: false should contain no image archives',
+    );
+  } finally {
+    await s.close();
+  }
+});
