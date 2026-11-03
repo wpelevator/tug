@@ -1,5 +1,19 @@
 # @wpelevator/tug
 
+## 0.12.0
+
+### Minor Changes
+
+- a9d446d: Add `tug image prune [--keep N] [--dry-run]` to delete the build archives kept on control for old deployments, and `tug control backup --no-images` to leave the archives out of a control backup. Rolling back to a deployment whose archive was pruned is refused with a clear message.
+- c5b637d: Add `tug node remove <node> --teardown` to clean a retired host over SSH (volumes are kept unless `--delete-data`), make `tug restore` find writers on other nodes from host names in environment variables, and make `tug deploy` refuse to start a service with data empty on another node unless you pass `--move <service>`, which holds the services that write to it until the restore or `tug hold release`.
+- f8df155: `tug deploy`, `tug rollback` and `tug scale` print a one-line summary by default; `--json` restores the full result for scripts. `tug deploy` warns when the Compose file's `name:` differs from the Tug project. A restore that times out waiting for the writers to stop now names the node, the writer's state and the apply error the node reported, and the backup docs explain why a sibling health check that depends on a held writer fails during a restore.
+
+### Patch Changes
+
+- c736d1e: The published `ghcr.io/wpelevator/tug` image is now based on Alpine instead of Debian, roughly halving its size (about 87 MB compressed instead of 159 MB). It ships only the Docker CLI rather than the full Docker Engine package.
+- 864c877: Fixes from a real-host evaluation: `tug setup` writes the credential's control URL into a new `tug.yml` instead of `https://localhost:8443`; a restore no longer times out with "the writers did not stop in time" when a sibling service's health check fails during the hold; a health check on a crashed container reports its exit code and last log lines instead of a refused connection; `tug scale` stays within a service's explicit `placement.nodes`; `tug run` containers inherit the service's cross-node `extra_hosts`; `tug deploy` finds `compose.yaml`/`compose.yml` by default; and the missing-backup-schedule message is clearer.
+- 82a57cd: Clarify VPS deployment, application scope, node topology and volume placement, registry-free image delivery, and where to find examples.
+
 ## 0.11.0
 
 ### Minor Changes
