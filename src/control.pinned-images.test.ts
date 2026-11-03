@@ -60,7 +60,7 @@ async function server() {
     }),
   });
   assert.equal(secret.status, 200, 'project registry credentials must be stored as a secret');
-  const deploy = (version: string) =>
+  const deploy = (version: string, pinApp = true) =>
     post('/api/v1/deployments', {
       project: 'site',
       version,
@@ -68,7 +68,7 @@ async function server() {
         services: {
           app: {
             image: 'private.example/team/app:latest',
-            'x-tug': { placement: { nodes: ['n1'] } },
+            ...(pinApp ? { 'x-tug': { placement: { nodes: ['n1'] } } } : {}),
           },
           worker: {
             image: 'private.example/team/app:latest',
@@ -121,7 +121,7 @@ test('published images pin once per deployment, rollback and late nodes keep the
   try {
     const n1 = await s.node('n1');
     assert.equal(n1.registryToken, undefined, 'registration must issue only an agent credential');
-    const firstResponse = await s.deploy('one');
+    const firstResponse = await s.deploy('one', false);
     assert.equal(
       firstResponse.status,
       200,

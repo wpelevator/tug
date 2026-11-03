@@ -1,4 +1,4 @@
-import { openAsBlob } from 'node:fs';
+import { existsSync, openAsBlob } from 'node:fs';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -34,11 +34,17 @@ async function makeContext(): Promise<string> {
   return tmp;
 }
 
+/** The first conventional Compose file name in the working directory; `docker-compose.yml` when none exists. */
+export function defaultComposeFile(cwd = process.cwd()): string {
+  const names = ['compose.yaml', 'compose.yml', 'docker-compose.yaml', 'docker-compose.yml'];
+  return names.find((name) => existsSync(path.join(cwd, name))) ?? 'docker-compose.yml';
+}
+
 export function registerDeploy(program: Command): void {
   const deploy = program
     .command('deploy')
     .description('deploy the Compose project, or cancel a deployment with `deploy cancel <id>`')
-    .option('-f, --file <file>', 'compose file', 'docker-compose.yml')
+    .option('-f, --file <file>', 'compose file', defaultComposeFile())
     .option('--version <version>', 'display version (default: git-<Compose hash>)')
     .option('--build-local', 'build application images locally and upload them without source')
     .option('--no-wait', 'return after desired state is created')

@@ -1291,12 +1291,20 @@ export async function createApp(
     const matched = nodeInfos.filter((node) =>
       labels.every((label) => node.labels.includes(label)),
     );
-    const pool = labels.length ? matched : nodeInfos;
+    // Explicit `placement.nodes` (without labels or global, which deploy resolves into nodes) bound the pool; scaling never re-homes a service off them.
+    const pinned =
+      !labels.length && !global && Array.isArray(placement.nodes)
+        ? (placement.nodes as string[])
+        : [];
+    const candidates = pinned.length
+      ? matched.filter((node) => pinned.includes(node.name))
+      : matched;
+    const pool = candidates;
     if (!pool.length)
       throw httpError(
         400,
-        labels.length
-          ? 'no healthy nodes match the service placement labels'
+        labels.length || pinned.length
+          ? 'no healthy nodes match the service placement'
           : 'no nodes available for scaling',
       );
     const selected = global ? pool : pool.slice(0, Math.min(replicas, pool.length));

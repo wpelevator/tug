@@ -74,3 +74,36 @@ test('holds for services on other nodes or unknown services are ignored', async 
   await reconcile(desired, ctx, undefined, undefined, ['ghost']);
   assert.equal(docker.running().length, 2, 'an unknown hold changes nothing');
 });
+
+test('a failing sibling still reports the held writer so a restore can proceed', async () => {
+  const docker = new FakeDocker();
+  const ctx = await makeCtx(docker);
+  const withHealth = buildDesiredState({
+    project: 'proj',
+    version: 'v2',
+    compose: normalized({
+      services: {
+        web: { image: 'nginx', 'x-tug': { placement: { nodes: ['n1'] } } },
+        db: {
+          image: 'mariadb',
+          'x-tug': {
+            placement: { nodes: ['n1'] },
+            health: { type: 'tcp', port: 1, retries: 1, interval: '1ms', timeout: '100ms' },
+          },
+        },
+      },
+    }),
+  });
+  await assert.rejects(
+    reconcile(withHealth, ctx, undefined, undefined, ['web']),
+    (error: Error & { serviceStates?: Record<string, { rolloutState: string }> }) => {
+      assert.equal(
+        error.serviceStates?.web.rolloutState,
+        'held',
+        'the failure should carry the held writer state so pollOnce can report it',
+      );
+      return true;
+    },
+    'the unhealthy sibling fails the apply',
+  );
+});
