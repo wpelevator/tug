@@ -24,8 +24,10 @@ import * as tar from 'tar';
 import { openDb, openSnapshotDb } from './db.ts';
 import type { Db } from './db.ts';
 import { isUniqueViolation } from './db-driver.ts';
+import { lockQueries } from './db-locks.ts';
+import { backupDestinationQueries } from './db-backup-destination.ts';
+import { immediateTransaction } from './db-transaction.ts';
 import type {
-  BackupDestinationRow,
   CommandRow,
   DeploymentRow,
   DesiredStateRow,
@@ -76,7 +78,6 @@ import {
   BACKUP_COMMAND_TYPES,
 } from './protocol.ts';
 import {
-  BACKUP_SECRET_PROJECT,
   isReservedProject,
   parseBackupDestination,
   projectRepository,
@@ -1196,6 +1197,8 @@ export async function createApp(
     res.status(426).json({ error: 'WebSocket upgrade required' });
   });
 
+  const locks = lockQueries(db);
+
   function acquireProjectLock(
     project: string,
     operation: string,
@@ -1203,19 +1206,18 @@ export async function createApp(
   ) {
     const name = `project:${project}`;
     const ts = now();
-    db.run('DELETE FROM locks WHERE expires_at < ?', ts);
+    locks.purgeExpired(ts);
     const owner = `${operation}:${id('lock')}`;
     try {
-      db.run(
-        'INSERT INTO locks(name,owner,expires_at,created_at) VALUES(?,?,?,?)',
+      locks.insert({
         name,
         owner,
-        new Date(Date.now() + ttlMs).toISOString(),
-        ts,
-      );
+        expires_at: new Date(Date.now() + ttlMs).toISOString(),
+        created_at: ts,
+      });
     } catch (e) {
       if (!isUniqueViolation(e)) throw e;
-      const existing = db.get<LockRow>('SELECT * FROM locks WHERE name=?', name);
+      const existing = locks.find(name);
       const err: HttpError = new Error(
         `project ${project} is locked by ${existing?.owner} until ${existing?.expires_at}`,
       );
@@ -1226,12 +1228,7 @@ export async function createApp(
     const heartbeat = setInterval(
       () => {
         try {
-          db.run(
-            'UPDATE locks SET expires_at=? WHERE name=? AND owner=?',
-            new Date(Date.now() + ttlMs).toISOString(),
-            name,
-            owner,
-          );
+          locks.renew(name, owner, new Date(Date.now() + ttlMs).toISOString());
         } catch {
           /* Best-effort bookkeeping. */
         }
@@ -1250,7 +1247,7 @@ export async function createApp(
     if (lock?.heartbeat) clearInterval(lock.heartbeat);
     if (lock)
       try {
-        db.run('DELETE FROM locks WHERE name=? AND owner=?', lock.name, lock.owner);
+        locks.release(lock.name, lock.owner);
       } catch {
         /* Best-effort bookkeeping. */
       }
@@ -1771,19 +1768,15 @@ export async function createApp(
     res.json({ ok: true, name: String(req.params.name) });
   });
 
-  const backupDestination = () =>
-    db.get<BackupDestinationRow>("SELECT * FROM backup_destination WHERE id='default'");
+  const destinationQueries = backupDestinationQueries(db);
+  const backupDestination = () => destinationQueries.find();
   const backupEnv = (): Record<string, string> => {
     const row = backupDestination();
     if (!row) return {};
     const env: Record<string, string> = {};
     for (const name of JSON.parse(row.env_names_json) as string[]) {
-      const secret = db.get<Pick<SecretRow, 'encrypted_value'>>(
-        'SELECT encrypted_value FROM secrets WHERE project_id=? AND name=?',
-        BACKUP_SECRET_PROJECT,
-        name,
-      );
-      if (secret) env[name] = decrypt(secret.encrypted_value, masterKey);
+      const secret = destinationQueries.secret(name);
+      if (secret) env[name] = decrypt(secret, masterKey);
     }
     return env;
   };
@@ -1906,32 +1899,15 @@ export async function createApp(
       return res.status(400).json({ error: errMessage(e) });
     }
     const ts = now();
-    db.exec('BEGIN IMMEDIATE');
-    try {
-      db.run('DELETE FROM secrets WHERE project_id=?', BACKUP_SECRET_PROJECT);
-      for (const [name, value] of Object.entries(parsed.env))
-        db.run(
-          'INSERT INTO secrets(id,project_id,name,encrypted_value,version,created_at,updated_at) VALUES(?,?,?,?,?,?,?)',
-          id('sec'),
-          BACKUP_SECRET_PROJECT,
-          name,
-          encrypt(value, masterKey),
-          1,
-          ts,
-          ts,
-        );
-      db.run(
-        `INSERT INTO backup_destination(id,url,env_names_json,checked_at,check_result_json,updated_at) VALUES('default',?,?,NULL,NULL,?)
-        ON CONFLICT(id) DO UPDATE SET url=excluded.url,env_names_json=excluded.env_names_json,checked_at=NULL,check_result_json=NULL,updated_at=excluded.updated_at`,
-        parsed.url,
-        JSON.stringify(Object.keys(parsed.env).sort()),
-        ts,
-      );
-      db.exec('COMMIT');
-    } catch (e) {
-      db.exec('ROLLBACK');
-      throw e;
-    }
+    destinationQueries.replace(
+      parsed.url,
+      Object.entries(parsed.env).map(([name, value]) => ({
+        id: id('sec'),
+        name,
+        encryptedValue: encrypt(value, masterKey),
+      })),
+      ts,
+    );
     audit(req.actor!, {
       type: 'backup.destination_set',
       message: `backup destination set to ${parsed.url} by ${req.actor!.name}`,
@@ -1940,14 +1916,13 @@ export async function createApp(
     res.json({ ok: true, url: parsed.url, envNames: Object.keys(parsed.env).sort() });
   });
   api('delete', '/api/v1/backup/destination', null, async (req, res) => {
-    db.run('DELETE FROM secrets WHERE project_id=?', BACKUP_SECRET_PROJECT);
-    const removed = db.run("DELETE FROM backup_destination WHERE id='default'");
-    if (removed.changes)
+    const removed = destinationQueries.remove();
+    if (removed)
       audit(req.actor!, {
         type: 'backup.destination_removed',
         message: `backup destination removed by ${req.actor!.name}`,
       });
-    res.json({ ok: true, removed: removed.changes > 0 });
+    res.json({ ok: true, removed });
   });
   api('get', '/api/v1/backup/repository-password', null, async (req, res) => {
     const project = String(req.query.project || '');
@@ -2496,12 +2471,7 @@ export async function createApp(
       const buildLock = lock;
       const publishingId = depId;
       await withPublication(() => {
-        const owned = db.get(
-          'SELECT 1 FROM locks WHERE name=? AND owner=? AND expires_at>?',
-          buildLock.name,
-          buildLock.owner,
-          now(),
-        );
+        const owned = locks.owns(buildLock.name, buildLock.owner, now());
         const pending = db.get(
           'SELECT 1 FROM deployments WHERE id=? AND state=?',
           publishingId,
@@ -2509,22 +2479,13 @@ export async function createApp(
         );
         if (!owned || !pending)
           throw httpError(409, 'deployment was cancelled or its build lease was lost');
-        db.exec('BEGIN IMMEDIATE');
-        try {
+        immediateTransaction(db, () => {
           const published = db.run(
             "UPDATE deployments SET state='rolling_out',updated_at=? WHERE id=? AND state='building'",
             now(),
             publishingId,
           );
-          if (
-            published.changes !== 1 ||
-            !db.get(
-              'SELECT 1 FROM locks WHERE name=? AND owner=? AND expires_at>?',
-              buildLock.name,
-              buildLock.owner,
-              now(),
-            )
-          )
+          if (published.changes !== 1 || !locks.owns(buildLock.name, buildLock.owner, now()))
             throw httpError(409, 'deployment was cancelled or its build lease was lost');
           db.run(
             'INSERT INTO desired_states(id,project_id,deployment_id,version,state_json,created_at) VALUES(?,?,?,?,?,?)',
@@ -2576,15 +2537,7 @@ export async function createApp(
             now(),
             project,
           );
-          db.exec('COMMIT');
-        } catch (e) {
-          try {
-            db.exec('ROLLBACK');
-          } catch {
-            /* Preserve the publication error. */
-          }
-          throw e;
-        }
+        });
       });
       audit(req.actor!, {
         type: 'deploy',

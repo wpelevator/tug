@@ -199,4 +199,4 @@ npm run lint
 npm run test:integration
 ```
 
-See [Development](docs/development.md) for details.
+See [Development](docs/development.md) for details. Database code uses direct SQLite queries; [SQLite storage](docs/architecture.md#sqlite-storage) describes query boundaries and synchronous transactions.
