@@ -34,6 +34,8 @@ The control plane and agent share the VPS with your application. Once your servi
 
 In a terminal Tug asks before it changes anything: whether to install Docker, which private address the node should use and whether it should handle ingress. It shows the plan and waits for you to confirm. `tug deploy` asks for any Compose variables, such as `${DB_PASSWORD}`, that no secret or `.env` provides. In CI or any other script nothing is ever asked, so pass the choices as flags (`--address`, `--ingress`, `--install-docker`, `-y`).
 
+Long-running deployments, rollbacks, setup, image transfers, backups, restores and agent command waits report their current stage and elapsed time to stderr every ten seconds. Progress also works in CI and keeps JSON results separate. See [CLI progress reporting](docs/cli.md).
+
 ## Your Compose file, plus a little `x-tug`
 
 This example builds on the [quickstart](docs/getting-started.md). It pins the app, database and database volume to `app1`. Placement can be omitted with one node, but explicit placement keeps the database on its chosen server when you add more nodes. Enable ingress with `tug node ingress app1`, point the hostname's DNS at the VPS, and allow public ports 80 and 443. Save this as `compose.yaml` and replace the hostname with yours:

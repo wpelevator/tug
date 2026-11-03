@@ -1,3 +1,4 @@
+import { withProgress } from '../cli-progress.ts';
 import type { Command } from 'commander';
 import { backupCheckProblems } from '../backup-check.ts';
 import { collect, loadCfg, print, readStdin, request } from './context.ts';
@@ -49,46 +50,59 @@ export function registerBackup(program: Command): void {
     .option('--no-wait', 'return once the backups are queued')
     .option('--timeout <seconds>', 'give up waiting after this many seconds', '3600')
     .action(async (targets: string[], o: { wait: boolean; timeout: string }) => {
-      const project = (await loadCfg()).project || 'site';
-      const queued = await request<{
-        runs: { runId: string; target: string }[];
-        errors: string[];
-      }>('POST', '/api/v1/backups/run', {
-        project,
-        targets: targets.length ? targets : undefined,
-      });
-      for (const message of queued.errors) console.error(message);
-      for (const run of queued.runs) console.log(`queued ${run.target} as ${run.runId}`);
-      let failed = queued.errors.length > 0;
-      if (o.wait) {
-        const deadline = Date.now() + Number(o.timeout) * 1000;
-        const pending = new Set(queued.runs.map((run) => run.runId));
-        while (pending.size && Date.now() < deadline) {
-          await new Promise((resolve) => setTimeout(resolve, 2000));
-          const listing = await request<BackupListing>(
-            'GET',
-            `/api/v1/backups?project=${encodeURIComponent(project)}&limit=200`,
-          );
-          for (const run of listing.runs)
-            if (pending.has(run.id) && BACKUP_TERMINAL.includes(run.state)) {
-              pending.delete(run.id);
-              const ok = run.state === 'succeeded';
-              failed ||= !ok;
-              console.log(
-                ok
-                  ? `${run.target}: snapshot ${run.snapshot_id?.slice(0, 8)}, ${formatBytes(run.added_bytes)} added`
-                  : `${run.target}: ${run.state}${run.error ? ` (${run.error})` : ''}`,
-              );
+      return withProgress('Queueing backups', async (progress) => {
+        const project = (await loadCfg()).project || 'site';
+        const queued = await request<{
+          runs: { runId: string; target: string }[];
+          errors: string[];
+        }>('POST', '/api/v1/backups/run', {
+          project,
+          targets: targets.length ? targets : undefined,
+        });
+        for (const message of queued.errors) console.error(message);
+        for (const run of queued.runs) console.log(`queued ${run.target} as ${run.runId}`);
+        let failed = queued.errors.length > 0;
+        if (o.wait) {
+          const deadline = Date.now() + Number(o.timeout) * 1000;
+          const pending = new Set(queued.runs.map((run) => run.runId));
+          if (pending.size)
+            progress.stage(
+              `Waiting for backups: ${queued.runs.map((run) => run.target).join(', ')}`,
+            );
+          const states = new Map<string, string>();
+          while (pending.size && Date.now() < deadline) {
+            await new Promise((resolve) => setTimeout(resolve, 2000));
+            const listing = await request<BackupListing>(
+              'GET',
+              `/api/v1/backups?project=${encodeURIComponent(project)}&limit=200`,
+            );
+            for (const run of listing.runs) {
+              if (pending.has(run.id)) states.set(run.id, `${run.target}: ${run.state}`);
+              if (pending.has(run.id) && BACKUP_TERMINAL.includes(run.state)) {
+                pending.delete(run.id);
+                const ok = run.state === 'succeeded';
+                failed ||= !ok;
+                console.log(
+                  ok
+                    ? `${run.target}: snapshot ${run.snapshot_id?.slice(0, 8)}, ${formatBytes(run.added_bytes)} added`
+                    : `${run.target}: ${run.state}${run.error ? ` (${run.error})` : ''}`,
+                );
+              }
             }
+            if (pending.size)
+              progress.stage(
+                `Backups: ${[...pending].map((id) => states.get(id) ?? id).join(', ')}`,
+              );
+          }
+          if (pending.size) {
+            console.error(
+              `timed out waiting for ${pending.size} backup(s); they keep running on the node`,
+            );
+            failed = true;
+          }
         }
-        if (pending.size) {
-          console.error(
-            `timed out waiting for ${pending.size} backup(s); they keep running on the node`,
-          );
-          failed = true;
-        }
-      }
-      if (failed) process.exitCode = 1;
+        if (failed) process.exitCode = 1;
+      });
     });
   backup
     .command('list')

@@ -1,3 +1,4 @@
+import { withProgress } from '../cli-progress.ts';
 import type { Command } from 'commander';
 import { collect, loadCfg, request } from './context.ts';
 
@@ -61,72 +62,76 @@ export function registerRestore(program: Command): void {
           timeout: string;
         },
       ) => {
-        const project = (await loadCfg()).project || 'site';
-        const explicit = Array.isArray(o.writers) && o.writers.length > 0 ? o.writers : undefined;
-        const result = await request<{
-          confirmed: boolean;
-          plan: RestorePlanView;
-          restoreId?: string;
-        }>('POST', '/api/v1/restores', {
-          project,
-          target,
-          from: o.from,
-          scratch: o.scratch === true,
-          safetyBackup: o.safetyBackup,
-          writers: explicit,
-          noWriters: o.writers === false,
-          confirm: o.confirm === true,
-        });
-        const plan = result.plan;
-        console.log(`target:   ${plan.target} on ${plan.node}`);
-        console.log(
-          `snapshot: ${plan.snapshotId}${plan.snapshotTime ? ` (${plan.snapshotTime})` : ''}`,
-        );
-        console.log(
-          `mode:     ${plan.mode}${plan.scratchVolume ? ` into new volume ${plan.scratchVolume}` : ''}`,
-        );
-        if (plan.mode === 'in-place') {
-          console.log(`stops:    ${plan.writers.length ? plan.writers.join(', ') : 'nothing'}`);
+        return withProgress(`Preparing restore for ${target}`, async (progress) => {
+          const project = (await loadCfg()).project || 'site';
+          const explicit = Array.isArray(o.writers) && o.writers.length > 0 ? o.writers : undefined;
+          const result = await request<{
+            confirmed: boolean;
+            plan: RestorePlanView;
+            restoreId?: string;
+          }>('POST', '/api/v1/restores', {
+            project,
+            target,
+            from: o.from,
+            scratch: o.scratch === true,
+            safetyBackup: o.safetyBackup,
+            writers: explicit,
+            noWriters: o.writers === false,
+            confirm: o.confirm === true,
+          });
+          const plan = result.plan;
+          console.log(`target:   ${plan.target} on ${plan.node}`);
           console.log(
-            `safety:   ${plan.safetyBackup ? 'a backup of the current data is taken first' : 'none (--no-safety-backup)'}`,
+            `snapshot: ${plan.snapshotId}${plan.snapshotTime ? ` (${plan.snapshotTime})` : ''}`,
           );
-        }
-        if (!result.confirmed) {
-          console.log('\nNothing was changed. Run again with --confirm to restore.');
-          return;
-        }
-        const deadline = Date.now() + Number(o.timeout) * 1000;
-        for (;;) {
-          await new Promise((resolve) => setTimeout(resolve, 2000));
-          const { restores } = await request<{ restores: RestoreRecord[] }>(
-            'GET',
-            `/api/v1/restores?project=${encodeURIComponent(project)}`,
+          console.log(
+            `mode:     ${plan.mode}${plan.scratchVolume ? ` into new volume ${plan.scratchVolume}` : ''}`,
           );
-          const record = restores.find((item) => item.id === result.restoreId);
-          if (record?.state === 'succeeded') {
-            if (record.error) console.error(`warning: ${record.error}`);
+          if (plan.mode === 'in-place') {
+            console.log(`stops:    ${plan.writers.length ? plan.writers.join(', ') : 'nothing'}`);
             console.log(
-              `restore ${record.id} completed${record.scratch_volume ? `; files are in volume ${record.scratch_volume}` : ''}`,
+              `safety:   ${plan.safetyBackup ? 'a backup of the current data is taken first' : 'none (--no-safety-backup)'}`,
             );
+          }
+          if (!result.confirmed) {
+            console.log('\nNothing was changed. Run again with --confirm to restore.');
             return;
           }
-          if (record && ['failed', 'interrupted', 'released'].includes(record.state)) {
-            console.error(`restore ${record.id} ${record.state}: ${record.error ?? ''}`);
-            if (record.state === 'interrupted')
-              console.error(
-                `the services stay stopped; run tug restore resume ${record.id} to try again or tug restore release ${record.id} to start them (data may be partly restored)`,
+          progress.stage(`Restore ${result.restoreId}: queued`);
+          const deadline = Date.now() + Number(o.timeout) * 1000;
+          for (;;) {
+            await new Promise((resolve) => setTimeout(resolve, 2000));
+            const { restores } = await request<{ restores: RestoreRecord[] }>(
+              'GET',
+              `/api/v1/restores?project=${encodeURIComponent(project)}`,
+            );
+            const record = restores.find((item) => item.id === result.restoreId);
+            if (record) progress.stage(`Restore ${record.id}: ${record.state}`);
+            if (record?.state === 'succeeded') {
+              if (record.error) console.error(`warning: ${record.error}`);
+              console.log(
+                `restore ${record.id} completed${record.scratch_volume ? `; files are in volume ${record.scratch_volume}` : ''}`,
               );
-            process.exitCode = 1;
-            return;
+              return;
+            }
+            if (record && ['failed', 'interrupted', 'released'].includes(record.state)) {
+              console.error(`restore ${record.id} ${record.state}: ${record.error ?? ''}`);
+              if (record.state === 'interrupted')
+                console.error(
+                  `the services stay stopped; run tug restore resume ${record.id} to try again or tug restore release ${record.id} to start them (data may be partly restored)`,
+                );
+              process.exitCode = 1;
+              return;
+            }
+            if (Date.now() > deadline) {
+              console.error(
+                `timed out waiting; restore ${result.restoreId} continues on control (tug restore list)`,
+              );
+              process.exitCode = 1;
+              return;
+            }
           }
-          if (Date.now() > deadline) {
-            console.error(
-              `timed out waiting; restore ${result.restoreId} continues on control (tug restore list)`,
-            );
-            process.exitCode = 1;
-            return;
-          }
-        }
+        });
       },
     );
   restore

@@ -27,3 +27,17 @@ export function createProgress({
     },
   };
 }
+
+/** Own the timer for one operation, including failures and early returns. */
+export async function withProgress<T>(
+  label: string,
+  operation: (progress: ReturnType<typeof createProgress>) => Promise<T>,
+): Promise<T> {
+  const progress = createProgress();
+  try {
+    progress.stage(label);
+    return await operation(progress);
+  } finally {
+    progress.stop();
+  }
+}

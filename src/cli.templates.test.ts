@@ -77,6 +77,11 @@ test('control setup uses config controlUrl, with overlay, environment and flag o
   try {
     await fs.writeFile(config, 'controlUrl: https://configured.test:9099\n');
     const configured = await install('https://configured.test:9099');
+    assert.match(
+      configured.stderr,
+      /Checking control host root@ssh-alias.*Installing control on root@ssh-alias.*Issuing root credential on root@ssh-alias/s,
+      'control setup must identify host checks, installation and credential issuance on stderr',
+    );
     assert.doesNotMatch(
       configured.stderr,
       /from the SSH target/,

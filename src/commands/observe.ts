@@ -47,7 +47,7 @@ export function registerObserve(program: Command): void {
         ['docker_compose', 'docker', ['compose', 'version']],
       ] as [string, string, string[]][]) {
         try {
-          local.push({ name, ok: true, output: runCapture(cmd, args).trim() });
+          local.push({ name, ok: true, output: (await runCapture(cmd, args)).trim() });
         } catch (e) {
           local.push({ name, ok: false, error: errMessage(e) });
         }

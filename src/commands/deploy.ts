@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { Command } from 'commander';
 import { createLocalBuildSnapshot, createSourceArchive, prepareLocalImages } from '../cli-build.ts';
-import { createProgress } from '../cli-progress.ts';
+import { createProgress, withProgress } from '../cli-progress.ts';
 import { canPrompt } from '../cli-prompt.ts';
 import { findMissingSecrets, promptForSecrets } from '../cli-secrets.ts';
 import { composeHash } from '../compose.ts';
@@ -194,13 +194,21 @@ export function registerDeploy(program: Command): void {
     .option('--timeout <seconds>', 'wait timeout', '300')
     .option('--json', 'print the full result, including the desired state, as JSON')
     .action(async (o: CommonOpts & WaitOpts & { force?: boolean; json?: boolean }) => {
-      const response = await request<DeployResponse>('POST', '/api/v1/rollback', {
-        project: await projectOf(o),
-        force: Boolean(o.force),
+      return withProgress('Preparing rollback on control', async (progress) => {
+        const response = await request<DeployResponse>('POST', '/api/v1/rollback', {
+          project: await projectOf(o),
+          force: Boolean(o.force),
+        });
+        if (o.wait) {
+          progress.stage(`Deployment ${response.deployment.id}: ${response.deployment.state}`);
+          response.deployment = await waitForDeployment(
+            response.deployment.id,
+            Number(o.timeout),
+            (deployment) => progress.stage(`Deployment ${deployment.id}: ${deployment.state}`),
+          );
+        }
+        printResult(o.json, response, formatDeployment);
       });
-      if (o.wait)
-        response.deployment = await waitForDeployment(response.deployment.id, Number(o.timeout));
-      printResult(o.json, response, formatDeployment);
     });
 
   program

@@ -31,3 +31,34 @@ test('progress reports stages immediately and elapsed time while work is pending
   t.mock.timers.tick(30_000);
   assert.equal(lines.length, count, 'stopping progress must cancel all future heartbeat output');
 });
+
+test('scoped progress stops heartbeats on success, early return and rejection', async (t) => {
+  const { withProgress } = await import('./cli-progress.ts');
+  t.mock.timers.enable({ apis: ['Date', 'setInterval'], now: 0 });
+  const lines: string[] = [];
+  t.mock.method(process.stderr, 'write', (line: string) => {
+    lines.push(line);
+    return true;
+  });
+  for (const fails of [false, true]) {
+    const operation = withProgress('Waiting', async () => {
+      t.mock.timers.tick(10_000);
+      if (fails) throw new Error('operation failed');
+      return 42;
+    });
+    if (fails)
+      await assert.rejects(
+        operation,
+        /operation failed/,
+        'progress must preserve the original operation error',
+      );
+    else assert.equal(await operation, 42, 'progress must preserve the operation result');
+    const count = lines.length;
+    t.mock.timers.tick(30_000);
+    assert.equal(
+      lines.length,
+      count,
+      'completed or failed operations must leave no heartbeat timer',
+    );
+  }
+});
