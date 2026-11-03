@@ -758,3 +758,26 @@ test('source archive excludes a custom credential file and honours character-cla
     await fs.rm(archive, { force: true });
   }
 });
+
+test('deploy summaries are one line and a compose file name is read for the project warning', async () => {
+  const { formatDeployment } = await import('./commands/context.ts');
+  const { composeName } = await import('./commands/deploy.ts');
+  assert.equal(
+    formatDeployment({
+      deployment: { id: 'dep_1', state: 'succeeded' },
+      desiredState: { project: 'rug', version: 'v2', services: { a: {}, b: {} } },
+    }),
+    'rug v2: deployment dep_1 succeeded, 2 services',
+    'a deploy should summarize project, version, state and service count',
+  );
+  assert.match(
+    formatDeployment({ deployment: { id: 'dep_2', state: 'failed', error_message: 'boom' } }),
+    /dep_2 failed \(boom\)/,
+    'a failure summary should carry the error',
+  );
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-name-'));
+  await fs.writeFile(path.join(dir, 'a.yml'), 'name: "rug"  # project\nservices: {}\n');
+  await fs.writeFile(path.join(dir, 'b.yml'), 'services:\n  web:\n    name: nope\n');
+  assert.equal(await composeName(path.join(dir, 'a.yml')), 'rug', 'a top-level name is read');
+  assert.equal(await composeName(path.join(dir, 'b.yml')), undefined, 'nested names are ignored');
+});

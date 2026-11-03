@@ -10,7 +10,9 @@ import { composeHash } from '../compose.ts';
 import { normalizeCompose } from '../normalize.ts';
 import {
   loadCfg,
+  formatDeployment,
   print,
+  printResult,
   projectOf,
   request,
   waitForCommand,
@@ -40,6 +42,12 @@ export function defaultComposeFile(cwd = process.cwd()): string {
   return names.find((name) => existsSync(path.join(cwd, name))) ?? 'docker-compose.yml';
 }
 
+/** The top-level `name:` of a Compose file, which Compose would use as the project name. */
+export async function composeName(file: string): Promise<string | undefined> {
+  const text = await fs.readFile(file, 'utf8').catch(() => '');
+  return /^name:\s*["']?([A-Za-z0-9][\w.-]*)["']?\s*(?:#.*)?$/m.exec(text)?.[1];
+}
+
 export function registerDeploy(program: Command): void {
   const deploy = program
     .command('deploy')
@@ -49,9 +57,11 @@ export function registerDeploy(program: Command): void {
     .option('--build-local', 'build application images locally and upload them without source')
     .option('--no-wait', 'return after desired state is created')
     .option('--timeout <seconds>', 'wait timeout in seconds', '300')
+    .option('--json', 'print the full result, including the desired state, as JSON')
     .action(
       async (
-        o: CommonOpts & WaitOpts & { file: string; version?: string; buildLocal?: boolean },
+        o: CommonOpts &
+          WaitOpts & { file: string; version?: string; buildLocal?: boolean; json?: boolean },
       ) => {
         const cfg = await loadCfg();
         const project = o.project || cfg.project || 'site';
@@ -74,6 +84,11 @@ export function registerDeploy(program: Command): void {
             secretNames.push(name);
           }
         }
+        const declared = await composeName(o.file);
+        if (declared && declared !== project)
+          console.error(
+            `warning: ${o.file} is named ${declared} but the Tug project is ${project}; secrets, backups and restores are scoped to the Tug project (set project: ${declared} in tug.yml, or pass --project)`,
+          );
         const compose = await normalizeCompose(o.file, secretNames, { project });
         const version = o.version || `git-${composeHash(compose)}`;
         let response: DeployResponse;
@@ -118,7 +133,7 @@ export function registerDeploy(program: Command): void {
           });
         if (o.wait)
           response.deployment = await waitForDeployment(response.deployment.id, Number(o.timeout));
-        print(response);
+        printResult(o.json, response, formatDeployment);
       },
     );
   deploy
@@ -134,24 +149,34 @@ export function registerDeploy(program: Command): void {
     .option('--force')
     .option('--no-wait', 'return immediately after activating rollback')
     .option('--timeout <seconds>', 'wait timeout', '300')
-    .action(async (o: CommonOpts & WaitOpts & { force?: boolean }) => {
+    .option('--json', 'print the full result, including the desired state, as JSON')
+    .action(async (o: CommonOpts & WaitOpts & { force?: boolean; json?: boolean }) => {
       const response = await request<DeployResponse>('POST', '/api/v1/rollback', {
         project: await projectOf(o),
         force: Boolean(o.force),
       });
       if (o.wait)
         response.deployment = await waitForDeployment(response.deployment.id, Number(o.timeout));
-      print(response);
+      printResult(o.json, response, formatDeployment);
     });
 
   program
     .command('scale <service> <replicas>')
     .description('scale a service to N replicas across matching nodes')
-    .action(async (service: string, replicas: string, o: CommonOpts) => {
+    .option('--json', 'print the full result as JSON')
+    .action(async (service: string, replicas: string, o: CommonOpts & { json?: boolean }) => {
       const project = await projectOf(o);
       if (!/^[1-9]\d*$/.test(replicas)) throw new Error('replicas must be a positive integer');
-      print(
-        await request('POST', '/api/v1/scale', { project, service, replicas: Number(replicas) }),
+      const result = await request<{ service: string; replicas: number; nodes: string[] }>(
+        'POST',
+        '/api/v1/scale',
+        { project, service, replicas: Number(replicas) },
+      );
+      printResult(
+        o.json,
+        result,
+        (r) =>
+          `${r.service} scaled to ${r.replicas} replica${r.replicas === 1 ? '' : 's'} on ${r.nodes.join(', ')}`,
       );
     });
 

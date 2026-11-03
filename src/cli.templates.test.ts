@@ -365,6 +365,7 @@ test('install commands render the shipped templates (src in dev, dist in the ima
       '--file',
       composeFile,
       '--no-wait',
+      '--json',
     );
     assert.equal(
       JSON.parse(deployment.stdout).deployment.version,
@@ -380,6 +381,7 @@ test('install commands render the shipped templates (src in dev, dist in the ima
       '--file',
       composeFile,
       '--no-wait',
+      '--json',
     );
     assert.equal(
       JSON.parse(before.stdout).deployment.project,

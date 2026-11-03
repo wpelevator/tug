@@ -342,6 +342,29 @@ export function createRestoreService(deps: RestoreDeps) {
     });
   };
 
+  /** Says which writers never reported `held` and why: the node's own apply error, or that it has not reported. */
+  const holdDiagnosis = (restore: RestoreRunRow, writers: string[]): string => {
+    const desired = deployed(restore.project_id);
+    const problems: string[] = [];
+    for (const service of writers)
+      for (const node of desired?.services[service]?.placement.nodes ?? []) {
+        const row = db.get<NodeStatusRow>(
+          'SELECT s.* FROM node_statuses s JOIN nodes n ON n.id=s.node_id WHERE n.name=? AND s.project_id=?',
+          node,
+          restore.project_id,
+        );
+        const status = row ? (JSON.parse(row.status_json) as ProjectStatus) : undefined;
+        const state = status?.serviceStates?.[service]?.rolloutState;
+        if (state === 'held') continue;
+        problems.push(
+          !status
+            ? `${service} on ${node}: the node has not reported`
+            : `${service} on ${node}: ${state ?? 'no state'}${status.error ? `; the node's apply failed with: ${status.error}` : ''}`,
+        );
+      }
+    return problems.join('; ');
+  };
+
   /** Fails a restore. Before anything changed, holds and the lock are dropped; after, they stay until released. */
   function fail(restore: RestoreRunRow, error: string, dataChanged: boolean): void {
     if (dataChanged) move(restore, 'interrupted', { error });
@@ -376,7 +399,10 @@ export function createRestoreService(deps: RestoreDeps) {
 
   function advanceHolding(restore: RestoreRunRow, writers: string[], age: number): void {
     if (!writersReport(restore, writers, 'held')) {
-      if (age > HOLD_TIMEOUT_MS) fail(restore, 'the writers did not stop in time', false);
+      if (age > HOLD_TIMEOUT_MS) {
+        const why = holdDiagnosis(restore, writers);
+        fail(restore, `the writers did not stop in time${why ? ` (${why})` : ''}`, false);
+      }
       return;
     }
     if (!restore.safety_backup) return queueRestoreJob(restore);

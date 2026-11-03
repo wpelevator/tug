@@ -31,6 +31,24 @@ export interface DeployResponse {
   deployment: DeploymentRecord;
   desiredState?: unknown;
 }
+
+/** One line for a person: which project and version reached which state, and how many services it runs. */
+export function formatDeployment(response: DeployResponse): string {
+  const { deployment } = response;
+  const state = response.desiredState as
+    { project?: string; version?: string; services?: Record<string, unknown> } | undefined;
+  const services = Object.keys(state?.services ?? {}).length;
+  const label = [state?.project, state?.version].filter(Boolean).join(' ');
+  return `${label ? `${label}: ` : ''}deployment ${deployment.id} ${deployment.state}${
+    services ? `, ${services} service${services === 1 ? '' : 's'}` : ''
+  }${deployment.error_message ? ` (${deployment.error_message})` : ''}`;
+}
+
+/** Prints the full API result with `--json`, otherwise the human summary. */
+export function printResult<T>(json: boolean | undefined, value: T, summary: (value: T) => string) {
+  if (json) print(value);
+  else console.log(summary(value));
+}
 export interface CommonOpts {
   project?: string;
 }
