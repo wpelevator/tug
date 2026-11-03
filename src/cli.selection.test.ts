@@ -17,6 +17,11 @@ test('CLI selections mutate only chosen resources, preserve output and abort wit
   const control = await startMtlsControl(dir);
   const db = await openDb(path.join(dir, 'tug.db'));
   const transport = createTransport(control.root, control.url);
+  const requiredRow = <T>(sql: string): T => {
+    const row = db.get<T>(sql);
+    assert.ok(row, `the expected database row must exist for: ${sql}`);
+    return row;
+  };
   const entry = path.resolve('src/cli.ts');
   const api = async (method: string, route: string, body?: unknown) => {
     const response = await transport.http(transport.base + route, {
@@ -89,7 +94,7 @@ test('CLI selections mutate only chosen resources, preserve output and abort wit
       'cancelling a resource selection should abort',
     );
     assert.equal(
-      db.get<{ count: number }>('SELECT count(*) AS count FROM secrets').count,
+      requiredRow<{ count: number }>('SELECT count(*) AS count FROM secrets').count,
       2,
       'cancellation must preserve every secret',
     );
@@ -111,13 +116,13 @@ test('CLI selections mutate only chosen resources, preserve output and abort wit
 
     await run(['node', 'address', '--to', '10.0.0.2'], ['2']);
     assert.equal(
-      db.get<{ address: string }>("SELECT address FROM nodes WHERE name='n2'").address,
+      requiredRow<{ address: string }>("SELECT address FROM nodes WHERE name='n2'").address,
       '10.0.0.2',
       'node address should apply the new value to the chosen node',
     );
     await run(['node', 'ingress'], ['2']);
     assert.equal(
-      db.get<{ ingress: number }>("SELECT ingress FROM nodes WHERE name='n2'").ingress,
+      requiredRow<{ ingress: number }>("SELECT ingress FROM nodes WHERE name='n2'").ingress,
       1,
       'ingress should enable the chosen node',
     );
@@ -127,7 +132,7 @@ test('CLI selections mutate only chosen resources, preserve output and abort wit
     );
     await run(['deploy', 'cancel'], ['1']);
     assert.equal(
-      db.get<{ state: string }>("SELECT state FROM deployments WHERE id='dep_cancel'").state,
+      requiredRow<{ state: string }>("SELECT state FROM deployments WHERE id='dep_cancel'").state,
       'cancelled',
       'cancel should submit the chosen deployment ID',
     );
@@ -187,7 +192,7 @@ test('CLI selections mutate only chosen resources, preserve output and abort wit
 
     await run(['credential', 'revoke'], ['2']);
     assert.ok(
-      db.get<{ revoked_at: string }>(
+      requiredRow<{ revoked_at: string }>(
         "SELECT revoked_at FROM operator_credentials WHERE name='selected'",
       ).revoked_at,
       'revoke should submit the selected active credential name',
@@ -266,7 +271,7 @@ test('CLI selections mutate only chosen resources, preserve output and abort wit
       'restore writer selection should override automatic discovery',
     );
     assert.equal(
-      db.get<{ count: number }>('SELECT count(*) AS count FROM restore_runs').count,
+      requiredRow<{ count: number }>('SELECT count(*) AS count FROM restore_runs').count,
       0,
       'interactive selection must not bypass restore --confirm',
     );
@@ -277,7 +282,7 @@ test('CLI selections mutate only chosen resources, preserve output and abort wit
       'backup selection should queue the selected enabled target',
     );
     assert.equal(
-      db.get<{ count: number }>(
+      requiredRow<{ count: number }>(
         "SELECT count(*) AS count FROM backup_runs WHERE state='queued' AND target='service:db'",
       ).count,
       0,
@@ -285,7 +290,7 @@ test('CLI selections mutate only chosen resources, preserve output and abort wit
     );
     db.run(
       "INSERT INTO restore_runs(id,project_id,target,node_id,snapshot_id,mode,state,started_at) VALUES('rst_old','site','service:db',?,'old-snapshot','in-place','interrupted','2000-01-01')",
-      db.get<{ id: string }>("SELECT id FROM nodes WHERE name='n1'").id,
+      requiredRow<{ id: string }>("SELECT id FROM nodes WHERE name='n1'").id,
     );
     for (let index = 0; index < 25; index++)
       db.run(
@@ -294,14 +299,14 @@ test('CLI selections mutate only chosen resources, preserve output and abort wit
       );
     await run(['restore', 'resume'], ['1']);
     assert.equal(
-      db.get<{ state: string }>("SELECT state FROM restore_runs WHERE id='rst_old'").state,
+      requiredRow<{ state: string }>("SELECT state FROM restore_runs WHERE id='rst_old'").state,
       'restoring',
       'resume selection must find an interrupted restore beyond the recent history limit',
     );
     db.run("UPDATE restore_runs SET state='interrupted' WHERE id='rst_old'");
     await run(['restore', 'release'], ['1']);
     assert.equal(
-      db.get<{ state: string }>("SELECT state FROM restore_runs WHERE id='rst_old'").state,
+      requiredRow<{ state: string }>("SELECT state FROM restore_runs WHERE id='rst_old'").state,
       'released',
       'release selection should release the selected interrupted restore',
     );
@@ -337,7 +342,8 @@ test('CLI selections mutate only chosen resources, preserve output and abort wit
     }
     await run(['node', 'disable'], ['2']);
     assert.ok(
-      db.get<{ disabled_at: string }>("SELECT disabled_at FROM nodes WHERE name='n2'").disabled_at,
+      requiredRow<{ disabled_at: string }>("SELECT disabled_at FROM nodes WHERE name='n2'")
+        .disabled_at,
       'disable must block only the chosen node',
     );
     await run(['node', 'remove'], ['2']);
