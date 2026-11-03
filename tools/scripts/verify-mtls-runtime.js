@@ -2,7 +2,7 @@
 // Runs against a built tree (npm run build first; inside the images it is /app/dist): exercises @peculiar/x509
 // issuance and CSR verification, an mTLS listener with the production TLS options, and the undici transport pinned to
 // the CA, including the loopback connect-target override that still verifies the public host name. Exits non-zero on
-// any failure, so it doubles as the runtime-image check that the TLS dependencies work on Debian and Alpine.
+// any failure, so it doubles as the runtime-image check that the TLS dependencies work on Alpine (musl).
 import fs from 'node:fs/promises';
 import https from 'node:https';
 import os from 'node:os';
