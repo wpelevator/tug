@@ -14,7 +14,7 @@ Status reports the last observation from each node, which may be stale; it is no
 
 Read the error from `tug deploy`, then check `tug status`, `tug events` and `tug logs <service>`. If there is more than one eligible node, use `tug logs <service> --node <name>`. Check image availability, environment variables, secret names, container startup logs and health-check port and path. Verify that referenced dependencies can be reached and that the probe allows enough startup time. See [Health checks](healthchecks.md).
 
-A project with multiple registered nodes needs placement for every service. A stateful service moved to another node may require an explicit `--move` acknowledgement and a restore; do not release held writers until you understand whether the new volume contains the correct data. See [Placement](placement.md) and [Move the database](migration.md#move-the-database).
+A project with multiple registered nodes needs placement for every service. A stateful service moved to another node may require an explicit `--move` acknowledgement and a restore; do not release held writers until you understand whether the new volume contains the correct data. See [Service placement](service-placement.md) and [Move the database](migration.md#move-the-database).
 
 ## The service is running but the site is unreachable
 

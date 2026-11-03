@@ -1,4 +1,4 @@
-# Placement and a second node
+# Service placement and scaling
 
 With one registered node, a service with no placement runs there. Once multiple nodes are registered, each service must select explicit nodes, labels or `global: true`. Adding a node does not automatically move a deployed service, copy its data or provide failover. Placement is resolved at deploy or scale time, not continuously rescheduled when a node fails.
 

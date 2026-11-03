@@ -47,7 +47,7 @@ test('the quickstart service deploys to the single node and publishes its docume
 });
 
 test('the second-node example places the service on both named nodes', () => {
-  const compose = normalized(composeBlock('placement.md'));
+  const compose = normalized(composeBlock('service-placement.md'));
   assert.doesNotThrow(
     () => validateCompose(compose, ['app1', 'app2']),
     'the placement example should validate with two nodes',

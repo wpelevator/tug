@@ -68,7 +68,7 @@ With one node, omitted placement selects it automatically. The HTTP check verifi
 - [Add a hostname and HTTPS](networking.md#layer-b-ingress-and-tls): enable ingress, point DNS at the VPS and route a service.
 - [Deploy an application and database](../README.md#your-compose-file-plus-a-little-x-tug): use a volume and a project secret, then explore the [WordPress example](../examples/wordpress/README.md).
 - [Back up and recover](backups.md): protect workload data and the control plane separately, then rehearse a restore.
-- [Add another node](placement.md): pin stateful services and spread a stateless service across servers.
+- [Add another node](service-placement.md): pin stateful services and spread a stateless service across servers.
 - [Choose health checks and safer rollouts](healthchecks.md): understand readiness, failures and rollback.
 - [Give CI or teammates access](access-control.md): create credentials appropriate for trusted operators.
 

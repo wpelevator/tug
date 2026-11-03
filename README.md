@@ -30,7 +30,7 @@ tug node add root@203.0.113.5 --name app1  # install the agent on the same VPS
 tug deploy                          # deploy a Compose file in this directory
 ```
 
-The control plane and agent share the VPS with your application. The walkthrough includes a Compose file, networking prerequisites and a way to verify the service. You can [add HTTPS](docs/networking.md#layer-b-ingress-and-tls), [protect your data](docs/backups.md) and [add another server](docs/placement.md) when needed.
+The control plane and agent share the VPS with your application. The walkthrough includes a Compose file, networking prerequisites and a way to verify the service. You can [add HTTPS](docs/networking.md#layer-b-ingress-and-tls), [protect your data](docs/backups.md) and [add another server](docs/service-placement.md) when needed.
 
 In a terminal Tug asks before it changes anything: whether to install Docker, which private address the node should use and whether it should handle ingress. It shows the plan and waits for you to confirm. `tug deploy` asks for any Compose variables, such as `${DB_PASSWORD}`, that no secret or `.env` provides. In CI or any other script nothing is ever asked, so pass the choices as flags (`--address`, `--ingress`, `--install-docker`, `-y`).
 
@@ -172,7 +172,7 @@ Start with the [single-VPS tutorial](docs/getting-started.md), then choose the t
   - [Credentials and CI](docs/access-control.md)
   - [Security trust boundaries](docs/security.md)
 - **Servers and data**
-  - [Placement and adding a second node](docs/placement.md)
+  - [Service placement and scaling](docs/service-placement.md)
   - [Node management](docs/nodes.md)
   - [Backups and recovery](docs/backups.md)
   - [Moving to new servers](docs/migration.md)
