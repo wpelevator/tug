@@ -69,6 +69,8 @@ Running containers keep serving while control is down; agents just cannot pick u
 
 ### Recover control on another host
 
+For a planned move of the whole installation, including workloads, see [Migrating to new servers](migration.md).
+
 This procedure was exercised with the published 0.9.0 release on two VPSes; see [Real-host evaluation](real-host-evaluation.md#recovery-drill-with-the-published-090-release-2-november-2026) for the exact scope and limitations. Restore the workload data separately using its project backups. Keep the control backup encrypted off-host and keep the original operator credential and backup repository passwords separately; the control archive contains the master key and private CA.
 
 1. Stop or isolate the old control plane before directing agents to the replacement. Two active control planes with divergent state are not a supported failover setup. Running workload containers continue serving while control is unavailable.
