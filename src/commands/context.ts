@@ -141,6 +141,7 @@ export function runCapture(cmd: string, args: string[], opts: SpawnSyncOptions =
 export async function waitForDeployment(
   deploymentId: string,
   timeoutSeconds = 300,
+  onProgress?: (deployment: DeploymentRecord) => void,
 ): Promise<DeploymentRecord> {
   const deadline = Date.now() + timeoutSeconds * 1000;
   while (Date.now() < deadline) {
@@ -156,6 +157,7 @@ export async function waitForDeployment(
         { cause: error },
       );
     }
+    onProgress?.(deployment);
     if ((TERMINAL_DEPLOYMENT_STATES as readonly string[]).includes(deployment.state)) {
       if (deployment.state !== 'succeeded')
         throw new Error(

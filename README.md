@@ -8,7 +8,7 @@ Tug runs a small control plane and an agent, which can share the same VPS with y
 
 ## What you can do with it
 
-- **Deploy a Compose file to your servers.** `tug deploy` builds or pulls your images, starts them on the right nodes, waits for health checks and tells you why if something fails. `tug rollback` returns to the previous version, and `x-tug: { rollback: auto }` does it for you.
+- **Deploy a Compose file to your servers.** `tug deploy` builds or pulls your images, starts them on the right nodes, waits for health checks and tells you why if something fails. It reports deployment stages and elapsed time while work is pending. `tug rollback` returns to the previous version, and `x-tug: { rollback: auto }` does it for you.
 - **Choose where things run.** Pin a database and its volume to one node, spread web containers over several, and let Tug's managed Caddy ingress serve them over HTTPS with certificates it obtains for you.
 - **Update without downtime.** Opt-in rolling rollouts start the new version, wait until it is healthy and only then switch traffic.
 - **Keep secrets out of your repository.** `tug secret set DB_PASSWORD` stores them encrypted and sends each one only to the nodes whose services use it.

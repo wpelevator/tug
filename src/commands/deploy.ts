@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { Command } from 'commander';
 import { createLocalBuildSnapshot, createSourceArchive, prepareLocalImages } from '../cli-build.ts';
+import { createProgress } from '../cli-progress.ts';
 import { canPrompt } from '../cli-prompt.ts';
 import { findMissingSecrets, promptForSecrets } from '../cli-secrets.ts';
 import { composeHash } from '../compose.ts';
@@ -76,82 +77,106 @@ export function registerDeploy(program: Command): void {
             move: string[];
           },
       ) => {
-        const cfg = await loadCfg();
-        const project = o.project || cfg.project || 'site';
-        // Control secrets are interpolated as sentinels; the agent substitutes the node's released values.
-        const { secrets } = await request<{ secrets: { name: string }[] }>(
-          'GET',
-          `/api/v1/secrets?project=${encodeURIComponent(project)}`,
-        );
-        const secretNames = secrets.map((secret) => secret.name);
-        const missing = await findMissingSecrets(o.file, secretNames);
-        if (missing.length) {
-          if (!canPrompt())
-            throw new Error(
-              `${o.file} needs values that are not set: ${missing.join(', ')}; create each with tug secret set <name> (or run tug deploy in a terminal to be prompted)`,
-            );
-          console.error(`Missing secrets for project ${project}: ${missing.join(', ')}`);
-          // Only names that do not exist yet are stored, so an existing secret is never overwritten.
-          for (const [name, value] of Object.entries(await promptForSecrets(missing))) {
-            await request('POST', '/api/v1/secrets', { project, name, value });
-            secretNames.push(name);
-          }
-        }
-        const movePayload = o.move.length ? { moves: o.move } : {};
-        const declared = await composeName(o.file);
-        if (declared && declared !== project)
-          console.error(
-            `warning: ${o.file} is named ${declared} but the Tug project is ${project}; secrets, backups and restores are scoped to the Tug project (set project: ${declared} in tug.yml, or pass --project)`,
+        const progress = createProgress();
+        try {
+          progress.stage('Preparing deployment');
+          const cfg = await loadCfg();
+          const project = o.project || cfg.project || 'site';
+          // Control secrets are interpolated as sentinels; the agent substitutes the node's released values.
+          const { secrets } = await request<{ secrets: { name: string }[] }>(
+            'GET',
+            `/api/v1/secrets?project=${encodeURIComponent(project)}`,
           );
-        const compose = await normalizeCompose(o.file, secretNames, { project });
-        const version = o.version || `git-${composeHash(compose)}`;
-        let response: DeployResponse;
-        if (o.buildLocal) {
-          const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-local-build-'));
-          try {
-            const form = new FormData();
-            const source = Object.values(compose.services).some((service) => service.build)
-              ? await createLocalBuildSnapshot(process.cwd(), directory, [
-                  cfg.file,
-                  cfg.localFile,
-                  ...(cfg.credentialFile ? [cfg.credentialFile] : []),
-                ])
-              : process.cwd();
-            const localImages = await prepareLocalImages(compose, source, directory);
-            for (const { field } of localImages)
-              form.append(
-                field,
-                await openAsBlob(path.join(directory, `${field}.tar.gz`)),
-                `${field}.tar.gz`,
+          const secretNames = secrets.map((secret) => secret.name);
+          const missing = await findMissingSecrets(o.file, secretNames);
+          if (missing.length) {
+            if (!canPrompt())
+              throw new Error(
+                `${o.file} needs values that are not set: ${missing.join(', ')}; create each with tug secret set <name> (or run tug deploy in a terminal to be prompted)`,
               );
-            form.append(
-              'payload',
-              JSON.stringify({ project, version, compose, localImages, ...movePayload }),
+            console.error(`Missing secrets for project ${project}: ${missing.join(', ')}`);
+            // Only names that do not exist yet are stored, so an existing secret is never overwritten.
+            for (const [name, value] of Object.entries(await promptForSecrets(missing))) {
+              await request('POST', '/api/v1/secrets', { project, name, value });
+              secretNames.push(name);
+            }
+          }
+          const movePayload = o.move.length ? { moves: o.move } : {};
+          const declared = await composeName(o.file);
+          if (declared && declared !== project)
+            console.error(
+              `warning: ${o.file} is named ${declared} but the Tug project is ${project}; secrets, backups and restores are scoped to the Tug project (set project: ${declared} in tug.yml, or pass --project)`,
             );
-            response = await request<DeployResponse>('POST', '/api/v1/deployments', form, true);
-          } finally {
-            await fs.rm(directory, { recursive: true, force: true });
+          const compose = await normalizeCompose(o.file, secretNames, { project });
+          const version = o.version || `git-${composeHash(compose)}`;
+          let response: DeployResponse;
+          if (o.buildLocal) {
+            const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-local-build-'));
+            try {
+              const form = new FormData();
+              progress.stage('Preparing local build snapshot');
+              const source = Object.values(compose.services).some((service) => service.build)
+                ? await createLocalBuildSnapshot(process.cwd(), directory, [
+                    cfg.file,
+                    cfg.localFile,
+                    ...(cfg.credentialFile ? [cfg.credentialFile] : []),
+                  ])
+                : process.cwd();
+              const localImages = await prepareLocalImages(
+                compose,
+                source,
+                directory,
+                undefined,
+                progress.stage,
+              );
+              for (const { field } of localImages)
+                form.append(
+                  field,
+                  await openAsBlob(path.join(directory, `${field}.tar.gz`)),
+                  `${field}.tar.gz`,
+                );
+              form.append(
+                'payload',
+                JSON.stringify({ project, version, compose, localImages, ...movePayload }),
+              );
+              progress.stage('Uploading images and preparing deployment on control');
+              response = await request<DeployResponse>('POST', '/api/v1/deployments', form, true);
+            } finally {
+              await fs.rm(directory, { recursive: true, force: true });
+            }
+          } else if (Object.values(compose.services).some((service) => service.build)) {
+            progress.stage('Archiving source for remote build');
+            const tarball = await makeContext();
+            try {
+              const form = new FormData();
+              form.append('payload', JSON.stringify({ project, version, compose, ...movePayload }));
+              form.append('context', await openAsBlob(tarball), 'context.tgz');
+              progress.stage('Uploading source and building images on control');
+              response = await request<DeployResponse>('POST', '/api/v1/deployments', form, true);
+            } finally {
+              await fs.rm(tarball, { force: true });
+            }
+          } else {
+            progress.stage('Resolving images and preparing deployment on control');
+            response = await request<DeployResponse>('POST', '/api/v1/deployments', {
+              project,
+              version,
+              compose,
+              ...movePayload,
+            });
           }
-        } else if (Object.values(compose.services).some((service) => service.build)) {
-          const tarball = await makeContext();
-          try {
-            const form = new FormData();
-            form.append('payload', JSON.stringify({ project, version, compose, ...movePayload }));
-            form.append('context', await openAsBlob(tarball), 'context.tgz');
-            response = await request<DeployResponse>('POST', '/api/v1/deployments', form, true);
-          } finally {
-            await fs.rm(tarball, { force: true });
+          if (o.wait) {
+            progress.stage(`Deployment ${response.deployment.id}: ${response.deployment.state}`);
+            response.deployment = await waitForDeployment(
+              response.deployment.id,
+              Number(o.timeout),
+              (deployment) => progress.stage(`Deployment ${deployment.id}: ${deployment.state}`),
+            );
           }
-        } else
-          response = await request<DeployResponse>('POST', '/api/v1/deployments', {
-            project,
-            version,
-            compose,
-            ...movePayload,
-          });
-        if (o.wait)
-          response.deployment = await waitForDeployment(response.deployment.id, Number(o.timeout));
-        printResult(o.json, response, formatDeployment);
+          printResult(o.json, response, formatDeployment);
+        } finally {
+          progress.stop();
+        }
       },
     );
   deploy

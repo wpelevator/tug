@@ -367,6 +367,21 @@ test('install commands render the shipped templates (src in dev, dist in the ima
       '--no-wait',
       '--json',
     );
+    assert.match(
+      deployment.stderr,
+      /\[0s\] Preparing deployment/,
+      'JSON deploys must report preparation to stderr',
+    );
+    assert.match(
+      deployment.stderr,
+      /Resolving images and preparing deployment on control/,
+      'image-only deploys must identify control-side preparation',
+    );
+    assert.doesNotMatch(
+      deployment.stderr,
+      /Deployment .*: rolling_out/,
+      'no-wait must skip rollout progress',
+    );
     assert.equal(
       JSON.parse(deployment.stdout).deployment.version,
       'display-version',
