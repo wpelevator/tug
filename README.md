@@ -1,26 +1,99 @@
 # Tug
 
-The name: tugboats pull ships into place, like the pull-based agents here; `tug` is the CLI.
+Deploy Docker Compose apps to a few ordinary Linux servers, from your laptop or CI, without Kubernetes or a hosted platform.
 
-Deploy Docker Compose applications to one or more ordinary Linux VPSes through a small self-hosted control plane and a pull-based agent on each node, without Kubernetes or a hosted PaaS. Tug runs an agent on each node; the agents drive the node's Docker Engine API directly, and Compose is only used on your machine to read the file. What it is for, the deployment shapes it targets and the planned milestones are in the [Roadmap](docs/roadmap.md).
+You keep your `docker-compose.yml`. Tug installs a small control plane on one server and an agent on each of the others, then `tug deploy` puts your services where you say, waits until they are healthy and rolls back if they are not. It is built for running one to a few dozen sites, WordPress first, on two to ten VPSes, with backups and restores included.
 
-## Features
+## What you can do with it
 
-- One mutual-TLS port: every operator, CI job and node authenticates with a certificate from the control plane's private CA, and control authorizes it by public key. Scoped `read`/`deploy`/`admin` operator credentials for CI and teammates, an audit trail naming who acted, and SQLite metadata through Node's built-in driver.
-- Nodes join over SSH (`node add`) or enroll themselves with a single `docker run` after `node enroll`, each with its own certificate and an immutable node ID. Agents only dial out, so nodes behind NAT work.
-- Agents pull desired state from control, reconcile containers through the Docker Engine API, run TCP/HTTP/Docker health checks and report status. An outbound WebSocket wakes them as soon as control queues work and carries live `exec`, followed logs, `ps` and `inspect` sessions, with long-poll and periodic-poll fallbacks for ordinary work.
-- `x-tug` placement of services and volumes on nodes, with immutable desired-state records per deployment.
-- Build application images on control from uploaded source, or locally with `deploy --build-local`. Both use a filtered source snapshot that excludes known Tug credentials; operators must still exclude other secrets. Agents download saved images directly from control. Published images are pinned to registry digests at deployment creation.
-- Secrets encrypted at rest, released only to the nodes whose services reference them, with targeted service recreation when only a secret changes.
-- Deployment convergence, per-project operation locks, cancellation, rollback, per-service rollout events and log fetching through the agents.
-- Opt-in zero-downtime rolling rollouts for ingress-fronted services (`x-tug.rollout`) and automatic rollback of failed deployments (`x-tug.rollback: auto`). See [Compose extensions](docs/compose.md#rolling-rollouts).
-- Private published images use encrypted project credentials for digest resolution and Engine API pulls.
-- Health-aware cross-node service names (hosts-file entries injected into containers), on by default with a `TUG_SERVICE_NAMES=false` opt-out, and an optional managed Caddy ingress with automatic HTTPS. Both use each node's private `address` on your existing network. See [Networking](docs/networking.md).
-- Private-by-default published ports: agent-generated container definitions bind them to the node address or loopback, never every interface unless you write `0.0.0.0`. Tug does not encrypt node-to-node workload traffic; your network owns reachability, firewalling and encryption. See [Networking](docs/networking.md#published-ports-private-by-default).
-- Workload backups of service commands and volumes with restic, a separate control-plane backup and restore, and `tug doctor` diagnostics for certificate expiry, node connectivity and clock skew.
-- `tug status` summarizes deployments, node reports and failures; `tug status --json` prints the raw JSON for automation.
+- **Deploy a Compose file to your servers.** `tug deploy` builds or pulls your images, starts them on the right nodes, waits for health checks and tells you why if something fails. `tug rollback` returns to the previous version, and `x-tug: { rollback: auto }` does it for you.
+- **Choose where things run.** Pin a database and its volume to one node, spread web containers over several, and let Tug's managed Caddy ingress serve them over HTTPS with certificates it obtains for you.
+- **Update without downtime.** Opt-in rolling rollouts start the new version, wait until it is healthy and only then switch traffic.
+- **Keep secrets out of your repository.** `tug secret set DB_PASSWORD` stores them encrypted and sends each one only to the nodes whose services use it.
+- **Back up and restore.** Scheduled backups of databases and volumes to S3-compatible storage with restic, and `tug restore run db` to bring one back.
+- **Look inside running services.** `tug logs`, `tug exec`, `tug run` (for example `wp` CLI), `tug ps` and `tug status` work through the control plane, so you never SSH to a node to see what is going on.
+- **Give CI a limited key.** `tug credential create` makes read-only, deploy-only or admin credentials, and every change records who made it.
 
-## How it fits together
+Nodes only dial out to the control plane, so they work behind NAT or a firewall that allows nothing inbound. Tug does not need a cloud provider's API, a registry or an overlay network.
+
+## Try it
+
+You need Node.js 22.18 or newer and Docker Compose v2 on your machine, and SSH access to one or more Linux servers (Debian, Ubuntu, Fedora or a RHEL-compatible distribution). Tug can install Docker on them for you.
+
+```bash
+npm install -g @wpelevator/tug      # or run it with npx @wpelevator/tug
+
+tug setup root@203.0.113.5          # install the control plane on a server
+tug node add root@198.51.100.7      # add a server that will run your apps
+tug deploy                          # deploy ./docker-compose.yml
+```
+
+In a terminal Tug asks before it changes anything: whether to install Docker, which private address the node should use and whether it should handle ingress. It shows the plan and waits for you to confirm. `tug deploy` asks for any Compose variables, such as `${DB_PASSWORD}`, that no secret or `.env` provides. In CI or any other script nothing is ever asked, so pass the choices as flags (`--address`, `--ingress`, `--install-docker`, `-y`).
+
+## Your Compose file, plus a little `x-tug`
+
+A normal Compose file already works. Add `x-tug` to say where services run, how to tell they are healthy and where traffic comes in:
+
+```yaml
+services:
+  db:
+    image: mariadb:11.4.8
+    volumes: [db-data:/var/lib/mysql]
+    environment:
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+    x-tug:
+      placement: { nodes: [app1] }
+      health: { type: tcp, port: 3306 }
+
+  wordpress:
+    image: wordpress:6.8.3-apache
+    depends_on: [db]
+    x-tug:
+      placement: { nodes: [app1] }
+      health: { type: http, port: 80, path: /wp-includes/version.php }
+      ingress: { host: blog.example.com, port: 80, tls: auto }
+
+volumes:
+  db-data:
+    x-tug: { placement: { nodes: [app1] } }
+```
+
+```bash
+tug secret set DB_ROOT_PASSWORD
+tug deploy
+tug status       # what is running where, and anything failing
+tug logs wordpress --follow
+```
+
+A complete WordPress site with scheduled database and uploads backups is in the [WordPress example](examples/wordpress/README.md). Everything `x-tug` can express is in [Compose extensions](docs/compose.md).
+
+## Everyday commands
+
+Project commands sit at the top level; everything else reads `tug <subject> <verb>`.
+
+| I want to... | Run |
+| --- | --- |
+| Deploy, or undo a deploy | `tug deploy`, `tug rollback` |
+| See what is running and what failed | `tug status`, `tug events`, `tug ps` |
+| Read logs or open a shell | `tug logs <service>`, `tug exec <service> sh` |
+| Run a one-off command | `tug run <service> wp cache flush` |
+| Change the number of replicas | `tug scale <service> 3` |
+| Add, list or replace servers | `tug node add`, `tug node list`, `tug node replace <name>` |
+| Add a server I cannot SSH to | `tug node enroll`, then run the printed `docker run` on it |
+| Manage secrets | `tug secret set`, `tug secret list`, `tug secret remove` |
+| Back up now, or restore | `tug backup run`, `tug restore run <target>` |
+| Give CI a deploy key | `tug credential create ci --role deploy` |
+| Check everything is healthy | `tug doctor` |
+
+Every command and option is in the [CLI reference](docs/cli.md). `tug status --json` prints raw JSON for scripts.
+
+## Is Tug right for you?
+
+Tug fits if you run a handful of Compose apps on VPSes you already pay for, want deploys, rollbacks, secrets and backups handled in one tool, and are happy with a single control server that you back up.
+
+It deliberately does not do Kubernetes-style scheduling, autoscaling, distributed storage or database failover, and it does not provision servers through a provider's API. Node-to-node traffic travels over your own private network (Tailscale, a VPC, a LAN), so you own its firewalling and encryption. If you want automatic rescheduling of containers across a cluster, see how it compares with [Docker Swarm](docs/swarm-comparison.md). The goals, principles and planned milestones are in the [Roadmap](docs/roadmap.md).
+
+## How it works
 
 ```text
   tug CLI / CI (operator credential)
@@ -51,26 +124,11 @@ Deploy Docker Compose applications to one or more ordinary Linux VPSes through a
   SSH is used only by the CLI to install the control plane and nodes.
 ```
 
-Operators and CI talk to the control API. The control plane stores desired state and builds images; each agent dials out to fetch the work for its node, applies it through the Docker Engine API and reports health back, so the control channel works through NAT without inbound ports. SSH is used only to install the control plane and its nodes. Cross-node service names and Caddy ingress use each node's `address` over the operator's private network; Tug provides no overlay or encryption for that workload traffic. See [Networking](docs/networking.md), and [Architecture](docs/architecture.md) for every flow in detail.
+`tug deploy` reads your Compose file on your machine and sends it to the control plane, which stores it as an immutable desired state, builds any images and pins published images to digests. Each agent fetches the work for its node, applies it through the Docker Engine API, runs the health checks and reports back. The control plane marks the deployment done when every node reports it serving. Compose runs only on your machine; nodes need just Docker.
 
-## Quick start
+Control serves mutual TLS directly on one port (`8443`). Every operator, CI job and node authenticates with a certificate from a private CA created at install, so the control address can be a bare IP and can change later. Do not terminate TLS in front of it. A `controlUrl` in `tug.yml` tells the CLI where control is (see [CLI configuration](docs/cli.md#config-file)). [Architecture](docs/architecture.md) covers every flow in detail, and [Security](docs/security.md) the trust boundaries.
 
-Install the CLI (Node >= 22.18), or run it without installing through `npx @wpelevator/tug`:
-
-```bash
-npm install -g @wpelevator/tug
-tug setup root@203.0.113.5
-tug node add root@198.51.100.7
-tug deploy
-```
-
-`tug setup` (short for `tug control setup`) installs control and imports the root credential, `tug node add` infers the node name from the SSH host and, in a terminal, offers to install Docker, choose the inter-node address and enable ingress before it changes anything, and `tug deploy` finds `docker-compose.yml` and prompts for missing secrets. Commands read `tug <subject> <verb>` (`tug node list`, `tug secret set`, `tug backup run`), except the everyday project commands, which stay at the top level: `deploy`, `rollback`, `scale`, `restart`, `status`, `events`, `logs`, `exec`, `run`, `ps` and `inspect`. See the [CLI reference](docs/cli.md).
-
-The CLI installs the matching `ghcr.io/wpelevator/tug:<version>` image on your hosts. Control serves mutual TLS directly on its port (`8443`): every operator, CI job and node authenticates with a certificate from a private CA created at install, and clients verify a name generated from that CA, so the address can be a bare IP and can change later. Do not terminate TLS in front of it.
-
-A `controlUrl` in `tug.yml` is the one name for where control is: `tug setup` advertises it, and every other command connects to it. Pass `--control-url` (or set `TUG_CONTROL_URL`) to override it for one invocation. See [CLI configuration](docs/cli.md#config-file) for precedence and per-node defaults.
-
-The full walkthrough, including nodes you cannot SSH to (`tug node enroll`), CI credentials (`tug credential create`), moving the control plane and recovery, is in [Getting started](docs/getting-started.md).
+The full walkthrough, including CI credentials, moving the control plane and recovery, is in [Getting started](docs/getting-started.md).
 
 ## Documentation
 
