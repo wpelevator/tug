@@ -164,7 +164,7 @@ The [single-VPS tutorial](docs/getting-started.md) walks through a first deploym
 Start with the [single-VPS tutorial](docs/getting-started.md), then choose the topic that matches your next task:
 
 - **Deploy and operate**
-  - [WordPress example](examples/wordpress/README.md)
+  - [Application examples](examples/README.md)
   - [Health checks and rollouts](docs/healthchecks.md)
   - [Troubleshooting](docs/troubleshooting.md)
 - **Networking and access**

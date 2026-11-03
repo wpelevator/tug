@@ -8,3 +8,5 @@ tug.local.yaml
 tug.local.json
 *.log
 dist
+
+/examples
