@@ -20,6 +20,7 @@ Managed-ingress convergence tests exercise current and outdated configuration ha
 |---|---|---|
 | The runtime image shipped without the Compose plugin, so every real deploy failed (the former runtime ran Compose on nodes; agents now use the Docker Engine API and the plugin is no longer part of the image) | Real hosts | Tier 2: `npm run test:smoke:image` runs the shipped image's binaries, database code and mTLS dependencies without any host plugins, on Alpine |
 | `deploy --build-local` was rejected on containerd image stores, where `docker save` lists a build attestation as an extra top-level entry | Local integration run on Docker Desktop | Tier 1: `src/artifacts.test.ts` builds synthetic archives, including the rejected variants |
+| `secret set` printed success but stayed running with stdin open; auditing prompts also found stale readline listeners that echoed later hidden answers | CLI bug report and subprocess reproduction | Tier 1: `src/commands/secret.test.ts` and `src/cli-prompt.test.ts` check exit with open input, listener cleanup, hidden answers and EOF errors |
 | The first rolling deploy started two revisions of the same image | Real hosts | Not guarded yet, see backlog item 1 |
 | A control database from before scoped credentials lacks columns the current control writes | Real hosts | Not guarded yet, see backlog item 2 |
 | The earlier Compose-based agent failed `depends_on.condition: service_healthy` when the image had no Docker `HEALTHCHECK`, and the deploy error omitted the Compose message | Historical real-host evaluation | The Engine API agent now falls back to checking that the dependency is running; `src/agent.test.ts` covers this and `src/control.rollout.test.ts` checks apply errors are reported |
@@ -32,7 +33,7 @@ Managed-ingress convergence tests exercise current and outdated configuration ha
 - **The agent** takes its Docker Engine API client (`DockerApi`; the in-memory Engine in `tests/fake-docker.ts`) and HTTP client as injectable dependencies, so tests assert the exact Engine calls issued for a reconcile (`src/agent.test.ts`, `src/agent.images.test.ts`, `src/agent.network.test.ts`).
 - **Shell scripts** are tested by running the generated text against fake executables placed first on `PATH`, instead of asserting on strings (`src/cli-install.test.ts`).
 - **Image archives** are built in the test, so malformed and hostile layouts can be checked without Docker (`src/artifacts.test.ts`).
-- **The CLI** is run against a stub `ssh` that records its arguments (`src/cli.templates.test.ts`).
+- **The CLI** is run against a stub `ssh` that records its arguments (`src/cli.templates.test.ts`). Subprocess exit tests leave stdin open after secret entry, repeated visible/hidden prompts, prompted command failure, HTTP responses, and interactive exec success, nonzero exit, remote error, disconnect and SIGINT cancellation (`src/commands/secret.test.ts`, `src/cli-prompt.test.ts`, `src/cli.stdin.test.ts`, `src/cli-live-transport.test.ts`). Each subprocess has a deadline so a leaked handle fails the test. Whole-document readers (`init -`, `node register --csr -`, backup destination credentials and runtime `agent install-cert`) receive EOF and must then exit; they intentionally wait for the complete document before producing a result.
 
 ### SQLite contract and blocking measurements
 
