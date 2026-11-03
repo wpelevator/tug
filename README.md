@@ -94,7 +94,7 @@ tug logs wordpress --follow
 
 The named volume holds data on `app1`; it is not copied to another node automatically. Back it up and restore or move its data deliberately if you replace the server.
 
-A complete WordPress site with scheduled database and uploads backups is in the [WordPress example](examples/wordpress/README.md). Everything `x-tug` can express is in [Compose extensions](docs/compose.md).
+See the [examples directory](examples/) for stack-specific applications. Everything `x-tug` can express is in [Compose extensions](docs/compose.md).
 
 ## Everyday commands
 
