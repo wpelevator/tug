@@ -10,7 +10,7 @@ import { startMtlsControl } from '../tests/helpers.ts';
 const exec = promisify(execFile);
 const entry = path.resolve('src/cli.ts');
 
-test('status retains JSON by default and can render a human-readable summary', async () => {
+test('status is human-readable by default and prints JSON with --json', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-status-'));
   const control = await startMtlsControl(dir);
   try {
@@ -18,12 +18,12 @@ test('status retains JSON by default and can render a human-readable summary', a
     assert.equal(node.status, 200, 'the status test node must register');
     const env: NodeJS.ProcessEnv = { ...process.env, ...control.env };
     delete env.TUG_CONFIG;
-    const json = await exec(process.execPath, [entry, 'status'], { cwd: dir, env });
+    const json = await exec(process.execPath, [entry, 'status', '--json'], { cwd: dir, env });
     assert.ok(
       Array.isArray(JSON.parse(json.stdout).nodes),
-      'status must remain JSON for existing scripts',
+      'status --json must print the raw JSON for scripts',
     );
-    const human = await exec(process.execPath, [entry, 'status', '--human'], { cwd: dir, env });
+    const human = await exec(process.execPath, [entry, 'status'], { cwd: dir, env });
     assert.match(
       human.stdout,
       /No projects/,

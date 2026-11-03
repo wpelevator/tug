@@ -75,7 +75,7 @@ services:
 ```
 
 ```bash
-tug secret-set DB_PASSWORD        # only if your services use @@tug:secret:NAME@@
+tug secret-set DB_PASSWORD        # optional: `tug deploy` prompts for missing secrets in a terminal
 tug deploy -f docker-compose.yml
 ```
 

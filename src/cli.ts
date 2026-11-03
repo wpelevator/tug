@@ -34,6 +34,7 @@ import { errMessage, loadTemplate } from './util.ts';
 import { createTransport } from './agent-credential.ts';
 import { decodeCredential, writeFileDurable } from './pki.ts';
 import { backupCheckProblems } from './backup-check.ts';
+import { canPrompt, findMissingSecrets, promptForSecrets } from './cli-secrets.ts';
 import { formatStatus } from './cli-status.ts';
 import type { StatusResponse } from './cli-status.ts';
 import { PROJECT_NAME_PATTERN, ROLES, CREDENTIAL_NAME_PATTERN } from './credentials.ts';
@@ -1199,11 +1200,21 @@ program
         'GET',
         `/api/v1/secrets?project=${encodeURIComponent(project)}`,
       );
-      const compose = await normalizeCompose(
-        o.file,
-        secrets.map((secret) => secret.name),
-        { project },
-      );
+      const secretNames = secrets.map((secret) => secret.name);
+      const missing = await findMissingSecrets(o.file, secretNames);
+      if (missing.length) {
+        if (!canPrompt())
+          throw new Error(
+            `${o.file} needs values that are not set: ${missing.join(', ')}; create each with tug secret-set <name> (or run tug deploy in a terminal to be prompted)`,
+          );
+        console.error(`Missing secrets for project ${project}: ${missing.join(', ')}`);
+        // Only names that do not exist yet are stored, so an existing secret is never overwritten.
+        for (const [name, value] of Object.entries(await promptForSecrets(missing))) {
+          await request('POST', '/api/v1/secrets', { project, name, value });
+          secretNames.push(name);
+        }
+      }
+      const compose = await normalizeCompose(o.file, secretNames, { project });
       const version = o.version || `git-${composeHash(compose)}`;
       let response: DeployResponse;
       if (o.buildLocal) {
@@ -1252,10 +1263,10 @@ program
   );
 program
   .command('status')
-  .option('--human', 'show a readable summary instead of JSON')
-  .action(async (o: { human?: boolean }) => {
+  .option('--json', 'print the raw status as JSON for scripts')
+  .action(async (o: { json?: boolean }) => {
     const status = await request<StatusResponse>('GET', '/api/v1/status');
-    console.log(o.human ? formatStatus(status) : JSON.stringify(status, null, 2));
+    console.log(o.json ? JSON.stringify(status, null, 2) : formatStatus(status));
   });
 program
   .command('events')

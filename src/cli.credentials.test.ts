@@ -117,7 +117,7 @@ test('credential-create, credential-list and credential-revoke work against cont
       'credential-list should show the credential by name',
     );
 
-    const status = await tug(body.credential, 'status');
+    const status = await tug(body.credential, 'status', '--json');
     assert.ok(
       Array.isArray(JSON.parse(status.stdout).projects),
       'a scoped credential should work anywhere TUG_TOKEN does',
@@ -147,7 +147,7 @@ test('credential-create, credential-list and credential-revoke work against cont
       'credential-revoke should confirm',
     );
     await assert.rejects(
-      tug(body.credential, 'status'),
+      tug(body.credential, 'status', '--json'),
       /fetch failed|terminated|socket|ECONNRESET|closed|401/i,
       'the revoked credential should stop working: the connection gate refuses it',
     );
