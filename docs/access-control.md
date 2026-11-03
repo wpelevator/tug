@@ -41,11 +41,16 @@ The project column says how a scoped credential's allowed projects are checked: 
 
 | Route | Role | Project check |
 | --- | --- | --- |
+| `GET /api/v1/projects` | `read` | Response is filtered to allowed projects |
+| `GET /api/v1/services` | `read` | Query; service names and eligible placements only |
+| `GET /api/v1/deployments` | `read` | Query; active deployments only |
+| `GET /api/v1/backup/snapshots` | `read` | Query; successful catalog backups for target |
+| `GET /api/v1/holds` | `admin` | Query; deployment move holds only |
 | `GET /api/v1/status` | `read` | Response is filtered to allowed projects |
 | `GET /api/v1/events` | `read` | `project` query, or filtered to allowed projects |
 | `GET /api/v1/projects/:project` | `read` | Path |
 | `GET /api/v1/deployments/:id` | `read` | Deployment's project |
-| `GET /api/v1/volumes` | `read` | Query |
+| `GET /api/v1/volumes` | `read` | Query; includes node name, persistence and referencing services |
 | `GET /api/v1/secrets` | `read` | Query (names and versions only) |
 | `POST /api/v1/projects` | `deploy` | Body `name` |
 | `POST /api/v1/deployments` | `deploy` | Body or upload payload `project` |
@@ -59,7 +64,7 @@ The project column says how a scoped credential's allowed projects are checked: 
 | `POST /api/v1/backups/run` | `deploy` | Body `project` |
 | `GET /api/v1/backups` | `read` | Query `project` |
 | `POST /api/v1/restores` | `admin` | Body `project`; without `confirm` it only returns the plan |
-| `GET /api/v1/restores` | `read` | Query `project` |
+| `GET /api/v1/restores` | `read` | Query `project`; `state=interrupted` returns all interrupted restores |
 | `POST /api/v1/restores/:id/release` | `admin` | Drops the holds of an interrupted restore |
 | `POST /api/v1/restores/:id/resume` | `admin` | Runs an interrupted restore again |
 | `GET /api/v1/backup/destination` | `admin` | Control-wide; URL and variable names, never values |

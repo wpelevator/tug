@@ -1,3 +1,4 @@
+import { selectNodes, selectNode } from './selection.ts';
 import type { Command } from 'commander';
 import { applyConfigDefaults, normalizeControlUrl, nodeSettings } from '../cli-config.ts';
 import { formatNodes } from '../cli-status.ts';
@@ -47,6 +48,7 @@ export interface NodeIdentityOpts extends InstallOpts {
   label: string[];
   agentControlUrl?: string;
   all?: boolean;
+  select?: boolean;
   wait: boolean;
   ingress?: boolean;
   yes?: boolean;
@@ -258,11 +260,16 @@ async function runNodeIdentity(
 ): Promise<void> {
   const cfg = await loadCfg();
   const verb = repair ? 'node repair' : mode === 'create' ? 'node add' : 'node replace';
-  if (o.all) {
+  if (o.select && o.all) throw new Error('--select and --all cannot be combined');
+  if (o.all || o.select) {
     if (positional.name || positional.ssh)
-      throw new Error(`${verb} --all walks every configured node; do not name one`);
+      throw new Error(`${verb} --all/--select cannot be combined with a node or SSH target`);
     const results: { node: string; ok: boolean; reporting?: boolean; error?: string }[] = [];
-    for (const [name, settings] of Object.entries(cfg.nodes)) {
+    const names = o.select
+      ? await selectNodes(Object.keys(cfg.nodes).filter((name) => cfg.nodes[name].ssh))
+      : Object.keys(cfg.nodes);
+    for (const name of names) {
+      const settings = cfg.nodes[name];
       const target = settings.ssh as string | undefined;
       if (!target) continue;
       const merged = { ...o, name };
@@ -279,6 +286,7 @@ async function runNodeIdentity(
     return;
   }
   let name = positional.name ?? (positional.ssh ? inferNodeName(positional.ssh) : undefined);
+  if (!name && mode === 'replace') name = await selectNode();
   if (!name && mode === 'create') name = await promptNodeName(positional.ssh);
   if (!name)
     throw new Error(
@@ -286,11 +294,9 @@ async function runNodeIdentity(
         ? `${verb} needs --name${positional.ssh ? ' (an IP address does not suggest one; in a terminal it asks)' : ''}`
         : `${verb} needs the node name`,
     );
-  if (mode === 'create') {
-    // The name may have come from the SSH host, after the config defaults were applied without one.
-    o.name = name;
-    applyConfigDefaults(command, o, nodeSettings(cfg, name));
-  }
+  // Selection or SSH inference may supply the name after the root hook applied defaults.
+  o.name = name;
+  applyConfigDefaults(command, o, nodeSettings(cfg, name));
   const sshTarget = positional.ssh ?? (nodeSettings(cfg, name).ssh as string | undefined);
   if (!sshTarget)
     throw new Error(
@@ -338,14 +344,16 @@ export function registerNode(program: Command): void {
         .description(
           `${description} (the SSH target defaults to nodes.<name>.ssh in the config file; --all walks every configured node)`,
         ),
-    ).action(
-      async (
-        name: string | undefined,
-        ssh: string | undefined,
-        o: NodeIdentityOpts,
-        command: Command,
-      ) => runNodeIdentity({ name, ssh }, o, 'replace', command, repair),
-    );
+    )
+      .option('--select', 'choose registered nodes with configured SSH targets')
+      .action(
+        async (
+          name: string | undefined,
+          ssh: string | undefined,
+          o: NodeIdentityOpts,
+          command: Command,
+        ) => runNodeIdentity({ name, ssh }, o, 'replace', command, repair),
+      );
   }
 
   node
@@ -470,23 +478,35 @@ export function registerNode(program: Command): void {
       },
     );
   node
-    .command('address <name> <address>')
+    .command('address [name] [address]')
+    .option('--to <address>', 'new address when choosing a node interactively')
     .description("update a node's inter-node address")
-    .action(async (name: string, address: string) =>
-      print(
+    .action(async (name: string, address: string, o: { to?: string }) => {
+      if (address && o.to) throw new Error('pass the address positionally or with --to, not both');
+      address = address || o.to || '';
+      if (!address)
+        throw new Error('node address needs an address; use --to when selecting a node');
+      name = await selectNode(name);
+      return print(
         await request('POST', `/api/v1/nodes/${encodeURIComponent(name)}/address`, { address }),
-      ),
-    );
+      );
+    });
   node
-    .command('disable <name>')
+    .command('disable [name]')
     .description(
       "block a node's key immediately without deleting its metadata or placement (no SSH needed); bring it back with node replace",
     )
     .action(async (name: string) =>
-      print(await request('POST', `/api/v1/nodes/${encodeURIComponent(name)}/disable`, {})),
+      print(
+        await request(
+          'POST',
+          `/api/v1/nodes/${encodeURIComponent(await selectNode(name))}/disable`,
+          {},
+        ),
+      ),
     );
   node
-    .command('remove <name> [sshTarget]')
+    .command('remove [name] [sshTarget]')
     .description(
       'remove a retired node from the control plane (its identity, statuses and queued commands); with --teardown also stop its agent and delete its containers and agent state over SSH',
     )
@@ -509,6 +529,7 @@ export function registerNode(program: Command): void {
         if (!o.teardown) {
           if (ssh || o.deleteData || o.yes)
             throw new Error('an SSH target, --delete-data and --yes need --teardown');
+          name = await selectNode(name);
           return print(
             await request(
               'DELETE',
@@ -516,6 +537,7 @@ export function registerNode(program: Command): void {
             ),
           );
         }
+        name = await selectNode(name);
         const cfg = await loadCfg();
         const sshTarget = ssh ?? (nodeSettings(cfg, name).ssh as string | undefined);
         if (!sshTarget)
@@ -550,16 +572,20 @@ export function registerNode(program: Command): void {
     );
 
   node
-    .command('ingress <name>')
+    .command('ingress [name]')
     .description(
       'mark a node as an ingress node (managed Caddy on ports 80/443), or remove the role with --disable',
     )
     .option('--disable', 'stop acting as an ingress node')
     .action(async (name: string, o: { disable?: boolean }) =>
       print(
-        await request('POST', `/api/v1/nodes/${encodeURIComponent(name)}/ingress`, {
-          enabled: !o.disable,
-        }),
+        await request(
+          'POST',
+          `/api/v1/nodes/${encodeURIComponent(await selectNode(name))}/ingress`,
+          {
+            enabled: !o.disable,
+          },
+        ),
       ),
     );
 }

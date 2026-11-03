@@ -1,3 +1,4 @@
+import { selectDeployment, selectService } from './selection.ts';
 import { existsSync, openAsBlob } from 'node:fs';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -155,10 +156,16 @@ export function registerDeploy(program: Command): void {
       },
     );
   deploy
-    .command('cancel <id>')
+    .command('cancel [id]')
     .description('cancel a deployment that has not finished')
     .action(async (id: string) =>
-      print(await request('POST', `/api/v1/deployments/${encodeURIComponent(id)}/cancel`, {})),
+      print(
+        await request(
+          'POST',
+          `/api/v1/deployments/${encodeURIComponent(await selectDeployment(id))}/cancel`,
+          {},
+        ),
+      ),
     );
 
   program
@@ -179,31 +186,43 @@ export function registerDeploy(program: Command): void {
     });
 
   program
-    .command('scale <service> <replicas>')
+    .command('scale [service] [replicas]')
+    .option('--replicas <n>', 'replica count when choosing a service interactively')
     .description('scale a service to N replicas across matching nodes')
     .option('--json', 'print the full result as JSON')
-    .action(async (service: string, replicas: string, o: CommonOpts & { json?: boolean }) => {
-      const project = await projectOf(o);
-      if (!/^[1-9]\d*$/.test(replicas)) throw new Error('replicas must be a positive integer');
-      const result = await request<{ service: string; replicas: number; nodes: string[] }>(
-        'POST',
-        '/api/v1/scale',
-        { project, service, replicas: Number(replicas) },
-      );
-      printResult(
-        o.json,
-        result,
-        (r) =>
-          `${r.service} scaled to ${r.replicas} replica${r.replicas === 1 ? '' : 's'} on ${r.nodes.join(', ')}`,
-      );
-    });
+    .action(
+      async (
+        service: string,
+        replicas: string,
+        o: CommonOpts & { json?: boolean; replicas?: string },
+      ) => {
+        if (o.replicas && replicas)
+          throw new Error('pass replicas positionally or with --replicas, not both');
+        replicas = replicas || o.replicas || '';
+        const project = await projectOf(o);
+        if (!/^[1-9]\d*$/.test(replicas)) throw new Error('replicas must be a positive integer');
+        service = await selectService(service);
+        const result = await request<{ service: string; replicas: number; nodes: string[] }>(
+          'POST',
+          '/api/v1/scale',
+          { project, service, replicas: Number(replicas) },
+        );
+        printResult(
+          o.json,
+          result,
+          (r) =>
+            `${r.service} scaled to ${r.replicas} replica${r.replicas === 1 ? '' : 's'} on ${r.nodes.join(', ')}`,
+        );
+      },
+    );
 
   program
-    .command('restart <service>')
+    .command('restart [service]')
     .description('restart a service on every node that runs it')
     .option('--timeout <seconds>', 'wait timeout', '60')
     .action(async (svc: string, o: CommonOpts & { timeout: string }) => {
       const project = await projectOf(o);
+      svc = await selectService(svc);
       const created = await request('POST', '/api/v1/restart', { project, service: svc });
       const cmd = await waitForCommand(created.commandId, Number(o.timeout));
       if (cmd.state === 'failed')

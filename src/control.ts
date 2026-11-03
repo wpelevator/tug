@@ -1855,7 +1855,13 @@ export async function createApp(
     res.json({ confirmed: true, plan, ...started });
   });
   api('get', '/api/v1/restores', queryProject, async (req, res) =>
-    res.json({ restores: restores.list(String(req.query.project || 'site')) }),
+    res.json({
+      restores: restores.list(
+        String(req.query.project || 'site'),
+        20,
+        req.query.state === 'interrupted',
+      ),
+    }),
   );
   api('post', '/api/v1/restores/:id/release', null, async (req, res) => {
     const result = restores.releaseInterrupted(String(req.params.id));
@@ -1868,6 +1874,7 @@ export async function createApp(
     res.json(result);
   });
   api('get', '/api/v1/backups', queryProject, async (req, res) => {
+    backups.sync();
     const project = String(req.query.project || 'site');
     const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 500);
     res.json({
@@ -2657,14 +2664,31 @@ export async function createApp(
       }
     }),
   );
-  api('get', '/api/v1/volumes', queryProject, async (req, res) =>
+  api('get', '/api/v1/volumes', queryProject, async (req, res) => {
+    const project = String(req.query.project || 'site');
+    const desired = currentDesired(project);
+    const state: DesiredState | undefined = desired ? JSON.parse(desired.state_json) : undefined;
+    const volumes = db.all<VolumeRow & { node: string | null }>(
+      'SELECT v.*,n.name AS node FROM volumes v LEFT JOIN nodes n ON n.id=v.node_id WHERE v.project_id=? ORDER BY v.name',
+      project,
+    );
     res.json({
-      volumes: db.all(
-        'SELECT * FROM volumes WHERE project_id=? ORDER BY name',
-        String(req.query.project || 'site'),
-      ),
-    }),
-  );
+      volumes: volumes.map((volume) => ({
+        ...volume,
+        persistent: Boolean(
+          JSON.parse(volume.config_json || '{}').persistent || volume.type !== 'ephemeral',
+        ),
+        usedBy: Object.entries(state?.compose?.services || {})
+          .filter(([, service]) =>
+            (service.volumes || []).some(
+              (mount) =>
+                (typeof mount === 'string' ? mount.split(':')[0] : mount.source) === volume.name,
+            ),
+          )
+          .map(([name]) => name),
+      })),
+    });
+  });
   api('delete', '/api/v1/volumes/:name', queryProject, async (req, res) => {
     const project = String(req.query.project || 'site');
     const deleteData = String(req.query.deleteData || 'false') === 'true';
@@ -2980,6 +3004,65 @@ export async function createApp(
   api('get', '/api/v1/commands/:id', commandProject, async (req, res) =>
     res.json(db.get('SELECT * FROM commands WHERE id=?', String(req.params.id))),
   );
+  api('get', '/api/v1/projects', null, async (req, res) => {
+    const scope = projectScope(req.actor!, 'id');
+    res.json({
+      projects: db.all(
+        `SELECT id AS name FROM projects WHERE ${scope.where} ORDER BY id`,
+        ...scope.args,
+      ),
+    });
+  });
+  api('get', '/api/v1/services', queryProject, async (req, res) => {
+    const project = String(req.query.project || 'site');
+    const row = currentDesired(project);
+    const desired: DesiredState | undefined = row ? JSON.parse(row.state_json) : undefined;
+    const nodes = db.all<NodeRow>('SELECT * FROM nodes ORDER BY name');
+    res.json({
+      services: Object.entries(desired?.services || {})
+        .map(([name, service]) => ({
+          name,
+          nodes: nodes
+            .filter(
+              (node) =>
+                !service.placement?.nodes?.length || service.placement.nodes.includes(node.name),
+            )
+            .map((node) => ({
+              name: node.name,
+              status: node.disabled_at ? 'disabled' : isStale(node) ? 'stale' : node.status,
+            })),
+        }))
+        .sort((a, b) => a.name.localeCompare(b.name)),
+    });
+  });
+  api('get', '/api/v1/deployments', queryProject, async (req, res) => {
+    res.json({
+      deployments: db.all(
+        `SELECT id,project_id,version,state,created_at FROM deployments WHERE project_id=? AND state IN (${ACTIVE_STATES_SQL}) ORDER BY created_at DESC,id`,
+        String(req.query.project || 'site'),
+      ),
+    });
+  });
+  api('get', '/api/v1/backup/snapshots', queryProject, async (req, res) => {
+    const project = String(req.query.project || 'site');
+    const target = String(req.query.target || '');
+    if (!target) throw httpError(400, 'target is required');
+    res.json({
+      snapshots: db.all(
+        `SELECT id,target,snapshot_id,finished_at,size_bytes,trigger FROM backup_runs WHERE project_id=? AND target=? AND state='succeeded' AND snapshot_id IS NOT NULL ORDER BY finished_at DESC,id`,
+        project,
+        target,
+      ),
+    });
+  });
+  api('get', '/api/v1/holds', queryProject, async (req, res) => {
+    res.json({
+      holds: db.all(
+        'SELECT service,reason,created_at FROM service_holds WHERE project_id=? AND restore_id IS NULL ORDER BY service',
+        String(req.query.project || 'site'),
+      ),
+    });
+  });
   api('get', '/api/v1/status', null, async (req, res) => {
     const staleSeconds = Number(process.env.TUG_STALE_SECONDS || 60);
     const cutoff = new Date(Date.now() - staleSeconds * 1000).toISOString();

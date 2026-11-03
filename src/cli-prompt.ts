@@ -13,7 +13,7 @@ export const ask: Prompter = async (question, hidden = false) => {
   const muted = { on: false };
   const output = new Writable({
     write(chunk, _encoding, callback) {
-      if (!muted.on) process.stdout.write(chunk);
+      if (!muted.on) process.stderr.write(chunk);
       callback();
     },
   });
@@ -24,7 +24,7 @@ export const ask: Prompter = async (question, hidden = false) => {
       rl.once('close', onClose);
       rl.question(question, (answer) => {
         rl.off('close', onClose);
-        if (hidden) process.stdout.write('\n');
+        if (hidden) process.stderr.write('\n');
         resolve(answer);
       });
       muted.on = hidden;

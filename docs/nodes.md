@@ -2,6 +2,8 @@
 
 A node is a registered Docker host on which Tug places services, and the agent is the container on it that fetches work from the control plane and manages the node's containers through the Docker Engine API. Nodes need Docker Engine only, not the Compose plugin. Add nodes either by pushing an install over SSH or by letting a fresh host enroll itself.
 
+Node operations that act on existing nodes can offer registered names when omitted. `tug node replace --select` and `tug node repair --select` choose several registered nodes with SSH targets in local config; `--all` continues to walk every configured node. Use `tug node address --to <address>` to choose the node while supplying its new address. See [interactive selection](cli.md#interactive-selection).
+
 ## Node names and IDs
 
 A node has a **name** you choose (used in `x-tug.placement.nodes`, the CLI and the config file) and an **ID** that control generates (`node_` followed by random hex). The ID is immutable: it is never derived from the name, never changes when the identity is replaced, and is never reused. The node's certificate names its ID (`tug:node:<id>`), and every record control keeps for the node (status, commands, backup schedules and volumes) refers to the ID. When `node remove` frees a name, a node created later with that name gets a new ID, so certificates issued for the removed node can never authenticate the new one, even if the same key is installed again, and leftover records of the removed node do not attach to it. `tug status` and `tug events` show IDs next to names where a record carries one.

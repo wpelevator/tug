@@ -1,3 +1,4 @@
+import { selectResource } from './selection.ts';
 import type { Command } from 'commander';
 import { print, projectOf, request } from './context.ts';
 import type { CommonOpts } from './context.ts';
@@ -13,14 +14,14 @@ export function registerVolume(program: Command): void {
       ),
     );
   volume
-    .command('remove <name>')
+    .command('remove [name]')
     .description('remove a volume from the project')
     .option('--delete-data', 'delete underlying Docker volume data')
     .action(async (name: string, o: CommonOpts & { deleteData?: boolean }) =>
       print(
         await request(
           'DELETE',
-          `/api/v1/volumes/${encodeURIComponent(name)}?project=${encodeURIComponent(await projectOf(o))}&deleteData=${Boolean(o.deleteData)}`,
+          `/api/v1/volumes/${encodeURIComponent(await selectResource(name, 'volumes'))}?project=${encodeURIComponent(await projectOf(o))}&deleteData=${Boolean(o.deleteData)}`,
         ),
       ),
     );

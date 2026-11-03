@@ -6,6 +6,8 @@ A VPS is a durable computer with enough resources to host multiple sites or a me
 
 Tug runs a small control plane and an agent, which can share the same VPS with your applications. It builds application images on the control server or your machine and delivers them to your nodes, so you do not need to run or configure an image registry for those builds. Published images are still pulled from their upstream registries.
 
+Existing service and resource targets can be chosen directly in an interactive terminal: try `tug logs`, `tug deploy cancel` or `tug restore run`. Use `--select` for backup and move-hold subsets; see [interactive CLI selection](docs/cli.md#interactive-selection) for all supported commands and scripting behavior.
+
 ## What you can do with it
 
 - **Deploy a Compose file to your servers.** `tug deploy` builds or pulls your images, starts them on the right nodes, waits for health checks and tells you why if something fails. `tug rollback` returns to the previous version, and `x-tug: { rollback: auto }` does it for you.
