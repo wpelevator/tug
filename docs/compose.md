@@ -2,6 +2,8 @@
 
 Tug deploys standard Docker Compose files with an `x-tug` extension on services and volumes for placement and health checks. Compose is used only on the operator machine, where `tug deploy` normalizes the file; nodes run no Compose. Each agent turns the services placed on its node into Docker Engine API container definitions, without `x-tug`, `build`, `deploy` and `container_name`, with `extra_hosts` added for services on other nodes and `image` set to the built or declared image. Published `ports` without a host IP are bound to the node's `address` or `127.0.0.1` instead of every interface; write the host IP (for example `"0.0.0.0:80:80"`) to publish on purpose. See [Published ports](networking.md#published-ports-private-by-default).
 
+See [Health checks](healthchecks.md) to choose a probe and [Service placement and scaling](service-placement.md) to choose where services run.
+
 ## Services
 
 ```yaml
@@ -21,10 +23,10 @@ services:
         path: /
 ```
 
-- `placement.nodes`: node names that run the service. Required on every service when more than one node is registered. With a single node, services without placement go to that node.
+- `placement.nodes`: node names that run the service. With one registered node, a service without placement goes to that node. With multiple nodes, choose explicit nodes, labels or `global: true` for every service.
 - `placement.labels`: node labels (tags) that select the nodes running the service. Nodes must carry all listed labels. Combined with `replicas: N`, the control plane spreads the service across N matching nodes; `global: true` runs one replica on every matching node. Nodes whose agent has not been seen within `TUG_STALE_SECONDS` are skipped when labels or `global` are resolved (at deploy and on `tug scale`), so a dead host cannot hold a rollout open. Explicit `placement.nodes` still pins a service to named nodes, and `tug scale` never moves a pinned service off them.
 - `global`: run one replica on every node matching `placement.labels` (or every node when no labels are given).
-- `replicas`: optional; in this version it must equal the number of placement nodes (one container per node).
+- `replicas`: optional. With explicit nodes and no labels, it must equal the number of named nodes. With label placement, it selects up to that many matching nodes. Tug runs at most one replica of a service per node.
 - `ingress`: publishes the service on a hostname through the managed Caddy edge (see [Networking](networking.md#layer-b-ingress-and-tls)). `host` is a fully qualified hostname, unique across the file; `port` is the service's container port or published host port and must appear in `ports`; `tls` is `auto` (default, ACME), `custom` or `off`. `tls: custom` also needs `cert` and `key`, the names of project secrets holding the PEM certificate chain and private key, which must exist before you deploy.
 - `rollout`: `strategy: recreate` (default) or `rolling`, plus `drain`; see [Rolling rollouts](#rolling-rollouts). The top-level `x-tug: { rollback: auto }` is described under [Automatic rollback](#automatic-rollback).
 - `health`: checked by the agent after the container starts; the service is `serving` only once it passes.
@@ -33,7 +35,7 @@ services:
   - `type: http` requests `http://<container-ip>:<port><path>` (defaults `80` and `/`) and expects a 2xx response after following redirects.
   - `interval` (default `2s`), `timeout` (default `2s`) and `retries` (default `10`) accept numbers in milliseconds or `ms`/`s`/`m` suffixes.
 
-`depends_on` sets start order on a node. `condition: service_healthy` waits on the dependency's `x-tug.health` when it has one, otherwise on Docker's `HEALTHCHECK`, so it fails the deploy when the image has no `HEALTHCHECK` and the service has no `healthcheck:` block. MariaDB 11.4 is one such image. Use `depends_on: [db]` and `x-tug.health` on each service. A failed apply is included in the deployment error `tug deploy` prints, and recorded once as `service.failed`.
+`depends_on` sets start order on a node. `condition: service_healthy` waits on the dependency's `x-tug.health` when it has one; otherwise it checks that the container is running and, if present, its Docker `HEALTHCHECK` is healthy. Without either health check it only verifies that the container is running. A failed apply is included in the deployment error `tug deploy` prints, and recorded once as `service.failed`.
 
 ```yaml
     x-tug:
@@ -143,7 +145,7 @@ services:
     x-tug:
       placement: { nodes: [app1] }
       backup:
-        command: mariadb-dump -u root -p"$MARIADB_ROOT_PASSWORD" --single-transaction --databases wordpress
+        command: mariadb-dump -u root -p"$$MARIADB_ROOT_PASSWORD" --single-transaction --databases wordpress
         filename: wordpress.sql
         verify: "-- Dump completed"
 
@@ -185,7 +187,7 @@ Secrets are referenced by variable name and resolved by control at deploy time; 
 
 ## A database on the same node
 
-An app reaches a database by Compose's own DNS only when they are on the same node. A name injected for a service on another node points at that node's address, and the client has to use the published host port, so an unpublished database is not reachable across nodes. Shared volumes and replica spread are not implemented.
+An app reaches a database by Compose's own DNS only when they are on the same node. A name injected for a service on another node points at that node's address, and the client has to use the published host port, so an unpublished database is not reachable across nodes. Local volumes are not copied between nodes; label placement can spread replicas across matching nodes.
 
 ```yaml
 services:
@@ -231,7 +233,7 @@ volumes:
         nodes: [app]
 ```
 
-Set `DB_PASSWORD` and `DB_ROOT_PASSWORD` with `tug secret set` before deploying. The MariaDB flag keeps the buffer pool small enough for a 1 GB host that is also running the agent. Do not add `condition: service_healthy` unless the database image defines a Docker `HEALTHCHECK`.
+Set `DB_PASSWORD` and `DB_ROOT_PASSWORD` with `tug secret set` before deploying. The MariaDB flag keeps the buffer pool small enough for a 1 GB host that is also running the agent. A `service_healthy` dependency can use the database service’s `x-tug.health`; without a Tug or Docker health check it verifies only that the container is running.
 
 ## Not supported
 

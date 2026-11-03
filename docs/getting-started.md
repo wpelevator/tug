@@ -1,116 +1,75 @@
-# Getting started
+# Deploy your first service
 
-This walks from nothing to a deployed Compose project: install the control plane, add a node, deploy. You need a machine to run the control plane, at least one more Docker host to run workloads (they can be the same machine for a trial), SSH access as root or a user with Docker rights, and the `tug` CLI on your laptop or CI runner.
+Install Tug's control plane and agent on one Linux VPS, deploy nginx, and visit its welcome page.
 
-```bash
-npm install -g @wpelevator/tug   # Node >= 22.18; or use `npx @wpelevator/tug`
-```
+## Before you start
 
-The CLI installs the matching `ghcr.io/wpelevator/tug:<version>` image on your hosts. Nodes need Docker Engine only. Add `--install-docker` to any install command to have Tug install Docker on a supported Debian, Ubuntu, Fedora or RHEL-compatible host first.
+You need a VPS with a public IP and SSH access as root, Node.js 22.18 or newer and Docker Compose v2 on your computer. The VPS must run Debian, Ubuntu, Fedora or a RHEL-compatible distribution if you want Tug to install Docker; otherwise install Docker Engine and the Compose plugin there first. The VPS needs outbound access to pull images. Allow your computer and the agent to reach control on TCP 8443, and allow your computer to reach TCP 8080 for this temporary example. Check your provider firewall as well as any host firewall.
 
-## How access works
+Replace `203.0.113.5` below with your VPS address. These commands assume an interactive terminal, where Tug explains and confirms the installation choices. For automation see [Setup in the CLI reference](cli.md#setup).
 
-Everything that talks to the control plane uses a client certificate: you, CI and every node. There are no API tokens and no passwords.
+## 1. Install Tug and control
 
-- Installing the control plane creates a private certificate authority (CA) on that host and issues you a **root credential**, a file containing the CA, a certificate and a private key.
-- The CA also gives control a generated **control name** (`control-<hash>.tug`). Clients verify that name, so verification does not depend on the address you dial. You can use a bare IP, change the IP later, or connect through an SSH tunnel without issuing new credentials.
-- Control serves mutual TLS directly on one port (default `8443`). Do not put a TLS-terminating proxy in front of it; TCP passthrough is fine.
+On your computer, create a directory for this project and install the CLI:
 
-## 1. Install the control plane
-
-```bash
+```sh
+mkdir my-first-tug && cd my-first-tug
+npm install -g @wpelevator/tug
 tug setup root@203.0.113.5
 ```
 
-`tug setup` is short for `tug control setup`. In a terminal it checks for Docker, offers to install it when missing, prints its plan and asks to confirm; pass `--install-docker` and `-y` to do the same without questions, for example in a script.
+Allow Tug to install Docker if necessary and confirm the plan. Setup installs control and imports a root operator credential to your computer. The credential has full administrative access; keep it private. Setup creates `tug.yml` for shared defaults and a local overlay pointing to the credential. Keep working in this directory: the CLI searches the current directory for configuration, not its parents. See [project and configuration selection](cli.md#arguments-options-and-configuration).
 
-Clients need a reachable address for control. `control setup` uses `controlUrl` from the CLI config file, including any overlay override; `--config <file>` selects a file. Without it, the command takes the SSH target and the published port (here `https://203.0.113.5:8443`) and prints that default. Pass `--control-url https://control.example.com:8443` when clients should use a different address, for example a DNS name or an SSH alias that only resolves on your machine. It can be an IP or a DNS name. It is written into each credential as the default connect address and added to the server certificate, but it is not the identity: if the address changes you update the setting and clients can override it (see [Moving the control plane](#moving-the-control-plane)). Add `--extra-san <name-or-ip>` for other addresses clients might use, and `--port` to publish a different port.
-
-The command checks the host (Docker, free disk, free port), starts the control container and imports the root credential: it creates `tug.yml` (commit it; it lists your servers and defaults), copies the credential to a `0600` file under `~/.config/tug/credentials/` and points the git-ignored `tug.local.yml` at it. The credential is full admin access, so keep that file safe. Add `--credential-out <file>` to also save a copy, or `--no-import --credential-out <file>` to only save it (to import it elsewhere with `tug init <file>`). Running the same command later upgrades control in place and does not issue a new root credential.
-
-## 2. Check the connection
-
-```bash
+```sh
 tug status
 ```
 
-In CI, set `TUG_CREDENTIAL` (the encoded credential) or `TUG_CREDENTIAL_FILE` instead of importing a credential.
+You should see a control-wide status summary. If it cannot connect, check the address printed during setup and TCP 8443; see [Troubleshooting](troubleshooting.md).
 
-## 3. Add a node
+## 2. Add the same VPS as a node
 
-If you can SSH to the host:
-
-```bash
-tug node add root@198.51.100.7
+```sh
+tug node add root@203.0.113.5 --name app1
+tug node list
 ```
 
-The node name defaults to the first DNS label of the SSH host (`app1` for `root@app1.example.com`); when you connect by IP address a terminal asks for the name and suggests the host's own hostname, and a script passes `--name`. In a terminal the command checks for Docker and offers to install it, lists the host's IPv4 addresses (private ones first) to choose the inter-node address from, asks whether the node should handle ingress and shows a plan to confirm before it changes anything. In a script, say it all explicitly: `tug node add root@198.51.100.7 --name app1 --address 10.0.0.7 --install-docker --ingress -y`. List the registered nodes with `tug node list`.
+Accept Docker installation if prompted, choose an address belonging to the VPS and confirm the plan. You can decline managed ingress for this example and enable it later when you add a hostname. A private interface address is useful when you add a second server. The agent connects out to control and should appear in the node list with a recent contact time. The control plane and agent now share the VPS.
 
-The node generates its own private key, your admin credential authorizes it, and the signed certificate is installed back over SSH. `--address` is the node's private inter-node IP on your existing network; other nodes and ingress upstreams use it, and Tug binds published ports to it. It must be reachable from nodes that need cross-node service traffic. The command waits for the node's first report. It is safe to run again after a failure.
+## 3. Deploy and visit a service
 
-If you cannot SSH to it (cloud-init, autoscaling, a host behind NAT), prepare an enrollment credential and run the printed command on the host:
-
-```bash
-tug node enroll --name app1 --address 10.0.0.11                  # prints a docker run
-tug node enroll --name app1 --address 10.0.0.11 --install-docker # prints cloud-init user-data
-```
-
-The join key inside is single-use, bound to the node name and valid for one hour. Mint one per instance, and treat saved user-data as a secret.
-
-Agents only dial out to control, so the control channel works through NAT. Cross-node workload traffic is separate: service names and remote ingress upstreams require reachable private node `address` values on your network, and Tug does not encrypt that traffic. Check with `tug status`; a node that is reporting shows a recent `last_seen_at`.
-
-## 4. Deploy
-
-Add the node to the service's placement in your Compose file:
+Save this as `compose.yaml` in the same directory:
 
 ```yaml
 services:
   web:
-    image: nginx:alpine
+    image: nginx:1.27-alpine
+    ports:
+      - "0.0.0.0:8080:80"
     x-tug:
-      placement:
-        nodes: [app1]
+      health:
+        type: http
+        port: 80
+        path: /
 ```
 
-```bash
-tug secret set DB_PASSWORD        # optional: `tug deploy` prompts for missing secrets in a terminal
-tug deploy -f docker-compose.yml
+```sh
+tug deploy
+tug status
+tug logs web
+curl http://203.0.113.5:8080/
 ```
 
-`deploy` waits until every placed node reports the new revision healthy. Then use `tug status`, `logs`, `exec`, `ps`, `rollback`, `backup run` and `doctor`. See [Compose extensions](compose.md) for placement, health checks, rollouts, ingress and backups.
+The deploy should report success, status should show `web` serving on `app1`, and curl should return the nginx welcome page. The explicit `0.0.0.0` publishes the example on all IPv4 interfaces; restrict TCP 8080 to your computer in the provider firewall while trying it. For a real site, use [managed ingress and HTTPS](networking.md#layer-b-ingress-and-tls), remove this explicit public binding, and redeploy. Tug otherwise binds published ports to the node address or loopback; a public node address can still make them public. See [port exposure](networking.md#published-ports-private-by-default).
 
-## 5. Give CI and teammates their own credentials
+With one node, omitted placement selects it automatically. The HTTP check verifies nginx responds before Tug marks it serving; see [Health checks](healthchecks.md). If the deploy fails or the page is unreachable, start with [Troubleshooting](troubleshooting.md).
 
-```bash
-tug credential create ci-site --role deploy --project site
-```
+## Choose a next step
 
-It prints the credential once and control keeps no copy of the private key. Store it as `TUG_CREDENTIAL` in your CI secrets. Credentials last at most a year. To replace one, create a new name, verify it, update consumers, then `tug credential revoke` the old name. See [Access control](access-control.md).
+- [Add a hostname and HTTPS](networking.md#layer-b-ingress-and-tls): enable ingress, point DNS at the VPS and route a service.
+- [Deploy an application and database](../README.md#your-compose-file-plus-a-little-x-tug): use a volume and a project secret, then explore the [WordPress example](../examples/wordpress/README.md).
+- [Back up and recover](backups.md): protect workload data and the control plane separately, then rehearse a restore.
+- [Add another node](service-placement.md): pin stateful services and spread a stateless service across servers.
+- [Choose health checks and safer rollouts](healthchecks.md): understand readiness, failures and rollback.
+- [Give CI or teammates access](access-control.md): create credentials appropriate for trusted operators.
 
-## Moving the control plane
-
-Because clients verify the generated control name, the address is only a default:
-
-1. Move or re-address the host and set the new `TUG_CONTROL_URL` on control (or rerun `control setup` with the new `--control-url`). Control adds the new address to its certificate on restart.
-2. Until credentials are refreshed, point clients at the new address: `tug --control-url https://NEW:8443 ...` or `TUG_CONTROL_URL`, and for an agent set `TUG_CONTROL_URL` in `/etc/tug/agent.env`.
-3. Optionally reissue credentials so they carry the new default: `control setup --recover-root` for root, `credential create` for others, `node replace` for nodes.
-
-No credential becomes invalid because the address changed. The control name only changes if the CA itself is replaced, which requires redistributing every credential.
-
-## Lost or compromised something
-
-| Situation | What to do |
-| --- | --- |
-| Lost the root credential | `tug control setup <ssh-target> --recover-root` |
-| A CI credential leaked | `tug credential revoke <name>`; live sessions close within a second |
-| A node is suspect | `tug node disable <node>` now, then `tug node replace` |
-| A node's identity is corrupt or expired | `tug node repair` or `tug node replace` |
-| Restored an older control backup | Recover root if needed, reapply revocations, then `node replace --all` ([Control plane](control-plane.md#backups-and-authorization-history)) |
-
-## Next steps
-
-- [Control plane](control-plane.md): mutual TLS, the CA, backups and restore of control itself.
-- [Nodes](nodes.md): certificates, renewal, enrollment and recovery in detail.
-- [Networking](networking.md): your private inter-node network, cross-node service names and ingress.
-- [Backups](backups.md): scheduled workload backups with restic.
-- [CLI reference](cli.md) and [Configuration](configuration.md).
+The service and control plane will keep running after this tutorial. Before retiring a host that contains data, follow [Retire a host](migration.md#retire-a-host); teardown can delete volumes and credentials. The [CLI reference](cli.md), [Compose reference](compose.md) and [configuration reference](configuration.md) describe all options.

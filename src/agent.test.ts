@@ -312,6 +312,31 @@ test('services are started in depends_on order and wait for a healthy dependency
   );
 });
 
+test('service_healthy without a health check accepts a running dependency', async () => {
+  const ctx = await makeCtx();
+  const docker = fake(ctx);
+  docker.addImage('app');
+  docker.addImage('db');
+  const status = await reconcile(
+    desired({
+      services: {
+        db: { image: 'db', ...place },
+        app: { image: 'app', depends_on: { db: { condition: 'service_healthy' } }, ...place },
+      },
+    }),
+    ctx,
+  );
+  assert.equal(
+    status.health,
+    'serving',
+    'a running dependency without a health check should satisfy the fallback',
+  );
+  assert.ok(
+    docker.names().some((name) => name.includes('-app-')),
+    'the dependent service should start after the running check',
+  );
+});
+
 test('a depends_on cycle fails the apply with the cycle named', async () => {
   const ctx = await makeCtx();
   await assert.rejects(

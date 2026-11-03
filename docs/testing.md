@@ -22,7 +22,7 @@ Managed-ingress convergence tests exercise current and outdated configuration ha
 | `deploy --build-local` was rejected on containerd image stores, where `docker save` lists a build attestation as an extra top-level entry | Local integration run on Docker Desktop | Tier 1: `src/artifacts.test.ts` builds synthetic archives, including the rejected variants |
 | The first rolling deploy started two revisions of the same image | Real hosts | Not guarded yet, see backlog item 1 |
 | A control database from before scoped credentials lacks columns the current control writes | Real hosts | Not guarded yet, see backlog item 2 |
-| `depends_on.condition: service_healthy` fails the deploy when the image has no Docker `HEALTHCHECK`, and the deploy error omitted the compose message | Real hosts | Tier 1: `src/control.rollout.test.ts` asserts the deployment error includes the node apply error |
+| The earlier Compose-based agent failed `depends_on.condition: service_healthy` when the image had no Docker `HEALTHCHECK`, and the deploy error omitted the Compose message | Historical real-host evaluation | The Engine API agent now falls back to checking that the dependency is running; `src/agent.test.ts` covers this and `src/control.rollout.test.ts` checks apply errors are reported |
 
 ## Tier 1: mocked tests
 

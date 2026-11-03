@@ -20,23 +20,23 @@ Agents only dial out to the control plane, so nodes can work behind NAT or a fir
 
 ## Try it
 
-You need Node.js 22.18 or newer and Docker Compose v2 on your machine, and SSH access to one or more Linux servers (Debian, Ubuntu, Fedora or a RHEL-compatible distribution). Tug can install Docker on them for you.
+Follow [Deploy your first service](docs/getting-started.md) to install Tug, deploy nginx to one VPS and verify that it works. You need Node.js 22.18 or newer and Docker Compose v2 on your computer, plus SSH access to a Linux server. Tug can install Docker on supported servers.
 
 ```bash
 npm install -g @wpelevator/tug      # or run it with npx @wpelevator/tug
 
 tug setup root@203.0.113.5          # install the control plane
 tug node add root@203.0.113.5 --name app1  # install the agent on the same VPS
-tug deploy                          # deploy your Compose file to that VPS
+tug deploy                          # deploy a Compose file in this directory
 ```
 
-The control plane and agent share the VPS with your app and database. Choose ingress during node setup if Tug should serve your app over HTTPS, and point your hostname at the VPS. You can add another server later with `tug node add`. Avoid publishing an application port already used by control (8443 by default).
+The control plane and agent share the VPS with your application. Once your service is running, you can [add HTTPS](docs/networking.md#layer-b-ingress-and-tls), [back up your data](docs/backups.md) or [add another server](docs/service-placement.md).
 
 In a terminal Tug asks before it changes anything: whether to install Docker, which private address the node should use and whether it should handle ingress. It shows the plan and waits for you to confirm. `tug deploy` asks for any Compose variables, such as `${DB_PASSWORD}`, that no secret or `.env` provides. In CI or any other script nothing is ever asked, so pass the choices as flags (`--address`, `--ingress`, `--install-docker`, `-y`).
 
 ## Your Compose file, plus a little `x-tug`
 
-Use a supported Compose file as your starting point. This example pins the app, database and database volume to `app1`, the node named in the quick start. Placement can be omitted with one node, but explicit placement keeps the database on its chosen server when you add more nodes. Save this as `compose.yaml` and replace the hostname with yours:
+This example builds on the [quickstart](docs/getting-started.md). It pins the app, database and database volume to `app1`. Placement can be omitted with one node, but explicit placement keeps the database on its chosen server when you add more nodes. Enable ingress with `tug node ingress app1`, point the hostname's DNS at the VPS, and allow public ports 80 and 443. Save this as `compose.yaml` and replace the hostname with yours:
 
 ```yaml
 services:
@@ -157,31 +157,38 @@ It deliberately does not do Kubernetes-style scheduling, autoscaling, distribute
 
 Control serves mutual TLS directly on one port (`8443`). Every operator, CI job and node authenticates with a certificate from a private CA created at install, so the control address can be a bare IP and can change later. Do not terminate TLS in front of it. A `controlUrl` in `tug.yml` tells the CLI where control is (see [CLI configuration](docs/cli.md#config-file)). [Architecture](docs/architecture.md) covers every flow in detail, and [Security](docs/security.md) the trust boundaries.
 
-The full walkthrough, including CI credentials, moving the control plane and recovery, is in [Getting started](docs/getting-started.md).
-
 ## Documentation
 
-- [Getting started](docs/getting-started.md): install control, add nodes, deploy, give CI a credential, move control, recover.
-- [Terminology](docs/terminology.md): core concepts, the naming review (which recommendations are implemented), industry comparisons and the remaining proposed interface improvements.
-- [Architecture](docs/architecture.md): components, reconciliation, workflow diagrams, secrets and runtime paths.
-- [Compose extensions](docs/compose.md): `x-tug` placement, health checks, volumes and limitations.
-- [Control plane](docs/control-plane.md): install, mutual TLS and the private CA, image delivery, control-plane backup and recovery on another host.
-- [Examples](examples/README.md): WordPress and minimal Node.js, Django and Laravel apps with databases, backups and S3-compatible file storage.
-- [Backups](docs/backups.md): scheduled workload backups with `x-tug.backup` (restic), restore, recipes for common databases, and a restore drill. See also the [WordPress example](examples/wordpress/README.md).
-- [Access control](docs/access-control.md): certificate identity classes, scoped operator credentials, roles, audit trail and a GitHub Actions deploy example.
-- [Security](docs/security.md): deployment trust boundaries, security audit findings and validation limits.
-- [Networking](docs/networking.md): bring-your-own private networking, cross-node service names, ingress and TLS, firewall notes.
-- [Migrating to new servers](docs/migration.md): move the web tier, database, object store or control plane to new hosts, and retire the old ones.
-- [Nodes](docs/nodes.md): node names and IDs, SSH install, self-service enrollment, certificate renewal and recovery, registration and status.
-- [CLI reference](docs/cli.md): every `tug` command and option.
-- [Configuration](docs/configuration.md): CLI, control and agent environment variables.
-- [Development](docs/development.md): local setup, CI, Compose stack, host mode and the integration test.
-- [Testing](docs/testing.md): test layers, rollout metrics, mocked test backlog, and the [Caddy/PHP and static-file benchmark](docs/testing.md#caddy-proxy-overhead-benchmark).
-- [Observability](docs/observability.md): what can be observed today, and the proposed logs, metrics and alerting.
-- [Releases](docs/releases.md): changesets, npm and Docker image publishing.
-- [Standalone binary](docs/standalone-binary.md): proposed Bun-compiled CLI binaries and Homebrew distribution, with the mTLS dependency findings.
-- [Roadmap](docs/roadmap.md): goals, principles, the reference WordPress topology and planned milestones.
-- [Docker Swarm comparison](docs/swarm-comparison.md): overlapping capabilities, workflow advantages, scheduling and networking limits, failure behavior and workload fit.
+Start with the [single-VPS tutorial](docs/getting-started.md), then choose the topic that matches your next task:
+
+- **Deploy and operate**
+  - [Application examples](examples/README.md)
+  - [Health checks and rollouts](docs/healthchecks.md)
+  - [Troubleshooting](docs/troubleshooting.md)
+- **Networking and access**
+  - [Hostnames, HTTPS and service networking](docs/networking.md)
+  - [Credentials and CI](docs/access-control.md)
+  - [Security trust boundaries](docs/security.md)
+- **Servers and data**
+  - [Service placement and scaling](docs/service-placement.md)
+  - [Node management](docs/nodes.md)
+  - [Backups and recovery](docs/backups.md)
+  - [Moving to new servers](docs/migration.md)
+- **Reference**
+  - [CLI](docs/cli.md)
+  - [Compose extensions](docs/compose.md)
+  - [Configuration](docs/configuration.md)
+  - [Control plane](docs/control-plane.md)
+- **Contribute and design**
+  - [Development](docs/development.md)
+  - [Testing](docs/testing.md)
+  - [Releases](docs/releases.md)
+  - [Architecture](docs/architecture.md)
+  - [Roadmap](docs/roadmap.md)
+  - [Observability status and proposal](docs/observability.md)
+  - [Terminology](docs/terminology.md)
+  - [Standalone binary proposal](docs/standalone-binary.md)
+  - [Docker Swarm comparison](docs/swarm-comparison.md)
 
 ## Development
 

@@ -8,7 +8,7 @@ tug control setup root@control.example.com
 
 The address clients use by default comes from `controlUrl` in the CLI config file (`--config <file>` selects one), including any overlay override. Without it, the address is the SSH target's host plus the published port (`https://control.example.com:8443`), which `control setup` prints. Pass `--control-url` (or set `TUG_CONTROL_URL`) to override either default, for example when you install through an SSH alias or a private address but clients reach control elsewhere. The credential URL is never used as an installation address. A configured URL keeps its public port even when `--port` publishes a different Docker host port. It is only an address: clients verify the generated control name, not this URL. `control setup` runs SSH preflight checks on the host (Docker, Docker Compose, writable Tug paths, at least 2048 MB free under `/var/lib`, the mTLS port free), then starts the `control` container from `src/templates/control-compose.yml`, publishing one port (default `8443`). Add `--install-docker` to install Docker Engine and Compose first on a supported Debian, Ubuntu, Fedora and RHEL-compatible host.
 
-On a fresh install it then issues the **root** credential on the host (`docker exec ... control issue-credential --name root --role admin` over SSH) and imports it straight into the local config as a `0600` file (`--credential-out <file>` optionally writes an extra copy; there is no default file); it never lands in container logs or a permanent file on control. Upgrading by running `control setup` again preserves credentials and never reissues root. If the root credential is lost, `tug control setup <ssh-target> --advertise-url ... --recover-root` replaces only root's key without the API, closes its sessions within a second and audits the recovery; other admins are unaffected.
+On a fresh install it then issues the **root** credential on the host (`docker exec ... control issue-credential --name root --role admin` over SSH) and imports it straight into the local config as a `0600` file (`--credential-out <file>` optionally writes an extra copy; there is no default file); it never lands in container logs or a permanent file on control. Upgrading by running `control setup` again preserves credentials and never reissues root. If the root credential is lost, `tug control setup <ssh-target> --control-url https://control.example.com:8443 --recover-root` replaces only root's key without the API, closes its sessions within a second and audits the recovery; other admins are unaffected.
 
 The control container runs the published image `ghcr.io/wpelevator/tug:<CLI version>` (the installed CLI's own package version, so control and the CLI match). Pass `--image <tag>` to use another tag, or `--build-local-image` to build the image from the current checkout and copy it to the host over SSH with `docker save` / `scp` / `docker load` (tagged `tug:local` unless `--image` is given); the latter is for development and needs the repository's Dockerfile in the working directory. See [Releases](releases.md). Running `control setup` again over an existing control upgrades it in place: the port preflight accepts the port when the existing `tug-control-control-1` container holds it, and still fails when anything else does.
 
@@ -31,7 +31,7 @@ Control listens on **one** TLS 1.3 port that requires a client certificate from 
 - **Server certificate.** SANs are the control name, the host of `TUG_CONTROL_URL` (required, a credential-free `https://` origin including the published port; the default address written into credentials) and optional `TUG_EXTRA_SANS` (comma-separated DNS names and IPs). The server certificate lasts 90 days, is renewed at two thirds of its lifetime while running, and the TLS context reloads without a restart. Control warns when the CA nears expiry.
 - **Profiles.** Control assigns every certificate: it verifies CSR signatures and P-256 keys and never copies requester-supplied subjects, SANs, validity or extensions. Leaves are `CA=false` with one assigned identity URI, back-dated five minutes and capped by the CA's validity.
 - **Connections.** Chain validation rejects missing or foreign certificates during the handshake, before any HTTP is parsed. TLS session resumption is disabled and any reused session is closed, so every connection presents its certificate. A post-handshake gate then checks the database, and every request and WebSocket upgrade checks it again. Disable, replace, remove, revoke, root recovery and certificate expiry close the affected sockets (API-originated changes immediately, host-side changes within a second).
-- **Clients.** The CLI and agent pin the credential's CA and verify the control name derived from the CA. `--control-url` / `--agent-control-url` change only the TCP connect target (for example `127.0.0.1:18082` through an SSH tunnel), and the credential's stored URL is just the default target. Moving control to a new IP or DNS name therefore invalidates no credential; see [Getting started](getting-started.md#moving-the-control-plane).
+- **Clients.** The CLI and agent pin the credential's CA and verify the control name derived from the CA. `--control-url` / `--agent-control-url` change only the TCP connect target (for example `127.0.0.1:18082` through an SSH tunnel), and the credential's stored URL is just the default target. Moving control to a new IP or DNS name therefore invalidates no credential; see [Moving the control plane](#moving-the-control-plane).
 
 Deployment boundaries: TCP passthrough works. TLS termination ahead of control does not (it breaks the client certificate), and TLS interception fails certificate validation. Browsers need explicit CA trust and an imported client credential; browser setup is out of scope. Control's mutual TLS does not encrypt workload traffic between nodes; that traffic uses the operator's network ([Networking](networking.md#bring-your-own-network)).
 
@@ -80,6 +80,26 @@ This procedure was exercised with the published 0.9.0 release on two VPSes; see 
 5. Connect with the original operator credential and use `--control-url https://<replacement-host>:8443` if the address changed. Verify the recovered projects, deployments and backup catalog. Agents that still point to the old address must be repointed; the tested 0.9.0 path was `tug node replace <node> <ssh-target> --control-url https://<replacement-host>:8443 --agent-control-url https://<replacement-host>:8443 --credential <original-credential>`. Verify that each node returns online and that the site serves the expected data.
 
 A snapshot older than later node or operator changes does not contain those changes; follow the identity and revocation recovery notes in [Authentication and PKI](#authentication-and-pki). This sequence does not replace a separate, tested backup of workload volumes or databases.
+
+## Moving the control plane
+
+Because clients verify the generated control name, the address is only a default:
+
+1. Move or re-address the host and set the new `TUG_CONTROL_URL` on control (or rerun `control setup` with the new `--control-url`). Control adds the new address to its certificate on restart.
+2. Until credentials are refreshed, point clients at the new address: `tug --control-url https://NEW:8443 ...` or `TUG_CONTROL_URL`, and for an agent set `TUG_CONTROL_URL` in `/etc/tug/agent.env`.
+3. Optionally reissue credentials so they carry the new default: `control setup --recover-root` for root, `credential create` for others, `node replace` for nodes.
+
+No credential becomes invalid because the address changed. The control name only changes if the CA itself is replaced, which requires redistributing every credential.
+
+## Lost or compromised something
+
+| Situation | What to do |
+| --- | --- |
+| Lost the root credential | `tug control setup <ssh-target> --recover-root` |
+| A CI credential leaked | `tug credential revoke <name>`; live sessions close within a second |
+| A node is suspect | `tug node disable <node>` now, then `tug node replace` |
+| A node's identity is corrupt or expired | `tug node repair` or `tug node replace` |
+| Restored an older control backup | Recover root if needed, reapply revocations, then `node replace --all` ([Control plane](control-plane.md#backups-and-authorization-history)) |
 
 ## Access control
 
