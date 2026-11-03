@@ -64,7 +64,7 @@ tug node add root@198.51.100.7
 tug deploy
 ```
 
-`tug setup` (short for `tug control setup`) installs control and imports the root credential, `tug node add` infers the node name from the SSH host and, in a terminal, offers to install Docker, choose the inter-node address and enable ingress before it changes anything, and `tug deploy` finds `docker-compose.yml` and prompts for missing secrets. Commands read `tug <subject> <verb>` (`tug node list`, `tug secret set`, `tug backup run`); see the [CLI reference](docs/cli.md).
+`tug setup` (short for `tug control setup`) installs control and imports the root credential, `tug node add` infers the node name from the SSH host and, in a terminal, offers to install Docker, choose the inter-node address and enable ingress before it changes anything, and `tug deploy` finds `docker-compose.yml` and prompts for missing secrets. Commands read `tug <subject> <verb>` (`tug node list`, `tug secret set`, `tug backup run`), except the everyday project commands, which stay at the top level: `deploy`, `rollback`, `scale`, `restart`, `status`, `events`, `logs`, `exec`, `run`, `ps` and `inspect`. See the [CLI reference](docs/cli.md).
 
 The CLI installs the matching `ghcr.io/wpelevator/tug:<version>` image on your hosts. Control serves mutual TLS directly on its port (`8443`): every operator, CI job and node authenticates with a certificate from a private CA created at install, and clients verify a name generated from that CA, so the address can be a bare IP and can change later. Do not terminate TLS in front of it.
 

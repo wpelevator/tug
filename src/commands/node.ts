@@ -8,8 +8,10 @@ import {
   shellQuote as sh,
   HOST_NETWORK_FLAG,
 } from '../cli-install.ts';
+import type { AddressCandidate } from '../cli-onboarding.ts';
 import { formatNodePlan, inferNodeName, isValidNodeName } from '../cli-onboarding.ts';
 import { ask, canPrompt, choose, confirm } from '../cli-prompt.ts';
+import type { Prompter } from '../cli-prompt.ts';
 import { isNodeHost } from '../node-address.ts';
 import { resolveImage } from '../image.ts';
 import type { EnrollmentCredentialResponse, IdentityResponse, JoinKey } from '../protocol.ts';
@@ -38,7 +40,7 @@ import {
 import fs from 'node:fs/promises';
 
 /** Everything the SSH-assisted node commands share. */
-interface NodeIdentityOpts extends InstallOpts {
+export interface NodeIdentityOpts extends InstallOpts {
   name?: string;
   address?: string;
   label: string[];
@@ -154,18 +156,40 @@ async function installNodeIdentity(
   return reporting;
 }
 
+/** The questions and probes `planNodeAdd` makes, injectable so the prompt flow is testable without a terminal or SSH. */
+export interface PlanDeps {
+  interactive: boolean;
+  hasDocker: (target: string) => boolean;
+  discover: (target: string) => AddressCandidate[];
+  prompt: Prompter;
+}
+
+const realPlanDeps = (): PlanDeps => ({
+  interactive: canPrompt(),
+  hasDocker: (target) => hostHasDocker(target),
+  discover: discoverAddresses,
+  prompt: ask,
+});
+
 /**
  * What `node add` is about to do, with the choices a terminal can still make: Docker, the inter-node address and the
  * ingress role are asked about, never assumed. Without a terminal nothing is probed or asked and only the plan is printed.
  */
-async function planNodeAdd(sshTarget: string, name: string, o: NodeIdentityOpts): Promise<void> {
-  const interactive = canPrompt();
-  if (interactive && !o.installDocker && !hostHasDocker(sshTarget))
+export async function planNodeAdd(
+  sshTarget: string,
+  name: string,
+  o: NodeIdentityOpts,
+  deps: PlanDeps = realPlanDeps(),
+): Promise<void> {
+  const { interactive, prompt } = deps;
+  if (interactive && !o.installDocker && !deps.hasDocker(sshTarget))
     o.installDocker = await confirm(
       `Docker is not installed on ${sshTarget}. Install it now (needs root)?`,
+      true,
+      prompt,
     );
   if (interactive && !o.address) {
-    const candidates = discoverAddresses(sshTarget);
+    const candidates = deps.discover(sshTarget);
     if (candidates.length) {
       const none = 'none: leave the address unset';
       const options = [
@@ -179,6 +203,7 @@ async function planNodeAdd(sshTarget: string, name: string, o: NodeIdentityOpts)
         `Which address should other nodes use to reach ${name}?`,
         options,
         candidates[0].private ? 0 : options.length - 1,
+        prompt,
       );
       if (index < candidates.length) o.address = candidates[index].address;
     }
@@ -187,6 +212,7 @@ async function planNodeAdd(sshTarget: string, name: string, o: NodeIdentityOpts)
     o.ingress = await confirm(
       `Should ${name} handle ingress (managed Caddy on ports 80 and 443)?`,
       false,
+      prompt,
     );
   console.error(
     formatNodePlan({
@@ -199,7 +225,7 @@ async function planNodeAdd(sshTarget: string, name: string, o: NodeIdentityOpts)
       image: resolveImage(o.image, o.buildLocalImage),
     }),
   );
-  if (interactive && !o.yes && !(await confirm(`Add ${name}?`)))
+  if (interactive && !o.yes && !(await confirm(`Add ${name}?`, true, prompt)))
     throw new Error('cancelled; nothing was changed');
 }
 
