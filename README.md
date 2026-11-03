@@ -163,11 +163,34 @@ The [single-VPS tutorial](docs/getting-started.md) walks through a first deploym
 
 Start with the [single-VPS tutorial](docs/getting-started.md), then choose the topic that matches your next task:
 
-- **Deploy and operate:** [WordPress example](examples/wordpress/README.md), [health checks and rollouts](docs/healthchecks.md), and [troubleshooting](docs/troubleshooting.md).
-- **Networking and access:** [hostnames, HTTPS and service networking](docs/networking.md), [credentials and CI](docs/access-control.md), and [security trust boundaries](docs/security.md).
-- **Servers and data:** [placement and adding a second node](docs/placement.md), [node management](docs/nodes.md), [backups and recovery](docs/backups.md), and [moving to new servers](docs/migration.md).
-- **Reference:** [CLI](docs/cli.md), [Compose extensions](docs/compose.md), [configuration](docs/configuration.md), and [control plane](docs/control-plane.md).
-- **Contribute and design:** [development](docs/development.md), [testing](docs/testing.md), [releases](docs/releases.md), [architecture](docs/architecture.md), [roadmap](docs/roadmap.md), [observability status and proposal](docs/observability.md), [terminology](docs/terminology.md), [standalone binary proposal](docs/standalone-binary.md), and [Docker Swarm comparison](docs/swarm-comparison.md).
+- **Deploy and operate**
+  - [WordPress example](examples/wordpress/README.md)
+  - [Health checks and rollouts](docs/healthchecks.md)
+  - [Troubleshooting](docs/troubleshooting.md)
+- **Networking and access**
+  - [Hostnames, HTTPS and service networking](docs/networking.md)
+  - [Credentials and CI](docs/access-control.md)
+  - [Security trust boundaries](docs/security.md)
+- **Servers and data**
+  - [Placement and adding a second node](docs/placement.md)
+  - [Node management](docs/nodes.md)
+  - [Backups and recovery](docs/backups.md)
+  - [Moving to new servers](docs/migration.md)
+- **Reference**
+  - [CLI](docs/cli.md)
+  - [Compose extensions](docs/compose.md)
+  - [Configuration](docs/configuration.md)
+  - [Control plane](docs/control-plane.md)
+- **Contribute and design**
+  - [Development](docs/development.md)
+  - [Testing](docs/testing.md)
+  - [Releases](docs/releases.md)
+  - [Architecture](docs/architecture.md)
+  - [Roadmap](docs/roadmap.md)
+  - [Observability status and proposal](docs/observability.md)
+  - [Terminology](docs/terminology.md)
+  - [Standalone binary proposal](docs/standalone-binary.md)
+  - [Docker Swarm comparison](docs/swarm-comparison.md)
 
 ## Development
 
