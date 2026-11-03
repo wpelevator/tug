@@ -78,6 +78,7 @@ The project column says how a scoped credential's allowed projects are checked: 
 | `DELETE /api/v1/nodes/:name` | `admin` | Control-wide |
 | `POST /api/v1/control/backups/run` | `admin` | Control-wide |
 | `POST /api/v1/control/restore` | `admin` | Control-wide |
+| `POST /api/v1/holds/release` | `admin` | Body `project`; drops the holds a deploy placed for a move |
 | `POST /api/v1/images/prune` | `admin` | Control-wide; deletes build archives older than the kept deployments |
 | `GET /api/v1/diagnostics` | `admin` | Control-wide |
 | `POST /api/v1/diagnostics/nodes` | `admin` | Control-wide |

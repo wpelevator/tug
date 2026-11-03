@@ -45,8 +45,38 @@ export interface RestoreDeps {
   clock?: () => Date;
 }
 
+const HOST_KEY = /host|server|addr|endpoint|url|uri|dsn/i;
+
 /**
- * The services that write to a target. For a service they are the services that depend on it, transitively;
+ * True when an environment entry points at `service` over the network: a host-like variable that is exactly the
+ * service name (`WORDPRESS_DB_HOST=db`), or a value that names it as a host (`db:3306`, `mysql://u:p@db/app`,
+ * `mysql:host=db;dbname=app`). A service reached across nodes has no `depends_on` to find it by.
+ */
+export function environmentReaches(service: string, key: string, value: string): boolean {
+  const name = service.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  if (value === service) return HOST_KEY.test(key);
+  return [
+    new RegExp(`^${name}:\\d+$`),
+    new RegExp(`(?:://|@)(?:[^/@\\s]*@)?${name}(?::\\d+)?(?:[/?\\s]|$)`),
+    new RegExp(`(?:host|server)=${name}(?:[;:,\\s]|$)`, 'i'),
+  ].some((pattern) => pattern.test(value));
+}
+
+function environmentOf(service: ComposeFile['services'][string]): [string, string][] {
+  const env = service.environment as unknown;
+  if (Array.isArray(env))
+    return env.map(String).map((entry) => {
+      const at = entry.indexOf('=');
+      return at < 0 ? [entry, ''] : [entry.slice(0, at), entry.slice(at + 1)];
+    });
+  return env && typeof env === 'object'
+    ? Object.entries(env as Record<string, unknown>).map(([k, v]) => [k, String(v ?? '')])
+    : [];
+}
+
+/**
+ * The services that write to a target. For a service they are the services that depend on it, transitively,
+ * plus the services whose environment names it as a host, which is how a service on another node reaches it (only for the target itself, not for what depends on the writers);
  * for a volume, the services that mount it and everything depending on those. Stored `depends_on` is used,
  * because the per-node copies drop cross-node dependencies.
  */
@@ -76,7 +106,16 @@ export function discoverWriters(compose: ComposeFile, target: string): string[] 
   while (queue.length) {
     const current = queue.pop()!;
     for (const service of Object.keys(compose.services))
-      if (!writers.has(service) && service !== name && dependsOn(service).includes(current)) {
+      if (
+        !writers.has(service) &&
+        service !== name &&
+        (dependsOn(service).includes(current) ||
+          (kind === 'service' &&
+            current === name &&
+            environmentOf(compose.services[service]).some(([k, v]) =>
+              environmentReaches(name, k, v),
+            )))
+      ) {
         writers.add(service);
         queue.push(service);
       }
@@ -193,7 +232,7 @@ export function createRestoreService(deps: RestoreDeps) {
           return { error: `writer ${writer} is not a service of ${request.project}`, status: 400 };
       if (!writers.length && !request.noWriters && !request.writers)
         return {
-          error: `no services were found that write to ${request.target}; pass --writers to name them or --no-writers to restore without holding any`,
+          error: `no services were found that write to ${request.target} (looked at depends_on, volume mounts and host names in environment variables); pass --writers to name them or --no-writers to restore without holding any`,
           status: 409,
         };
     }

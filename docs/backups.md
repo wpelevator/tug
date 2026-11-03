@@ -88,7 +88,7 @@ Restores are as generic as backups. A service is restored by running its `x-tug.
 `tug restore` returns when the data is back and the services it stopped report serving again, or after five minutes with a warning if they do not, so a script can probe the site as soon as it returns. An in-place restore is deliberately careful:
 
 1. It **locks the project**, so a deploy, rollback or secret change gets a clear refusal while it runs.
-2. It **stops the writers**: the `writers` you named, or discovered from `depends_on` (for a service) or volume mounts (for a volume), including everything that depends on them. If none are found it refuses unless you pass `--writers` or `--no-writers`, because an app that reaches the database without `depends_on` is the hole in discovery and the plan makes you look.
+2. It **stops the writers**: the `writers` you named, or discovered from `depends_on`, or host names in environment variables such as `WORDPRESS_DB_HOST=db` or `mysql://u@db:3306/app` (for a service), or volume mounts (for a volume), including everything that depends on them. If none are found it refuses unless you pass `--writers` or `--no-writers`, because an app that reaches the database without `depends_on` is the hole in discovery and the plan makes you look.
 3. It takes a **safety backup** of the current data, tagged `trigger:pre-restore` and exempt from retention (skip with `--no-safety-backup`). If that fails, nothing has changed: the writers start again and the lock is dropped.
 4. It restores, then starts the writers and unlocks.
 

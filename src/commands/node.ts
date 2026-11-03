@@ -35,6 +35,7 @@ import {
   dockerBootstrap,
   hostHasDocker,
   preflightRemote,
+  teardownScript,
   transferTugImage,
 } from './host.ts';
 import fs from 'node:fs/promises';
@@ -484,19 +485,69 @@ export function registerNode(program: Command): void {
       print(await request('POST', `/api/v1/nodes/${encodeURIComponent(name)}/disable`, {})),
     );
   node
-    .command('remove <name>')
+    .command('remove <name> [sshTarget]')
     .description(
-      'remove a retired node from the control plane (its identity, statuses and queued commands); stop its agent and remove its containers on the host yourself',
+      'remove a retired node from the control plane (its identity, statuses and queued commands); with --teardown also stop its agent and delete its containers and agent state over SSH',
     )
     .option('--force', 'remove even if the node is still reporting')
-    .action(async (name: string, o: { force?: boolean }) =>
-      print(
-        await request(
-          'DELETE',
-          `/api/v1/nodes/${encodeURIComponent(name)}${o.force ? '?force=true' : ''}`,
-        ),
-      ),
+    .option(
+      '--teardown',
+      'also clean the host over SSH (the SSH target defaults to nodes.<name>.ssh in the config file)',
+    )
+    .option(
+      '--delete-data',
+      'with --teardown, also delete project volumes and ingress certificates',
+    )
+    .option('-y, --yes', 'with --teardown, do not ask for confirmation')
+    .action(
+      async (
+        name: string,
+        ssh: string | undefined,
+        o: { force?: boolean; teardown?: boolean; deleteData?: boolean; yes?: boolean },
+      ) => {
+        if (!o.teardown) {
+          if (ssh || o.deleteData || o.yes)
+            throw new Error('an SSH target, --delete-data and --yes need --teardown');
+          return print(
+            await request(
+              'DELETE',
+              `/api/v1/nodes/${encodeURIComponent(name)}${o.force ? '?force=true' : ''}`,
+            ),
+          );
+        }
+        const cfg = await loadCfg();
+        const sshTarget = ssh ?? (nodeSettings(cfg, name).ssh as string | undefined);
+        if (!sshTarget)
+          throw new Error(
+            `--teardown needs an SSH target: pass <ssh-target> or set nodes.${name}.ssh in ${cfg.file}`,
+          );
+        if (!o.yes) {
+          if (!canPrompt())
+            throw new Error(
+              '--teardown deletes data on the host; pass -y to confirm without a terminal',
+            );
+          console.error(
+            `This will stop the Tug agent on ${sshTarget}, remove its Tug containers and networks and delete /etc/tug and /var/lib/tug${
+              o.deleteData
+                ? ', and DELETE every project volume and the ingress certificates'
+                : ' (project volumes are kept)'
+            }.`,
+          );
+          if (!(await confirm('Continue?', false))) throw new Error('cancelled');
+        }
+        // The control record goes first: it refuses a node that is still placed in a current deployment before any
+        // host is touched. A node control no longer knows is cleaned anyway, so a failed cleanup can be retried.
+        let removed: unknown = { ok: true, node: name, alreadyRemoved: true };
+        try {
+          removed = await request('DELETE', `/api/v1/nodes/${encodeURIComponent(name)}?force=true`);
+        } catch (error) {
+          if (!/node not found/.test(errMessage(error))) throw error;
+        }
+        runLocal('ssh', ['--', sshTarget, teardownScript(Boolean(o.deleteData))]);
+        print({ ...(removed as object), teardown: sshTarget, deleteData: Boolean(o.deleteData) });
+      },
     );
+
   node
     .command('ingress <name>')
     .description(

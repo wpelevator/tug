@@ -5,7 +5,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createApp } from './control.ts';
-import { testImageResolver, testControlUrl, testIdentity } from '../tests/helpers.ts';
+import { json, testImageResolver, testControlUrl, testIdentity } from '../tests/helpers.ts';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
@@ -288,6 +288,67 @@ test('scale stays within explicit placement.nodes when the service has no labels
       ['web-1'],
       'scale should not place replicas outside the pinned placement.nodes',
     );
+  } finally {
+    await s.close();
+  }
+});
+
+test('moving a service with data to another node needs --move and holds its writers', async () => {
+  const s = await makeServer();
+  try {
+    const nodeA = await post(s.base, '/api/v1/nodes/register', { name: 'a' });
+    await post(s.base, '/api/v1/nodes/register', { name: 'b' });
+    const compose = (dbNode: string) =>
+      normalized({
+        services: {
+          db: {
+            image: 'mariadb',
+            volumes: [{ type: 'volume', source: 'data', target: '/var/lib/mysql' }],
+            'x-tug': { placement: { nodes: [dbNode] } },
+          },
+          web: {
+            image: 'wordpress',
+            environment: { WORDPRESS_DB_HOST: 'db' },
+            'x-tug': { placement: { nodes: ['a'] } },
+          },
+        },
+        volumes: { data: {} },
+      });
+    const deploy = (version: string, dbNode: string, moves?: string[]) =>
+      fetch(`${s.base}/api/v1/deployments`, {
+        method: 'POST',
+        headers: op,
+        body: JSON.stringify({ project: 'site', version, compose: compose(dbNode), moves }),
+      });
+    const first = await deploy('v1', 'a');
+    assert.equal(first.status, 200, 'the first deployment places db on a');
+    const desired = (await json(first)).desiredState;
+    await fetch(`${s.base}/agent/v1/status`, {
+      method: 'POST',
+      headers: { ...op, 'x-tug-test-node': nodeA.nodeId },
+      body: JSON.stringify({
+        projects: [
+          {
+            project: 'site',
+            observedVersion: desired.version,
+            observedRevision: desired.revision,
+            health: 'serving',
+          },
+        ],
+      }),
+    });
+    const refused = await deploy('v2', 'b');
+    assert.equal(refused.status, 409, 'moving db to another node without --move should be refused');
+    assert.match((await json(refused)).error, /would start empty.*--move db/);
+    assert.equal((await deploy('v2', 'b', ['db'])).status, 200, 'an acknowledged move deploys');
+    const work = await json(
+      await fetch(`${s.base}/agent/v1/work`, {
+        headers: { ...op, 'x-tug-test-node': nodeA.nodeId },
+      }),
+    );
+    assert.deepEqual(work.holds, { site: ['web'] }, 'the writer of the moved service is held');
+    const released = await post(s.base, '/api/v1/holds/release', { project: 'site' });
+    assert.deepEqual(released.released, ['web'], 'hold release starts the held writer again');
   } finally {
     await s.close();
   }

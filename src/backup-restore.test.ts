@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { openDb } from './db.ts';
 import { createBackupService } from './backup-scheduler.ts';
-import { createRestoreService, discoverWriters } from './backup-restore.ts';
+import { createRestoreService, discoverWriters, environmentReaches } from './backup-restore.ts';
 import { normalized } from '../tests/fake-docker.ts';
 import type { BackupJobPayload, DesiredState } from './protocol.ts';
 
@@ -552,4 +552,24 @@ test('an unfinished restore keeps the project locked across a control restart', 
   f.db.run("DELETE FROM locks WHERE name='project:site'");
   f.restores.advance();
   assert.equal(f.lock()?.owner, `restore:${id}`, 're-adopting the restore takes the lock back');
+});
+
+test('writers on another node are found from environment variables that name the target as a host', () => {
+  const compose = {
+    services: {
+      db: { image: 'mariadb' },
+      php: { image: 'php', environment: { WORDPRESS_DB_HOST: 'db', DB_USER: 'db' } },
+      cron: { image: 'php', environment: ['DATABASE_URL=mysql://u:p@db:3306/app'] },
+      pdo: { image: 'php', environment: { DSN: 'mysql:host=db;dbname=app' } },
+      cache: { image: 'redis', environment: { CACHE_HOST: 'redis', NAME: 'db' } },
+      unrelated: { image: 'busybox', environment: { DB_USER: 'db', MODE: 'dbx' } },
+    },
+  } as never;
+  assert.deepEqual(
+    discoverWriters(compose, 'service:db'),
+    ['cron', 'pdo', 'php'],
+    'host-like variables, URLs and DSNs naming db make a service a writer; a user or mode called db does not',
+  );
+  assert.equal(environmentReaches('db', 'X', 'db:3306'), true, 'host:port names the service');
+  assert.equal(environmentReaches('db', 'X', 'dbx'), false, 'a prefix is not the service name');
 });

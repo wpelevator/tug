@@ -265,6 +265,7 @@ const SAMPLES: Record<string, { path: string; body?: unknown }> = {
   },
   'POST /api/v1/nodes/:name/ingress': { path: '/api/v1/nodes/ghost/ingress', body: {} },
   'POST /api/v1/control/backups/run': { path: '/api/v1/control/backups/run', body: {} },
+  'POST /api/v1/holds/release': { path: '/api/v1/holds/release', body: {} },
   'POST /api/v1/images/prune': { path: '/api/v1/images/prune', body: { dryRun: true } },
   'POST /api/v1/control/restore': { path: '/api/v1/control/restore', body: {} },
   'GET /api/v1/diagnostics': { path: '/api/v1/diagnostics' },
