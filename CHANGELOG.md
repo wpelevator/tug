@@ -1,5 +1,22 @@
 # @wpelevator/tug
 
+## 0.13.0
+
+### Minor Changes
+
+- 6c6e88d: Choose services, nodes, deployments, restore snapshots and other existing resources directly in the terminal. Add opt-in multi-selection for backups, move holds, node repair/replacement, restore writers and credential project scopes, with scoped control-plane discovery and unchanged explicit-target scripting.
+
+### Patch Changes
+
+- fe10226: Report elapsed-time progress during rollback, setup and image transfers, node reporting, backups, restores and agent command waits.
+- b58b9a3: CLI failures say more: a network error names its cause instead of only `fetch failed`, a deploy whose wait is interrupted names the deployment and `tug deploy cancel <id>` (as does the refusal when another deploy is still rolling out), and `tug setup` and `tug node add` stop before touching the host when the release image for this CLI version is not published yet.
+- e774226: Add reproducible local benchmarks for the WordPress, Node.js, Django, and Laravel examples.
+- 871b326: Remove backup destinations and their stored credentials atomically, preserving both if a database operation fails.
+- c9d542b: Include the docs directory in the npm package so the documentation is available with installed releases.
+- 872bbc2: Fix tug secret set hanging after printing its result when stdin remains open.
+- 872bbc2: Preserve readline cleanup between CLI prompts so stale input listeners cannot echo later hidden answers.
+- fe10226: Show deployment stages and elapsed-time progress on stderr, including per-service local builds and rollout state changes.
+
 ## 0.12.0
 
 ### Minor Changes
