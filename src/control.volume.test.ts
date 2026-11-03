@@ -81,7 +81,15 @@ test('volume metadata is protected and delete-data queues deletion after unrefer
     });
     assert.equal(res.status, 200);
     res = await fetch(`${s.base}/api/v1/volumes?project=site`, { headers: op });
-    assert.equal((await json(res)).volumes[0].name, 'data');
+    const listed = (await json(res)).volumes[0];
+    assert.equal(listed.name, 'data', 'the listing should retain the volume name');
+    assert.equal(listed.node, 'n1', 'volume selection should show a readable node name');
+    assert.equal(listed.persistent, true, 'volume selection should identify persistent data');
+    assert.deepEqual(
+      listed.usedBy,
+      ['app'],
+      'volume selection should identify services that still reference it',
+    );
     res = await fetch(`${s.base}/api/v1/volumes/data?project=site&deleteData=true`, {
       method: 'DELETE',
       headers: op,

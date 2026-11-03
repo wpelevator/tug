@@ -588,7 +588,12 @@ export function createRestoreService(deps: RestoreDeps) {
     return result;
   }
 
-  function list(project: string, limit = 20): RestoreRunRow[] {
+  function list(project: string, limit = 20, interruptedOnly = false): RestoreRunRow[] {
+    if (interruptedOnly)
+      return db.all<RestoreRunRow>(
+        "SELECT * FROM restore_runs WHERE project_id=? AND state='interrupted' ORDER BY started_at DESC,id",
+        project,
+      );
     return db.all<RestoreRunRow>(
       'SELECT * FROM restore_runs WHERE project_id=? ORDER BY started_at DESC LIMIT ?',
       project,

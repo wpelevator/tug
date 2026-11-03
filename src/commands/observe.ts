@@ -1,3 +1,4 @@
+import { selectNode } from './selection.ts';
 import type { Command } from 'commander';
 import { errMessage } from '../util.ts';
 import { formatStatus } from '../cli-status.ts';
@@ -37,9 +38,11 @@ export function registerObserve(program: Command): void {
       'check this machine and the control plane: certificate expiry, node connectivity and clock skew',
     )
     .option('--nodes', 'also run host diagnostics on every node through its agent and wait')
-    .option('--node <name>', 'run host diagnostics on one node through its agent and wait')
+    .option('--node [name]', 'run host diagnostics on one node through its agent and wait')
     .option('--timeout <seconds>', 'wait timeout for node diagnostics', '60')
-    .action(async (o: { nodes?: boolean; node?: string; timeout: string }) => {
+    .action(async (o: { nodes?: boolean; node?: string | boolean; timeout: string }) => {
+      if (o.nodes && o.node) throw new Error('--nodes and --node cannot be combined');
+      if (o.node === true) o.node = await selectNode();
       const local: { name: string; ok: boolean; output?: string; error?: string }[] = [];
       for (const [name, cmd, args] of [
         ['node', 'node', ['--version']],

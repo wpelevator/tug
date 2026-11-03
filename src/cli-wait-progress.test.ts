@@ -74,6 +74,26 @@ test('long-wait commands report progress on stderr and retain their results and 
   };
   const originalExitCode = process.exitCode;
   try {
+    await t.test('target selection validation completes before progress starts', async () => {
+      await assert.rejects(
+        run('backup', 'run', 'service:db', '--select'),
+        /--select cannot be combined with explicit targets/,
+        'backup selection must still reject conflicting targets before queueing work',
+      );
+      assert.deepEqual(requested, [], 'invalid backup selection must not contact control');
+      assert.deepEqual(
+        err,
+        [],
+        'backup progress must not start while target selection is unresolved',
+      );
+      await assert.rejects(
+        run('restore', 'run', 'service:db', '--select-snapshot', '--from', 'latest'),
+        /--select-snapshot cannot be combined with --from/,
+        'restore selection must still reject conflicting snapshot options',
+      );
+      assert.deepEqual(requested, [], 'invalid restore selection must not contact control');
+      assert.deepEqual(err, [], 'restore progress must not start before selection validation');
+    });
     await t.test(
       'rollback reports state and keeps JSON clean, with no-wait skipping polling',
       async () => {

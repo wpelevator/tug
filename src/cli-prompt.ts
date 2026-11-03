@@ -13,22 +13,23 @@ export const ask: Prompter = async (question, hidden = false) => {
   const muted = { on: false };
   const output = new Writable({
     write(chunk, _encoding, callback) {
-      if (!muted.on) process.stdout.write(chunk);
+      if (!muted.on) process.stderr.write(chunk);
       callback();
     },
   });
   const rl = readline.createInterface({ input: process.stdin, output, terminal: true });
   try {
     return await new Promise<string>((resolve, reject) => {
-      rl.once('close', () => reject(new Error('input closed before an answer was given')));
+      const onClose = () => reject(new Error('input closed before an answer was given'));
+      rl.once('close', onClose);
       rl.question(question, (answer) => {
-        if (hidden) process.stdout.write('\n');
+        rl.off('close', onClose);
+        if (hidden) process.stderr.write('\n');
         resolve(answer);
       });
       muted.on = hidden;
     });
   } finally {
-    rl.removeAllListeners('close');
     rl.close();
   }
 };

@@ -1,3 +1,4 @@
+import { selectResource } from './selection.ts';
 import type { Command } from 'commander';
 import { print, projectOf, request } from './context.ts';
 import type { CommonOpts } from './context.ts';
@@ -15,7 +16,11 @@ export function registerSecret(program: Command): void {
         o.value ??
         (await new Promise<string>((resolve) => {
           process.stdout.write(`${name}: `);
-          process.stdin.once('data', (d) => resolve(String(d).trim()));
+          process.stdin.once('data', (d) => {
+            // This command needs no more input; an open stdin can otherwise keep Node alive.
+            process.stdin.destroy();
+            resolve(String(d).trim());
+          });
         }));
       print(await request('POST', '/api/v1/secrets', { project: await projectOf(o), name, value }));
     });
@@ -28,13 +33,13 @@ export function registerSecret(program: Command): void {
       ),
     );
   secret
-    .command('remove <name>')
+    .command('remove [name]')
     .description('delete a secret')
     .action(async (name: string, o: CommonOpts) =>
       print(
         await request(
           'DELETE',
-          `/api/v1/secrets/${encodeURIComponent(name)}?project=${encodeURIComponent(await projectOf(o))}`,
+          `/api/v1/secrets/${encodeURIComponent(await selectResource(name, 'secrets'))}?project=${encodeURIComponent(await projectOf(o))}`,
         ),
       ),
     );

@@ -1,3 +1,4 @@
+import { selectBackups } from './selection.ts';
 import { withProgress } from '../cli-progress.ts';
 import type { Command } from 'commander';
 import { backupCheckProblems } from '../backup-check.ts';
@@ -47,9 +48,13 @@ export function registerBackup(program: Command): void {
     .description(
       'back up the named services or volumes now, or every backup target of the project; waits and exits nonzero if any backup fails',
     )
+    .option('--select', 'choose one or more backup targets instead of backing up all')
     .option('--no-wait', 'return once the backups are queued')
     .option('--timeout <seconds>', 'give up waiting after this many seconds', '3600')
-    .action(async (targets: string[], o: { wait: boolean; timeout: string }) => {
+    .action(async (targets: string[], o: { wait: boolean; timeout: string; select?: boolean }) => {
+      if (o.select && targets.length)
+        throw new Error('--select cannot be combined with explicit targets');
+      if (o.select) targets = await selectBackups();
       return withProgress('Queueing backups', async (progress) => {
         const project = (await loadCfg()).project || 'site';
         const queued = await request<{

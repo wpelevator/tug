@@ -213,6 +213,11 @@ test('expired credentials are rejected and last_used_at is recorded', async () =
 /** A concrete, harmless request for each route; the matrix test fails if a route in ROUTE_ROLES has no sample. */
 const SAMPLES: Record<string, { path: string; body?: unknown }> = {
   'GET /api/v1/live': { path: '/api/v1/live' },
+  'GET /api/v1/projects': { path: '/api/v1/projects' },
+  'GET /api/v1/services': { path: '/api/v1/services' },
+  'GET /api/v1/deployments': { path: '/api/v1/deployments' },
+  'GET /api/v1/backup/snapshots': { path: '/api/v1/backup/snapshots?target=service:db' },
+  'GET /api/v1/holds': { path: '/api/v1/holds' },
   'GET /api/v1/status': { path: '/api/v1/status' },
   'GET /api/v1/events': { path: '/api/v1/events' },
   'GET /api/v1/projects/:project': { path: '/api/v1/projects/site' },

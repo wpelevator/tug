@@ -26,6 +26,11 @@ const LAST_USED_INTERVAL_MS = 60_000;
  */
 export const ROUTE_ROLES: Record<string, RouteRole> = {
   'GET /api/v1/live': 'deploy',
+  'GET /api/v1/services': 'read',
+  'GET /api/v1/projects': 'read',
+  'GET /api/v1/deployments': 'read',
+  'GET /api/v1/backup/snapshots': 'read',
+  'GET /api/v1/holds': 'admin',
   'GET /api/v1/status': 'read',
   'GET /api/v1/events': 'read',
   'GET /api/v1/projects/:project': 'read',
