@@ -1038,6 +1038,10 @@ export async function createApp(
         current?.current_deployment_id || '',
       );
       if (!previousDs) throw httpError(404, 'no previous deployment found');
+      assertArtifactsAvailable(
+        JSON.parse(previousDs.state_json),
+        `roll back to ${previousDs.version}`,
+      );
       const ts = now();
       const depId = id('dep');
       const previousState: DesiredState = JSON.parse(previousDs.state_json);
@@ -2083,7 +2087,92 @@ export async function createApp(
   db.run(
     "UPDATE deployments SET state='build_failed',error_message='control restarted during build' WHERE state IN ('uploading','building')",
   );
+  /** Archives deleted by `image prune`, or missing from a backup taken without images, can no longer be deployed. */
+  async function markMissingArtifacts(): Promise<void> {
+    for (const row of db.all<BuildRow>(
+      "SELECT * FROM builds WHERE state='complete' AND artifact_path IS NOT NULL",
+    ))
+      if (!(await fs.stat(path.join(DATA_DIR, row.artifact_path!)).catch(() => null)))
+        db.run(
+          "UPDATE builds SET state='pruned',artifact_path=NULL,updated_at=? WHERE id=?",
+          now(),
+          row.id,
+        );
+  }
+  /** Throws a 409 when a desired state needs a build archive that was pruned. */
+  function assertArtifactsAvailable(state: DesiredState, action: string): void {
+    for (const [name, service] of Object.entries(state.services)) {
+      if (!service.artifact) continue;
+      const build = db.get<BuildRow>('SELECT * FROM builds WHERE id=?', service.artifact.buildId);
+      if (build?.state === 'pruned')
+        throw httpError(
+          409,
+          `cannot ${action}: the build archive of ${name} was pruned (tug image prune); deploy it again instead`,
+        );
+    }
+  }
+  /**
+   * Deletes build archives no longer needed: everything except the newest `keep` desired states of each project,
+   * the current deployment and any version a node still reports. The desired states stay, so history lists them,
+   * but rolling back to a pruned one is refused.
+   */
+  async function pruneArtifacts(
+    keep: number,
+    dryRun: boolean,
+  ): Promise<{ pruned: { id: string; service: string; sizeBytes: number }[]; freedBytes: number }> {
+    const kept = new Set<string>();
+    const reported = db
+      .all<{ project_id: string; status_json: string }>(
+        'SELECT project_id,status_json FROM node_statuses',
+      )
+      .map((row) => ({
+        project: row.project_id,
+        ...(JSON.parse(row.status_json) as { observedVersion?: string; observedRevision?: string }),
+      }));
+    const current = new Set(
+      db
+        .all<{ current_deployment_id: string | null }>('SELECT current_deployment_id FROM projects')
+        .map((row) => row.current_deployment_id),
+    );
+    const rows = db.all<DesiredStateRow>('SELECT * FROM desired_states ORDER BY created_at DESC');
+    const seen = new Map<string, number>();
+    for (const row of rows) {
+      const index = seen.get(row.project_id) ?? 0;
+      seen.set(row.project_id, index + 1);
+      const state: DesiredState = JSON.parse(row.state_json);
+      const lagging = reported.some(
+        (r) =>
+          r.project === row.project_id &&
+          r.observedVersion === state.version &&
+          (!r.observedRevision || r.observedRevision === state.revision),
+      );
+      if (index >= keep && !lagging && !current.has(row.deployment_id)) continue;
+      for (const service of Object.values(state.services))
+        if (service.artifact) kept.add(service.artifact.buildId);
+    }
+    const pruned: { id: string; service: string; sizeBytes: number }[] = [];
+    for (const build of db.all<BuildRow>(
+      "SELECT * FROM builds WHERE state='complete' AND artifact_path IS NOT NULL",
+    )) {
+      if (kept.has(build.id)) continue;
+      pruned.push({ id: build.id, service: build.service, sizeBytes: build.size_bytes });
+      if (dryRun) continue;
+      await fs.rm(path.join(DATA_DIR, build.artifact_path!), { force: true });
+      db.run(
+        "UPDATE builds SET state='pruned',artifact_path=NULL,updated_at=? WHERE id=?",
+        now(),
+        build.id,
+      );
+      const shared = db.get(
+        "SELECT 1 FROM builds WHERE image_ref=? AND state='complete'",
+        build.image_ref,
+      );
+      if (!shared) await images.run('docker', ['image', 'rm', build.image_ref]).catch(() => {});
+    }
+    return { pruned, freedBytes: pruned.reduce((sum, build) => sum + build.sizeBytes, 0) };
+  }
   await collectArtifacts();
+  await markMissingArtifacts();
   const receiveDeployment = upload.any();
   api('post', '/api/v1/deployments', null, (req, res) => {
     receiveDeployment(req, res, (error) => {
@@ -2619,6 +2708,18 @@ export async function createApp(
       releaseLock(lock);
     }
   });
+  api('post', '/api/v1/images/prune', null, async (req, res) =>
+    withWriter(async () => {
+      const keep = req.body?.keep === undefined ? 5 : Number(req.body.keep);
+      if (!Number.isInteger(keep) || keep < 1)
+        return res.status(400).json({ error: 'keep must be a positive integer' });
+      res.json({
+        dryRun: Boolean(req.body?.dryRun),
+        keep,
+        ...(await pruneArtifacts(keep, Boolean(req.body?.dryRun))),
+      });
+    }),
+  );
   api('post', '/api/v1/control/backups/run', null, async (req, res) =>
     withWriter(async () => {
       const backupDir =
@@ -2642,10 +2743,11 @@ export async function createApp(
           recursive: true,
           filter: (src) => path.basename(src) !== 'server.json',
         });
-        await fs.cp(artifactDir, path.join(staging, 'images'), { recursive: true });
+        const withImages = req.body?.images !== false;
+        if (withImages) await fs.cp(artifactDir, path.join(staging, 'images'), { recursive: true });
         await fs.writeFile(
           path.join(staging, 'metadata.json'),
-          JSON.stringify({ backupId, createdAt: ts, type: 'control' }, null, 2),
+          JSON.stringify({ backupId, createdAt: ts, type: 'control', images: withImages }, null, 2),
           { mode: 0o600 },
         );
         await tar.c({ gzip: true, file: artifactRef, cwd: staging, mode: 0o600 }, [
@@ -2653,7 +2755,7 @@ export async function createApp(
           'master.key',
           'metadata.json',
           'pki',
-          'images',
+          ...(withImages ? ['images'] : []),
         ]);
       } catch (error) {
         await fs.rm(artifactRef, { force: true });
@@ -2712,10 +2814,22 @@ export async function createApp(
         for (const secret of snapshot.all<SecretRow>('SELECT * FROM secrets'))
           decrypt(secret.encrypted_value, key);
         const states = snapshot.all<DesiredStateRow>('SELECT * FROM desired_states');
-        for (const stateRow of states) {
+        const meta = JSON.parse(
+          await fs.readFile(path.join(restoreDir, 'metadata.json'), 'utf8').catch(() => '{}'),
+        ) as { images?: boolean };
+        // A backup taken without images restores the archive-less builds as pruned on the next start.
+        for (const stateRow of meta.images === false ? [] : states) {
           const state: DesiredState = JSON.parse(stateRow.state_json);
           for (const service of Object.values(state.services)) {
             if (!service.artifact) continue;
+            // `image prune` already removed this one before the backup.
+            if (
+              snapshot.get(
+                "SELECT 1 FROM builds WHERE id=? AND state='pruned'",
+                service.artifact.buildId,
+              )
+            )
+              continue;
             const build = snapshot.get<BuildRow>(
               'SELECT * FROM builds WHERE id=? AND state=?',
               service.artifact.buildId,
