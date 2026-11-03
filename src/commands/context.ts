@@ -1,3 +1,6 @@
+import { canPrompt } from '../cli-prompt.ts';
+import { selectOne } from '../cli-selection.ts';
+import type { ServiceChoice } from './selection.ts';
 import { spawnSync } from 'node:child_process';
 import type { SpawnSyncOptions } from 'node:child_process';
 import path from 'node:path';
@@ -186,6 +189,25 @@ export async function runLive(
   input: Omit<LiveInput, 'project'>,
 ): Promise<void> {
   const cfg = await loadCfg();
+  if (!input.node && canPrompt()) {
+    const { services: listing } = await request<{ services: ServiceChoice[] }>(
+      'GET',
+      `/api/v1/services?project=${encodeURIComponent(cfg.project || 'site')}`,
+    );
+    const candidates = new Map(
+      listing
+        .filter((service) => operation === 'ps' || service.name === input.service)
+        .flatMap((service) => service.nodes)
+        .map((node) => [node.name, node]),
+    );
+    if (candidates.size > 1)
+      input.node = await selectOne(undefined, 'Select a node for this operation', async () =>
+        [...candidates.values()].map((node) => ({
+          value: node.name,
+          label: `${node.name} (${node.status})`,
+        })),
+      );
+  }
   process.exitCode = await runCliLive(
     parseLiveRequest(operation, { ...input, project: cfg.project || 'site' }),
     createCliLiveTransport(cfg.credential, cfg.controlUrl),

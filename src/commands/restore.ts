@@ -1,3 +1,5 @@
+import { selectMany } from '../cli-selection.ts';
+import { selectBackup, selectRestore, selectSnapshot, serviceChoices } from './selection.ts';
 import type { Command } from 'commander';
 import { collect, loadCfg, request } from './context.ts';
 
@@ -27,10 +29,12 @@ export function registerRestore(program: Command): void {
     .command('restore')
     .description('restore services and volumes from backups');
   restore
-    .command('run <target>')
+    .command('run [target]')
     .description(
       'restore a service or volume from a backup. Without --confirm it only prints the plan. An in-place restore locks the project, stops the services that write to the target, takes a safety backup, restores, then starts them again',
     )
+    .option('--select-snapshot', 'choose a successful backup from the catalog')
+    .option('--select-writers', 'choose services to stop instead of discovering writers')
     .option('--from <id>', 'backup run id, restic snapshot id, or latest', 'latest')
     .option(
       '--scratch',
@@ -54,13 +58,26 @@ export function registerRestore(program: Command): void {
         target: string,
         o: {
           from: string;
+          selectSnapshot?: boolean;
+          selectWriters?: boolean;
           scratch?: boolean;
           safetyBackup: boolean;
           writers: string[] | false;
           confirm?: boolean;
           timeout: string;
         },
+        command: Command,
       ) => {
+        if (o.selectSnapshot && command.getOptionValueSource('from') === 'cli')
+          throw new Error('--select-snapshot cannot be combined with --from');
+        if (o.selectWriters && (o.writers === false || o.writers.length))
+          throw new Error('--select-writers cannot be combined with --writers or --no-writers');
+        if (o.scratch && o.selectWriters)
+          throw new Error('--select-writers does not apply to scratch restores');
+        target = await selectBackup(target);
+        if (o.selectSnapshot) o.from = await selectSnapshot(target);
+        if (o.selectWriters)
+          o.writers = await selectMany('Select services to stop for the restore', serviceChoices);
         const project = (await loadCfg()).project || 'site';
         const explicit = Array.isArray(o.writers) && o.writers.length > 0 ? o.writers : undefined;
         const result = await request<{
@@ -145,21 +162,31 @@ export function registerRestore(program: Command): void {
         );
     });
   restore
-    .command('resume <id>')
+    .command('resume [id]')
     .description('run an interrupted restore again; the stopped services stay stopped meanwhile')
     .action(async (id: string) =>
       console.log(
-        JSON.stringify(await request('POST', `/api/v1/restores/${encodeURIComponent(id)}/resume`)),
+        JSON.stringify(
+          await request(
+            'POST',
+            `/api/v1/restores/${encodeURIComponent(await selectRestore(id))}/resume`,
+          ),
+        ),
       ),
     );
   restore
-    .command('release <id>')
+    .command('release [id]')
     .description(
       'start the services an interrupted restore stopped and unlock the project; the data may be partly restored',
     )
     .action(async (id: string) =>
       console.log(
-        JSON.stringify(await request('POST', `/api/v1/restores/${encodeURIComponent(id)}/release`)),
+        JSON.stringify(
+          await request(
+            'POST',
+            `/api/v1/restores/${encodeURIComponent(await selectRestore(id))}/release`,
+          ),
+        ),
       ),
     );
 }

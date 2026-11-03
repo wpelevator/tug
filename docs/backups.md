@@ -90,6 +90,8 @@ backup:
 
 ### Restore
 
+In a terminal, `tug backup run --select` chooses a subset of enabled targets. `tug restore run` offers a target when omitted; add `--select-snapshot` to choose a successful catalog backup or `--select-writers` to override writer discovery. `tug restore resume` and `tug restore release` offer interrupted restores when their ID is omitted. Existing preview and confirmation requirements still apply. See [interactive selection](cli.md#interactive-selection).
+
 ```bash
 tug restore run db                       # prints the plan, changes nothing
 tug restore run db --confirm             # latest backup of the db service

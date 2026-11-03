@@ -30,7 +30,7 @@ test('repeated visible and hidden prompts release stdin after answering without 
   let output = '';
   let firstAnswered = false;
   let hiddenAnswered = false;
-  running.child.stdout!.on('data', (data) => {
+  running.child.stderr!.on('data', (data) => {
     output += String(data);
     if (!firstAnswered && output.includes('First answer: ')) {
       firstAnswered = true;
@@ -47,7 +47,7 @@ test('repeated visible and hidden prompts release stdin after answering without 
     /\{"first":"visible-value","hiddenLength":12\}/,
     'successive prompts should read both answers and exit without closing the input pipe',
   );
-  assert.ok(!result.stdout.includes('hidden-value'), 'hidden prompts should not echo the answer');
+  assert.ok(!result.stderr.includes('hidden-value'), 'hidden prompts should not echo the answer');
 });
 
 test('a prompt rejects and exits when stdin closes before an answer', async () => {
@@ -91,7 +91,7 @@ test('CLI exits after a prompted command fails while stdin stays open', async ()
       { cwd: dir, env: { ...process.env, TUG_CONFIG: '', CI: '' }, timeout: 10000 },
     );
     let answered = false;
-    running.child.stdout!.on('data', (data) => {
+    running.child.stderr!.on('data', (data) => {
       if (!answered && String(data).includes('Node name')) {
         answered = true;
         running.child.stdin!.write('app1\n');
