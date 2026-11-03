@@ -7,6 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { Command } from 'commander';
 import {
+  formatNodePlan,
   inferNodeName,
   isValidNodeName,
   isPrivateIPv4,
@@ -172,4 +173,29 @@ test('the CLI is grouped: setup mirrors control setup, node add needs a name for
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
+});
+
+test('formatNodePlan does not claim Docker is installed when the host was not probed', () => {
+  const base = { name: 'app1', ssh: 'root@app1', image: 'tug:test' };
+  assert.match(
+    formatNodePlan({ ...base, probed: false }),
+    /docker: {3}not checked/,
+    'an unprobed host is reported as not checked',
+  );
+  assert.match(
+    formatNodePlan({ ...base, probed: true }),
+    /docker: {3}already installed/,
+    'a probed host without --install-docker has Docker',
+  );
+  assert.match(
+    formatNodePlan({
+      ...base,
+      probed: true,
+      installDocker: true,
+      ingress: true,
+      address: '10.0.0.7',
+    }),
+    /docker: {3}install[\s\S]*address: {2}10\.0\.0\.7[\s\S]*ingress: {2}enabled/,
+    'chosen install, address and ingress are shown',
+  );
 });

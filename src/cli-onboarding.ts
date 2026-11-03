@@ -60,3 +60,32 @@ export function parseAddressCandidates(output: string): AddressCandidate[] {
 export function sortCandidates(candidates: AddressCandidate[]): AddressCandidate[] {
   return [...candidates].sort((a, b) => Number(b.private) - Number(a.private));
 }
+
+export interface NodePlan {
+  name: string;
+  ssh: string;
+  installDocker?: boolean;
+  /** False when nothing asked the host, so whether Docker is present is unknown. */
+  probed: boolean;
+  address?: string;
+  ingress?: boolean;
+  image: string;
+}
+
+/** The plan `node add` shows before it changes anything; it never claims what it did not check. */
+export function formatNodePlan(plan: NodePlan): string {
+  const docker = plan.installDocker
+    ? 'install'
+    : plan.probed
+      ? 'already installed'
+      : 'not checked; must already be installed';
+  return [
+    'Node plan',
+    `  name:     ${plan.name}`,
+    `  ssh:      ${plan.ssh}`,
+    `  docker:   ${docker}`,
+    `  address:  ${plan.address ?? 'not set'}`,
+    `  ingress:  ${plan.ingress ? 'enabled (Caddy on ports 80 and 443)' : 'no'}`,
+    `  image:    ${plan.image}`,
+  ].join('\n');
+}

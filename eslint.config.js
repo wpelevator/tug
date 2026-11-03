@@ -23,6 +23,9 @@ export default [
       '@typescript-eslint/no-unused-vars': ['warn', { argsIgnorePattern: '^_' }],
       'no-console': 'off',
       'no-empty': ['error', { allowEmptyCatch: true }],
+      // Flag the long, deeply nested bodies where an early exit hides the paths; extract a function instead.
+      'max-depth': ['warn', 5],
+      'no-else-return': 'warn',
     },
   },
   {

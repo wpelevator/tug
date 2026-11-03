@@ -175,6 +175,8 @@ Claims must match verified behavior. Image rollback does not undo data, schema o
 
 M10 is done; M12 is cancelled and its residual limitations are deferred. M14 and much of M11 are implemented; the current priority is verifying the complete operating journey rather than repeating those milestones. The milestone descriptions and checklist record existing work and candidates, not commitments that override this sequence.
 
+Guided onboarding (`tug setup`, an inferred node name, and `node add` offering Docker, the inter-node address and ingress in a terminal) answers the first-run friction recorded in [real-host runs](real-host-evaluation.md). It prompts only in a terminal outside CI; scripts pass the same choices as flags. The prompts have unit and CLI tests but have not yet been exercised on real hosts, so the next real-host run should follow the README quick start as written.
+
 Historical validation: [real-host runs](real-host-evaluation.md) on two Ubuntu 24.04 hosts covered SSH install with the Docker bootstrap, the now-removed WireGuard mesh, an agent behind bridge NAT, a publicly trusted Let's Encrypt certificate from the managed Caddy, cross-node service names as then implemented, remote and `--build-local` deploys, rollback from a retained image, a rolling rollout through the public ingress with no failed requests (over 2,200 sampled), a failing version rejected while the old revision kept serving, automatic rollback, and on freshly wiped hosts label placement, `global`, `tug scale`, `ps`/`inspect`/`exec`/`logs -f` and a cloud-init enrolled node behind a deny-all-inbound firewall ([M6, M7 and enrollment](real-host-evaluation.md#m6-m7-and-enrollment-on-fresh-hosts)). The mesh and mesh-based name results are retained as history, not evidence for the current plain-address network path. Not yet validated on real hosts: the current plain-address cross-node service-name, ingress and private-port path, a node behind real NAT, certificate renewal, arm64 nodes and dnf-based hosts.
 
 The test layers, the metrics milestones are held to and the backlog of mocked tests are in [Testing](testing.md).
@@ -227,4 +229,6 @@ The test layers, the metrics milestones are held to and the backlog of mocked te
 - [ ] Scaled WordPress reference example (code in image, shared uploads) validated on real hosts
 - [ ] Mocked tests from the [Testing](testing.md#backlog-of-mocked-tests-proposed) backlog: revisions started per deployment and old-schema database behavior
 - [x] M13 uncloud release baseline rechecked and updated in [Positioning](#positioning); repeat at the start of each milestone
+- [x] Guided onboarding: grouped `tug <subject> <verb>` commands, `tug setup`, name inference and `node add` prompts that never run without a terminal
+- [ ] Follow the README quick start, prompts included, on fresh hosts and record the result in [real-host evaluation](real-host-evaluation.md)
 - [ ] Each milestone: tests added, README.md and docs updated, its own plan file folded into docs and deleted when done

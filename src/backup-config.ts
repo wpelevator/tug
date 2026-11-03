@@ -259,16 +259,23 @@ export function resolveBackups(compose: ComposeFile, project = ''): Resolved {
     return { schedule, retention, jitterSeconds, timeoutSec, memory };
   };
 
-  for (const [name, svc] of Object.entries(compose.services)) {
-    const config = svc['x-tug']?.backup;
-    if (config === undefined) continue;
-    const label = `${name}: x-tug.backup`;
+  /** The object form of a backup config; null when it is off, or invalid (the error is reported). */
+  const specOf = (label: string, config: BackupConfig): BackupSpec | null => {
     const spec = normalizeConfig(config);
-    if (spec === null) continue;
+    if (spec === null) return null;
     if (typeof spec !== 'object' || Array.isArray(spec)) {
       errors.push(`${label} must be true, false, a cron string or an object`);
-      continue;
+      return null;
     }
+    return spec;
+  };
+
+  const serviceTarget = (name: string, svc: ComposeService): ResolvedBackup | null => {
+    const config = svc['x-tug']?.backup;
+    if (config === undefined) return null;
+    const label = `${name}: x-tug.backup`;
+    const spec = specOf(label, config);
+    if (!spec) return null;
     const before = errors.length;
     const base = common(label, 'service', name, spec);
 
@@ -296,8 +303,8 @@ export function resolveBackups(compose: ComposeFile, project = ''): Resolved {
         `${label} needs a single instance; ${name} is global, replicated or placed on several nodes`,
       );
 
-    if (errors.length > before || !base || !argv) continue;
-    targets.push({
+    if (errors.length > before || !base || !argv) return null;
+    return {
       target: `service:${name}`,
       kind: 'service',
       name,
@@ -309,19 +316,18 @@ export function resolveBackups(compose: ComposeFile, project = ''): Resolved {
       verify: spec.verify,
       writers: spec.writers,
       node: !dynamic && nodes.length === 1 ? nodes[0] : undefined,
-    });
-  }
+    };
+  };
 
-  for (const [name, def] of Object.entries(compose.volumes || {})) {
+  const volumeTarget = (
+    name: string,
+    def: NonNullable<ComposeFile['volumes']>[string],
+  ): ResolvedBackup | null => {
     const config = isObject(def) ? def['x-tug']?.backup : undefined;
-    if (config === undefined) continue;
+    if (config === undefined) return null;
     const label = `volumes.${name}: x-tug.backup`;
-    const spec = normalizeConfig(config);
-    if (spec === null) continue;
-    if (typeof spec !== 'object' || Array.isArray(spec)) {
-      errors.push(`${label} must be true, false, a cron string or an object`);
-      continue;
-    }
+    const spec = specOf(label, config);
+    if (!spec) return null;
     const before = errors.length;
     const base = common(label, 'volume', name, spec);
     if (
@@ -350,8 +356,8 @@ export function resolveBackups(compose: ComposeFile, project = ''): Resolved {
         `${label} needs x-tug.placement.nodes on volume ${name}, since its services are placed by label or global`,
       );
 
-    if (errors.length > before || !base) continue;
-    targets.push({
+    if (errors.length > before || !base) return null;
+    return {
       target: `volume:${name}`,
       kind: 'volume',
       name,
@@ -360,7 +366,13 @@ export function resolveBackups(compose: ComposeFile, project = ''): Resolved {
       exclude: spec.exclude,
       writers: spec.writers,
       node: candidates.length === 1 ? candidates[0] : undefined,
-    });
-  }
+    };
+  };
+
+  const found = [
+    ...Object.entries(compose.services).map(([name, svc]) => serviceTarget(name, svc)),
+    ...Object.entries(compose.volumes || {}).map(([name, def]) => volumeTarget(name, def)),
+  ];
+  targets.push(...found.filter((target): target is ResolvedBackup => target !== null));
   return { targets, errors };
 }

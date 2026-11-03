@@ -283,11 +283,10 @@ export async function runCliLive(
     } finally {
       try {
         if (session) {
-          if (controller.signal.aborted || failure) {
-            try {
-              await session.send({ type: 'cancel' });
-            } catch {}
-          }
+          if (controller.signal.aborted || failure)
+            await Promise.resolve()
+              .then(() => session!.send({ type: 'cancel' }))
+              .catch(() => {});
           await session.close();
         }
       } finally {

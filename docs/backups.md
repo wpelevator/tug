@@ -71,7 +71,9 @@ backup:
 
 `tug events` shows `backup.completed`, `backup.failed`, `backup.missed`, `backup.stale` and `backup.no_destination`. A backup is `missed` when its node did not pick it up before its deadline (`node_offline`) or when control was not running at the slot: a week of downtime produces one missed event and one catch-up run per target, not a burst. A failed scheduled run is retried once after ten minutes. A target with no success for two periods raises `backup.stale` once a day, which catches a destination key that has quietly stopped working. While control is down no backup starts, which is the price of one scheduler; running jobs finish and report when control returns.
 
-`tug backup run` takes a backup now and `tug backup list` shows the catalog ([CLI](cli.md#backups)). ### Restore
+`tug backup run` takes a backup now and `tug backup list` shows the catalog ([CLI](cli.md#backups)).
+
+### Restore
 
 ```bash
 tug restore run db                       # prints the plan, changes nothing
