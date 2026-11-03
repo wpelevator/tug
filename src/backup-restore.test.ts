@@ -573,3 +573,44 @@ test('writers on another node are found from environment variables that name the
   assert.equal(environmentReaches('db', 'X', 'db:3306'), true, 'host:port names the service');
   assert.equal(environmentReaches('db', 'X', 'dbx'), false, 'a prefix is not the service name');
 });
+
+const placeMoveHold = (f: Awaited<ReturnType<typeof fixture>>) =>
+  f.db.run(
+    "INSERT INTO service_holds(project_id,service,reason,restore_id,created_at) VALUES('site','web','moved db',NULL,'2026-11-01T09:00:00Z')",
+  );
+
+test('a restore that fails before changing data keeps the holds a move placed', async () => {
+  const f = await fixture();
+  f.catalog('service:db', 'snap1', '2026-11-01T09:00:00Z');
+  placeMoveHold(f);
+  const plan = f.restores.plan(request());
+  assert.ok(!('error' in plan));
+  const started = f.restores.start(request(), plan) as { restoreId: string };
+  f.reportHeld(true);
+  f.restores.advance();
+  const safety = f.queued.at(-1)!;
+  f.backups.onResult(safety.id, 'failed', { error: 'bucket unreachable' });
+  f.restores.advance();
+  assert.equal(f.state(started.restoreId).state, 'failed', 'the restore failed before any change');
+  assert.deepEqual(
+    f.holds(),
+    ['web'],
+    'the writer stays stopped, so it cannot start against the empty database',
+  );
+  assert.equal(f.lock(), undefined, 'the project lock is still dropped');
+});
+
+test('a restore that succeeds drops the holds a move placed', async () => {
+  const f = await fixture();
+  f.catalog('service:db', 'snap1', '2026-11-01T09:00:00Z');
+  placeMoveHold(f);
+  const plan = f.restores.plan(request({ safetyBackup: false }));
+  assert.ok(!('error' in plan));
+  f.restores.start(request({ safetyBackup: false }), plan);
+  assert.deepEqual(f.holds(), ['web'], 'the move hold keeps the writer stopped meanwhile');
+  f.reportHeld(true);
+  f.restores.advance();
+  f.finish(f.queued.at(-1)!.id, 'succeeded');
+  f.restores.advance();
+  assert.deepEqual(f.holds(), [], 'the writers are released once the data is back');
+});

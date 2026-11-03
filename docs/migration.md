@@ -66,7 +66,7 @@ This is the move that can lose data, so the order matters. Deploying a database 
 6. **Verify** with the application and `tug backup list --check`.
 7. **Clean up the old volume.** `tug volume remove db-data --delete-data` removes the record and the Docker volume on its node, but it refuses while a service in the current deployment still references the volume. Check `tug volume list` and, if the old copy is still there, remove the leftover Docker volume on the old host by hand.
 
-If the restore fails before it changes any data, it releases the holds and the writers start against the empty database. Check `tug restore list` and run the restore again before reopening traffic.
+If the restore fails before it changes any data, the writers stay held, so nothing connects to the empty database. Fix the cause and run the restore again; `tug hold release` is the way to start them without a restore.
 
 While a writer is held, a sibling service whose health check depends on it (an nginx check that requests a PHP page) reports a failed apply for the duration. Give such services a health check that does not depend on the writer, such as a static `/healthz`. See [Restore](backups.md#restore). If the writers never report held, the restore fails after five minutes and the error names the node, the writer and the apply error the node reported.
 

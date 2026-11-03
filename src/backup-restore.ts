@@ -272,8 +272,20 @@ export function createRestoreService(deps: RestoreDeps) {
       `restore:${restore.id}`,
     );
   }
-  function release(restore: RestoreRunRow): void {
+  /**
+   * Drops a restore's holds and lock. Holds a deploy placed for a move (no `restore_id`) are dropped with them,
+   * unless `keepMoveHolds`: a restore that failed before changing data must not start the writers against the
+   * empty database it was meant to fill.
+   */
+  function release(restore: RestoreRunRow, keepMoveHolds = false): void {
     db.run('DELETE FROM service_holds WHERE restore_id=?', restore.id);
+    if (!keepMoveHolds)
+      for (const service of JSON.parse(restore.writers_json) as string[])
+        db.run(
+          'DELETE FROM service_holds WHERE project_id=? AND service=? AND restore_id IS NULL',
+          restore.project_id,
+          service,
+        );
     unlock(restore);
     deps.wake(restore.project_id);
   }
@@ -342,7 +354,16 @@ export function createRestoreService(deps: RestoreDeps) {
     if (restore.mode === 'scratch') queueRestoreJob(restore);
     else move(restore, 'holding');
     if (restore.mode === 'in-place')
-      for (const service of restorePlan.writers)
+      for (const service of restorePlan.writers) {
+        // A hold a deploy placed for a move stays as it is; this restore drops it when it succeeds.
+        if (
+          db.get(
+            'SELECT 1 FROM service_holds WHERE project_id=? AND service=? AND restore_id IS NULL',
+            restore.project_id,
+            service,
+          )
+        )
+          continue;
         db.run(
           'INSERT OR REPLACE INTO service_holds(project_id,service,reason,restore_id,created_at) VALUES(?,?,?,?,?)',
           restore.project_id,
@@ -351,6 +372,7 @@ export function createRestoreService(deps: RestoreDeps) {
           restoreId,
           ts,
         );
+      }
     deps.wake(restore.project_id);
     advance();
     return {
@@ -408,7 +430,7 @@ export function createRestoreService(deps: RestoreDeps) {
   function fail(restore: RestoreRunRow, error: string, dataChanged: boolean): void {
     if (dataChanged) move(restore, 'interrupted', { error });
     else {
-      release(restore);
+      release(restore, true);
       move(restore, 'failed', { error });
     }
     event(
