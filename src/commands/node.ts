@@ -8,8 +8,8 @@ import {
   shellQuote as sh,
   HOST_NETWORK_FLAG,
 } from '../cli-install.ts';
-import { inferNodeName } from '../cli-onboarding.ts';
-import { canPrompt, choose, confirm } from '../cli-prompt.ts';
+import { inferNodeName, isValidNodeName } from '../cli-onboarding.ts';
+import { ask, canPrompt, choose, confirm } from '../cli-prompt.ts';
 import { isNodeHost } from '../node-address.ts';
 import { resolveImage } from '../image.ts';
 import type { EnrollmentCredentialResponse, IdentityResponse, JoinKey } from '../protocol.ts';
@@ -29,6 +29,7 @@ import type { InstallOpts } from './context.ts';
 import {
   bootstrapDocker,
   discoverAddresses,
+  remoteHostname,
   dockerBootstrap,
   hostHasDocker,
   preflightRemote,
@@ -197,6 +198,24 @@ async function planNodeAdd(sshTarget: string, name: string, o: NodeIdentityOpts)
     throw new Error('cancelled; nothing was changed');
 }
 
+/**
+ * A name for a node when the SSH host does not suggest one (an IP address): in a terminal ask for it, offering the
+ * host's own hostname as the default. Without a terminal there is nobody to ask.
+ */
+async function promptNodeName(sshTarget?: string): Promise<string | undefined> {
+  if (!canPrompt()) return undefined;
+  const suggestion = sshTarget ? remoteHostname(sshTarget) : undefined;
+  const fallback = suggestion && isValidNodeName(suggestion) ? suggestion : undefined;
+  for (;;) {
+    const answer = (await ask(`Node name${fallback ? ` (${fallback})` : ''}: `)).trim() || fallback;
+    if (!answer) continue;
+    if (isValidNodeName(answer)) return answer;
+    console.error(
+      'Use letters, numbers, dots, underscores or hyphens, starting with a letter or number.',
+    );
+  }
+}
+
 async function runNodeIdentity(
   positional: { name?: string; ssh?: string },
   o: NodeIdentityOpts,
@@ -226,11 +245,12 @@ async function runNodeIdentity(
     if (results.some((r) => !r.ok)) process.exitCode = 1;
     return;
   }
-  const name = positional.name ?? (positional.ssh ? inferNodeName(positional.ssh) : undefined);
+  let name = positional.name ?? (positional.ssh ? inferNodeName(positional.ssh) : undefined);
+  if (!name && mode === 'create') name = await promptNodeName(positional.ssh);
   if (!name)
     throw new Error(
       mode === 'create'
-        ? `${verb} needs --name${positional.ssh ? ' (an IP address does not suggest one)' : ''}`
+        ? `${verb} needs --name${positional.ssh ? ' (an IP address does not suggest one; in a terminal it asks)' : ''}`
         : `${verb} needs the node name`,
     );
   if (mode === 'create') {
@@ -309,7 +329,10 @@ export function registerNode(program: Command): void {
     .description(
       'mint a single-use, name-bound join key so a host you cannot SSH to can self-join with one docker run; a saved cloud-init document contains a credential',
     )
-    .requiredOption('--name <name>', 'the node name the key is bound to; mint one key per instance')
+    .option(
+      '--name <name>',
+      'the node name the key is bound to; mint one key per instance (asked for in a terminal when omitted)',
+    )
     .option('--address <addr>', 'private inter-node address for this node')
     .option(
       '--agent-control-url <url>',
@@ -324,16 +347,24 @@ export function registerNode(program: Command): void {
     .option('--install-docker', 'print cloud-init that installs Docker and starts the agent')
     .option('--json', 'print JSON including the command or cloud-init payload')
     .action(
-      async (o: {
-        name: string;
-        agentControlUrl?: string;
-        address?: string;
-        ttl: string;
-        image?: string;
-        label: string[];
-        json?: boolean;
-        installDocker?: boolean;
-      }) => {
+      async (
+        o: {
+          name?: string;
+          agentControlUrl?: string;
+          address?: string;
+          ttl: string;
+          image?: string;
+          label: string[];
+          json?: boolean;
+          installDocker?: boolean;
+        },
+        cmd: Command,
+      ) => {
+        if (!o.name) {
+          o.name = await promptNodeName();
+          if (!o.name) throw new Error('node enroll needs --name');
+          applyConfigDefaults(cmd, o, nodeSettings(await loadCfg(), o.name));
+        }
         if (o.address !== undefined && !isNodeHost(o.address))
           throw new Error('address must be an IP address or hostname without a port');
         const connectUrl = o.agentControlUrl ? normalizeControlUrl(o.agentControlUrl) : undefined;

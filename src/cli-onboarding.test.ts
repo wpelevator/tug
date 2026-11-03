@@ -8,6 +8,7 @@ import path from 'node:path';
 import { Command } from 'commander';
 import {
   inferNodeName,
+  isValidNodeName,
   isPrivateIPv4,
   parseAddressCandidates,
   sortCandidates,
@@ -30,6 +31,12 @@ test('inferNodeName uses the first DNS label and refuses IP addresses', () => {
   assert.equal(inferNodeName('root@app1:2222'), 'app1', 'a port is not part of the name');
   assert.equal(inferNodeName('root@203.0.113.7'), undefined, 'an IPv4 address suggests no name');
   assert.equal(inferNodeName('root@[2001:db8::1]'), undefined, 'an IPv6 address suggests no name');
+});
+
+test('isValidNodeName accepts hostnames and refuses spaces and slashes', () => {
+  assert.ok(isValidNodeName('app-1.eu'), 'a hostname-like name is valid');
+  assert.ok(!isValidNodeName('bad name'), 'a space is not valid');
+  assert.ok(!isValidNodeName('a/b'), 'a slash is not valid');
 });
 
 test('isPrivateIPv4 covers RFC 1918 and carrier-grade NAT only', () => {
@@ -149,6 +156,11 @@ test('the CLI is grouped: setup mirrors control setup, node add needs a name for
       run('node', 'add', 'root@203.0.113.7'),
       /needs --name.*IP address/,
       'an IP address should not become a node name',
+    );
+    await assert.rejects(
+      run('node', 'enroll'),
+      /node enroll needs --name/,
+      'enroll without a name and without a terminal should fail rather than prompt',
     );
     await assert.rejects(
       run('control', 'setup', 'root@host', '--no-import'),

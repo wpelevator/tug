@@ -44,7 +44,7 @@ If you can SSH to the host:
 tug node add root@198.51.100.7
 ```
 
-The node name defaults to the first DNS label of the SSH host (`app1` for `root@app1.example.com`); give `--name` when you connect by IP address. In a terminal the command checks for Docker and offers to install it, lists the host's IPv4 addresses (private ones first) to choose the inter-node address from, asks whether the node should handle ingress and shows a plan to confirm before it changes anything. In a script, say it all explicitly: `tug node add root@198.51.100.7 --name app1 --address 10.0.0.7 --install-docker --ingress -y`. List the registered nodes with `tug node list`.
+The node name defaults to the first DNS label of the SSH host (`app1` for `root@app1.example.com`); when you connect by IP address a terminal asks for the name and suggests the host's own hostname, and a script passes `--name`. In a terminal the command checks for Docker and offers to install it, lists the host's IPv4 addresses (private ones first) to choose the inter-node address from, asks whether the node should handle ingress and shows a plan to confirm before it changes anything. In a script, say it all explicitly: `tug node add root@198.51.100.7 --name app1 --address 10.0.0.7 --install-docker --ingress -y`. List the registered nodes with `tug node list`.
 
 The node generates its own private key, your admin credential authorizes it, and the signed certificate is installed back over SSH. `--address` is the node's private inter-node IP on your existing network; other nodes and ingress upstreams use it, and Tug binds published ports to it. It must be reachable from nodes that need cross-node service traffic. The command waits for the node's first report. It is safe to run again after a failure.
 
