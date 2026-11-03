@@ -56,16 +56,7 @@ export function formatStatus(status: StatusResponse): string {
           detail.serviceStates &&
           typeof detail.serviceStates === 'object'
         ) {
-          for (const [name, state] of Object.entries(detail.serviceStates).sort(([a], [b]) =>
-            a.localeCompare(b),
-          )) {
-            if (!state || typeof state !== 'object') continue;
-            const item = state as { rolloutState?: unknown; rolloutError?: unknown };
-            if (typeof item.rolloutState === 'string')
-              lines.push(
-                `    ${name}: ${item.rolloutState}${typeof item.rolloutError === 'string' && item.rolloutError ? ` — ${item.rolloutError}` : ''}`,
-              );
-          }
+          lines.push(...serviceStateLines(detail.serviceStates));
         }
       } catch {
         lines.push('    Report details unavailable');
@@ -115,4 +106,19 @@ export function formatNodes(nodes: NodeListing[]): string {
         .trimEnd(),
     )
     .join('\n');
+}
+
+function serviceStateLines(serviceStates: object): string[] {
+  return Object.entries(serviceStates)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .flatMap(([name, state]) => {
+      const item = (state && typeof state === 'object' ? state : {}) as {
+        rolloutState?: unknown;
+        rolloutError?: unknown;
+      };
+      if (typeof item.rolloutState !== 'string') return [];
+      const error =
+        typeof item.rolloutError === 'string' && item.rolloutError ? ` — ${item.rolloutError}` : '';
+      return [`    ${name}: ${item.rolloutState}${error}`];
+    });
 }

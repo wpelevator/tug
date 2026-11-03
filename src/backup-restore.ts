@@ -374,88 +374,83 @@ export function createRestoreService(deps: RestoreDeps) {
     db.run('UPDATE restore_runs SET node_id=? WHERE id=?', queued.nodeId, restore.id);
   }
 
+  function advanceHolding(restore: RestoreRunRow, writers: string[], age: number): void {
+    if (!writersReport(restore, writers, 'held')) {
+      if (age > HOLD_TIMEOUT_MS) fail(restore, 'the writers did not stop in time', false);
+      return;
+    }
+    if (!restore.safety_backup) return queueRestoreJob(restore);
+    const safety = backups.runNow(
+      restore.project_id,
+      [restore.target],
+      restore.actor ?? 'restore',
+      'pre-restore',
+    );
+    if (!safety.runs.length)
+      return fail(restore, `the safety backup could not start: ${safety.errors.join('; ')}`, false);
+    move(restore, 'safety_backup', { safetyRunId: safety.runs[0].runId });
+  }
+
+  function advanceSafetyBackup(restore: RestoreRunRow): void {
+    const run = db.get<BackupRunRow>('SELECT * FROM backup_runs WHERE id=?', restore.safety_run_id);
+    if (!run || run.state === 'queued' || run.state === 'running') return;
+    if (run.state === 'succeeded') return queueRestoreJob(restore);
+    fail(
+      restore,
+      `the safety backup ${run.state}${run.error ? ` (${run.error})` : ''}; nothing was changed`,
+      false,
+    );
+  }
+
+  function advanceRestoring(restore: RestoreRunRow, writers: string[]): void {
+    const command = db.get<CommandRow>('SELECT * FROM commands WHERE id=?', restore.command_id);
+    if (!command || ['pending', 'running'].includes(command.state)) return;
+    if (command.state !== 'succeeded') {
+      const error =
+        (JSON.parse(command.result_json ?? '{}') as { error?: string }).error ??
+        `the restore command ${command.state}`;
+      return fail(restore, error, restore.mode === 'in-place');
+    }
+    if (restore.mode === 'in-place') release(restore);
+    // The data is back; the restore is done when the services that were stopped are serving again.
+    if (restore.mode === 'in-place' && writers.length) move(restore, 'verifying');
+    else complete(restore);
+  }
+
+  function advanceVerifying(restore: RestoreRunRow, writers: string[], age: number): void {
+    if (writersReport(restore, writers, 'serving')) return complete(restore);
+    if (age > VERIFY_TIMEOUT_MS)
+      complete(
+        restore,
+        `the data was restored, but ${writers.join(', ')} did not report serving within ${VERIFY_TIMEOUT_MS / MINUTE} minutes; check tug status`,
+      );
+  }
+
+  function advanceRestore(restore: RestoreRunRow): void {
+    const age =
+      clock().getTime() -
+      new Date(restore.state_changed_at ?? restore.started_at ?? stamp()).getTime();
+    // Keep the project locked while a restore is unfinished, across a control restart.
+    if (restore.mode === 'in-place' && LOCKED_STATES.includes(restore.state)) lock(restore);
+    const writers = JSON.parse(restore.writers_json) as string[];
+    switch (restore.state) {
+      case 'holding':
+        return advanceHolding(restore, writers, age);
+      case 'safety_backup':
+        return advanceSafetyBackup(restore);
+      case 'restoring':
+        return advanceRestoring(restore, writers);
+      case 'verifying':
+        return advanceVerifying(restore, writers, age);
+    }
+  }
+
   /** Advances every restore that is waiting on something; safe to call often. */
   function advance(): void {
     for (const restore of db.all<RestoreRunRow>(
       `SELECT * FROM restore_runs WHERE state NOT IN ('succeeded','failed','released')`,
-    )) {
-      const age =
-        clock().getTime() -
-        new Date(restore.state_changed_at ?? restore.started_at ?? stamp()).getTime();
-      // Keep the project locked while a restore is unfinished, across a control restart.
-      if (restore.mode === 'in-place' && LOCKED_STATES.includes(restore.state)) lock(restore);
-      const writers = JSON.parse(restore.writers_json) as string[];
-      switch (restore.state) {
-        case 'holding': {
-          if (!writersReport(restore, writers, 'held')) {
-            if (age > HOLD_TIMEOUT_MS) fail(restore, 'the writers did not stop in time', false);
-            break;
-          }
-          if (!restore.safety_backup) {
-            queueRestoreJob(restore);
-            break;
-          }
-          const safety = backups.runNow(
-            restore.project_id,
-            [restore.target],
-            restore.actor ?? 'restore',
-            'pre-restore',
-          );
-          if (!safety.runs.length)
-            return fail(
-              restore,
-              `the safety backup could not start: ${safety.errors.join('; ')}`,
-              false,
-            );
-          move(restore, 'safety_backup', { safetyRunId: safety.runs[0].runId });
-          break;
-        }
-        case 'safety_backup': {
-          const run = db.get<BackupRunRow>(
-            'SELECT * FROM backup_runs WHERE id=?',
-            restore.safety_run_id,
-          );
-          if (!run || run.state === 'queued' || run.state === 'running') break;
-          if (run.state === 'succeeded') queueRestoreJob(restore);
-          else
-            fail(
-              restore,
-              `the safety backup ${run.state}${run.error ? ` (${run.error})` : ''}; nothing was changed`,
-              false,
-            );
-          break;
-        }
-        case 'restoring': {
-          const command = db.get<CommandRow>(
-            'SELECT * FROM commands WHERE id=?',
-            restore.command_id,
-          );
-          if (!command || ['pending', 'running'].includes(command.state)) break;
-          if (command.state === 'succeeded') {
-            if (restore.mode === 'in-place') release(restore);
-            // The data is back; the restore is done when the services that were stopped are serving again.
-            if (restore.mode === 'in-place' && writers.length) move(restore, 'verifying');
-            else complete(restore);
-          } else {
-            const error =
-              (JSON.parse(command.result_json ?? '{}') as { error?: string }).error ??
-              `the restore command ${command.state}`;
-            fail(restore, error, restore.mode === 'in-place');
-          }
-          break;
-        }
-        case 'verifying': {
-          if (writersReport(restore, writers, 'serving')) complete(restore);
-          else if (age > VERIFY_TIMEOUT_MS)
-            complete(
-              restore,
-              `the data was restored, but ${writers.join(', ')} did not report serving within ${VERIFY_TIMEOUT_MS / MINUTE} minutes; check tug status`,
-            );
-          break;
-        }
-        default:
-      }
-    }
+    ))
+      advanceRestore(restore);
   }
 
   function complete(restore: RestoreRunRow, warning?: string): void {
