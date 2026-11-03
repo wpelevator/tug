@@ -111,6 +111,12 @@ export function hostHasDocker(target: string, compose = false): boolean {
   return spawnSync('ssh', ['--', target, check], { stdio: 'ignore' }).status === 0;
 }
 
+/** The host's short hostname, or undefined when it cannot be read. */
+export function remoteHostname(target: string): string | undefined {
+  const result = spawnSync('ssh', ['--', target, 'hostname -s'], { encoding: 'utf8' });
+  return result.status === 0 ? String(result.stdout).trim() || undefined : undefined;
+}
+
 /** The host's global IPv4 addresses, private ones first; empty when the host cannot say. */
 export function discoverAddresses(target: string): AddressCandidate[] {
   const result = spawnSync('ssh', ['--', target, LIST_ADDRESSES_COMMAND], { encoding: 'utf8' });
