@@ -1,7 +1,10 @@
 # Examples
 
 - [WordPress and MariaDB](wordpress/README.md): a site with scheduled database and content backups.
-- [Node.js and PostgreSQL](node/README.md), [Django and PostgreSQL](django/README.md), and [Laravel and MariaDB](laravel/README.md): minimal file APIs with Redis and S3-compatible storage.
+- Language stacks: minimal file APIs with Redis and S3-compatible storage.
+  - [Node.js and PostgreSQL](node/README.md)
+  - [Django and PostgreSQL](django/README.md)
+  - [Laravel and MariaDB](laravel/README.md)
 - [tug.yml](tug.yml): example CLI configuration for a two-node project.
 
 ## Language stack examples
