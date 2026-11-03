@@ -13,7 +13,7 @@ import { formatNodePlan, inferNodeName, isValidNodeName } from '../cli-onboardin
 import { ask, canPrompt, choose, confirm } from '../cli-prompt.ts';
 import type { Prompter } from '../cli-prompt.ts';
 import { isNodeHost } from '../node-address.ts';
-import { resolveImage } from '../image.ts';
+import { assertImagePublished, resolveImage } from '../image.ts';
 import type { EnrollmentCredentialResponse, IdentityResponse, JoinKey } from '../protocol.ts';
 import { errMessage, loadTemplate } from '../util.ts';
 import {
@@ -96,6 +96,7 @@ async function installNodeIdentity(
   const cfg = await loadCfg();
   const connectUrl = o.agentControlUrl ? normalizeControlUrl(o.agentControlUrl) : undefined;
   await transportFor(cfg).then((t) => t.close()); // fail before touching the host when there is no credential
+  assertImagePublished(resolveImage(o.image, o.buildLocalImage));
   if (o.installDocker) await bootstrapDocker(sshTarget);
   preflightRemote(sshTarget, {
     controlUrl: connectUrl ?? cfg.credential?.url,

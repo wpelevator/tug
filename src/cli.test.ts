@@ -795,3 +795,18 @@ test('teardown stops the agent and removes Tug state, and only deletes volumes o
     'volumes go with --delete-data',
   );
 });
+
+test('network failures name their cause instead of only "fetch failed"', async () => {
+  const { describeFetchError } = await import('./util.ts');
+  const error = Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNRESET' } });
+  assert.equal(
+    describeFetchError(error),
+    'fetch failed (ECONNRESET)',
+    'the system error code should follow the message',
+  );
+  assert.equal(
+    describeFetchError(new Error('boom')),
+    'boom',
+    'errors without a cause pass through',
+  );
+});
