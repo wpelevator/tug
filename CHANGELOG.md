@@ -1,5 +1,17 @@
 # @wpelevator/tug
 
+## 0.11.0
+
+### Minor Changes
+
+- 98c2041: Commands are now grouped as `tug <subject> <verb>` (`node add`, `secret set`, `backup run`, `credential create`, and so on); the dash-joined names such as `node-install` are removed, and `deploy-cancel` is `deploy cancel`. `tug setup` (short for `tug control setup`) installs control and imports the root credential in one step, so `tug init` is only needed for credentials from elsewhere. `tug node add` infers the node name from the SSH host and, in a terminal, offers to install Docker, choose the inter-node address and enable ingress (`--ingress`), then confirms a plan (`-y` skips it). `tug node list` is new, and `node replace` and `node repair` take the node name as an argument.
+- a56bd80: `tug status` now prints a readable summary by default and `--json` prints the raw JSON (`--human` is removed). `tug deploy` prompts to generate or enter Compose variables that no secret, environment or `.env` provides, and fails with a clear error in CI or without a terminal.
+
+### Patch Changes
+
+- 52bb79b: `tug node add` checks for a control credential before it probes the host or asks questions, and its plan says when Docker was not checked. When the new node has not reported after the wait, the result says `reporting: false` and the command exits non-zero instead of looking like a success.
+- 98c2041: `tug node add` asks for the node name in a terminal when the SSH host is an IP address, suggesting the host's own hostname; `tug node enroll` asks for `--name` too. Without a terminal `--name` is still required.
+
 ## 0.10.0
 
 ### Minor Changes
