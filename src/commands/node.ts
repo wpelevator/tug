@@ -8,7 +8,7 @@ import {
   shellQuote as sh,
   HOST_NETWORK_FLAG,
 } from '../cli-install.ts';
-import { inferNodeName, isValidNodeName } from '../cli-onboarding.ts';
+import { formatNodePlan, inferNodeName, isValidNodeName } from '../cli-onboarding.ts';
 import { ask, canPrompt, choose, confirm } from '../cli-prompt.ts';
 import { isNodeHost } from '../node-address.ts';
 import { resolveImage } from '../image.ts';
@@ -89,7 +89,7 @@ async function installNodeIdentity(
   repair = false,
   /** False in batch mode, where only the final per-node results are printed. */
   printResult = true,
-): Promise<void> {
+): Promise<boolean> {
   const cfg = await loadCfg();
   const connectUrl = o.agentControlUrl ? normalizeControlUrl(o.agentControlUrl) : undefined;
   await transportFor(cfg).then((t) => t.close()); // fail before touching the host when there is no credential
@@ -130,6 +130,7 @@ async function installNodeIdentity(
   if (o.ingress)
     await request('POST', `/api/v1/nodes/${encodeURIComponent(name)}/ingress`, { enabled: true });
   const result = { ok: true, node: response.node, ...(o.ingress ? { ingress: true } : {}) };
+  let reporting = !o.wait;
   if (o.wait) {
     // A report from the new identity: wait for a report after the install began, not a replaced node's stale status.
     for (let i = 0; i < 30; i++) {
@@ -139,14 +140,18 @@ async function installNodeIdentity(
       );
       const seen = nodes.find((n) => n.name === name)?.last_seen_at;
       if (seen && seen > started) {
-        if (printResult) print(result);
-        return;
+        reporting = true;
+        break;
       }
       await new Promise((r) => setTimeout(r, 2000));
     }
-    console.error(`node ${name} has not reported yet; check \`docker logs tug-agent\` on the host`);
+    if (!reporting)
+      console.error(
+        `node ${name} has not reported yet; check \`docker logs tug-agent\` on the host`,
+      );
   }
-  if (printResult) print(result);
+  if (printResult) print(o.wait ? { ...result, reporting } : result);
+  return reporting;
 }
 
 /**
@@ -184,15 +189,15 @@ async function planNodeAdd(sshTarget: string, name: string, o: NodeIdentityOpts)
       false,
     );
   console.error(
-    [
-      'Node plan',
-      `  name:     ${name}`,
-      `  ssh:      ${sshTarget}`,
-      `  docker:   ${o.installDocker ? 'install' : 'must already be installed'}`,
-      `  address:  ${o.address ?? 'not set'}`,
-      `  ingress:  ${o.ingress ? 'enabled (Caddy on ports 80 and 443)' : 'no'}`,
-      `  image:    ${resolveImage(o.image, o.buildLocalImage)}`,
-    ].join('\n'),
+    formatNodePlan({
+      name,
+      ssh: sshTarget,
+      installDocker: o.installDocker,
+      probed: interactive,
+      address: o.address,
+      ingress: o.ingress,
+      image: resolveImage(o.image, o.buildLocalImage),
+    }),
   );
   if (interactive && !o.yes && !(await confirm(`Add ${name}?`)))
     throw new Error('cancelled; nothing was changed');
@@ -228,21 +233,21 @@ async function runNodeIdentity(
   if (o.all) {
     if (positional.name || positional.ssh)
       throw new Error(`${verb} --all walks every configured node; do not name one`);
-    const results: { node: string; ok: boolean; error?: string }[] = [];
+    const results: { node: string; ok: boolean; reporting?: boolean; error?: string }[] = [];
     for (const [name, settings] of Object.entries(cfg.nodes)) {
       const target = settings.ssh as string | undefined;
       if (!target) continue;
       const merged = { ...o, name };
       applyConfigDefaults(command, merged, nodeSettings(cfg, name));
       try {
-        await installNodeIdentity(target, name, mode, merged, repair, false);
-        results.push({ node: name, ok: true });
+        const reporting = await installNodeIdentity(target, name, mode, merged, repair, false);
+        results.push({ node: name, ok: true, ...(merged.wait ? { reporting } : {}) });
       } catch (e) {
         results.push({ node: name, ok: false, error: errMessage(e) });
       }
     }
     print({ results });
-    if (results.some((r) => !r.ok)) process.exitCode = 1;
+    if (results.some((r) => !r.ok || r.reporting === false)) process.exitCode = 1;
     return;
   }
   let name = positional.name ?? (positional.ssh ? inferNodeName(positional.ssh) : undefined);
@@ -263,8 +268,12 @@ async function runNodeIdentity(
     throw new Error(
       `${verb} needs an SSH target: pass <ssh-target> or set nodes.${name}.ssh in ${cfg.file}`,
     );
-  if (mode === 'create') await planNodeAdd(sshTarget, name, o);
-  await installNodeIdentity(sshTarget, name, mode, o, repair);
+  if (mode === 'create') {
+    if (o.agentControlUrl) normalizeControlUrl(o.agentControlUrl);
+    await transportFor(cfg).then((t) => t.close()); // no questions about a host this CLI cannot enroll
+    await planNodeAdd(sshTarget, name, o);
+  }
+  if (!(await installNodeIdentity(sshTarget, name, mode, o, repair))) process.exitCode = 1;
 }
 
 export function registerNode(program: Command): void {
