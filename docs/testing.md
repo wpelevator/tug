@@ -95,6 +95,8 @@ Proposed:
 - Latency and packet loss between ingress and app, using `tc netem` inside the privileged containers if the host kernel provides it.
 - A Pebble server, Let's Encrypt's own test ACME server, with Caddy pointed at it, so automatic certificates are covered without the internet or rate limits.
 
+The language stack examples have a separate Docker check: `node --test tests/integration/language-stacks.test.ts`. It builds each application, migrates a real database, uploads and downloads a file through a minimal S3 HTTP fixture, runs the configured database dump and restore, and clears Redis to verify recovered metadata. The fixture does not verify S3 signatures and does not replace a test against an actual object storage provider or a Tug deployment.
+
 ## Tier 3: real hosts
 
 Real hosts are the only place that shows routing between separate machines on an operator-provided private network, real certificate issuance, real network latency and the state a previous install leaves behind. Proposed: a manually triggered GitHub workflow that creates two throwaway DigitalOcean droplets, runs the scenarios, writes the report and always destroys the droplets, even on failure. A run should cost cents. It needs a DigitalOcean token and an SSH key as repository secrets, and should use Let's Encrypt's staging CA to stay clear of production rate limits.

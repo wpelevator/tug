@@ -1,0 +1,76 @@
+# Replace the node, ingress host, S3 endpoint, bucket and region before deploying.
+x-tug:
+  rollback: auto
+  backup:
+    schedule: "0 3 * * *"
+    retention:
+      daily: 7
+      weekly: 4
+      monthly: 6
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: app
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - "db-data:/var/lib/postgresql/data"
+    x-tug:
+      placement:
+        nodes:
+          - app
+      health:
+        type: tcp
+        port: 5432
+      backup:
+        command: pg_dump -U app --clean --if-exists app
+        filename: app.sql
+        verify: "-- PostgreSQL database dump complete"
+        restore: psql -U app -d app -v ON_ERROR_STOP=1
+
+  redis:
+    image: redis:7-alpine
+    x-tug:
+      placement:
+        nodes:
+          - app
+      health:
+        type: tcp
+        port: 6379
+
+  web:
+    build: ./app
+    depends_on:
+      - db
+      - redis
+    ports:
+      - "8080:8000"
+    environment:
+      DB_PASSWORD: ${DB_PASSWORD}
+      APP_KEY: ${APP_KEY}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      S3_REGION: us-east-1
+      S3_BUCKET: tug-example
+      S3_ENDPOINT: https://s3.example.com
+    x-tug:
+      placement:
+        nodes:
+          - app
+      health:
+        type: http
+        port: 8000
+        path: /health
+      ingress:
+        host: django.example.com
+        port: 8000
+        tls: auto
+
+volumes:
+  db-data:
+    x-tug:
+      placement:
+        nodes:
+          - app
