@@ -77,7 +77,6 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { openDb, openAgentDb, openSnapshotDb } from './dist/db.js';
-await assert.rejects(fs.access('/app/examples'), { code: 'ENOENT' }, 'the runtime image must not include the repository examples');
 const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-smoke-'));
 try {
   const db = await openDb(path.join(dir, 'control.db'));

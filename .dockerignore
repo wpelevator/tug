@@ -9,5 +9,4 @@ tug.local.json
 *.log
 dist
 
-# Example applications are not part of Tug release images.
 /examples
