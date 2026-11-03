@@ -37,6 +37,8 @@ Node certificates last 90 days. The agent renews at two thirds of the lifetime p
 
 `node add --all` and `node replace --all` walk the SSH targets declared in `tug.yml` one node at a time, continue after failures and print a per-node result. Suspected key compromise is `node disable` followed by `node replace`. `node remove` deletes the node (its ID is retired for good) and revokes any unconsumed join key.
 
+Moving services to new servers and retiring old nodes is covered in [Migrating to new servers](migration.md).
+
 ## Declaring nodes in the config file
 
 A repository can record its servers in the [config file](cli.md#config-file) so nobody has to remember `root@203.0.113.7`:

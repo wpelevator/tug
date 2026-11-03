@@ -141,6 +141,7 @@ The full walkthrough, including CI credentials, moving the control plane and rec
 - [Access control](docs/access-control.md): certificate identity classes, scoped operator credentials, roles, audit trail and a GitHub Actions deploy example.
 - [Security](docs/security.md): deployment trust boundaries, security audit findings and validation limits.
 - [Networking](docs/networking.md): bring-your-own private networking, cross-node service names, ingress and TLS, firewall notes.
+- [Migrating to new servers](docs/migration.md): move the web tier, database, object store or control plane to new hosts, and retire the old ones.
 - [Nodes](docs/nodes.md): node names and IDs, SSH install, self-service enrollment, certificate renewal and recovery, registration and status.
 - [CLI reference](docs/cli.md): every `tug` command and option.
 - [Configuration](docs/configuration.md): CLI, control and agent environment variables.
