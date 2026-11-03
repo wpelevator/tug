@@ -269,7 +269,11 @@ test('CLI commands route through resolved configuration and preserve exec argv i
   };
   delete env.TUG_CONFIG;
   const cli = (...args: string[]) =>
-    execFileAsync(process.execPath, [path.resolve('src/cli.ts'), ...args], { env, cwd: '/tmp' });
+    execFileAsync(process.execPath, [path.resolve('src/cli.ts'), ...args], {
+      env,
+      cwd: '/tmp',
+      timeout: 10000,
+    });
   try {
     const ps = await cli('ps', '--node', 'node-a', '--project', 'selected');
     assert.deepEqual(
@@ -331,6 +335,76 @@ test('transport maps remote adapter errors into CLI failures', async () => {
       /TTY adapter is unavailable/,
       'agent capability errors must surface without claiming remote TTY success',
     );
+  } finally {
+    await f.close();
+  }
+});
+
+test('interactive CLI exits on completion, failure, disconnect and cancellation while stdin stays open', async () => {
+  const f = await serverFixture();
+  let outcome = 'success';
+  let child: ReturnType<typeof execFileAsync>['child'];
+  f.server.on('connection', (socket) => {
+    socket.on('message', (data) => {
+      const message = JSON.parse(data.toString());
+      if (message.type === 'live.open') frame(socket, { type: 'live.started', node: 'n' });
+      if (message.type !== 'live.stdin') return;
+      frame(socket, {
+        type: 'live.output',
+        stream: 'stdout',
+        data: Buffer.from('received input\n').toString('base64'),
+      });
+      if (outcome === 'disconnect') socket.close();
+      else if (outcome === 'cancel') child.kill('SIGINT');
+      else if (outcome === 'error') frame(socket, { type: 'live.error', message: 'remote failed' });
+      else frame(socket, { type: 'live.exit', code: outcome === 'nonzero' ? 17 : 0 });
+    });
+  });
+  try {
+    for (outcome of ['success', 'nonzero', 'error', 'disconnect', 'cancel']) {
+      const running = execFileAsync(
+        process.execPath,
+        [path.resolve('src/cli.ts'), 'exec', 'web', '-i', '--', 'cat'],
+        {
+          cwd: os.tmpdir(),
+          env: {
+            ...process.env,
+            TUG_CONFIG: '',
+            TUG_CONTROL_URL: f.url,
+            TUG_CREDENTIAL: JSON.stringify(f.credential),
+            TUG_PROJECT: 'site',
+          },
+          timeout: 10000,
+        },
+      );
+      child = running.child;
+      child.stdin!.write('input stays open\n');
+      if (outcome === 'success') {
+        const result = await running;
+        assert.equal(
+          result.stdout,
+          'received input\n',
+          'interactive exec should print remote output and exit without local EOF',
+        );
+      } else {
+        await assert.rejects(
+          running,
+          (error: Error & { code?: number; stderr?: string }) => {
+            assert.equal(
+              error.code,
+              outcome === 'cancel' ? 130 : outcome === 'nonzero' ? 17 : 1,
+              `${outcome} should exit with its expected status without waiting for local EOF`,
+            );
+            if (outcome === 'error')
+              assert.match(error.stderr ?? '', /remote failed/, 'remote errors should be reported');
+            if (outcome === 'disconnect')
+              assert.match(error.stderr ?? '', /disconnect/, 'disconnects should be reported');
+            return true;
+          },
+          `${outcome} should terminate the CLI while stdin stays open`,
+        );
+      }
+    }
   } finally {
     await f.close();
   }

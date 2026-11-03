@@ -85,7 +85,7 @@ Every control URL, including overrides, must be `https://`. Agents can dial out 
 
 `tug deploy` also resolves secrets for you. It scans the Compose file for variables with no default (`${NAME}` or `$NAME`) that are not a control secret, in the environment or in `.env`. In a terminal it asks, for each one, whether to generate a random 192-bit value or to enter one (hidden), and stores it before deploying; existing secrets are never overwritten and generated values are never printed. Without a terminal, or when `CI` is set, it fails immediately naming the variables, so a pipeline never hangs or deploys an empty value.
 
-- `tug secret set <name> [--value <value>]` sets a secret, reading stdin if `--value` is omitted.
+- `tug secret set <name> [--value <value>]` sets a secret, reading stdin if `--value` is omitted. After you enter the value and press Enter, it prints the result and exits without requiring EOF (Ctrl-D).
 - `tug secret list` lists names and versions, without values.
 - `tug secret remove <name>` deletes a secret.
 

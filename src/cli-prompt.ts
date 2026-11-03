@@ -20,15 +20,16 @@ export const ask: Prompter = async (question, hidden = false) => {
   const rl = readline.createInterface({ input: process.stdin, output, terminal: true });
   try {
     return await new Promise<string>((resolve, reject) => {
-      rl.once('close', () => reject(new Error('input closed before an answer was given')));
+      const onClose = () => reject(new Error('input closed before an answer was given'));
+      rl.once('close', onClose);
       rl.question(question, (answer) => {
+        rl.off('close', onClose);
         if (hidden) process.stdout.write('\n');
         resolve(answer);
       });
       muted.on = hidden;
     });
   } finally {
-    rl.removeAllListeners('close');
     rl.close();
   }
 };
