@@ -26,7 +26,7 @@ You need Node.js 22.18 or newer and Docker Compose v2 on your machine, and SSH a
 npm install -g @wpelevator/tug      # or run it with npx @wpelevator/tug
 
 tug setup root@203.0.113.5          # install the control plane
-tug node add root@203.0.113.5       # install the agent on the same VPS
+tug node add root@203.0.113.5 --name app1  # install the agent on the same VPS
 tug deploy                          # deploy your Compose file to that VPS
 ```
 
@@ -36,32 +36,53 @@ In a terminal Tug asks before it changes anything: whether to install Docker, wh
 
 ## Your Compose file, plus a little `x-tug`
 
-Use a supported Compose file as your starting point. On a single node, placement is automatic; add `x-tug` to define health checks and ingress. For example, save this as `compose.yaml` and replace the hostname with yours:
+Use a supported Compose file as your starting point. This example pins the app, database and database volume to `app1`, the node named in the quick start. Placement can be omitted with one node, but explicit placement keeps the database on its chosen server when you add more nodes. Save this as `compose.yaml` and replace the hostname with yours:
 
 ```yaml
 services:
   db:
     image: mariadb:11.4.8
-    volumes: [db-data:/var/lib/mysql]
+    volumes:
+      - db-data:/var/lib/mysql
     environment:
       MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
     x-tug:
-      health: { type: tcp, port: 3306 }
+      placement:
+        nodes:
+          - app1
+      health:
+        type: tcp
+        port: 3306
 
   wordpress:
     image: wordpress:6.8.3-apache
-    depends_on: [db]
+    depends_on:
+      - db
     environment:
       WORDPRESS_DB_HOST: db
       WORDPRESS_DB_USER: root
       WORDPRESS_DB_PASSWORD: ${DB_ROOT_PASSWORD}
-    ports: ["8080:80"]
+    ports:
+      - "8080:80"
     x-tug:
-      health: { type: http, port: 80, path: /wp-includes/version.php }
-      ingress: { host: blog.example.com, port: 80, tls: auto }
+      placement:
+        nodes:
+          - app1
+      health:
+        type: http
+        port: 80
+        path: /wp-includes/version.php
+      ingress:
+        host: blog.example.com
+        port: 80
+        tls: auto
 
 volumes:
   db-data:
+    x-tug:
+      placement:
+        nodes:
+          - app1
 ```
 
 ```bash
@@ -70,6 +91,8 @@ tug deploy
 tug status       # what is running where, and anything failing
 tug logs wordpress --follow
 ```
+
+The named volume holds data on `app1`; it is not copied to another node automatically. Back it up and restore or move its data deliberately if you replace the server.
 
 A complete WordPress site with scheduled database and uploads backups is in the [WordPress example](examples/wordpress/README.md). Everything `x-tug` can express is in [Compose extensions](docs/compose.md).
 
@@ -105,21 +128,24 @@ It deliberately does not do Kubernetes-style scheduling, autoscaling, distribute
   tug CLI / CI
        | mTLS: deploy, status, logs, exec
        v
-+---------------------------------------+
-| Your VPS                              |
-|  Control plane: API, SQLite, builds   |
-|       ^                               |
-|       | agent connection              |
-|  Agent -> Docker Engine               |
-|            app + database + volumes   |
-|            optional Caddy ingress     |
-+---------------------------------------+
++-----------------------------------+       +-------------------------------+
+| VPS app1                          |       | VPS app2 (optional)           |
+|  Control plane: API, SQLite,      |       |                               |
+|    image builds                   |       |                               |
+|       ^                           |       |                               |
+|       | agent connections         |<------+ Agent -> Docker Engine        |
+|  Agent -> Docker Engine           |       |          additional services  |
+|            app + database        |       |                               |
+|            local volume + Caddy   |       |                               |
++-----------------------------------+       +-------------------------------+
+           |                                           |
+           +-------- private workload network ---------+
 
-  Add more agent nodes when needed. SSH installs control and agents;
-  normal operations use the control API.
+  app1 can run alone. Add app2 when needed; agents dial control.
+  SSH installs control and agents; normal operations use the control API.
 ```
 
-`tug deploy` reads your Compose file on your machine and sends it to the control plane, which stores it as an immutable desired state, builds application images when needed and pins published images to digests. Tug delivers its built images as archives; published images are pulled from their upstream registries. Each agent fetches the work for its node, applies it through the Docker Engine API, runs the health checks and reports back. The control plane marks the deployment done when every node reports it serving. Compose runs only on your machine; nodes need just Docker.
+`tug deploy` reads your Compose file on your machine and sends it to the control plane, which stores it as an immutable desired state, builds application images when needed and pins published images to digests. Tug delivers its built images as archives; published images are pulled from their upstream registries. Each agent fetches the work for its node, applies it through the Docker Engine API, runs the health checks and reports back. The control plane marks the deployment done when every node reports it serving. Compose runs only on your machine for application normalization; nodes need Docker, and the control installation also uses Compose. Cross-node workload traffic uses your own private network.
 
 Control serves mutual TLS directly on one port (`8443`). Every operator, CI job and node authenticates with a certificate from a private CA created at install, so the control address can be a bare IP and can change later. Do not terminate TLS in front of it. A `controlUrl` in `tug.yml` tells the CLI where control is (see [CLI configuration](docs/cli.md#config-file)). [Architecture](docs/architecture.md) covers every flow in detail, and [Security](docs/security.md) the trust boundaries.
 

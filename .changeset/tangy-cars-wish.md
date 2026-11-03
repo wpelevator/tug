@@ -2,4 +2,4 @@
 "@wpelevator/tug": patch
 ---
 
-Clarify the single-VPS setup and registry-free image delivery in the README.
+Clarify VPS deployment, node and volume placement, and registry-free image delivery in the README.
