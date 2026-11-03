@@ -12,7 +12,8 @@
     "tug-runtime": "./dist/main.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "docs"
   ],
   "publishConfig": {
     "access": "public"

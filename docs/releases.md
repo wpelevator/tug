@@ -14,6 +14,8 @@ It asks for the bump (`patch`, `minor` or `major`) and a summary, and writes a M
 
 ## Release flow
 
+The npm package includes the compiled runtime in `dist/` and the documentation in `docs/`, as listed in `package.json`'s `files` allowlist. npm also includes the root README and package metadata. To inspect the release contents locally without publishing, run `npm pack --dry-run`; its `prepack` hook builds the runtime first.
+
 1. A PR with a changeset merges to `main`.
 2. `release.yml` runs on every push to `main`. While unreleased changesets exist, `changesets/action` opens or updates a "chore: version packages" PR that runs `npm run version-packages` (bumps `package.json`, updates `package-lock.json`, writes `CHANGELOG.md` and deletes the consumed changesets).
 3. Merging that PR is the release. The same workflow then runs `npm run release` (`changeset publish`), which publishes `@wpelevator/tug` to npm with provenance and creates the git tag.
