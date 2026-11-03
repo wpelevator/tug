@@ -60,11 +60,13 @@ This is the move that can lose data, so the order matters. Deploying a database 
 
 1. **Add the new node** on the same private network, with the label the database selects (or pin it by name).
 2. **Back up now:** `tug backup run db`, then confirm with `tug backup list --check`.
-3. **Stop the writers before you change the placement.** Stop the services that write to the database, for example by removing them from the Compose file for one deploy, or by holding them with the restore in the next step on a database you have already moved. Do not leave the application running against the empty database. This step is manual today; there is no command that holds writers for a move.
-4. **Change the database placement and deploy.** The database starts empty on the new node.
-5. **Restore the snapshot into it:** `tug restore run db --writers php-fpm --confirm`. When the application runs on a different node than the database, Tug cannot infer the writers from `depends_on`, so name them with `--writers` (or pass `--no-writers` if you stopped them yourself). The restore takes a safety snapshot of the current data first.
-6. **Bring the writers back** and verify with the application and `tug backup list --check`.
+3. **Change the database placement and deploy with `--move`:** `tug deploy --move db`. Without the flag Tug refuses the deploy, because the database would start empty on the new node. With it, the services that write to the database are held (stopped) so nothing connects to the empty one. Writers are found from `depends_on` and from host names in environment variables (`WORDPRESS_DB_HOST=db`); check them with `tug restore run db` without `--confirm`, which prints the plan.
+4. **Restore the snapshot into it:** `tug restore run db --confirm`, adding `--writers php-fpm` if the plan missed a writer. The restore takes over the holds, takes a safety snapshot of the current data first and starts the writers when it finishes.
+5. **Changed your mind?** `tug hold release` starts the held services without restoring. Only do that if the empty database is acceptable.
+6. **Verify** with the application and `tug backup list --check`.
 7. **Clean up the old volume.** `tug volume remove db-data --delete-data` removes the record and the Docker volume on its node, but it refuses while a service in the current deployment still references the volume. Check `tug volume list` and, if the old copy is still there, remove the leftover Docker volume on the old host by hand.
+
+If the restore fails before it changes any data, the writers stay held, so nothing connects to the empty database. Fix the cause and run the restore again; `tug hold release` is the way to start them without a restore.
 
 While a writer is held, a sibling service whose health check depends on it (an nginx check that requests a PHP page) reports a failed apply for the duration. Give such services a health check that does not depend on the writer, such as a static `/healthz`. See [Restore](backups.md#restore). If the writers never report held, the restore fails after five minutes and the error names the node, the writer and the apply error the node reported.
 
@@ -93,17 +95,11 @@ Workload data is not part of the control backup. Back it up and restore it separ
 
 ## Retire a host
 
-`tug node remove <name>` only deletes the node's record from control. It does not touch the host, so the agent and its containers keep running until you stop them. Once the node is removed and nothing is placed on it:
+`tug node remove <name> --teardown` removes the node's record from control and then cleans the host over SSH (the target defaults to `nodes.<name>.ssh` in `tug.yml`). It refuses a node that a current deployment still places services on, stops the agent and ingress, removes the Tug containers and networks, and deletes `/etc/tug` and `/var/lib/tug`. Project volumes and ingress certificates are kept; add `--delete-data` to delete them too, only once the data has been moved or backed up. It asks for confirmation (`-y` to skip, required without a terminal) and refuses a host that runs the control plane. If the cleanup fails after the record was removed, run the same command again.
 
-```bash
-# on the old host
-docker rm -fv $(docker ps -aq --filter label=tug.project)   # project containers
-docker rm -f tug-agent tug-caddy 2>/dev/null                # agent and ingress, if present
-docker volume ls --filter label=tug.project -q | xargs -r docker volume rm
-rm -rf /var/lib/tug /etc/tug
-```
+Plain `tug node remove <name>` only deletes the record and leaves the host running.
 
-On a former control host also remove the control stack and its data, which includes the master key and the private CA: take the backup first, then `docker compose -p tug-control down -v` and `rm -rf /opt/tug-control /var/lib/tug-control`. Remove Docker itself only if nothing else uses it.
+On a former control host remove the control stack and its data, which includes the master key and the private CA: take the backup first, then `docker compose -p tug-control down -v` and `rm -rf /opt/tug-control /var/lib/tug-control`. Remove Docker itself only if nothing else uses it.
 
 Locally, delete the host from `tug.yml`, and remove stale credentials under `~/.config/tug/credentials/` and any `TUG_CONTROL_URL` you exported.
 
@@ -111,7 +107,7 @@ Names to look for when cleaning up by hand: containers are `tug-<project>-<servi
 
 ## Known limits
 
-- No guided move: writers are not held automatically for a database move, and the old volume is not removed for you.
-- No host uninstall command; host cleanup is manual.
+- A move does not copy the data: you restore it from a backup, and the old volume is not removed for you.
+- A control host is retired by hand.
 - Scratch restore volumes and the safety snapshot of every in-place restore are kept. See the limits in [Backups](backups.md).
 - The control archive does not contain workload data.

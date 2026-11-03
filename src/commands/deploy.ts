@@ -10,6 +10,7 @@ import { composeHash } from '../compose.ts';
 import { normalizeCompose } from '../normalize.ts';
 import {
   loadCfg,
+  collect,
   formatDeployment,
   print,
   printResult,
@@ -58,10 +59,22 @@ export function registerDeploy(program: Command): void {
     .option('--no-wait', 'return after desired state is created')
     .option('--timeout <seconds>', 'wait timeout in seconds', '300')
     .option('--json', 'print the full result, including the desired state, as JSON')
+    .option(
+      '--move <service>',
+      'acknowledge that a service placed on another node starts empty (its data does not move); the services that write to it are held until you restore it or run `tug hold release` (repeatable)',
+      collect,
+      [],
+    )
     .action(
       async (
         o: CommonOpts &
-          WaitOpts & { file: string; version?: string; buildLocal?: boolean; json?: boolean },
+          WaitOpts & {
+            file: string;
+            version?: string;
+            buildLocal?: boolean;
+            json?: boolean;
+            move: string[];
+          },
       ) => {
         const cfg = await loadCfg();
         const project = o.project || cfg.project || 'site';
@@ -84,6 +97,7 @@ export function registerDeploy(program: Command): void {
             secretNames.push(name);
           }
         }
+        const movePayload = o.move.length ? { moves: o.move } : {};
         const declared = await composeName(o.file);
         if (declared && declared !== project)
           console.error(
@@ -110,7 +124,10 @@ export function registerDeploy(program: Command): void {
                 await openAsBlob(path.join(directory, `${field}.tar.gz`)),
                 `${field}.tar.gz`,
               );
-            form.append('payload', JSON.stringify({ project, version, compose, localImages }));
+            form.append(
+              'payload',
+              JSON.stringify({ project, version, compose, localImages, ...movePayload }),
+            );
             response = await request<DeployResponse>('POST', '/api/v1/deployments', form, true);
           } finally {
             await fs.rm(directory, { recursive: true, force: true });
@@ -119,7 +136,7 @@ export function registerDeploy(program: Command): void {
           const tarball = await makeContext();
           try {
             const form = new FormData();
-            form.append('payload', JSON.stringify({ project, version, compose }));
+            form.append('payload', JSON.stringify({ project, version, compose, ...movePayload }));
             form.append('context', await openAsBlob(tarball), 'context.tgz');
             response = await request<DeployResponse>('POST', '/api/v1/deployments', form, true);
           } finally {
@@ -130,6 +147,7 @@ export function registerDeploy(program: Command): void {
             project,
             version,
             compose,
+            ...movePayload,
           });
         if (o.wait)
           response.deployment = await waitForDeployment(response.deployment.id, Number(o.timeout));

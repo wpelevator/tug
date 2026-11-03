@@ -168,7 +168,7 @@ The value is a cron string, `true` (a volume, with everything from the project d
 | `jitter` | both | Seconds of delay after the scheduled minute, 0 to 3600 | a stable per-target value under 15 minutes |
 | `timeout` | both | Hard limit for a run, `1m` to `24h` | `2h` |
 | `memory` | both | Memory limit of the restic helper container, `128m` to `16g` | `512m` |
-| `writers` | both | Services to hold during a restore | discovered from `depends_on` and volume mounts |
+| `writers` | both | Services to hold during a restore | discovered from `depends_on`, host names in environment variables and volume mounts |
 | `command` | service | What to run in the container; its output is the backup | required |
 | `restore` | service | What to run in the container to load a backup back; the stored file arrives on its standard input | none (the service cannot be restored by Tug) |
 | `filename` | service | Name of the file inside the snapshot | `<service>.out` |

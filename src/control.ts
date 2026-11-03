@@ -84,7 +84,7 @@ import {
   redactSecrets,
 } from './backup-destination.ts';
 import { createBackupService } from './backup-scheduler.ts';
-import { createRestoreService } from './backup-restore.ts';
+import { createRestoreService, discoverWriters } from './backup-restore.ts';
 import {
   AUTO_ROLLBACK_ACTOR,
   ROUTE_ROLES,
@@ -2191,6 +2191,25 @@ export async function createApp(
       });
     });
   });
+  /**
+   * Services that keep data on a node and are placed on different nodes by `compose` than by the current
+   * deployment. Deploying such a change starts the service empty on the new node: the data does not move.
+   */
+  function movedServices(project: string, compose: ComposeFile): string[] {
+    const current = currentDesired(project);
+    if (!current) return [];
+    const before: DesiredState = JSON.parse(current.state_json);
+    return Object.entries(compose.services || {})
+      .filter(([name, svc]) => {
+        const old = before.services?.[name]?.placement?.nodes ?? [];
+        const next = svc['x-tug']?.placement?.nodes ?? [];
+        const keepsData =
+          Boolean(svc['x-tug']?.backup) ||
+          (svc.volumes ?? []).some((mount) => typeof mount === 'object' && mount.type === 'volume');
+        return keepsData && old.length > 0 && next.length > 0 && old.some((n) => !next.includes(n));
+      })
+      .map(([name]) => name);
+  }
   async function deployRequest(req: Request, res: Response, uploadError?: unknown): Promise<void> {
     const files = (Array.isArray(req.files) ? req.files : []) as Express.Multer.File[];
     let responseBody: unknown;
@@ -2273,6 +2292,15 @@ export async function createApp(
         throw httpError(400, errMessage(e));
       }
       assertIngressHostsFree(project, compose);
+      const acknowledgedMoves: string[] = Array.isArray(body.moves) ? body.moves.map(String) : [];
+      const unacknowledged = movedServices(project, compose).filter(
+        (name) => !acknowledgedMoves.includes(name),
+      );
+      if (unacknowledged.length)
+        throw httpError(
+          409,
+          `${unacknowledged.join(', ')} would start empty on a different node: its data does not move. Back it up, then deploy with --move ${unacknowledged.join(' --move ')} to hold the services that write to it, and run tug restore run <target> --confirm`,
+        );
       // The CLI interpolates control secrets as sentinels; a reference to a secret that is gone would deploy an empty value.
       const referenced = sentinelNames(compose);
       if (referenced.includes(REGISTRY_AUTH_SECRET))
@@ -2507,6 +2535,18 @@ export async function createApp(
             JSON.stringify(desired),
             ts,
           );
+          // The moved service starts empty: keep what writes to it stopped until its data is restored.
+          for (const moved of acknowledgedMoves.filter((name: string) => compose.services?.[name]))
+            for (const writer of discoverWriters(compose, `service:${moved}`))
+              if (!acknowledgedMoves.includes(writer))
+                db.run(
+                  'INSERT OR REPLACE INTO service_holds(project_id,service,reason,restore_id,created_at) VALUES(?,?,?,?,?)',
+                  project,
+                  writer,
+                  `moved ${moved}`,
+                  null,
+                  ts,
+                );
           for (const [volumeName, volumeSpec] of Object.entries(compose.volumes || {})) {
             const lp = volumeSpec?.['x-tug'] || {};
             const nodeName = lp.placement?.nodes?.[0] || null;
@@ -2716,6 +2756,30 @@ export async function createApp(
       releaseLock(lock);
     }
   });
+  api('post', '/api/v1/holds/release', bodyProject, async (req, res) =>
+    withWriter(async () => {
+      const project = String(req.body?.project || 'site');
+      const services: string[] = Array.isArray(req.body?.services)
+        ? req.body.services.map(String)
+        : [];
+      // Only holds a deploy placed for a move; a restore's holds are dropped by `restore release`.
+      const rows = db.all<{ service: string }>(
+        'SELECT service FROM service_holds WHERE project_id=? AND restore_id IS NULL',
+        project,
+      );
+      const released = rows
+        .map((row) => row.service)
+        .filter((service) => !services.length || services.includes(service));
+      for (const service of released)
+        db.run(
+          'DELETE FROM service_holds WHERE project_id=? AND service=? AND restore_id IS NULL',
+          project,
+          service,
+        );
+      wakeAll(project);
+      res.json({ ok: true, project, released });
+    }),
+  );
   api('post', '/api/v1/images/prune', null, async (req, res) =>
     withWriter(async () => {
       const keep = req.body?.keep === undefined ? 5 : Number(req.body.keep);

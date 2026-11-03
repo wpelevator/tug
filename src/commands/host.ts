@@ -122,3 +122,27 @@ export function discoverAddresses(target: string): AddressCandidate[] {
   const result = spawnSync('ssh', ['--', target, LIST_ADDRESSES_COMMAND], { encoding: 'utf8' });
   return result.status === 0 ? sortCandidates(parseAddressCandidates(String(result.stdout))) : [];
 }
+
+/**
+ * The script that retires a node host: stops the agent and ingress, removes the project containers, networks and
+ * agent state. Project volumes (your data) and the ingress certificates go only with `deleteData`. A host that runs
+ * the control plane is refused, because removing it would destroy the master key and the private CA.
+ */
+export function teardownScript(deleteData: boolean): string {
+  return [
+    'set -eu',
+    "if docker ps -a --format '{{.Names}}' | grep -q '^tug-control'; then echo 'this host runs the control plane; retire it by hand (see docs/migration.md)' >&2; exit 3; fi",
+    'docker rm -f tug-agent tug-caddy >/dev/null 2>&1 || true',
+    'ids=$(docker ps -aq --filter label=tug.project --filter label=tug.job; docker ps -aq --filter label=tug.project)',
+    '[ -z "$ids" ] || docker rm -fv $ids >/dev/null',
+    "docker network ls -q --filter 'name=^tug_' | xargs -r docker network rm >/dev/null 2>&1 || true",
+    'rm -rf /etc/tug /var/lib/tug',
+    ...(deleteData
+      ? [
+          'docker volume ls -q --filter label=tug.project | xargs -r docker volume rm >/dev/null',
+          'docker volume rm tug-caddy-data tug-caddy-config tug-caddy-etc tug_restic_cache >/dev/null 2>&1 || true',
+        ]
+      : []),
+    'echo "node host cleaned"',
+  ].join('\n');
+}

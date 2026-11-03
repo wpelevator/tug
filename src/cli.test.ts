@@ -781,3 +781,17 @@ test('deploy summaries are one line and a compose file name is read for the proj
   assert.equal(await composeName(path.join(dir, 'a.yml')), 'rug', 'a top-level name is read');
   assert.equal(await composeName(path.join(dir, 'b.yml')), undefined, 'nested names are ignored');
 });
+
+test('teardown stops the agent and removes Tug state, and only deletes volumes on request', async () => {
+  const { teardownScript } = await import('./commands/host.ts');
+  const safe = teardownScript(false);
+  assert.match(safe, /docker rm -f tug-agent tug-caddy/, 'the agent and ingress are stopped');
+  assert.match(safe, /rm -rf \/etc\/tug \/var\/lib\/tug/, 'agent state is removed');
+  assert.ok(!safe.includes('docker volume'), 'volumes are kept by default');
+  assert.match(safe, /runs the control plane.*exit 3/, 'a control host is refused');
+  assert.match(
+    teardownScript(true),
+    /docker volume ls -q --filter label=tug.project/,
+    'volumes go with --delete-data',
+  );
+});
