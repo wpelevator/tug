@@ -1,8 +1,10 @@
 # Tug
 
-Deploy Docker Compose apps to a few ordinary Linux servers, from your laptop or CI, without Kubernetes or a hosted platform.
+Deploy Docker Compose apps to your own Linux VPS, from your laptop or CI, without Kubernetes or a hosted platform.
 
-You keep your `docker-compose.yml`. Tug installs a small control plane on one server and an agent on each of the others, then `tug deploy` puts your services where you say, waits until they are healthy and rolls back if they are not. It is built for running one to a few dozen sites, WordPress first, on two to ten VPSes, with backups and restores included.
+A VPS is a durable computer with enough resources to host multiple sites or a medium-size application and its database. Tug helps you use that capacity: keep your Compose file, deploy with one command, and manage rollouts, secrets, backups and restores. Start with one server and add more when you need them. Tug is built for a small number of servers and Compose applications, including Node.js, Laravel, Ruby and WordPress apps.
+
+Tug runs a small control plane and an agent, which can share the same VPS with your applications. It builds application images on the control server or your machine and delivers them to your nodes, so you do not need to run or configure an image registry for those builds. Published images are still pulled from their upstream registries.
 
 ## What you can do with it
 
@@ -14,7 +16,7 @@ You keep your `docker-compose.yml`. Tug installs a small control plane on one se
 - **Look inside running services.** `tug logs`, `tug exec`, `tug run` (for example `wp` CLI), `tug ps` and `tug status` work through the control plane, so you never SSH to a node to see what is going on.
 - **Give CI a limited key.** `tug credential create` makes read-only, deploy-only or admin credentials, and every change records who made it.
 
-Nodes only dial out to the control plane, so they work behind NAT or a firewall that allows nothing inbound. Tug does not need a cloud provider's API, a registry or an overlay network.
+Agents only dial out to the control plane, so nodes can work behind NAT or a firewall that allows nothing inbound. Tug does not need a cloud provider's API or an overlay network.
 
 ## Try it
 
@@ -23,39 +25,64 @@ You need Node.js 22.18 or newer and Docker Compose v2 on your machine, and SSH a
 ```bash
 npm install -g @wpelevator/tug      # or run it with npx @wpelevator/tug
 
-tug setup root@203.0.113.5          # install the control plane on a server
-tug node add root@198.51.100.7      # add a server that will run your apps
-tug deploy                          # deploy ./docker-compose.yml
+tug setup root@203.0.113.5          # install the control plane
+tug node add root@203.0.113.5 --name app1  # install the agent on the same VPS
+tug deploy                          # deploy your Compose file to that VPS
 ```
+
+The control plane and agent share the VPS with your app and database. Choose ingress during node setup if Tug should serve your app over HTTPS, and point your hostname at the VPS. You can add another server later with `tug node add`. Avoid publishing an application port already used by control (8443 by default).
 
 In a terminal Tug asks before it changes anything: whether to install Docker, which private address the node should use and whether it should handle ingress. It shows the plan and waits for you to confirm. `tug deploy` asks for any Compose variables, such as `${DB_PASSWORD}`, that no secret or `.env` provides. In CI or any other script nothing is ever asked, so pass the choices as flags (`--address`, `--ingress`, `--install-docker`, `-y`).
 
 ## Your Compose file, plus a little `x-tug`
 
-A normal Compose file already works. Add `x-tug` to say where services run, how to tell they are healthy and where traffic comes in:
+Use a supported Compose file as your starting point. This example pins the app, database and database volume to `app1`, the node named in the quick start. Placement can be omitted with one node, but explicit placement keeps the database on its chosen server when you add more nodes. Save this as `compose.yaml` and replace the hostname with yours:
 
 ```yaml
 services:
   db:
     image: mariadb:11.4.8
-    volumes: [db-data:/var/lib/mysql]
+    volumes:
+      - db-data:/var/lib/mysql
     environment:
       MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
     x-tug:
-      placement: { nodes: [app1] }
-      health: { type: tcp, port: 3306 }
+      placement:
+        nodes:
+          - app1
+      health:
+        type: tcp
+        port: 3306
 
   wordpress:
     image: wordpress:6.8.3-apache
-    depends_on: [db]
+    depends_on:
+      - db
+    environment:
+      WORDPRESS_DB_HOST: db
+      WORDPRESS_DB_USER: root
+      WORDPRESS_DB_PASSWORD: ${DB_ROOT_PASSWORD}
+    ports:
+      - "8080:80"
     x-tug:
-      placement: { nodes: [app1] }
-      health: { type: http, port: 80, path: /wp-includes/version.php }
-      ingress: { host: blog.example.com, port: 80, tls: auto }
+      placement:
+        nodes:
+          - app1
+      health:
+        type: http
+        port: 80
+        path: /wp-includes/version.php
+      ingress:
+        host: blog.example.com
+        port: 80
+        tls: auto
 
 volumes:
   db-data:
-    x-tug: { placement: { nodes: [app1] } }
+    x-tug:
+      placement:
+        nodes:
+          - app1
 ```
 
 ```bash
@@ -65,7 +92,9 @@ tug status       # what is running where, and anything failing
 tug logs wordpress --follow
 ```
 
-A complete WordPress site with scheduled database and uploads backups is in the [WordPress example](examples/wordpress/README.md). Everything `x-tug` can express is in [Compose extensions](docs/compose.md).
+The named volume holds data on `app1`; it is not copied to another node automatically. Back it up and restore or move its data deliberately if you replace the server.
+
+See the [examples directory](examples/) for stack-specific applications. Everything `x-tug` can express is in [Compose extensions](docs/compose.md).
 
 ## Everyday commands
 
@@ -89,42 +118,42 @@ Every command and option is in the [CLI reference](docs/cli.md). `tug status --j
 
 ## Is Tug right for you?
 
-Tug fits if you run a handful of Compose apps on VPSes you already pay for, want deploys, rollbacks, secrets and backups handled in one tool, and are happy with a single control server that you back up.
+Tug fits if you run Compose apps on one or a few VPSes, want deploys, rollbacks, secrets and backups handled in one tool, and are happy with a single control server that you back up. A server can host multiple apps as long as it has enough capacity; Tug does not automatically balance resource usage or replace a failed server.
 
 It deliberately does not do Kubernetes-style scheduling, autoscaling, distributed storage or database failover, and it does not provision servers through a provider's API. Node-to-node traffic travels over your own private network (Tailscale, a VPC, a LAN), so you own its firewalling and encryption. If you want automatic rescheduling of containers across a cluster, see how it compares with [Docker Swarm](docs/swarm-comparison.md). The goals, principles and planned milestones are in the [Roadmap](docs/roadmap.md).
 
 ## How it works
 
 ```text
-  tug CLI / CI (operator credential)
-       |
-       |  mTLS: deploy, status, logs, exec
-       v
-+-------------------------------------+
-| Control plane (one mTLS port)       |
-|   Control API (role-checked)        |
-|   SQLite: desired states, secrets   |
-|   private CA, image builds          |
-+-------------------------------------+
-       ^                       ^
-       |  agents dial out: work, status,
-       |  WebSocket wake and live sessions
-       |                       |
-+------+------------+   +------+------------------+
-| Node app1         |   | Node app2 (ingress node)|
-|   Agent           |   |   Agent                 |
-|   Docker Engine   |   |   Docker Engine         |
-|   services        |   |   services              |
-|                   |   |   managed Caddy ingress |
-+-------------------+   +-------------------------+
-        \_________________________/
-          workload traffic between node addresses
-          over the operator's private network
+                      tug CLI / CI
+                           |
+                           | mTLS: deploy, status, logs, exec
+                           v
++--------------------------------+     +--------------------------------+
+| VPS app1                       |     | VPS app2 (optional)            |
+|                                |     |                                |
+| Control plane                  |     |                                |
+| API, SQLite, image builds      |     |                                |
+|                                |     |                                |
+| Agent --> Docker Engine        |     | Agent --> Docker Engine        |
+|              |                 |     |              |                 |
+|              +-- service A     |     |              +-- service C     |
+|              +-- database      |     |              +-- service D     |
+|              +-- more...       |     |              +-- more...       |
+|     (zero or more services)    |     |     (zero or more services)    |
+|                                |     |                                |
+| Local volumes, optional Caddy  |     | Local volumes, optional Caddy  |
++--------------------------------+     +--------------------------------+
+             |                                         |
+             +------- private workload network --------+
 
-  SSH is used only by the CLI to install the control plane and nodes.
+  Each agent connects to the control plane over mTLS. Services are
+  placed on either node; local volumes stay on their node. app1 can
+  run alone. SSH installs control and agents; normal operations use
+  the control API.
 ```
 
-`tug deploy` reads your Compose file on your machine and sends it to the control plane, which stores it as an immutable desired state, builds any images and pins published images to digests. Each agent fetches the work for its node, applies it through the Docker Engine API, runs the health checks and reports back. The control plane marks the deployment done when every node reports it serving. Compose runs only on your machine; nodes need just Docker.
+`tug deploy` reads your Compose file on your machine and sends it to the control plane, which stores it as an immutable desired state, builds application images when needed and pins published images to digests. Tug delivers its built images as archives; published images are pulled from their upstream registries. Each agent fetches the work for its node, applies it through the Docker Engine API, runs the health checks and reports back. The control plane marks the deployment done when every node reports it serving. Compose runs only on your machine for application normalization; nodes need Docker, and the control installation also uses Compose. Cross-node workload traffic uses your own private network.
 
 Control serves mutual TLS directly on one port (`8443`). Every operator, CI job and node authenticates with a certificate from a private CA created at install, so the control address can be a bare IP and can change later. Do not terminate TLS in front of it. A `controlUrl` in `tug.yml` tells the CLI where control is (see [CLI configuration](docs/cli.md#config-file)). [Architecture](docs/architecture.md) covers every flow in detail, and [Security](docs/security.md) the trust boundaries.
 
