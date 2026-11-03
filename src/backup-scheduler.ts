@@ -4,9 +4,10 @@ import { projectRepository } from './backup-destination.ts';
 import { volumeName } from './container-spec.ts';
 import { id } from './util.ts';
 import { isUniqueViolation } from './db-driver.ts';
+import { backupDestinationQueries } from './db-backup-destination.ts';
 import type { ResolvedBackup } from './backup-config.ts';
 import type { Db } from './db.ts';
-import type { BackupDestinationRow, BackupRunRow, BackupScheduleRow } from './db.ts';
+import type { BackupRunRow, BackupScheduleRow } from './db.ts';
 import type {
   BackupJobPayload,
   BackupJobResult,
@@ -120,8 +121,8 @@ export function createBackupService(deps: BackupServiceDeps) {
   const stamp = () => clock().toISOString();
   const heartbeats = new Map<string, number>();
 
-  const destination = () =>
-    db.get<BackupDestinationRow>("SELECT * FROM backup_destination WHERE id='default'");
+  const destinationQueries = backupDestinationQueries(db);
+  const destination = () => destinationQueries.find();
   const nodeId = (name: string) =>
     db.get<{ id: string }>('SELECT id FROM nodes WHERE name=?', name)?.id;
   const nodeName = (nodeIdValue: string | null) =>

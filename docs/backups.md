@@ -36,7 +36,7 @@ Also [back up control](#control-plane-backup), copy the archive off-host, and pr
 
 ## Backup destination
 
-The control plane uses one destination. Running `tug backup destination set` replaces it. Each project uses its own repository. The complete command and credential options are in the [CLI reference](cli.md#backups).
+The control plane uses one destination. Running `tug backup destination set` replaces it. Setting or removing a destination updates its configuration and stored credentials atomically; a database failure leaves the previous configuration and credentials intact. Each project uses its own repository. The complete command and credential options are in the [CLI reference](cli.md#backups).
 
 ## Scheduled backups
 
