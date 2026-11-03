@@ -2,7 +2,7 @@ import { spawnSync } from 'node:child_process';
 import type { Command } from 'commander';
 import { canPrompt, confirm } from '../cli-prompt.ts';
 import { CONTROL_CONTAINER, defaultControlUrl, shellQuote as sh } from '../cli-install.ts';
-import { resolveImage } from '../image.ts';
+import { assertImagePublished, resolveImage } from '../image.ts';
 import { decodeCredential, writeFileDurable } from '../pki.ts';
 import { loadTemplate } from '../util.ts';
 import { collect, loadCfg, print, request, runLocal, templatesDir } from './context.ts';
@@ -75,6 +75,7 @@ function addSetup(parent: Command, description: string): void {
         );
       }
       const image = resolveImage(o.image, o.buildLocalImage);
+      assertImagePublished(image);
       console.error(
         [
           'Control plan',

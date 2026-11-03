@@ -2351,7 +2351,11 @@ export async function createApp(
         `SELECT * FROM deployments WHERE project_id=? AND state IN (${ACTIVE_STATES_SQL}) LIMIT 1`,
         project,
       );
-      if (active) throw httpError(409, `deployment ${active.id} is already ${active.state}`);
+      if (active)
+        throw httpError(
+          409,
+          `deployment ${active.id} is already ${active.state}; wait for it, or cancel it with: tug deploy cancel ${active.id}`,
+        );
       depId = id('dep');
       const ts = now();
       db.run(

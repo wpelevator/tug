@@ -22,6 +22,8 @@ tug init root.credential.json
 
 `tug init` copies the credential (a file, or `-` for stdin) into a `0600` file under `~/.config/tug/credentials/` and points the git-ignored `tug.local.yml` at it. CI passes `TUG_CREDENTIAL` (the encoded credential) or `TUG_CREDENTIAL_FILE`; precedence is `--credential <file>`, then the environment (setting both is an error), then the overlay's `credential` path. Tracked configuration may not name a credential.
 
+A release publishes the npm package a few minutes before its container image. A freshly updated CLI therefore fails `tug setup` and `tug node add` before touching the host, with a message that the image is not published yet; retry shortly, or pass `--image ghcr.io/wpelevator/tug:latest`.
+
 ## Authentication and PKI
 
 Control listens on **one** TLS 1.3 port that requires a client certificate from every peer. There is no plain HTTP listener, no unauthenticated route (not even a health check: monitor TCP reachability separately from authenticated readiness) and no bearer token. Operators, CI and nodes all use certificates signed by control's private CA; see [Access control](access-control.md) for identity classes, roles and key-based authorization.

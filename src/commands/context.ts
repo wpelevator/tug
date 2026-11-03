@@ -8,6 +8,7 @@ import { createCliLiveTransport } from '../cli-live-transport.ts';
 import { parseLiveRequest, runCliLive } from '../cli-live.ts';
 import type { LiveInput, LiveRequest } from '../cli-live.ts';
 import { TERMINAL_DEPLOYMENT_STATES } from '../protocol.ts';
+import { describeFetchError, errMessage } from '../util.ts';
 import type { DeploymentState } from '../protocol.ts';
 
 // Templates live next to the commands' parent: src/templates in dev (`node src/cli.ts`), dist/templates in the
@@ -100,11 +101,19 @@ export async function request<T = any>(
   const headers: Record<string, string> = {};
   if (!multipart) headers['content-type'] = 'application/json';
   try {
-    const res = await transport.http(`${transport.base}${route}`, {
-      method,
-      headers,
-      body: multipart ? (body as FormData) : body ? JSON.stringify(body) : undefined,
-    });
+    let res: Response;
+    try {
+      res = await transport.http(`${transport.base}${route}`, {
+        method,
+        headers,
+        body: multipart ? (body as FormData) : body ? JSON.stringify(body) : undefined,
+      });
+    } catch (error) {
+      throw new Error(
+        `${method} ${route}: could not reach control at ${transport.base}: ${describeFetchError(error)}`,
+        { cause: error },
+      );
+    }
     if (!res.ok) throw new Error(`${method} ${route}: ${res.status} ${await res.text()}`);
     return (await res.json()) as T;
   } finally {
@@ -135,10 +144,18 @@ export async function waitForDeployment(
 ): Promise<DeploymentRecord> {
   const deadline = Date.now() + timeoutSeconds * 1000;
   while (Date.now() < deadline) {
-    const deployment = await request<DeploymentRecord>(
-      'GET',
-      `/api/v1/deployments/${encodeURIComponent(deploymentId)}`,
-    );
+    let deployment: DeploymentRecord;
+    try {
+      deployment = await request<DeploymentRecord>(
+        'GET',
+        `/api/v1/deployments/${encodeURIComponent(deploymentId)}`,
+      );
+    } catch (error) {
+      throw new Error(
+        `lost contact with control while waiting for deployment ${deploymentId} (${errMessage(error)}); it may still be rolling out: check tug status, or stop it with: tug deploy cancel ${deploymentId}`,
+        { cause: error },
+      );
+    }
     if ((TERMINAL_DEPLOYMENT_STATES as readonly string[]).includes(deployment.state)) {
       if (deployment.state !== 'succeeded')
         throw new Error(
@@ -148,7 +165,9 @@ export async function waitForDeployment(
     }
     await new Promise((r) => setTimeout(r, 2000));
   }
-  throw new Error(`timed out waiting for deployment ${deploymentId}`);
+  throw new Error(
+    `timed out waiting for deployment ${deploymentId}; it is still rolling out: check tug status, or stop it with: tug deploy cancel ${deploymentId}`,
+  );
 }
 export async function waitForCommand(
   commandId: string,

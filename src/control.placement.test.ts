@@ -353,3 +353,32 @@ test('moving a service with data to another node needs --move and holds its writ
     await s.close();
   }
 });
+
+test('a deploy refused because another is rolling out names the command that cancels it', async () => {
+  const s = await makeServer();
+  try {
+    await post(s.base, '/api/v1/nodes/register', { name: 'a' });
+    const deploy = (version: string) =>
+      fetch(`${s.base}/api/v1/deployments`, {
+        method: 'POST',
+        headers: op,
+        body: JSON.stringify({
+          project: 'site',
+          version,
+          compose: normalized({
+            services: { web: { image: 'nginx', 'x-tug': { placement: { nodes: ['a'] } } } },
+          }),
+        }),
+      });
+    const first = await json(await deploy('v1'));
+    const second = await deploy('v2');
+    assert.equal(second.status, 409, 'a second deploy while one is rolling out is refused');
+    assert.match(
+      (await json(second)).error,
+      new RegExp(`tug deploy cancel ${first.deployment.id}`),
+      'the refusal should name the stuck deployment and how to cancel it',
+    );
+  } finally {
+    await s.close();
+  }
+});

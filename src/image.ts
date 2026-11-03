@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -30,4 +31,27 @@ export function resolveImage(
   version = packageVersion(),
 ): string {
   return image || (buildLocalImage ? LOCAL_IMAGE : defaultImage(version));
+}
+
+/**
+ * Fails before any host is touched when the published image for this CLI version does not exist yet. A release
+ * publishes the npm package a few minutes before its image, so a fresh CLI can briefly name a missing tag. Only a
+ * definitive "no such manifest" answer fails; no Docker, no network or a private registry carry on silently.
+ */
+export function assertImagePublished(
+  image: string,
+  inspect: (image: string) => { status: number | null; stderr: string } = (ref) => {
+    const result = spawnSync('docker', ['manifest', 'inspect', ref], {
+      encoding: 'utf8',
+      timeout: 20_000,
+    });
+    return { status: result.status, stderr: String(result.stderr ?? '') };
+  },
+): void {
+  if (!image.startsWith(`${IMAGE_REPOSITORY}:`)) return;
+  const result = inspect(image);
+  if (result.status !== 0 && /no such manifest|manifest unknown|not found/i.test(result.stderr))
+    throw new Error(
+      `${image} is not published yet: a release builds its image a few minutes after the npm package. Retry shortly, or pass --image ${IMAGE_REPOSITORY}:latest to use the latest release.`,
+    );
 }

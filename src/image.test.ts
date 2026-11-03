@@ -42,3 +42,26 @@ test('resolveImage prefers an explicit --image, then tug:local for local builds,
     'without flags the published image for the CLI version is used',
   );
 });
+
+test('a missing published image fails before the host is touched, and other failures carry on', async () => {
+  const { assertImagePublished, defaultImage } = await import('./image.ts');
+  const image = defaultImage('9.9.9');
+  assert.throws(
+    () => assertImagePublished(image, () => ({ status: 1, stderr: 'no such manifest: ghcr.io/…' })),
+    /is not published yet.*--image ghcr\.io\/wpelevator\/tug:latest/,
+    'a missing tag should say that the release image is still being built and how to continue',
+  );
+  assert.doesNotThrow(
+    () => assertImagePublished(image, () => ({ status: 1, stderr: 'dial tcp: i/o timeout' })),
+    'a network failure must not block the install',
+  );
+  assert.doesNotThrow(
+    () => assertImagePublished(image, () => ({ status: 0, stderr: '' })),
+    'a published image passes',
+  );
+  assert.doesNotThrow(
+    () =>
+      assertImagePublished('registry.example/tug:1', () => ({ status: 1, stderr: 'not found' })),
+    'a custom image is never checked',
+  );
+});
