@@ -125,24 +125,32 @@ It deliberately does not do Kubernetes-style scheduling, autoscaling, distribute
 ## How it works
 
 ```text
-  tug CLI / CI
-       | mTLS: deploy, status, logs, exec
-       v
-+-----------------------------------+       +-------------------------------+
-| VPS app1                          |       | VPS app2 (optional)           |
-|  Control plane: API, SQLite,      |       |                               |
-|    image builds                   |       |                               |
-|       ^                           |       |                               |
-|       | agent connections         |<------+ Agent -> Docker Engine        |
-|  Agent -> Docker Engine           |       |          additional services  |
-|            app + database        |       |                               |
-|            local volume + Caddy   |       |                               |
-+-----------------------------------+       +-------------------------------+
-           |                                           |
-           +-------- private workload network ---------+
+                      tug CLI / CI
+                           |
+                           | mTLS: deploy, status, logs, exec
+                           v
++--------------------------------+     +--------------------------------+
+| VPS app1                       |     | VPS app2 (optional)            |
+|                                |     |                                |
+| Control plane                  |     |                                |
+| API, SQLite, image builds      |     |                                |
+|                                |     |                                |
+| Agent --> Docker Engine        |     | Agent --> Docker Engine        |
+|              |                 |     |              |                 |
+|              +-- service A     |     |              +-- service C     |
+|              +-- database      |     |              +-- service D     |
+|              +-- more...       |     |              +-- more...       |
+|     (zero or more services)    |     |     (zero or more services)    |
+|                                |     |                                |
+| Local volumes, optional Caddy  |     | Local volumes, optional Caddy  |
++--------------------------------+     +--------------------------------+
+             |                                         |
+             +------- private workload network --------+
 
-  app1 can run alone. Add app2 when needed; agents dial control.
-  SSH installs control and agents; normal operations use the control API.
+  Each agent connects to the control plane over mTLS. Services are
+  placed on either node; local volumes stay on their node. app1 can
+  run alone. SSH installs control and agents; normal operations use
+  the control API.
 ```
 
 `tug deploy` reads your Compose file on your machine and sends it to the control plane, which stores it as an immutable desired state, builds application images when needed and pins published images to digests. Tug delivers its built images as archives; published images are pulled from their upstream registries. Each agent fetches the work for its node, applies it through the Docker Engine API, runs the health checks and reports back. The control plane marks the deployment done when every node reports it serving. Compose runs only on your machine for application normalization; nodes need Docker, and the control installation also uses Compose. Cross-node workload traffic uses your own private network.
