@@ -30,7 +30,8 @@ export async function importCredential(
     `${new URL(credential.url).host.replace(/[^A-Za-z0-9.-]/g, '_')}.json`,
   );
   await writeFileDurable(source, `${JSON.stringify(credential, null, 2)}\n`, 0o600);
-  for (const file of await writeInitConfig(cfg, source, connection)) console.log(`wrote ${file}`);
+  for (const file of await writeInitConfig(cfg, source, connection, credential.url))
+    console.log(`wrote ${file}`);
   console.log(`imported credential to ${source}`);
 }
 

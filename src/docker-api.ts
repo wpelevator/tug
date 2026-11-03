@@ -43,7 +43,12 @@ export interface ContainerInspect {
     User?: string;
     WorkingDir?: string;
   };
-  HostConfig?: { NetworkMode?: string; Binds?: string[]; Mounts?: unknown[] };
+  HostConfig?: {
+    NetworkMode?: string;
+    Binds?: string[];
+    Mounts?: unknown[];
+    ExtraHosts?: string[];
+  };
   State?: {
     Status?: string;
     Running?: boolean;

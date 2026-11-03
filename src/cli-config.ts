@@ -381,6 +381,7 @@ export async function writeInitConfig(
   config: ResolvedCliConfig,
   credentialFile: string,
   explicit: ConnectionOptions,
+  credentialUrl?: string,
 ): Promise<string[]> {
   const written: string[] = [];
   if (!config.fileExists) {
@@ -389,7 +390,12 @@ export async function writeInitConfig(
       config.file,
       serialize(
         config.file,
-        { controlUrl: config.controlUrl, project: config.project },
+        {
+          controlUrl: explicit.controlUrl
+            ? config.controlUrl
+            : (credentialUrl ?? config.controlUrl),
+          project: config.project,
+        },
         `Safe to commit: keep credentials out of this file (use TUG_CREDENTIAL_FILE or ${path.basename(config.localFile)}).`,
       ),
     );

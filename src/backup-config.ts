@@ -220,7 +220,9 @@ export function resolveBackups(compose: ComposeFile, project = ''): Resolved {
           ? defaultSchedule.trim()
           : undefined;
     if (spec.schedule === undefined && schedule === undefined)
-      errors.push(`${label} needs a schedule: set ${label}.schedule or x-tug.backup.schedule`);
+      errors.push(
+        `${label} needs a schedule: set ${label}.schedule or a project-level schedule at the top-level x-tug.backup.schedule`,
+      );
     const retention =
       spec.retention !== undefined
         ? validateRetention(label, spec.retention, errors)

@@ -55,3 +55,24 @@ test('a failed tcp health check carries the hint when the agent is not in a cont
     return true;
   });
 });
+
+test('a health check on an exited container reports the exit code instead of a dial failure', async () => {
+  const docker = new FakeDocker();
+  docker.addImage('db');
+  const id = await docker.createContainer('proj-db', { Image: 'db', Labels: {} });
+  await docker.startContainer(id);
+  await docker.stopContainer(id);
+  const ctx = {
+    docker,
+    http: fetch,
+    nodeName: 'n1',
+    stateDir: '/tmp/unused',
+    apply: true,
+    controlUrl: 'http://control.test',
+  } as AgentContext;
+  await assert.rejects(
+    waitForHealth(ctx, 'proj', id, 'db', { type: 'tcp', port: 1, retries: 1, interval: '1ms' }),
+    /db: tcp health check on port 1 failed after 1 attempt: db: container exited with code/,
+    'the error should say the container exited',
+  );
+});

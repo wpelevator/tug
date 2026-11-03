@@ -395,6 +395,7 @@ export async function startOneOff(
       NetworkMode: host.NetworkMode,
       ...(host.Binds?.length ? { Binds: host.Binds } : {}),
       ...(host.Mounts?.length ? { Mounts: host.Mounts } : {}),
+      ...(host.ExtraHosts?.length ? { ExtraHosts: host.ExtraHosts } : {}),
     },
   });
   const remove = () => docker.removeContainer(id).catch(() => {});
