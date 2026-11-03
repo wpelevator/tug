@@ -166,6 +166,7 @@ The full walkthrough, including CI credentials, moving the control plane and rec
 - [Architecture](docs/architecture.md): components, reconciliation, workflow diagrams, secrets and runtime paths.
 - [Compose extensions](docs/compose.md): `x-tug` placement, health checks, volumes and limitations.
 - [Control plane](docs/control-plane.md): install, mutual TLS and the private CA, image delivery, control-plane backup and recovery on another host.
+- [Examples](examples/README.md): WordPress and minimal Node.js, Django and Laravel apps with databases, backups and S3-compatible file storage.
 - [Backups](docs/backups.md): scheduled workload backups with `x-tug.backup` (restic), restore, recipes for common databases, and a restore drill. See also the [WordPress example](examples/wordpress/README.md).
 - [Access control](docs/access-control.md): certificate identity classes, scoped operator credentials, roles, audit trail and a GitHub Actions deploy example.
 - [Security](docs/security.md): deployment trust boundaries, security audit findings and validation limits.

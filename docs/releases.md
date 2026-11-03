@@ -2,6 +2,8 @@
 
 Tug is published as the npm package [`@wpelevator/tug`](https://www.npmjs.com/package/@wpelevator/tug) (bins `tug` and `tug-runtime`) and as the multi-arch (`linux/amd64`, `linux/arm64`) Docker image `ghcr.io/wpelevator/tug`. The package and image always share one version, and the CLI's install commands default to the image with the CLI's own version.
 
+The npm package includes the built distribution through the `package.json` files allowlist, and the Docker build context excludes `examples/`. Example applications live in the source repository and are not shipped in either release artifact.
+
 ## Changesets
 
 Versions come from [Changesets](https://github.com/changesets/changesets). Every pull request with a user-facing change (CLI, API, agent behavior, image contents, docs for a new behavior) adds a changeset:

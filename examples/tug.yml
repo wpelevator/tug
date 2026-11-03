@@ -21,7 +21,9 @@ nodes:
   app1:
     ssh: root@203.0.113.7
     address: 10.0.0.7 # private inter-node address on your network
-    label: [web, ingress]
+    label:
+      - web
+      - ingress
   app2:
     ssh: root@203.0.113.8
     address: 10.0.0.8
