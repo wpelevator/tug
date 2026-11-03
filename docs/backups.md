@@ -4,7 +4,7 @@ Tug schedules, verifies and restores backups itself. You mark a service or a vol
 
 ## Plan for recovery
 
-Workload snapshots and control-plane archives protect different things. Store both away from the VPS, and keep their credentials and passwords somewhere you can reach after the server is lost.
+Workload snapshots contain application data; control-plane archives contain Tug state and keys. Store both away from the VPS, and keep their credentials and passwords somewhere you can reach if the server is lost.
 
 | What | How to protect it | What to keep for recovery |
 | --- | --- | --- |
@@ -14,7 +14,7 @@ Workload snapshots and control-plane archives protect different things. Store bo
 | Control state, secrets, private CA and master key | Run `tug control backup` and copy the archive off-host encrypted; it does not include workload data. | The archive and an original operator credential; see [control recovery](control-plane.md#recover-control-on-another-host). |
 | Compose file and source | Keep them in version control. | Access to the repository and any external dependencies. |
 
-Backups of different targets are separate snapshots, not an atomic point-in-time copy. Plan how to stop writes and coordinate external storage if your application needs consistency across them. [The WordPress example](../examples/wordpress/README.md) illustrates a database and files on one node.
+Tug backs up each target separately. If your application needs a consistent point-in-time copy, plan how to stop writes and coordinate external storage. [The WordPress example](../examples/wordpress/README.md) illustrates a database and files on one node.
 
 ## Set up your first backup
 
@@ -36,7 +36,7 @@ Also [back up control](#control-plane-backup), copy the archive off-host, and pr
 
 ## Backup destination
 
-The destination is shared by the control plane and can be changed with `tug backup destination set`; setting it replaces the previous destination. Each project uses its own repository. The complete command and credential options are in the [CLI reference](cli.md#backups).
+The control plane uses one destination. Running `tug backup destination set` replaces it. Each project uses its own repository. The complete command and credential options are in the [CLI reference](cli.md#backups).
 
 ## Scheduled backups
 
@@ -136,7 +136,7 @@ Put the S3 credentials in the crontab environment or a `restic.env` file with mo
 
 ## Restore drill
 
-A backup you have not restored is a hope. Start with an isolated restore so you can verify the backup without changing live data. Time the exercise and record what you needed.
+A backup you have not restored is a hope. Start with an isolated restore to verify the backup without changing live data. Time the exercise and record what you needed.
 
 1. **Check the repository and the catalog.** `tug backup list` shows every target with its last success; the newest run should be recent and `succeeded`. `tug backup password` prints the repository and its password, so you can also inspect it directly with `restic snapshots` from any machine that can reach the bucket.
 2. **Restore files into a scratch volume.** `tug restore run wp-content --scratch --confirm` reads the latest snapshot into a new volume next to the live one and touches nothing live. List it with `docker run --rm -v <volume>:/data alpine ls /data` on the node, then remove the volume with `docker volume rm <volume>`.

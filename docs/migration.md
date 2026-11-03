@@ -84,7 +84,7 @@ Whatever you choose, the buckets your applications and backups use must exist be
 
 ## Move the control plane
 
-The recovery procedure is documented once, in [Recover control on another host](control-plane.md#recover-control-on-another-host), and changing only the address is covered in [Moving the control plane](control-plane.md#moving-the-control-plane). For a planned move:
+To recover a lost control server, see [Recover control on another host](control-plane.md#recover-control-on-another-host). To change only its address, see [Moving the control plane](control-plane.md#moving-the-control-plane). For a planned move:
 
 1. Take `tug control backup --no-images` on the old control and copy the archive off the host.
 2. Follow the recovery steps on the new host. Stop or isolate the old control before the new one serves, because two active control planes with divergent state are not supported.

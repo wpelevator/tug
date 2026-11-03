@@ -2,7 +2,7 @@
 
 Tug deploys standard Docker Compose files with an `x-tug` extension on services and volumes for placement and health checks. Compose is used only on the operator machine, where `tug deploy` normalizes the file; nodes run no Compose. Each agent turns the services placed on its node into Docker Engine API container definitions, without `x-tug`, `build`, `deploy` and `container_name`, with `extra_hosts` added for services on other nodes and `image` set to the built or declared image. Published `ports` without a host IP are bound to the node's `address` or `127.0.0.1` instead of every interface; write the host IP (for example `"0.0.0.0:80:80"`) to publish on purpose. See [Published ports](networking.md#published-ports-private-by-default).
 
-For task-oriented guidance, see [Health checks](healthchecks.md) and [Service placement and scaling](service-placement.md).
+See [Health checks](healthchecks.md) to choose a probe and [Service placement and scaling](service-placement.md) to choose where services run.
 
 ## Services
 

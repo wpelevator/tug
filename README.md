@@ -20,7 +20,7 @@ Agents only dial out to the control plane, so nodes can work behind NAT or a fir
 
 ## Try it
 
-Start with [Deploy your first service](docs/getting-started.md): install Tug and deploy nginx to one VPS, then verify the result. You need Node.js 22.18 or newer and Docker Compose v2 on your computer, plus SSH access to a Linux server. Tug can install Docker on supported servers.
+Follow [Deploy your first service](docs/getting-started.md) to install Tug, deploy nginx to one VPS and verify that it works. You need Node.js 22.18 or newer and Docker Compose v2 on your computer, plus SSH access to a Linux server. Tug can install Docker on supported servers.
 
 ```bash
 npm install -g @wpelevator/tug      # or run it with npx @wpelevator/tug
@@ -30,7 +30,7 @@ tug node add root@203.0.113.5 --name app1  # install the agent on the same VPS
 tug deploy                          # deploy a Compose file in this directory
 ```
 
-The control plane and agent share the VPS with your application. The walkthrough includes a Compose file, networking prerequisites and a way to verify the service. You can [add HTTPS](docs/networking.md#layer-b-ingress-and-tls), [protect your data](docs/backups.md) and [add another server](docs/service-placement.md) when needed.
+The control plane and agent share the VPS with your application. Once your service is running, you can [add HTTPS](docs/networking.md#layer-b-ingress-and-tls), [back up your data](docs/backups.md) or [add another server](docs/service-placement.md).
 
 In a terminal Tug asks before it changes anything: whether to install Docker, which private address the node should use and whether it should handle ingress. It shows the plan and waits for you to confirm. `tug deploy` asks for any Compose variables, such as `${DB_PASSWORD}`, that no secret or `.env` provides. In CI or any other script nothing is ever asked, so pass the choices as flags (`--address`, `--ingress`, `--install-docker`, `-y`).
 
@@ -156,8 +156,6 @@ It deliberately does not do Kubernetes-style scheduling, autoscaling, distribute
 `tug deploy` reads your Compose file on your machine and sends it to the control plane, which stores it as an immutable desired state, builds application images when needed and pins published images to digests. Tug delivers its built images as archives; published images are pulled from their upstream registries. Each agent fetches the work for its node, applies it through the Docker Engine API, runs the health checks and reports back. The control plane marks the deployment done when every node reports it serving. Compose runs only on your machine for application normalization; nodes need Docker, and the control installation also uses Compose. Cross-node workload traffic uses your own private network.
 
 Control serves mutual TLS directly on one port (`8443`). Every operator, CI job and node authenticates with a certificate from a private CA created at install, so the control address can be a bare IP and can change later. Do not terminate TLS in front of it. A `controlUrl` in `tug.yml` tells the CLI where control is (see [CLI configuration](docs/cli.md#config-file)). [Architecture](docs/architecture.md) covers every flow in detail, and [Security](docs/security.md) the trust boundaries.
-
-The [single-VPS tutorial](docs/getting-started.md) walks through a first deployment. The topic guides below cover the next operational steps.
 
 ## Documentation
 

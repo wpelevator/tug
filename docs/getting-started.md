@@ -1,6 +1,6 @@
 # Deploy your first service
 
-In this tutorial you will install Tug's control plane and agent on one Linux VPS, deploy nginx, and see its welcome page. It is a starting point for an application that you can later protect with backups or spread across more servers.
+Install Tug's control plane and agent on one Linux VPS, deploy nginx, and visit its welcome page.
 
 ## Before you start
 
@@ -18,7 +18,7 @@ npm install -g @wpelevator/tug
 tug setup root@203.0.113.5
 ```
 
-Allow Tug to install Docker if necessary and confirm the plan. Setup installs control, creates a root operator credential, and imports it locally. The credential has full administrative access; keep it private. Setup creates `tug.yml` for shared defaults and a local overlay pointing to the credential. Keep working in this directory: the CLI searches the current directory for configuration, not its parents. See [project and configuration selection](cli.md#arguments-options-and-configuration).
+Allow Tug to install Docker if necessary and confirm the plan. Setup installs control and imports a root operator credential to your computer. The credential has full administrative access; keep it private. Setup creates `tug.yml` for shared defaults and a local overlay pointing to the credential. Keep working in this directory: the CLI searches the current directory for configuration, not its parents. See [project and configuration selection](cli.md#arguments-options-and-configuration).
 
 ```sh
 tug status
@@ -33,7 +33,7 @@ tug node add root@203.0.113.5 --name app1
 tug node list
 ```
 
-Accept Docker installation if prompted, choose an address belonging to the VPS and confirm the plan. For this example you can decline managed ingress; it is introduced when you add a hostname. A private interface address is useful when you add a second server. The agent connects out to control and should appear in the node list with a recent contact time. The control plane and agent now share the VPS.
+Accept Docker installation if prompted, choose an address belonging to the VPS and confirm the plan. You can decline managed ingress for this example and enable it later when you add a hostname. A private interface address is useful when you add a second server. The agent connects out to control and should appear in the node list with a recent contact time. The control plane and agent now share the VPS.
 
 ## 3. Deploy and visit a service
 
@@ -72,4 +72,4 @@ With one node, omitted placement selects it automatically. The HTTP check verifi
 - [Choose health checks and safer rollouts](healthchecks.md): understand readiness, failures and rollback.
 - [Give CI or teammates access](access-control.md): create credentials appropriate for trusted operators.
 
-For cleanup, this tutorial intentionally leaves its deployment and control plane running. Before retiring a host that contains data, follow [Retire a host](migration.md#retire-a-host); teardown can delete volumes and credentials. The [CLI reference](cli.md), [Compose reference](compose.md) and [configuration reference](configuration.md) describe all options.
+The service and control plane will keep running after this tutorial. Before retiring a host that contains data, follow [Retire a host](migration.md#retire-a-host); teardown can delete volumes and credentials. The [CLI reference](cli.md), [Compose reference](compose.md) and [configuration reference](configuration.md) describe all options.

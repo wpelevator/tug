@@ -1,6 +1,6 @@
 # Troubleshooting
 
-Start in the project directory and check the project before taking action. `tug.yml` is looked up only in the current directory, and the project defaults to `site` unless selected with a flag, environment variable or config. Secrets, deployment, backup and restore operations use that resolved project; `tug status` and node operations are control-wide. See [configuration precedence](cli.md#arguments-options-and-configuration).
+Run these commands from your project directory. Tug looks for `tug.yml` only in the current directory and defaults to the `site` project unless you select another with a flag, environment variable or config. Secrets, deployment, backup and restore operations use that resolved project; `tug status` and node operations are control-wide. See [configuration precedence](cli.md#arguments-options-and-configuration).
 
 ```sh
 tug status
@@ -12,13 +12,13 @@ Status reports the last observation from each node, which may be stale; it is no
 
 ## Deploy fails or a service is unhealthy
 
-Read the error from `tug deploy`, then check `tug status`, `tug events` and `tug logs <service>`. If there is more than one eligible node, use `tug logs <service> --node <name>`. Check image availability, environment variables, secret names, container startup logs and health-check port and path. Verify that referenced dependencies can be reached and that the probe allows enough startup time. See [Health checks](healthchecks.md).
+Read the error from `tug deploy`, then check `tug status`, `tug events` and `tug logs <service>`. If there is more than one eligible node, use `tug logs <service> --node <name>`. Check image availability, environment variables, secret names, container startup logs and health-check port and path. Check that the service can reach its dependencies and that the probe allows enough startup time. See [Health checks](healthchecks.md).
 
 A project with multiple registered nodes needs placement for every service. A stateful service moved to another node may require an explicit `--move` acknowledgement and a restore; do not release held writers until you understand whether the new volume contains the correct data. See [Service placement](service-placement.md) and [Move the database](migration.md#move-the-database).
 
 ## The service is running but the site is unreachable
 
-Check that DNS points to the ingress VPS, ingress is enabled on the node, ports 80 and 443 are reachable for automatic HTTPS, and `x-tug.ingress` names a published service port. Run `tug doctor --nodes` and inspect ingress warnings in `tug status`. For a directly published port, check the actual node address, host binding and provider firewall. Tug may bind an unqualified published port to a private address or loopback. Explicit public bindings and public node addresses expose services according to the firewall. See [Ingress](networking.md#layer-b-ingress-and-tls) and [published ports](networking.md#published-ports-private-by-default).
+Check that DNS points to the ingress VPS, ingress is enabled on the node, ports 80 and 443 are reachable for automatic HTTPS, and `x-tug.ingress` names a published service port. Run `tug doctor --nodes` and inspect ingress warnings in `tug status`. For a directly published port, check the actual node address, host binding and provider firewall. Tug may bind an unqualified published port to a private address or loopback. A public binding or node address can expose the service, depending on your firewall. See [Ingress](networking.md#layer-b-ingress-and-tls) and [published ports](networking.md#published-ports-private-by-default).
 
 ## A node is stale or cannot reach a service
 
