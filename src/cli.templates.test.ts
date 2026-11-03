@@ -30,7 +30,7 @@ async function stubSsh(dir: string) {
   return { bin, log };
 }
 
-test('control-install uses config controlUrl, with overlay, environment and flag overrides', async () => {
+test('control setup uses config controlUrl, with overlay, environment and flag overrides', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-control-config-'));
   const ssh = await stubSsh(dir);
   const credential = path.join(dir, 'stub.credential.json');
@@ -53,18 +53,20 @@ test('control-install uses config controlUrl, with overlay, environment and flag
   const install = async (expected: string, ...args: string[]) => {
     await fs.rm(ssh.log, { force: true });
     const result = await cli(
-      'control-install',
+      'control',
+      'setup',
       'root@ssh-alias',
       '--config',
       config,
       '--credential-out',
       path.join(dir, 'root.out.json'),
+      '--no-import',
       ...args,
     );
     assert.equal(
       JSON.parse(result.stdout).url,
       expected,
-      'control-install should report the resolved installation address',
+      'control setup should report the resolved installation address',
     );
     assert.ok(
       (await fs.readFile(ssh.log, 'utf8')).includes(`TUG_CONTROL_URL: ${JSON.stringify(expected)}`),
@@ -96,7 +98,7 @@ test('control-install uses config controlUrl, with overlay, environment and flag
       'a credential alone should not replace the SSH fallback',
     );
     await install('https://ssh-alias:9555', '--port', '9555');
-    // nodeDefaults that name control-install options (image, installDocker) are its defaults too.
+    // nodeDefaults that name control setup options (image, installDocker) are its defaults too.
     await fs.writeFile(
       config,
       'controlUrl: https://configured.test:9099\nnodeDefaults:\n  installDocker: true\n  image: config/image:1\n',
@@ -114,7 +116,7 @@ test('control-install uses config controlUrl, with overlay, environment and flag
     await fs.writeFile(config, 'controlUrl: http://invalid.test\n');
     await fs.rm(ssh.log);
     await assert.rejects(
-      cli('control-install', 'root@ssh-alias', '--config', config),
+      cli('control', 'setup', 'root@ssh-alias', '--config', config),
       /must use https/,
       'an invalid configured control URL should fail before SSH',
     );
@@ -143,16 +145,17 @@ test('install commands render the shipped templates (src in dev, dist in the ima
     TUG_STUB_CREDENTIAL: control.credentialFile,
   };
   await fs.writeFile(env.TUG_CONFIG, '{}');
-  // TUG_CONTROL_URL is the connect target for API commands but the advertised address for control-install, so a shell
-  // that exports it for the first would change the second. Keep it away from control-install here.
+  // TUG_CONTROL_URL is the connect target for API commands but the advertised address for control setup, so a shell
+  // that exports it for the first would change the second. Keep it away from control setup here.
   const cli = (...args: string[]) => {
     const scoped: NodeJS.ProcessEnv = { ...env };
-    if (args[0] === 'control-install') delete scoped.TUG_CONTROL_URL;
+    if (args[0] === 'control' && args[1] === 'setup') delete scoped.TUG_CONTROL_URL;
     return execFileAsync(process.execPath, [cliEntry, ...args], { env: scoped, cwd: dir });
   };
   try {
     await cli(
-      'control-install',
+      'control',
+      'setup',
       'root@control.test',
       '--port',
       '9099',
@@ -160,6 +163,7 @@ test('install commands render the shipped templates (src in dev, dist in the ima
       'https://control.test:9099',
       '--credential-out',
       path.join(dir, 'root.out.json'),
+      '--no-import',
     );
     let script = await fs.readFile(ssh.log, 'utf8');
     assert.ok(
@@ -174,21 +178,23 @@ test('install commands render the shipped templates (src in dev, dist in the ima
     );
     assert.ok(
       script.includes(`image: ${JSON.stringify(defaultImage())}`),
-      'control-install defaults to the published image for the CLI version',
+      'control setup defaults to the published image for the CLI version',
     );
     assert.ok(
       !script.includes('docker build'),
-      'control-install does not build an image unless --build-local-image is set',
+      'control setup does not build an image unless --build-local-image is set',
     );
     assert.doesNotMatch(script, unrenderedVariable, 'no unrendered template variables');
 
     await fs.rm(ssh.log);
     await cli(
-      'control-install',
+      'control',
+      'setup',
       'root@bare.test',
       '--install-docker',
       '--credential-out',
       path.join(dir, 'root.out.json'),
+      '--no-import',
     );
     script = await fs.readFile(ssh.log, 'utf8');
     assert.ok(
@@ -211,7 +217,7 @@ test('install commands render the shipped templates (src in dev, dist in the ima
     );
 
     await fs.rm(ssh.log);
-    await cli('node-install', 'root@node.test', '--name', 'n-tpl', '--no-wait');
+    await cli('node', 'add', 'root@node.test', '--name', 'n-tpl', '--no-wait');
     script = await fs.readFile(ssh.log, 'utf8');
     assert.ok(script.includes('TUG_NODE_NAME=n-tpl'), 'agent.env rendered');
     assert.ok(!script.includes('TUG_AGENT_TOKEN'), 'no bearer token reaches the node');
@@ -222,7 +228,7 @@ test('install commands render the shipped templates (src in dev, dist in the ima
     );
     assert.ok(
       script.includes(defaultImage()),
-      'node-install defaults to the published image for the CLI version',
+      'node add defaults to the published image for the CLI version',
     );
     assert.doesNotMatch(script, unrenderedVariable, 'no unrendered template variables');
     assert.doesNotMatch(
@@ -239,7 +245,8 @@ test('install commands render the shipped templates (src in dev, dist in the ima
     await fs.rm(ssh.log);
     const agentControlUrl = 'https://agent-control.test';
     await cli(
-      'node-install',
+      'node',
+      'add',
       'root@private.test',
       '--name',
       'n-private',
@@ -259,7 +266,8 @@ test('install commands render the shipped templates (src in dev, dist in the ima
     const privateEnroll = JSON.parse(
       (
         await cli(
-          'node-prepare-enrollment',
+          'node',
+          'enroll',
           '--name',
           'n-private-enroll',
           '--agent-control-url',
@@ -282,24 +290,25 @@ test('install commands render the shipped templates (src in dev, dist in the ima
     );
     assert.equal(joinKey.name, 'n-private-enroll', 'the join key is bound to one node name');
 
-    const enroll = await cli('node-prepare-enrollment', '--name', 'n-enr');
+    const enroll = await cli('node', 'enroll', '--name', 'n-enr');
     assert.ok(
       enroll.stdout.includes(`'${defaultImage()}' agent`),
-      'node-prepare-enrollment prints a docker run with the published image for the CLI version',
+      'node enroll prints a docker run with the published image for the CLI version',
     );
     assert.match(
       enroll.stdout,
       /--network host /,
-      'node-prepare-enrollment should print a host-networked docker run for health checks',
+      'node enroll should print a host-networked docker run for health checks',
     );
     assert.doesNotMatch(
       enroll.stdout,
       /NET_ADMIN|TUG_MESH/,
-      'node-prepare-enrollment should not grant WireGuard capabilities or environment',
+      'node enroll should not grant WireGuard capabilities or environment',
     );
 
     const cloud = await cli(
-      'node-prepare-enrollment',
+      'node',
+      'enroll',
       '--name',
       'n-cloud',
       '--address',
@@ -426,44 +435,48 @@ test('batch identity commands apply every per-node setting and preserve explicit
       },
     };
     await fs.writeFile(env.TUG_CONFIG, JSON.stringify(configuredNodes));
-    for (const verb of ['node-install', 'node-replace-identity', 'node-repair-identity']) {
+    for (const verb of ['add', 'replace', 'repair']) {
       await fs.rm(ssh.log, { force: true });
-      const batch = JSON.parse((await cli(verb, '--all', '--no-wait')).stdout);
+      const batch = JSON.parse((await cli('node', verb, '--all', '--no-wait')).stdout);
       assert.deepEqual(
         batch.results,
         [
           { node: 'config-a', ok: true },
           { node: 'config-b', ok: true },
         ],
-        `${verb} --all should process each declared SSH node and skip nodes without SSH`,
+        `node ${verb} --all should process each declared SSH node and skip nodes without SSH`,
       );
       const calls = (await fs.readFile(ssh.log, 'utf8')).split('--END--');
       const a = calls.filter((call) => call.includes('root@config-a')).join('\n');
       const b = calls.filter((call) => call.includes('root@config-b')).join('\n');
-      assert.match(a, /node-agent:test/, `${verb} should apply the per-node image`);
+      assert.match(a, /node-agent:test/, `node ${verb} should apply the per-node image`);
       assert.match(
         a,
         /TUG_CONTROL_URL=https:\/\/node-control.test:8443/,
-        `${verb} should apply the per-node agent URL`,
+        `node ${verb} should apply the per-node agent URL`,
       );
       assert.doesNotMatch(
         a,
         /download.docker.com/,
-        `${verb} should honor a false per-node Docker value`,
+        `node ${verb} should honor a false per-node Docker value`,
       );
       assert.doesNotMatch(
         a,
         /NET_ADMIN|TUG_MESH|wireguard|tugwgtest/,
-        `${verb} should omit WireGuard capabilities, environment and preflight checks`,
+        `node ${verb} should omit WireGuard capabilities, environment and preflight checks`,
       );
-      assert.match(b, /default-agent:test/, `${verb} should inherit the default image`);
+      assert.match(b, /default-agent:test/, `node ${verb} should inherit the default image`);
       assert.match(
         b,
         /TUG_CONTROL_URL=https:\/\/default-control.test:8443/,
-        `${verb} should inherit the default agent URL`,
+        `node ${verb} should inherit the default agent URL`,
       );
-      assert.match(b, /download.docker.com/, `${verb} should inherit Docker installation`);
-      assert.match(b, /--network host /, `${verb} should retain host networking for health checks`);
+      assert.match(b, /download.docker.com/, `node ${verb} should inherit Docker installation`);
+      assert.match(
+        b,
+        /--network host /,
+        `node ${verb} should retain host networking for health checks`,
+      );
     }
     await fs.rm(ssh.log, { force: true });
     const metadataTransport = createTransport(control.root, control.url);
@@ -502,7 +515,8 @@ test('batch identity commands apply every per-node setting and preserve explicit
     const overridden = JSON.parse(
       (
         await cli(
-          'node-install',
+          'node',
+          'add',
           '--all',
           '--no-wait',
           '--image',

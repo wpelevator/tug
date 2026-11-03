@@ -78,7 +78,7 @@ There are several practical consequences:
 - Requesting three replicas with only two eligible nodes records two. The unmet third replica does not remain as a pending demand. Scaling to zero is rejected.
 - Each service gets at most one steady-state replica on a node. Repeated selection of the first candidates across different services is not cluster-wide load balancing.
 - CPU/memory settings can constrain individual containers, but Tug does not reserve capacity before placement. A deployment can overload a selected node.
-- `node-disable` revokes management access and removes endpoints; it neither stops the existing containers nor drains them elsewhere.
+- `node disable` revokes management access and removes endpoints; it neither stops the existing containers nor drains them elsewhere.
 
 See [`src/control.placement.test.ts`](../src/control.placement.test.ts), [`src/container-spec.ts`](../src/container-spec.ts) and the [CLI](cli.md). Swarm has continuing task replacement and resource-aware placement, and its drain operation moves eligible service tasks. [D3][D14][D18] These semantics matter more than both tools having a `replicas` field.
 

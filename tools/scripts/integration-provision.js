@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Runs in the runtime image next to control. It waits for control's CA, issues the root credential on the control
-// host (control-credential, sharing control's data volume), then registers every fake VPS the way `node-install`
+// host (control-credential, sharing control's data volume), then registers every fake VPS the way `tug node add`
 // does: the node's own `agent identity` makes the key and CSR, the identity endpoint signs it and `agent install-cert`
 // installs the result into /tokens/<node>, which the fake VPS copies into its state volume.
 import { execFileSync } from 'node:child_process';

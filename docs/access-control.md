@@ -14,8 +14,8 @@ A principal outside its class gets `403`. Authorization follows the **public key
 
 Operator credentials come in two kinds, both with a unique name, a role and optionally allowed projects:
 
-- **`root`** is an ordinary named admin issued on the control-plane host by `tug control-install` (`control issue-credential --name root --role admin`). Upgrades never reissue it; `tug control-install --recover-root` replaces only root's key without the API.
-- **Named credentials** are for CI systems, teammates and automation. Create them with `tug credential-create` (control generates the key and returns the credential once; it keeps no private-key copy) and revoke them with `tug credential-revoke`. They last one year at most.
+- **`root`** is an ordinary named admin issued on the control-plane host by `tug control setup` (`control issue-credential --name root --role admin`). Upgrades never reissue it; `tug control setup --recover-root` replaces only root's key without the API.
+- **Named credentials** are for CI systems, teammates and automation. Create them with `tug credential create` (control generates the key and returns the credential once; it keeps no private-key copy) and revoke them with `tug credential revoke`. They last one year at most.
 
 Replace a credential by creating a new name, verifying it, updating consumers and then revoking the old name. Keep at least one verified admin throughout.
 
@@ -100,18 +100,18 @@ Every deployment and every control event records the acting credential name, `ro
 ## Managing operator credentials
 
 ```bash
-tug credential-create ci-site --role deploy --project site
-tug credential-create ci-site --role deploy --project site --project blog --expires-in-days 90
-tug credential-create alice --role read
-tug credential-list
-tug credential-revoke ci-site
+tug credential create ci-site --role deploy --project site
+tug credential create ci-site --role deploy --project site --project blog --expires-in-days 90
+tug credential create alice --role read
+tug credential list
+tug credential revoke ci-site
 ```
 
 - Names are 1 to 64 letters, numbers, dots, underscores or hyphens. A revoked credential keeps its name so audit entries stay unambiguous; choose a new name to replace it.
-- `credential-create` prints the credential once, on stdout; a note on stderr reminds you to store it. Only the key hash is stored, so a lost credential cannot be recovered, only replaced.
-- `credential-list` shows name, role, projects, creator, creation, last use, expiry and revocation time, never secrets.
+- `credential create` prints the credential once, on stdout; a note on stderr reminds you to store it. Only the key hash is stored, so a lost credential cannot be recovered, only replaced.
+- `credential list` shows name, role, projects, creator, creation, last use, expiry and revocation time, never secrets.
 - Revocation applies to the next request. Expired credentials are refused with `401` the same way. `last_used_at` is refreshed at most once a minute in the background, so it is approximate and bookkeeping never delays or fails a request.
-- Credential records (name, role, projects, key hash, expiry, revocation) live in the control database, so they are part of `tug control-backup` and come back with `tug control-restore`; a restore returns the credential set (including revocations) to the backup's state. Private keys are never stored on control.
+- Credential records (name, role, projects, key hash, expiry, revocation) live in the control database, so they are part of `tug control backup` and come back with `tug control restore`; a restore returns the credential set (including revocations) to the backup's state. Private keys are never stored on control.
 - `root` is listed like any other admin credential. Use `--recover-root` if its credential is lost; prefer day-to-day use of named admin credentials.
 
 ## Deploying from GitHub Actions
@@ -119,7 +119,7 @@ tug credential-revoke ci-site
 Create a project-scoped `deploy` credential and store it as a repository secret (the credential already carries the control plane's default address and CA):
 
 ```bash
-tug credential-create github-site --role deploy --project site
+tug credential create github-site --role deploy --project site
 ```
 
 Add `TUG_CREDENTIAL` (the printed credential) under the repository's Settings, Secrets and variables, Actions. A workflow:

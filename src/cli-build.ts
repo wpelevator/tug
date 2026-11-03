@@ -44,7 +44,7 @@ export function sourceArchiveFilter(
   return !compileIgnore(ignores)(relative);
 }
 
-/** Credential documents written by `control-install --credential-out` (default `tug-root.credential.json`). */
+/** Credential documents, such as the copy `control setup --credential-out` writes (conventionally `*.credential.json`). */
 const CREDENTIAL_FILE = /\.credential\.json$/;
 
 const ignoreCache = new WeakMap<string[], (relative: string) => boolean>();

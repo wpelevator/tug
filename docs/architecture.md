@@ -11,7 +11,7 @@ The [README](../README.md#how-it-fits-together) has an overview diagram of how t
 - **Agent** (`src/agent.ts`): runs on every node, fetches authoritative work from `GET /agent/v1/work` and reconciles containers through the Docker Engine API (`src/docker-api.ts`) over the local socket. It builds one container definition per placed service (`src/container-spec.ts`), substitutes released secrets into the container environment, verifies/downloads/loads artifact-backed images, pulls published images by their pinned registry digest when the desired revision is new to the node, executes health checks, and reports status. Nodes need only the Docker Engine, not the Compose plugin.
 - **Reconciler** (`src/reconciler.ts`): one loop for every service. Containers carry `tug.project`, `tug.service`, `tug.revision` and `tug.config-hash` labels; the hash covers the resolved definition, the image identity and the versions of the secrets the service uses, and a container whose hash differs is replaced. `recreate` stops the old container and starts the new one; `rolling` (`x-tug.rollout.strategy: rolling`) starts the new one on a free host port beside the old one, health-checks it, lets the ingress switch and removes the old one after a drain. Tug names its own network `tug_<project>`, volumes `tug_v<project-length>_<project>_<volume>` and containers `tug-<project>-<service>-<hash8>`; service names are network aliases. Reconciliation never removes volumes; `volume.delete` is the only way one goes away.
 - **Compose normalization** (`src/normalize.ts`): `tug deploy` runs `docker compose config` on the operator machine, which does interpolation, `extends`, profiles and `env_file`. Control secrets are interpolated as `@@tug:secret:NAME@@` sentinels that the agent replaces with released values. The CLI reads Compose's YAML rendering because its JSON rendering drops service-level `x-tug`. Control validates the result against an allowlist of keys ([Compose](compose.md#supported-keys)); agents never parse Compose YAML.
-- **CLI** (`src/cli.ts`): the `tug` command for operators. It talks to the control API and uses SSH only for `control-install` and `node-install`. See [CLI reference](cli.md).
+- **CLI** (`src/cli.ts`): the `tug` command for operators. It talks to the control API and uses SSH only for `control setup` and `node add`. See [CLI reference](cli.md).
 - **Networking** (`src/ingress.ts`, `src/node-address.ts`): health-aware service endpoints, private-address port binding and the managed Caddy edge. `ingress.ts` resolves service endpoints and ingress routes from each node's `address`, renders the Caddyfile (control) and reconciles the Caddy container (agent). Tug provides no overlay or tunnel; the operator owns the inter-node network. See [Networking](networking.md).
 - **Runtime entrypoint** (`src/main.ts`, installed as the `tug-runtime` binary and `dist/main.js` in the image): one image runs both control and agent; `node src/main.ts control|agent` or `TUG_ROLE`. It also provides the `agent identity` and `agent install-cert` subcommands that node installation uses.
 - **Protocol** (`src/protocol.ts`): the control↔agent contract. It holds the types, and a few shared constants such as the active and terminal deployment states, for everything crossing the boundary: `DesiredState`, `ServiceSpec` and `HealthCheck`; the `/agent/v1/*` payloads (`WorkResponse` with its optional `serviceEndpoints`, `ports` and `ingress` blocks, `Command` / `CommandResult`, `StatusReport` / `ProjectStatus` / `IngressStatus`, `StreamMessage`, `WakeResponse`, `SecretsResponse`); and identity and enrollment (`IdentityRequest` / `IdentityResponse`, `EnrollRequest` / `EnrollResponse`, `RenewRequest` / `RenewResponse`, `EnrollmentCredentialResponse`, `JoinKey`). `control.ts`, `agent.ts`, `compose.ts` and `cli.ts` all import from it, so change the wire format there first.
@@ -57,7 +57,7 @@ Archives are validated before Docker can import them. A containerd-backed `docke
 
 Local builds use a multipart `POST /api/v1/deployments`: `payload` contains the Compose/project/version and `localImages` descriptors; each descriptor names a corresponding `image-N` file. Each archive must contain exactly its declared Tug tag and actual configuration/platform/checksum. Source contexts and local images are mutually exclusive. Control retags imported images under its own deployment identity before publishing their saved archives.
 
-## Node installation (`tug node-install`)
+## Node installation (`tug node add`)
 
 The node makes its own key and certificate request, so no bootstrap secret travels and the private key never leaves the host. The operator's admin credential authorizes the identity at that moment.
 
@@ -70,7 +70,7 @@ sequenceDiagram
     participant Host as Node host (SSH)
     participant Agent as Agent container
 
-    Op->>CLI: node-install root@host --name app1
+    Op->>CLI: node add root@host --name app1
     CLI->>Host: SSH preflight (docker, paths, disk, control reachable)
     CLI->>Host: docker save | scp | docker load (only with --build-local-image)
     CLI->>Host: ssh: docker run image agent identity (key stays in the state volume)
@@ -88,9 +88,9 @@ sequenceDiagram
     CLI-->>Op: { ok, node }
 ```
 
-`node-replace-identity` and `node-repair-identity` run the same flow with `mode: replace` (and, for repair, move corrupt credential documents aside first). See [Nodes](nodes.md).
+`node replace` and `node repair` run the same flow with `mode: replace` (and, for repair, move corrupt credential documents aside first). See [Nodes](nodes.md).
 
-## Self-service enrollment (`tug node-prepare-enrollment`)
+## Self-service enrollment (`tug node enroll`)
 
 ```mermaid
 sequenceDiagram
@@ -101,7 +101,7 @@ sequenceDiagram
     participant Host as Fresh host
     participant Agent as Agent container
 
-    Op->>CLI: node-prepare-enrollment --name app1
+    Op->>CLI: node enroll --name app1
     CLI->>Ctrl: POST /api/v1/nodes/enrollment-credential { name, labels, ttlSeconds }
     Ctrl->>DB: insert enrollment credential (key hash, name, reserved node ID, expiry)
     Ctrl-->>CLI: bootstrap credential
@@ -247,4 +247,4 @@ Agents write generated state under `TUG_STATE_DIR` (default `/var/lib/tug`):
 /var/lib/tug/projects/<project>/rollout.json               # rolling services: active/candidate/draining revisions and the last rejected one
 ```
 
-The state directory must be a persistent volume (`-v tug-agent:/var/lib/tug`; `node-install` mounts the host directory), so `agent.json` survives container recreation and the agent does not enroll again after an image update or reboot.
+The state directory must be a persistent volume (`-v tug-agent:/var/lib/tug`; `node add` mounts the host directory), so `agent.json` survives container recreation and the agent does not enroll again after an image update or reboot.

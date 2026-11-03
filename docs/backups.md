@@ -10,8 +10,8 @@ The working example is [`examples/wordpress`](../examples/wordpress/README.md): 
 | --- | --- | --- |
 | Database | `db-data` volume, MariaDB | `x-tug.backup.command` on the `db` service: a logical dump (`mariadb-dump --single-transaction`) streamed into restic. Never copy `/var/lib/mysql` of a running server. |
 | Uploads, plugins, themes | `wp-content` volume | `x-tug.backup` on the volume: mounted read-only and archived by restic. |
-| Secrets | Tug control database | `tug control-backup` (below). Print each project's repository password with `tug backup-repository-password` and keep it in your password manager too: without it, and without control's master key, a repository cannot be decrypted. |
-| Control plane | Control-plane host | `tug control-backup` (a control-plane backup, separate from the workload backups above): database, operator credential records, the private CA and master key, built images. It does not contain workload data. |
+| Secrets | Tug control database | `tug control backup` (below). Print each project's repository password with `tug backup password` and keep it in your password manager too: without it, and without control's master key, a repository cannot be decrypted. |
+| Control plane | Control-plane host | `tug control backup` (a control-plane backup, separate from the workload backups above): database, operator credential records, the private CA and master key, built images. It does not contain workload data. |
 | Compose file | Your Git repository | Already versioned. |
 
 `wp-config.php` is rebuilt from environment variables on every start, so it is not backed up. If you set fixed `WORDPRESS_AUTH_KEY` and the other salts as secrets they survive a rebuild; otherwise users are logged out after a restore.
@@ -22,7 +22,7 @@ Database and files are separate snapshots taken minutes apart. For a WordPress s
 
 ## Backup destination
 
-Tug can already hold the destination that scheduled backups will use. Set it once on control with `tug backup-destination-set` and read it with `backup-destination-show` ([CLI](cli.md#backups)). Credentials are encrypted with the master key, are never returned by the API, and are released only to a node that is running a backup command for it. Every project gets its own restic repository at `<destination>/<project>`, so a leaked password exposes one site, and one project's prune never blocks another's backups. The password is derived from the master key; print it with `tug backup-repository-password` and escrow it.
+Tug can already hold the destination that scheduled backups will use. Set it once on control with `tug backup destination set` and read it with `backup destination show` ([CLI](cli.md#backups)). Credentials are encrypted with the master key, are never returned by the API, and are released only to a node that is running a backup command for it. Every project gets its own restic repository at `<destination>/<project>`, so a leaked password exposes one site, and one project's prune never blocks another's backups. The password is derived from the master key; print it with `tug backup password` and escrow it.
 
 ## Scheduled backups
 
@@ -71,12 +71,12 @@ backup:
 
 `tug events` shows `backup.completed`, `backup.failed`, `backup.missed`, `backup.stale` and `backup.no_destination`. A backup is `missed` when its node did not pick it up before its deadline (`node_offline`) or when control was not running at the slot: a week of downtime produces one missed event and one catch-up run per target, not a burst. A failed scheduled run is retried once after ten minutes. A target with no success for two periods raises `backup.stale` once a day, which catches a destination key that has quietly stopped working. While control is down no backup starts, which is the price of one scheduler; running jobs finish and report when control returns.
 
-`tug backup-run` takes a backup now and `tug backup-list` shows the catalog ([CLI](cli.md#backups)). ### Restore
+`tug backup run` takes a backup now and `tug backup list` shows the catalog ([CLI](cli.md#backups)). ### Restore
 
 ```bash
-tug restore db                       # prints the plan, changes nothing
-tug restore db --confirm             # latest backup of the db service
-tug restore uploads --scratch --confirm   # files into a new volume, touching nothing live
+tug restore run db                       # prints the plan, changes nothing
+tug restore run db --confirm             # latest backup of the db service
+tug restore run uploads --scratch --confirm   # files into a new volume, touching nothing live
 ```
 
 A restore plan and its queued restore refresh backup placement from the latest successful deployment before choosing a node, so moving a project does not leave a restore aimed at the previous node until the next scheduler tick. Check the printed target before confirming.
@@ -90,7 +90,7 @@ Restores are as generic as backups. A service is restored by running its `x-tug.
 3. It takes a **safety backup** of the current data, tagged `trigger:pre-restore` and exempt from retention (skip with `--no-safety-backup`). If that fails, nothing has changed: the writers start again and the lock is dropped.
 4. It restores, then starts the writers and unlocks.
 
-Only a snapshot this target produced can be restored into it (its `project:` and `target:` tags are checked). If the restore itself fails, the writers stay stopped and the project locked, because a half-restored database serving traffic is worse than an outage. The restore is `interrupted`; `tug restore-resume <id>` tries again and `tug restore-release <id>` starts the services anyway. Scheduled backups of a target are skipped while it is being restored. A restore is recorded with `restore.started`, `restore.completed`, `restore.failed` and `restore.released` events.
+Only a snapshot this target produced can be restored into it (its `project:` and `target:` tags are checked). If the restore itself fails, the writers stay stopped and the project locked, because a half-restored database serving traffic is worse than an outage. The restore is `interrupted`; `tug restore resume <id>` tries again and `tug restore release <id>` starts the services anyway. Scheduled backups of a target are skipped while it is being restored. A restore is recorded with `restore.started`, `restore.completed`, `restore.failed` and `restore.released` events.
 
 A scratch restore of a volume is also the restore drill: it proves a backup can be read without touching anything live. Databases are the same drill by hand: `restic dump <snapshot> wordpress.sql` into a throwaway container.
 
@@ -100,40 +100,40 @@ This is a manual procedure, not automatic failover. A WordPress and MariaDB proj
 
 1. Fence the lost node or otherwise ensure its old workloads cannot write to shared services. Enroll the replacement node and verify it is online. Keep the recovery site private or otherwise block public traffic while its new database and volumes are empty; do not expose a fresh WordPress installer.
 2. Change the project’s service and volume placement to the replacement node and deploy the same project using the retained images, configuration and secrets. The replacement uses fresh local volumes; deploying alone does not restore their contents. Keep the old backup repository and its password available.
-3. Check `tug backup-list` and run `tug restore db` and `tug restore wp-content` without `--confirm`. Verify each plan names the replacement node and the intended pre-loss snapshot. If the latest snapshot is not the desired one, use `--from` with the intended backup run or snapshot ID. Older releases may briefly show the former node until the backup scheduler catches up; never confirm a plan aimed at the wrong host.
+3. Check `tug backup list` and run `tug restore run db` and `tug restore run wp-content` without `--confirm`. Verify each plan names the replacement node and the intended pre-loss snapshot. If the latest snapshot is not the desired one, use `--from` with the intended backup run or snapshot ID. Older releases may briefly show the former node until the backup scheduler catches up; never confirm a plan aimed at the wrong host.
 4. Restore the database and uploads with the printed commands and `--confirm`. Tug normally takes a safety backup before each in-place restore and stops the writers; wait for each restore to finish and investigate any warning before continuing. Verify known database content and uploaded files, probe the application, then re-enable traffic and update DNS or routing as needed.
 
 This does not restore data that was never backed up, external services, DNS, or changes after the selected snapshots. A live workload can write new data during recovery unless traffic and other writers are fenced; control alone cannot fence an unreachable or compromised host.
 
 ## Control plane backup
 
-`tug control-backup` covers the control plane only, not workload data. Take it with an `admin` operator credential and copy the archive off the control-plane host. The archive holds the master key, every secret and the private CA key (which can issue credentials for the whole installation), so treat it like a password vault and store it encrypted. Create a dedicated credential for the job: `tug credential-create backup --role admin` and store it at `/etc/tug/backup.credential.json` (mode `0600`). Example `/etc/cron.d/tug-control-backup` on the control-plane host (the runtime image runs the CLI; adjust to how you invoke `tug` there):
+`tug control backup` covers the control plane only, not workload data. Take it with an `admin` operator credential and copy the archive off the control-plane host. The archive holds the master key, every secret and the private CA key (which can issue credentials for the whole installation), so treat it like a password vault and store it encrypted. Create a dedicated credential for the job: `tug credential create backup --role admin` and store it at `/etc/tug/backup.credential.json` (mode `0600`). Example `/etc/cron.d/tug-control-backup` on the control-plane host (the runtime image runs the CLI; adjust to how you invoke `tug` there):
 
 ```cron
-15 2 * * * root TUG_CONTROL_URL=https://127.0.0.1:8443 TUG_CREDENTIAL_FILE=/etc/tug/backup.credential.json tug control-backup > /var/log/tug-control-backup.json 2>&1 && restic -r s3:https://s3.eu-central-1.amazonaws.com/acme-backups/control backup /var/lib/tug/control-backups --password-file /etc/tug/restic.pass
+15 2 * * * root TUG_CONTROL_URL=https://127.0.0.1:8443 TUG_CREDENTIAL_FILE=/etc/tug/backup.credential.json tug control backup > /var/log/tug-control-backup.json 2>&1 && restic -r s3:https://s3.eu-central-1.amazonaws.com/acme-backups/control backup /var/lib/tug/control-backups --password-file /etc/tug/restic.pass
 ```
 
-Put the S3 credentials in the crontab environment or a `restic.env` file with mode `0600`. Archives accumulate in `TUG_CONTROL_BACKUP_DIR`; prune old files with `find ... -mtime +14 -delete`. The cron line has not been run on a real control-plane host; verify that `tug` is on the cron `PATH` and that the data directory matches your install (`TUG_CONTROL_BACKUP_DIR`, see [Configuration](configuration.md)). `TUG_CONTROL_URL` is a connect target only; the certificate is still verified against the public URL in the credential. Restore with `tug control-restore <path> --confirm` and restart control ([Control plane](control-plane.md#backup-and-restore)).
+Put the S3 credentials in the crontab environment or a `restic.env` file with mode `0600`. Archives accumulate in `TUG_CONTROL_BACKUP_DIR`; prune old files with `find ... -mtime +14 -delete`. The cron line has not been run on a real control-plane host; verify that `tug` is on the cron `PATH` and that the data directory matches your install (`TUG_CONTROL_BACKUP_DIR`, see [Configuration](configuration.md)). `TUG_CONTROL_URL` is a connect target only; the certificate is still verified against the public URL in the credential. Restore with `tug control restore <path> --confirm` and restart control ([Control plane](control-plane.md#backup-and-restore)).
 
 ## Restore drill
 
 A backup you have not restored is a hope. Rehearse the restore on the live project so you know it works and how long it takes.
 
-1. **Check the repository and the catalog.** `tug backup-list` shows every target with its last success; the newest run should be recent and `succeeded`. `tug backup-repository-password` prints the repository and its password, so you can also inspect it directly with `restic snapshots` from any machine that can reach the bucket.
-2. **Restore files into a scratch volume.** `tug restore wp-content --scratch --confirm` reads the latest snapshot into a new volume next to the live one and touches nothing live. List it with `docker run --rm -v <volume>:/data alpine ls /data` on the node, then remove the volume with `docker volume rm <volume>`.
-3. **Restore the database for real, in a quiet moment.** `tug restore db` prints the plan; `tug restore db --confirm` stops WordPress, takes a safety backup of the current data, loads the dump and starts WordPress again. Compare a number you know (the post count, the newest upload) with production.
+1. **Check the repository and the catalog.** `tug backup list` shows every target with its last success; the newest run should be recent and `succeeded`. `tug backup password` prints the repository and its password, so you can also inspect it directly with `restic snapshots` from any machine that can reach the bucket.
+2. **Restore files into a scratch volume.** `tug restore run wp-content --scratch --confirm` reads the latest snapshot into a new volume next to the live one and touches nothing live. List it with `docker run --rm -v <volume>:/data alpine ls /data` on the node, then remove the volume with `docker volume rm <volume>`.
+3. **Restore the database for real, in a quiet moment.** `tug restore run db` prints the plan; `tug restore run db --confirm` stops WordPress, takes a safety backup of the current data, loads the dump and starts WordPress again. Compare a number you know (the post count, the newest upload) with production.
 4. **Write down how long it took.** That is your real recovery time.
 
 To rehearse a database restore without touching the live one, use the original project repository and its escrowed password to dump the snapshot with restic into an isolated throwaway database container, then verify the recovered data and remove the container. Tug does not restore a snapshot into a different project: repositories and snapshot tags are project-specific. Keep the isolated database and any test application disconnected from production services, mail and scheduled jobs. This manual procedure has not yet been validated as a complete fresh-host recovery drill.
 
 ## Known limits
 
-- One failed night is visible as a `backup.failed` or `backup.stale` event, not a push notification, until [webhooks](roadmap.md#m8--central-api-advantages-partly-done) exist. Watch `tug events`, or point a monitor at `tug backup-list`.
+- One failed night is visible as a `backup.failed` or `backup.stale` event, not a push notification, until [webhooks](roadmap.md#m8--central-api-advantages-partly-done) exist. Watch `tug events`, or point a monitor at `tug backup list`.
 - While control is down no backup starts. Running jobs finish and report when control returns, and a long gap yields one missed event and one catch-up run per target.
 - Live volumes are crash-consistent, not application-consistent. Use a command backup for anything with its own consistency (databases).
 - A volume is backed up from the one node that holds it. A volume you mount from a file server with `driver_opts` is read through that node's mount; back up the file server's own disk where you can.
 - Repository maintenance (`restic check`, a read-verify of the data) and SFTP destinations are not built yet.
-- A scratch restore leaves its volume (`tug_r<project-length>_<project>_<id>`) behind, and the safety snapshot of every in-place restore is kept for ever. There is no command to list or remove either yet: remove scratch volumes with `docker volume rm` on the node, and safety snapshots with `restic forget` using the repository from `tug backup-repository-password`.
+- A scratch restore leaves its volume (`tug_r<project-length>_<project>_<id>`) behind, and the safety snapshot of every in-place restore is kept for ever. There is no command to list or remove either yet: remove scratch volumes with `docker volume rm` on the node, and safety snapshots with `restic forget` using the repository from `tug backup password`.
 - The restic helper container defaults to a 512 MB memory limit, which is half of a 1 GB host; lower it with `memory` under `x-tug.backup`. Restic needs more memory for larger repositories, so test the limit against your data.
-- Failures are not pushed anywhere until webhooks exist. Run `tug backup-list --check` from cron or a monitor: it exits nonzero when a target is stale, failed or missed.
+- Failures are not pushed anywhere until webhooks exist. Run `tug backup list --check` from cron or a monitor: it exits nonzero when a target is stale, failed or missed.
 - Cancelling `tug exec` does not stop the remote process.

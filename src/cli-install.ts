@@ -42,7 +42,7 @@ export function enrollmentCloudInit(bootstrap: string, command: string): string 
   );
 }
 
-/** Name of the container `control-install` creates (Compose project `tug-control`, service `control`). */
+/** Name of the container `control setup` creates (Compose project `tug-control`, service `control`). */
 export const CONTROL_CONTAINER = 'tug-control-control-1';
 
 /** A TCP port is free, or is held by the control container this install would replace, so installing again upgrades in place. */
@@ -55,12 +55,8 @@ ss -ltn | awk '{print $4}' | grep -qE '[.:]${port}$' || exit 0
 `;
 }
 
-/**
- * The default control URL for `control-install`: the SSH target's host and the published port. Accepts
- * `host`, `user@host`, `ssh://user@host:2222` and bracketed IPv6. An SSH alias from ~/.ssh/config is used as written,
- * so pass `--control-url` when the alias is not a name or address clients can reach.
- */
-export function defaultControlUrl(sshTarget: string, port: number | string): string {
+/** The host of an SSH target: `host`, `user@host`, `ssh://user@host:2222` or bracketed IPv6. */
+export function sshHost(sshTarget: string): string {
   let host = sshTarget
     .trim()
     .replace(/^ssh:\/\//, '')
@@ -71,5 +67,15 @@ export function defaultControlUrl(sshTarget: string, port: number | string): str
   else if (host.split(':').length === 2) host = host.split(':')[0];
   if (!host || /[\s'"]/.test(host))
     throw new Error(`cannot derive a host from SSH target ${sshTarget}`);
+  return host;
+}
+
+/**
+ * The default control URL for `control setup`: the SSH target's host and the published port. Accepts
+ * `host`, `user@host`, `ssh://user@host:2222` and bracketed IPv6. An SSH alias from ~/.ssh/config is used as written,
+ * so pass `--control-url` when the alias is not a name or address clients can reach.
+ */
+export function defaultControlUrl(sshTarget: string, port: number | string): string {
+  const host = sshHost(sshTarget);
   return `https://${host.includes(':') ? `[${host}]` : host}:${port}`;
 }

@@ -76,7 +76,7 @@ Rolling rollouts for ingress-fronted services (start the new revision on its own
 
 ### M4 — Images without a registry, bare-host install (done)
 
-Control stores built images as saved image files and agents download them over their own authenticated connection, so no registry or daemon change is needed. `deploy --build-local` uploads an image built on the operator's machine. `--install-docker` bootstraps Docker on apt and dnf hosts and in `node-prepare-enrollment` cloud-init. See [Architecture](architecture.md#image-artifacts). Each deploy transfers the whole image; layer reuse is in [Later](#later--only-if-needed).
+Control stores built images as saved image files and agents download them over their own authenticated connection, so no registry or daemon change is needed. `deploy --build-local` uploads an image built on the operator's machine. `--install-docker` bootstraps Docker on apt and dnf hosts and in `node enroll` cloud-init. See [Architecture](architecture.md#image-artifacts). Each deploy transfers the whole image; layer reuse is in [Later](#later--only-if-needed).
 
 ### M5 — Streaming channel between agent and control (mostly done)
 
@@ -108,7 +108,7 @@ Working plan: `plan-backups.md`.
 
 The stateful half of principle 5, and something a central control plane does better than distributed schedulers: one schedule, one catalog, retention and restore.
 
-- **Done: generic backups.** `x-tug.backup` marks a service or a volume. Tug has no database support of its own: a service backup is a `command` run in the running container whose output is stored (database recipes are documentation), a volume backup archives its files. Control schedules them as agent commands on the placement node; the agent streams into restic in a helper container, uploading to a destination configured on control (S3-compatible, encrypted before leaving the node), one repository per project. Retention, a catalog, `backup-run` and `backup-list`, and `backup.*` events for completed, failed, missed and stale runs. See [Backups](backups.md).
+- **Done: generic backups.** `x-tug.backup` marks a service or a volume. Tug has no database support of its own: a service backup is a `command` run in the running container whose output is stored (database recipes are documentation), a volume backup archives its files. Control schedules them as agent commands on the placement node; the agent streams into restic in a helper container, uploading to a destination configured on control (S3-compatible, encrypted before leaving the node), one repository per project. Retention, a catalog, `backup run` and `backup list`, and `backup.*` events for completed, failed, missed and stale runs. See [Backups](backups.md).
 - **Done: restore.** `tug restore` locks the project, stops the services that write to the target, takes a safety backup, restores through the service's own `restore` command or the volume's files, and starts them again; an interrupted restore keeps the writers stopped until resumed or released. A scratch restore of a volume touches nothing live.
 - **Done: `tug run`.** `tug run SERVICE -- cmd` runs a one-off container with the service's image, environment, secrets, network and mounts, returns the exit code and is audited.
 - Not done: `x-tug.release` (a command that runs once per deployment before or after rollout, recorded on the deployment, a failure stopping the rollout), SFTP and postgres-free extras such as a weekly `restic check`/prune, a restore drill, `destination test`, and failed or missed backups as webhooks (M8).
@@ -185,7 +185,7 @@ The test layers, the metrics milestones are held to and the backlog of mocked te
 - [x] M2 networking, service names, ingress/TLS: default-on cross-node service names over node `address` values, `x-tug.ingress`, managed Caddy with `auto`/`custom`/`off` TLS ([Networking](networking.md))
 - [x] M3 rolling deploys with ingress upstream switching, `x-tug.rollout` (`strategy`, `drain`; `maxSurge` not implemented), opt-in automatic rollback, run on real hosts through the public ingress
 - [x] M4 images stored on control, retention tied to rollback history, agent image pruning, `deploy --build-local`; M13 makes this the only built-image delivery path
-- [x] M4 opt-in Docker install for `node-install`/`control-install` (verified on Ubuntu 24.04) and `node-prepare-enrollment --install-docker` cloud-init (verified on a cloud-init host)
+- [x] M4 opt-in Docker install for `node add`/`control setup` (verified on Ubuntu 24.04) and `node enroll --install-docker` cloud-init (verified on a cloud-init host)
 - [ ] M4 dnf bootstrap verified on real Fedora and Rocky/AlmaLinux hosts
 - [x] M5 wake channel, faster convergence, non-TTY `exec` with stdin, `logs -f`, `ps`, `inspect`
 - [ ] M5 agent/daemon log streams
@@ -201,13 +201,13 @@ The test layers, the metrics milestones are held to and the backlog of mocked te
 - [ ] M9 an authenticated `/api/v1/readyz`, sample alert rules, and the metrics documentation test gate
 - [x] M10 published ports bound to the node address or loopback by default; `doctor` reports public listeners
 - [x] M11 spec written
-- [x] M11 `x-tug.backup` (generic: a command in a service, or a volume's files), scheduled backups to S3-compatible storage with restic, catalog, `backup-run`, `backup-list`, `restore` (verified against real Docker and on two real hosts with an S3-compatible server and a scheduled run: [Real-host evaluation](real-host-evaluation.md#generic-backups-restore-and-tug-run-on-fresh-hosts-1-november-2026); not yet against AWS S3)
+- [x] M11 `x-tug.backup` (generic: a command in a service, or a volume's files), scheduled backups to S3-compatible storage with restic, catalog, `backup run`, `backup list`, `restore` (verified against real Docker and on two real hosts with an S3-compatible server and a scheduled run: [Real-host evaluation](real-host-evaluation.md#generic-backups-restore-and-tug-run-on-fresh-hosts-1-november-2026); not yet against AWS S3)
 - [x] M11 `tug run` one-off containers
 - [ ] M11 `x-tug.release` run-once hooks
 - [ ] M11 weekly maintenance (`restic check`, prune), restore drill, `backup-destination-test`, SFTP
 - [x] M11 `restore` waits for the restored writers to be serving again (five minutes, then it finishes with a warning)
 - [ ] M11 list and remove scratch-restore volumes, and expire safety snapshots (they accumulate for ever and only `restic forget` removes them)
-- [x] M11 `backup-list --check`: exit nonzero when any target is stale, failed or missed, as an interim for cron and monitors until webhooks (M8) exist
+- [x] M11 `backup list --check`: exit nonzero when any target is stale, failed or missed, as an interim for cron and monitors until webhooks (M8) exist
 - [x] M11 `memory` under `x-tug.backup` for the restic helper's memory limit
 - [x] A failed health check says when the agent runs outside a container (`doctor` does not check it separately)
 - [x] `TUG_ROLE=agent` works in the runtime image: it no longer sets a default command

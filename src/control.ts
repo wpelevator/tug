@@ -1405,7 +1405,7 @@ export async function createApp(
       return res.status(400).json({ error: "mode must be 'create' or 'replace'" });
     try {
       // The certificate names the immutable node ID: the existing node's, or a fresh one for a new name. A name freed by
-      // node-remove therefore never inherits the old ID, and certificates for the removed node cannot match the new one.
+      // `tug node remove` therefore never inherits the old ID, and certificates for the removed node cannot match the new one.
       let nodeId = db.get<NodeRow>('SELECT * FROM nodes WHERE name=?', name)?.id ?? id('node');
       let signed = await pki.signClientCsr(body.csr, identityUri('node', nodeId), NODE_LIFETIME_MS);
       // Signing is asynchronous: re-read, and re-sign once if a concurrent request created the node meanwhile.
@@ -1421,7 +1421,7 @@ export async function createApp(
         if (existing) {
           if (existing.key_hash !== signed.keyHash)
             return res.status(409).json({
-              error: `node ${name} already exists; use node-replace-identity to install a new key`,
+              error: `node ${name} already exists; use tug node replace to install a new key`,
             });
         } else {
           insertNode({
@@ -1573,8 +1573,7 @@ export async function createApp(
       );
       if (signed.keyHash !== node.key_hash)
         return res.status(403).json({
-          error:
-            'renewal requires a CSR for the node key; use node-replace-identity to change keys',
+          error: 'renewal requires a CSR for the node key; use tug node replace to change keys',
         });
       const last = node.last_renewed_at ? Date.parse(node.last_renewed_at) : 0;
       if (Date.now() - last < NODE_RENEW_MIN_INTERVAL_MS())
@@ -1591,7 +1590,7 @@ export async function createApp(
       sendError(res, e);
     }
   });
-  // Blocks a node's key without deleting its metadata or changing placement. It returns only through node-replace-identity.
+  // Blocks a node's key without deleting its metadata or changing placement. It returns only through `tug node replace`.
   api('post', '/api/v1/nodes/:name/disable', null, async (req, res) => {
     const node = findNode(String(req.params.name));
     if (!node) return res.status(404).json({ error: 'node not found' });
@@ -2195,7 +2194,7 @@ export async function createApp(
         if (missing.length)
           throw httpError(
             400,
-            `secrets not found in project ${project}: ${missing.join(', ')}; create them with tug secret-set`,
+            `secrets not found in project ${project}: ${missing.join(', ')}; create them with tug secret set`,
           );
       }
       const builtServices = Object.entries(compose.services)
@@ -2244,7 +2243,7 @@ export async function createApp(
           )
             throw httpError(
               400,
-              `${svcName}: custom TLS secret ${secret} not found in project ${project}; set it with secret-set first`,
+              `${svcName}: custom TLS secret ${secret} not found in project ${project}; set it with tug secret set first`,
             );
       }
       lock = acquireProjectLock(project, 'deploy');

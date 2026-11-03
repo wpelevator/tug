@@ -284,8 +284,11 @@ function demoCommand(
   source: string[] = [],
 ): { command: Command; opts: Record<string, unknown> } {
   const program = new Command().exitOverride();
-  const command = program
-    .command(name)
+  let parent: Command = program;
+  const words = name.split(' ');
+  for (const group of words.slice(0, -1)) parent = parent.command(group);
+  const command = parent
+    .command(words.at(-1)!)
     .option('-f, --file <file>', 'compose file', 'docker-compose.yml')
     .option('--build-local')
     .option('--address <addr>')
@@ -295,7 +298,7 @@ function demoCommand(
     .option('--no-wait')
     .option('--label <label>', 'label', (v: string, a: string[]) => [...a, v], [] as string[])
     .action(() => {});
-  program.parse([name, ...source], { from: 'user' });
+  program.parse([...words, ...source], { from: 'user' });
   return { command, opts: command.opts() };
 }
 
@@ -317,18 +320,14 @@ test('config values are defaults that never override a flag, and only reach comm
   assert.equal(fromFlags.opts.file, 'cli.yml', 'a flag should win over the config file');
   assert.equal(fromFlags.opts.wait, false, 'an explicit --no-wait should win over wait: true');
 
-  const node = demoCommand('node-install');
+  const node = demoCommand('node add');
   applyConfigDefaults(node.command, node.opts, defaults);
   assert.deepEqual(
     node.opts.label,
     ['web'],
     'label from the file should replace the empty default',
   );
-  assert.equal(
-    node.opts.file,
-    'docker-compose.yml',
-    'a project key should not apply to node-install',
-  );
+  assert.equal(node.opts.file, 'docker-compose.yml', 'a project key should not apply to node add');
 });
 
 test('every supported option setting reaches its commands and explicit flags take precedence', () => {
@@ -393,7 +392,7 @@ test('every config key is the camelCase of the flag it defaults, and every liste
   const helps = new Map<string, string>();
   const help = async (command: string): Promise<string> => {
     if (!helps.has(command)) {
-      const { stdout } = await exec(process.execPath, [entry, command, '--help']);
+      const { stdout } = await exec(process.execPath, [entry, ...command.split(' '), '--help']);
       helps.set(command, stdout);
     }
     return helps.get(command)!;
@@ -401,11 +400,7 @@ test('every config key is the camelCase of the flag it defaults, and every liste
   for (const [key, setting] of Object.entries({ ...COMMAND_SETTINGS, ...NODE_SETTINGS })) {
     if (setting.flag.startsWith('<')) {
       assert.equal(key, 'ssh', 'the only positional setting should be the ssh target');
-      assert.match(
-        await help('node-install'),
-        /\[sshTarget\]/,
-        'node-install should take [sshTarget]',
-      );
+      assert.match(await help('node add'), /\[sshTarget\]/, 'node add should take [sshTarget]');
       continue;
     }
     const name = setting.flag.replace(/^--(no-)?/, '');
@@ -485,7 +480,7 @@ test('init creates the tracked file once, keeps an existing one untouched, and g
   });
 });
 
-test('node-install reads the ssh target from the config and reports a missing one by key', async () => {
+test('node add reads the ssh target from the config and reports a missing one by key', async () => {
   await withDir(async (dir) => {
     await fs.writeFile(
       path.join(dir, 'tug.yml'),
@@ -496,20 +491,21 @@ test('node-install reads the ssh target from the config and reports a missing on
         () => ({ code: 0, stderr: '' }),
         (error: { code: number; stderr: string }) => ({ code: error.code, stderr: error.stderr }),
       );
-    const missing = await run('node-install', '--name', 'app2');
+    const missing = await run('node', 'add', '--name', 'app2');
     assert.match(
       missing.stderr,
       /needs an SSH target.*nodes\.app2\.ssh/,
       'a declared node without ssh should name the missing key',
     );
-    const undeclared = await run('node-install', '--name', 'ghost');
+    const undeclared = await run('node', 'add', '--name', 'ghost');
     assert.match(
       undeclared.stderr,
       /nodes\.ghost\.ssh/,
       'an undeclared node without a positional target should name the key to add',
     );
     const declared = await run(
-      'node-install',
+      'node',
+      'add',
       '--name',
       'app1',
       '--agent-control-url',
@@ -534,12 +530,22 @@ test('every config key applies to every command that has its option, and to no o
       (r) => r.stdout,
       (e: { stdout?: string }) => e.stdout ?? '',
     );
-  const names = [...(await run('--help')).matchAll(/^ {2}([a-z][a-z0-9-]*)(?: |$)/gm)]
-    .map((m) => m[1])
-    .filter((n) => n !== 'help');
   const helps = new Map<string, string>();
-  for (let i = 0; i < names.length; i += 8)
-    await Promise.all(names.slice(i, i + 8).map(async (n) => helps.set(n, await run(n, '--help'))));
+  const commandsOf = (help: string) =>
+    [
+      ...(help.split(/^Commands:$/m)[1] ?? '').matchAll(
+        /^ {2}([a-z][a-z0-9-]*)(?:\|[a-z]+)?(?: |$)/gm,
+      ),
+    ]
+      .map((m) => m[1]!)
+      .filter((n) => n !== 'help');
+  const walk = async (path: string[]): Promise<void> => {
+    const help = await run(...path, '--help');
+    helps.set(path.join(' '), help);
+    await Promise.all(commandsOf(help).map((n) => walk([...path, n])));
+  };
+  await Promise.all(commandsOf(await run('--help')).map((n) => walk([n])));
+  const names = [...helps.keys()].filter((n) => n !== 'setup'); // a shortcut resolved to `control setup`
   const hasOption = (command: string, flag: string) =>
     new RegExp(`^\\s+(-\\w, )?--(no-)?${flag.replace(/^--(no-)?/, '')}(\\s|,|<|$)`, 'm').test(
       helps.get(command) ?? '',

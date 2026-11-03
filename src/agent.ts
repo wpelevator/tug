@@ -611,7 +611,7 @@ export function runsInContainer(): boolean {
  */
 export function outsideContainerHint(health: HealthCheck, inContainer = runsInContainer()): string {
   if (inContainer || health.type === 'docker') return '';
-  return '; this agent is not running in a container, so it may be unable to reach container addresses (a host process on macOS cannot); run it with `docker run` as `tug node-install` does';
+  return '; this agent is not running in a container, so it may be unable to reach container addresses (a host process on macOS cannot); run it with `docker run` as `tug node add` does';
 }
 
 export async function waitForHealth(

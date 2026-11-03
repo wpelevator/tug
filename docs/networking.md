@@ -5,13 +5,13 @@ Two layers let services on different hosts find each other and let the internet 
 | Layer | What it adds | Turned on by |
 |---|---|---|
 | A. Cross-node service names | Services on other nodes resolve by name to their node's `address` (hosts-file entries, not DNS), only while healthy | On by default; set `TUG_SERVICE_NAMES=false` on control to opt out |
-| B. Ingress and TLS | A managed Caddy on an ingress node routes hostnames to services anywhere, with automatic HTTPS | `tug node-ingress <node>` plus `x-tug.ingress` on a service |
+| B. Ingress and TLS | A managed Caddy on an ingress node routes hostnames to services anywhere, with automatic HTTPS | `tug node ingress <node>` plus `x-tug.ingress` on a service |
 
 Independently of the layers, [published ports are private by default](#published-ports-private-by-default): Tug binds them to the address other nodes and the ingress use, never to every interface unless you wrote that.
 
 ## Bring your own network
 
-A node's `address` is its sole inter-node address. Set it with `node-install --address`, the node's `address` config key or `TUG_NODE_ADDRESS` at enrollment to a private IP on one of the host's interfaces. Every node that runs a client or an ingress upstream must be able to route to that IP. A hostname is also accepted, but it must resolve on the node to an address Docker can bind. Update a registered address with `tug node-address <name> <address>`. Do not use a cloud VM's public 1:1 NAT address when that address is absent from its interfaces; register its private interface address instead.
+A node's `address` is its sole inter-node address. Set it with `node add --address`, the node's `address` config key or `TUG_NODE_ADDRESS` at enrollment to a private IP on one of the host's interfaces. Every node that runs a client or an ingress upstream must be able to route to that IP. A hostname is also accepted, but it must resolve on the node to an address Docker can bind. Update a registered address with `tug node address <name> <address>`. Do not use a cloud VM's public 1:1 NAT address when that address is absent from its interfaces; register its private interface address instead.
 
 The network can be a VPC, LAN, existing VPN or another routed private network. Tug does not allocate inter-node addresses, create tunnels, configure routes or provide NAT traversal for workload traffic. Agents can still dial out to control through NAT, but cross-node service names and remote ingress upstreams work only where this workload network is reachable.
 
@@ -58,7 +58,7 @@ services:
         tls: auto
 ```
 
-An ingress hostname belongs to one project: a deploy or rollback is refused with `409` if another project's current deployment already routes the host (case-insensitive). `tug node-ingress edge1` marks a node as an ingress node (`--disable` removes the role). `port` may be the container port or the published host port; control resolves it to the published host port, and `validateCompose` rejects an ingress port that is not published, because the edge reaches services on `<node address>:<published port>`.
+An ingress hostname belongs to one project: a deploy or rollback is refused with `409` if another project's current deployment already routes the host (case-insensitive). `tug node ingress edge1` marks a node as an ingress node (`--disable` removes the role). `port` may be the container port or the published host port; control resolves it to the published host port, and `validateCompose` rejects an ingress port that is not published, because the edge reaches services on `<node address>:<published port>`.
 
 Caddy dials each upstream where its port is bound ([Published ports](#published-ports-private-by-default)): `127.0.0.1` for a service whose ingress port listens on loopback on the ingress node, otherwise the node's `address`, including for services on the ingress node itself. Remote addresses must be reachable from the ingress node over the operator's network.
 
@@ -71,7 +71,7 @@ Control aggregates the `ingress` blocks of every project's current deployment, a
 TLS modes:
 
 - `auto` (default): Caddy obtains and renews certificates with ACME. Ports 80 and 443 must be reachable from the internet and the host's DNS record must point at the ingress node. A name such as `app.<ingress-ip>.sslip.io` resolves to that address without a domain you own. Let's Encrypt limits certificates per registered domain, and `sslip.io` is shared, so a burst of new hostnames can be refused.
-- `custom`: `cert` and `key` name two project secrets holding the PEM certificate chain and private key (`tug secret-set WEB_CERT --project blog --value "$(cat fullchain.pem)"`). Deploy fails if either secret is missing. Control decrypts them only for the ingress node, which receives them as files in the work response; they never reach the nodes running the service, and they never appear in the Caddyfile.
+- `custom`: `cert` and `key` name two project secrets holding the PEM certificate chain and private key (`tug secret set WEB_CERT --project blog --value "$(cat fullchain.pem)"`). Deploy fails if either secret is missing. Control decrypts them only for the ingress node, which receives them as files in the work response; they never reach the nodes running the service, and they never appear in the Caddyfile.
 - `off`: plain HTTP on port 80, for development.
 
 The agent on an ingress node creates the `tug-caddy` container with host networking and three named volumes (`/data` for ACME accounts and certificates, `/config`, `/etc/caddy`), so certificates survive container recreation and image updates. Config is uploaded with the Engine API archive endpoint (which works whether the agent runs on the host or in a container) and applied with `caddy reload`, which swaps config gracefully without dropping connections or restarting the container. If Caddy rejects the config the agent restores the last applied files, reports `failed` with Caddy's error in the node's ingress status, and retries on the next poll; `tug doctor` flags ingress nodes that are not `serving`. Removing the ingress role removes the container but keeps the volumes. The Caddy image is `caddy:2-alpine` (override with `TUG_CADDY_IMAGE` on the agent).
@@ -129,8 +129,8 @@ sequenceDiagram
     participant E as Agent edge1 (ingress)
     participant Caddy as Caddy on edge1
 
-    Op->>Ctrl: node-install app1 / edge1 with private address values
-    Op->>Ctrl: node-ingress edge1
+    Op->>Ctrl: node add app1 / edge1 with private address values
+    Op->>Ctrl: node ingress edge1
     Op->>Ctrl: deploy (web on app1 with x-tug.ingress)
     loop every poll
         A->>Ctrl: GET /agent/v1/work

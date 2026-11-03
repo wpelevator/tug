@@ -4,23 +4,23 @@ One WordPress site and its MariaDB on a single node, with encrypted daily backup
 
 ```bash
 # 1. Secrets for the site
-tug secret-set DB_PASSWORD
-tug secret-set DB_ROOT_PASSWORD
+tug secret set DB_PASSWORD
+tug secret set DB_ROOT_PASSWORD
 
 # 2. Where backups go (once per control plane). Values come from your environment or stdin.
 AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... \
-  tug backup-destination-set s3:https://s3.example.com/my-bucket/tug-backups \
+  tug backup destination set s3:https://s3.example.com/my-bucket/tug-backups \
   --env AWS_ACCESS_KEY_ID --env AWS_SECRET_ACCESS_KEY
 
 # 3. Deploy (edit the node name "app" and the host "blog.example.com" first)
 tug deploy -f docker-compose.yml
 
 # 4. Check the first backup now instead of waiting for 03:00 UTC
-tug backup-run
-tug backup-list
+tug backup run
+tug backup list
 ```
 
-Print the project's repository password and keep it somewhere safe, apart from the server: `tug backup-repository-password`. Losing control's master key without it loses every backup.
+Print the project's repository password and keep it somewhere safe, apart from the server: `tug backup password`. Losing control's master key without it loses every backup.
 
 ## What gets backed up
 
@@ -34,9 +34,9 @@ Both use the project defaults at the top of the file: 03:00 UTC daily, keeping 7
 ## Restore
 
 ```bash
-tug restore db                  # prints the plan and changes nothing
-tug restore db --confirm        # latest backup of the database
-tug restore wp-content --scratch --confirm   # files into a new volume, nothing live touched
+tug restore run db                  # prints the plan and changes nothing
+tug restore run db --confirm        # latest backup of the database
+tug restore run wp-content --scratch --confirm   # files into a new volume, nothing live touched
 ```
 
 An in-place restore locks the project, stops WordPress (it depends on `db`), takes a safety backup of the current data, restores, then starts WordPress again. See [Restore](../../docs/backups.md#restore).
