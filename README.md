@@ -76,7 +76,7 @@ Project commands sit at the top level; everything else reads `tug <subject> <ver
 | Deploy, or undo a deploy | `tug deploy`, `tug rollback` |
 | See what is running and what failed | `tug status`, `tug events`, `tug ps` |
 | Read logs or open a shell | `tug logs <service>`, `tug exec <service> sh` |
-| Run a one-off command | `tug run <service> wp cache flush` |
+| Run a one-off command | `tug run <service> -- wp cache flush` |
 | Change the number of replicas | `tug scale <service> 3` |
 | Add, list or replace servers | `tug node add`, `tug node list`, `tug node replace <name>` |
 | Add a server I cannot SSH to | `tug node enroll`, then run the printed `docker run` on it |
