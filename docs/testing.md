@@ -18,7 +18,7 @@ Managed-ingress convergence tests exercise current and outdated configuration ha
 
 | Finding | Found by | Guarded by |
 |---|---|---|
-| The runtime image shipped without the Compose plugin, so every real deploy failed (the former runtime ran Compose on nodes; agents now use the Docker Engine API and the plugin is no longer part of the image) | Real hosts | Tier 2: `npm run test:smoke:image` runs the shipped image's binaries, database code and mTLS dependencies without any host plugins, for Debian and Alpine |
+| The runtime image shipped without the Compose plugin, so every real deploy failed (the former runtime ran Compose on nodes; agents now use the Docker Engine API and the plugin is no longer part of the image) | Real hosts | Tier 2: `npm run test:smoke:image` runs the shipped image's binaries, database code and mTLS dependencies without any host plugins, on Alpine |
 | `deploy --build-local` was rejected on containerd image stores, where `docker save` lists a build attestation as an extra top-level entry | Local integration run on Docker Desktop | Tier 1: `src/artifacts.test.ts` builds synthetic archives, including the rejected variants |
 | The first rolling deploy started two revisions of the same image | Real hosts | Not guarded yet, see backlog item 1 |
 | A control database from before scoped credentials lacks columns the current control writes | Real hosts | Not guarded yet, see backlog item 2 |
