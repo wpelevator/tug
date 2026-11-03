@@ -560,3 +560,15 @@ test('every config key applies to every command that has its option, and to no o
     );
   }
 });
+
+test('init writes the credential URL into a new tracked file when no URL was given', async () => {
+  await withDir(async (dir) => {
+    const resolved = await resolveCliConfig({}, {}, dir, true);
+    await writeInitConfig(resolved, path.join(dir, 'cred.json'), {}, 'https://control.test:8443');
+    assert.match(
+      await fs.readFile(path.join(dir, 'tug.yml'), 'utf8'),
+      /controlUrl: https:\/\/control\.test:8443/,
+      'the tracked file should hold the credential URL, not the localhost fallback',
+    );
+  });
+});

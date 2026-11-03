@@ -633,12 +633,14 @@ export async function waitForHealth(
         if (state.Health && state.Health.Status !== 'healthy')
           throw new Error(`${service}: docker health ${state.Health.Status}`);
       } else if (health.type === 'tcp') {
+        await assertRunning(ctx, container, service);
         await tcpCheck(
           await containerIp(ctx, project, container),
           health.port as number | string,
           parseDuration(health.timeout || '2s'),
         );
       } else if (health.type === 'http') {
+        await assertRunning(ctx, container, service);
         const ip = await containerIp(ctx, project, container);
         const res = await ctx.http(`http://${ip}:${health.port || 80}${health.path || '/'}`, {
           signal: AbortSignal.timeout(parseDuration(health.timeout || '2s')),
@@ -654,6 +656,35 @@ export async function waitForHealth(
   throw new Error(
     `${service}: ${describeHealthCheck(health)} failed after ${retries} attempt${retries === 1 ? '' : 's'}: ${describeError(last)}${outsideContainerHint(health)}`,
   );
+}
+
+/** Fails fast with the exit code and last log lines when the container is gone, instead of dialing a dead address. */
+async function assertRunning(ctx: AgentContext, container: string, service: string): Promise<void> {
+  const state = (await ctx.docker.inspectContainer(container)).State;
+  if (!state || state.Running) return;
+  const tail = await lastLogLines(ctx, container);
+  throw new Error(
+    `${service}: container exited with code ${state.ExitCode ?? '?'}${tail ? `; last log: ${tail}` : ''}`,
+  );
+}
+
+async function lastLogLines(ctx: AgentContext, container: string, lines = 3): Promise<string> {
+  try {
+    const proc = await ctx.docker.logs(container, { follow: false, tail: lines });
+    let out = '';
+    const collect = (chunk: Buffer) => void (out += chunk.toString());
+    proc.stdout.on('data', collect);
+    proc.stderr.on('data', collect);
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, 2000);
+      proc.stdout.once('close', () => (clearTimeout(timer), resolve()));
+      proc.stdout.once('end', () => (clearTimeout(timer), resolve()));
+    });
+    proc.kill();
+    return out.trim().split('\n').slice(-lines).join(' | ').slice(0, 400);
+  } catch {
+    return '';
+  }
 }
 
 /** Node's fetch reports every network failure as "fetch failed"; the system error that explains it is on `cause`. */
@@ -1185,7 +1216,10 @@ export async function reconcile(
         markEvents('failed');
       }
       // Rolling services are untouched by a failure here, so keep reporting their current revision as serving.
-      if (!rolling.length) throw e;
+      if (!rolling.length) {
+        // Callers turn the throw into a failed status; carry the per-service states so a held writer is still seen.
+        throw Object.assign(e instanceof Error ? e : new Error(errMessage(e)), { serviceStates });
+      }
       Object.assign(serviceStates, await activeRollingStates(dir, rolling));
       return failedStatus(errMessage(e));
     }
@@ -1334,6 +1368,11 @@ export async function pollOnce(ctx: AgentContext = defaultContext()): Promise<Pr
         ...(desired.revision ? { observedRevision: desired.revision } : {}),
         health: 'failed',
         error: errMessage(e),
+        ...((e as { serviceStates?: ProjectStatus['serviceStates'] }).serviceStates
+          ? {
+              serviceStates: (e as { serviceStates: ProjectStatus['serviceStates'] }).serviceStates,
+            }
+          : {}),
       });
     }
   }

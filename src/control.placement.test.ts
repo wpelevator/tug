@@ -265,3 +265,30 @@ test('node addresses cannot carry configuration syntax', async () => {
     await s.close();
   }
 });
+
+test('scale stays within explicit placement.nodes when the service has no labels', async () => {
+  const s = await makeServer();
+  try {
+    await post(s.base, '/api/v1/nodes/register', { name: 'web-1' });
+    await post(s.base, '/api/v1/nodes/register', { name: 'storage' });
+    await post(s.base, '/api/v1/deployments', {
+      project: 'site',
+      version: 'v1',
+      compose: normalized({
+        services: { php: { image: 'php', 'x-tug': { placement: { nodes: ['web-1'] } } } },
+      }),
+    });
+    const scaled = await post(s.base, '/api/v1/scale', {
+      project: 'site',
+      service: 'php',
+      replicas: 2,
+    });
+    assert.deepEqual(
+      scaled.nodes,
+      ['web-1'],
+      'scale should not place replicas outside the pinned placement.nodes',
+    );
+  } finally {
+    await s.close();
+  }
+});
