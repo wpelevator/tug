@@ -2,7 +2,7 @@
 
 Deploy Docker Compose apps to your own Linux VPS, from your laptop or CI, without Kubernetes or a hosted platform.
 
-A VPS is a durable computer with enough resources to host multiple sites or a medium-size application and its database. Tug helps you use that capacity: keep your Compose file, deploy with one command, and manage rollouts, secrets, backups and restores. Start with one server and add more when you need them. Tug is built for a small number of servers and applications, with WordPress as a primary use case.
+A VPS is a durable computer with enough resources to host multiple sites or a medium-size application and its database. Tug helps you use that capacity: keep your Compose file, deploy with one command, and manage rollouts, secrets, backups and restores. Start with one server and add more when you need them. Tug is built for a small number of servers and Compose applications, including Node.js, Laravel, Ruby and WordPress apps.
 
 Tug runs a small control plane and an agent, which can share the same VPS with your applications. It builds application images on the control server or your machine and delivers them to your nodes, so you do not need to run or configure an image registry for those builds. Published images are still pulled from their upstream registries.
 

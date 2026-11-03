@@ -4,7 +4,7 @@ This is the canonical statement of what Tug is for, the shape of deployment it t
 
 ## Goal
 
-Run a few Docker Compose applications, WordPress sites first, across a handful of ordinary Linux VPSes from one small self-hosted control plane, without Kubernetes, a hosted PaaS or a cloud provider's API.
+Run a few Docker Compose applications across a handful of ordinary Linux VPSes from one small self-hosted control plane, without Kubernetes, a hosted PaaS or a cloud provider's API.
 
 The operator this is for runs one to a few dozen sites on two to ten VPSes, deploys from a laptop or CI, and needs the day-2 jobs covered as well as the deploy: backups and restores, one-off commands such as `wp` CLI and database upgrades, logs, safe rollouts and rollbacks, and an audit of who changed what. Feature parity with other tools is not the goal; [uncloud](https://github.com/psviderski/uncloud) and Kamal are useful baselines for what operators expect (see [Positioning](#positioning)).
 
@@ -26,7 +26,7 @@ These are the shapes Tug is tested against and the ones the docs should steer pe
 
 **Small: one node per site, or several sites per node.** App and database on the same node, the managed Caddy ingress on that node, data in local named volumes. This is what most WordPress sites need and what was validated first ([Real-host evaluation](real-host-evaluation.md)). Many sites per node is the common case, so clear project boundaries, ingress routing for many hostnames and per-site backups matter more than multi-node features. Project boundaries are not isolation between mutually untrusted workloads.
 
-**Scaled WordPress (a possible future topology, not the flagship or a validated support promise):**
+**Scaled WordPress (a possible future topology, not a validated support promise):**
 
 ```text
 Internet -> ingress node (managed Caddy, TLS)
@@ -155,7 +155,7 @@ The agent stops running the `docker compose` CLI and reconciles containers throu
 
 ## Product decisions and reasoning
 
-Tug serves a trusted operator or small trusted team running several WordPress sites on one or a few ordinary VPSes. The flagship is the single-node site, including several independent sites on one node; additional nodes first add capacity and placement for independent sites. A scaled single site is a later, demand-driven use case. Judge work by whether it makes installing, operating and recovering those sites easier and safer, not by feature parity or the number of orchestration milestones completed.
+Tug serves a trusted operator or small trusted team running Compose applications on one or a few ordinary VPSes. The primary topology is an application and its state on one node, including several independent applications on one node; additional nodes first add capacity and placement for independent applications. A scaled single application is a later, demand-driven use case. Judge work by whether it makes installing, operating and recovering those applications easier and safer, not by feature parity or the number of orchestration milestones completed.
 
 The control plane earns its cost through understandable state, reliable deployments, backup visibility and recovery. Prefer a proven, repeatable recovery journey over additional scheduling, networking or infrastructure features. Restic is the backup repository mechanism; Tug's responsibility is to make backup status, credentials, off-host copies and actual restore outcomes understandable. Do not set recovery time or data-loss targets until a representative exercise measures them.
 
