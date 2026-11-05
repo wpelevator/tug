@@ -4,7 +4,7 @@ Run `tug --help` to list commands and `tug <command> --help` for command options
 
 | Subject | Verbs |
 |---|---|
-| (top level) | `setup`, `init`, `deploy` (and `deploy cancel`), `status`, `rollback`, `restart`, `scale`, `logs`, `exec`, `run`, `ps`, `inspect`, `events`, `doctor` |
+| (top level) | `setup`, `init`, `lint`, `deploy` (and `deploy cancel`), `status`, `rollback`, `restart`, `scale`, `logs`, `exec`, `run`, `ps`, `inspect`, `events`, `doctor` |
 | `control` | `setup`, `backup`, `restore` |
 | `node` | `add`, `list` (`ls`), `replace`, `repair`, `remove`, `disable`, `ingress`, `address`, `register`, `enroll` |
 | `secret` | `set`, `list`, `remove` |
@@ -14,6 +14,8 @@ Run `tug --help` to list commands and `tug <command> --help` for command options
 | `volume` | `list`, `remove` |
 | `hold` | `release` |
 | `image` | `prune` |
+
+`tug lint [-f --file <file>] [--json]` checks a Compose file against the `x-tug` schema before deploying: no control connection, credential or Docker needed. Findings go to stderr one per line as `$FILE: $RULE`, the command exits nonzero when anything is wrong, and `--json` prints `{ ok, file, errors }` for scripts and editors. The `--file` default and the `tug.yml` `file:` setting match `tug deploy` (see [Checking the file](compose.md#checking-the-file-with-tug-lint)); the schema itself is documented in [Compose extensions](compose.md).
 
 ## Arguments, options and configuration
 

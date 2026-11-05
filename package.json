@@ -13,7 +13,8 @@
   },
   "files": [
     "dist",
-    "docs"
+    "docs",
+    "x-tug.schema.json"
   ],
   "publishConfig": {
     "access": "public"
@@ -23,6 +24,7 @@
     "start:agent": "node src/main.ts agent",
     "build": "tsc -p tsconfig.build.json && node tools/scripts/copy-templates.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "schema": "node tools/scripts/write-x-tug-schema.js",
     "prepack": "npm run build",
     "test": "node --test 'src/**/*.test.ts'",
     "lint": "eslint . && prettier --check .",
@@ -60,6 +62,7 @@
     "@types/multer": "^2.3.0",
     "@types/node": "^22.20.5",
     "@types/ws": "^8.18.2",
+    "ajv": "^8.20.0",
     "eslint": "^10.5.0",
     "eslint-config-prettier": "^10.1.8",
     "globals": "^17.7.0",

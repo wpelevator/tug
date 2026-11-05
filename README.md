@@ -11,6 +11,7 @@ Existing service and resource targets can be chosen directly in an interactive t
 ## What you can do with it
 
 - **Deploy a Compose file to your servers.** `tug deploy` builds or pulls your images, starts them on the right nodes, waits for health checks and tells you why if something fails. It reports deployment stages and elapsed time while work is pending. `tug rollback` returns to the previous version, and `x-tug: { rollback: auto }` does it for you.
+- **Check before you deploy.** `tug lint` verifies the `x-tug` fields in your Compose file in milliseconds, without Docker or a control connection: an unknown health-check type, a misplaced key or an unreachable ingress host is a finding on stderr instead of a deployment that fails later (or worse, silently ignores the key). The same schema ships as JSON Schema, so linking it in your editor gives `x-tug` autocomplete and squiggles while you type ([compose.md](docs/compose.md#editor-autocomplete-and-squiggles)).
 - **Choose where things run.** Pin a database and its volume to one node, spread web containers over several, and let Tug's managed Caddy ingress serve them over HTTPS with certificates it obtains for you.
 - **Update without downtime.** Opt-in rolling rollouts start the new version, wait until it is healthy and only then switch traffic.
 - **Keep secrets out of your repository.** `tug secret set DB_PASSWORD` stores them encrypted and sends each one only to the nodes whose services use it.
