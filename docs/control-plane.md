@@ -85,10 +85,16 @@ A snapshot older than later node or operator changes does not contain those chan
 
 ## Upgrading the control plane
 
-Control and the CLI must match closely enough that every route the CLI calls exists on the control. Every command does a one-request version preflight per control per process against `GET /api/v1/version` (read role), so a skew fails before it produces an unrelated 404:
+Control and the CLI must match closely enough that every route the CLI calls exists on the control. The check itself travels with ordinary traffic (the Docker `/_ping` bargain: version information rides headers, not dedicated round trips):
 
-- The control is older than the CLI (or has no `/api/v1/version` route at all): the command is refused with `tug control setup <control host> --yes` as the fix. That redeploys the control container at the installed CLI's image tag and preserves the state and PKI in the `/data` volume.
-- The CLI is older than the control: the command proceeds with a warning naming `npm i -g @wpelevator/tug@<version>` to pin the CLI to the control's version.
+- The control stamps every HTTP response with its version (`x-tug-version`), so clients know what is answering them without a probe.
+- Every CLI and agent HTTP request declares the process's own version (`x-tug-client-version`); the WebSocket upgrades carry it too, but upgrade handling does not gate on it. The control refuses any request declaring a newer version than itself **before running the corresponding handler** — so a CLI ahead of the control is stopped by the surviving side itself, and an agent is refused rather than allowed to talk down what it assumes, matching the upgrade order below.
+- A CLI grants itself the read-direction rule: read commands (`status`, service listings) judge the stamp on their own responses; since reads are safe to have run against an older control, they pay no extra request. Commands whose first control request is a mutation (`deploy`, `rollback`, `restart`, `backup`, restore), live commands that open the live channel without a read first (`exec`, `run`, `logs`, `ps`, `inspect` given an explicit node or running non-interactively), and `node add` take a one-request explicit probe (`GET /api/v1/version`) instead, so a mutating request is never already received by an old control when the refusal arrives.
+
+Remediations:
+
+- The control is older than the CLI (a missing stamp on a command's own read reports this too — the control predates both stamp and probe): the command is refused with `tug control setup <control host> --yes` as the fix. That redeploys the control container at the installed CLI's image tag and preserves the state and PKI in the `/data` volume.
+- The CLI is older than the control: the command proceeds with one warning naming `npm i -g @wpelevator/tug@<version>` to pin the CLI to the control's version.
 
 Before an upgrade, keep the fallback lane: `ssh <host> docker tag ghcr.io/wpelevator/tug:<previous> tug:rollback`, then redeploy with `tug control setup <ssh-target> --image tug:rollback` if the new control misbehaves. Confirm the upgrade with `tug doctor` and `tug ps` right after, then match the agents with `tug node add --all` (see [Upgrading an agent](nodes.md#image)); see the [mismatch runbook](troubleshooting.md#cli-control-version-or-credentialca-mismatches) when `tug doctor` reports a CA fingerprint mismatch.
 

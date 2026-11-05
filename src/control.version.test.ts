@@ -47,3 +47,90 @@ test('the version route works for a fresh unauthenticated-in-test agent too (rea
     await s.close();
   }
 });
+
+test('every response stamps the control version, including error responses', async () => {
+  const s = await server();
+  try {
+    const ok = await fetch(`${s.base}/api/v1/version`, { headers: op() });
+    assert.equal(
+      ok.headers.get('x-tug-version'),
+      packageVersion(),
+      'the stamp rides the normal response, so clients never need a dedicated probe request',
+    );
+    const denied = await fetch(`${s.base}/api/v1/not-a-route`, { headers: op() });
+    assert.notEqual(
+      denied.status,
+      200,
+      'the route under test must be an error to prove stamping on errors',
+    );
+    assert.equal(
+      denied.headers.get('x-tug-version'),
+      packageVersion(),
+      'error responses carry the stamp too',
+    );
+  } finally {
+    await s.close();
+  }
+});
+
+test('a client declaring a newer version is refused before any handler runs', async () => {
+  const s = await server();
+  try {
+    const [major, minor] = packageVersion().split('.').map(Number);
+    const newer = minor >= 9 ? `${major + 1}.0` : `${major}.${minor + 1}`;
+    // A route that does not exist saves the point: a 400 skew refusal can only come from the middleware, not a handler.
+    const res = await fetch(`${s.base}/api/v1/not-a-route`, {
+      headers: { ...op(), 'x-tug-client-version': newer },
+    });
+    assert.equal(
+      res.status,
+      400,
+      'a client newer than the control is refused before any handler would run',
+    );
+    const body = (await json(res)) as { error?: string; skew?: string };
+    assert.equal(
+      body.skew,
+      'client-newer',
+      'the refusal names the skew direction for the client to act on',
+    );
+    assert.match(
+      body.error ?? '',
+      /tug control setup <control host> --yes/,
+      'refusal names the upgrade command',
+    );
+    const stamp = res.headers.get('x-tug-version');
+    assert.ok(
+      stamp,
+      'refusal responses stay stamped, so a refused legacy client can still self-classify',
+    );
+    // The refusal must not be a one-way door: a same-version client gets through.
+    const same = await fetch(`${s.base}/api/v1/version`, {
+      headers: { ...op(), 'x-tug-client-version': packageVersion() },
+    });
+    assert.equal(same.status, 200, 'the control refuses only clients strictly newer than itself');
+  } finally {
+    await s.close();
+  }
+});
+
+test('a client older than or equal to the control, or headerless, may proceed', async () => {
+  const s = await server();
+  try {
+    const [major, minor] = packageVersion().split('.').map(Number);
+    const olderVersion = minor > 0 ? `${major}.${minor - 1}` : `${major - 1}.0`;
+    for (const [clientVersion, description] of [
+      [olderVersion, 'an older client'],
+      [undefined, 'a headerless (legacy) client'],
+    ] as const) {
+      const headers = clientVersion ? { ...op(), 'x-tug-client-version': clientVersion } : op();
+      const res = await fetch(`${s.base}/api/v1/version`, { headers });
+      assert.equal(
+        res.status,
+        200,
+        `${description} must get through: the control only gates clients newer than itself`,
+      );
+    }
+  } finally {
+    await s.close();
+  }
+});

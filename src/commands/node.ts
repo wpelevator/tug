@@ -21,6 +21,7 @@ import { errMessage, loadTemplate } from '../util.ts';
 import {
   collect,
   loadCfg,
+  preflightVersion,
   print,
   readStdin,
   request,
@@ -100,6 +101,7 @@ async function installNodeIdentity(
     const cfg = await loadCfg();
     const connectUrl = o.agentControlUrl ? normalizeControlUrl(o.agentControlUrl) : undefined;
     await transportFor(cfg).then((t) => t.close()); // fail before touching the host when there is no credential
+    await preflightVersion(cfg); // refuse here, not after Docker has been installed on the host
     assertImagePublished(resolveImage(o.image, o.buildLocalImage));
     if (o.installDocker) {
       progress.stage(`Installing Docker on node ${name}`);
@@ -315,6 +317,7 @@ async function runNodeIdentity(
   if (mode === 'create') {
     if (o.agentControlUrl) normalizeControlUrl(o.agentControlUrl);
     await transportFor(cfg).then((t) => t.close()); // no questions about a host this CLI cannot enroll
+    await preflightVersion(cfg);
     await planNodeAdd(sshTarget, name, o);
   }
   if (!(await installNodeIdentity(sshTarget, name, mode, o, repair))) process.exitCode = 1;

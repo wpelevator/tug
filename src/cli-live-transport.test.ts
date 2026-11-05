@@ -22,8 +22,10 @@ async function serverFixture() {
   const issued = await pki.issueServer(serverNames('https://localhost:8443'));
   const https = createServer(
     serverTlsOptions({ cert: issued.cert, key: issued.key, ca: pki.caPem }),
-    // The CLI's version preflight runs before any live command; answer it with the running CLI's version.
+    // The CLI's version preflight runs before any live command; answer it with the running CLI's version and the
+    // response stamp the CLI's request path judges now.
     (req, res) => {
+      res.setHeader('x-tug-version', packageVersion());
       if (req.url === '/api/v1/version') {
         res.setHeader('content-type', 'application/json');
         res.end(JSON.stringify({ v: packageVersion() }));
