@@ -6,7 +6,7 @@ See [Health checks](healthchecks.md) to choose a probe and [Service placement an
 
 ## Checking the file with `tug lint`
 
-`tug lint` checks a Compose file against the `x-tug` schema without deploying: no control connection, credential or Docker needed. Findings name the service or volume and the rule, one per line on stderr as `$FILE: $RULE`, so an editor can jump to the line by splitting on the first colon. It reports exactly what `tug deploy` makes control reject — the whole `x-tug` schema (placement, replicas, global, health, ingress, rollout, backup on services; type, driver, persistent, placement, backup on volumes) plus the unsupported Compose keys — except for the checks that depend on your node list, which still happen at deploy. Running `tug lint` before `tug deploy` turns a typo such as `ingresss:` from a silently ignored key at deploy time into a ten-millisecond check.
+`tug lint` checks a Compose file against the `x-tug` schema without deploying: no control connection, credential or Docker needed. Findings name the service or volume and the rule, one per line on stderr as `$FILE: $RULE`, so an editor can jump to the line by splitting on the first colon. It reports exactly what `tug deploy` makes control reject: the whole `x-tug` schema (placement, replicas, global, health, ingress, rollout, backup on services; type, driver, persistent, placement, backup on volumes) plus the unsupported Compose keys, except for the checks that depend on your node list, which still happen at deploy. Running `tug lint` before `tug deploy` turns a typo such as `ingresss:` from a silently ignored key at deploy time into a ten-millisecond check.
 
 ```bash
 tug lint                 # the compose file in this directory (or the tug.yml file: setting)
@@ -14,11 +14,11 @@ tug lint -f proxy.yml    # any --file, as `tug lint --file <file>` and `tug depl
 tug lint --json          # { ok, file, errors: [ ... ] } for scripts and editors
 ```
 
-The command prints each finding with the file path as a prefix and exits nonzero when anything is wrong, so an editor can jump to the line by splitting on the first colon. Because lint cannot reach control, the findings that rest on your node list (for example multi-node placement requirements) still happen at deploy time where they belong.
+The command exits nonzero when anything is wrong, so `tug lint` works as a CI step before `tug deploy`.
 
 ## Editor autocomplete and squiggles
 
-The same schema `tug lint` applies is published as [JSON Schema](https://unpkg.com/@wpelevator/tug/x-tug.schema.json) for editors. Add one header line to `compose.yaml` and the Red Hat YAML extension for VS Code (or any @schema-aware YAML language server) gives you completion, descriptions and underlined findings for every `x-tug` field while you type:
+The same schema `tug lint` applies is published as [JSON Schema](https://unpkg.com/@wpelevator/tug/x-tug.schema.json) for editors. Add one header line to `compose.yaml` and the Red Hat YAML extension for VS Code (or any schema-aware YAML language server) gives you completion, descriptions and squiggles for every `x-tug` field while you type:
 
 ```yaml
 # yaml-language-server: $schema=https://unpkg.com/@wpelevator/tug/x-tug.schema.json
