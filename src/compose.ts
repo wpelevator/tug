@@ -6,7 +6,9 @@ import type {
   ComposeFile,
   ComposeService,
   DesiredState,
+  Placement,
   ServiceEndpoint,
+  ServiceExtension,
   ServiceSpec,
 } from './protocol.ts';
 
@@ -260,17 +262,152 @@ export const SUPPORTED_SERVICE_KEYS: readonly string[] = [
 /** Keys Compose adds or that Tug ignores on purpose: the default network, and `pull_policy` because Tug decides when images change. */
 const IGNORED_SERVICE_KEYS = ['networks', 'pull_policy'];
 const SUPPORTED_TOP_LEVEL = ['services', 'volumes', 'networks', 'name', 'x-tug'];
-const SUPPORTED_VOLUME_KEYS = ['name', 'driver', 'driver_opts', 'labels', 'external', 'x-tug'];
+export const SUPPORTED_VOLUME_KEYS = [
+  'name',
+  'driver',
+  'driver_opts',
+  'labels',
+  'external',
+  'x-tug',
+];
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 const isExtension = (key: string) => key.startsWith('x-');
+
+/** Keys of the service `x-tug` block; anything else is a typo deploy would silently ignore. */
+export const SERVICE_EXTENSION_KEYS = [
+  'placement',
+  'replicas',
+  'global',
+  'health',
+  'ingress',
+  'rollout',
+  'backup',
+];
+/** Keys of the top-level-volume `x-tug` block (control records `type` and `driver`). */
+export const VOLUME_EXTENSION_KEYS = ['type', 'driver', 'persistent', 'placement', 'backup'];
+
+/** Validates an `x-tug.placement` block wherever it appears (services and top-level volumes). */
+function validatePlacement(name: string, placement: unknown, errors: string[]): void {
+  if (placement === undefined) return;
+  if (!isObject(placement)) {
+    errors.push(`${name}: x-tug.placement must be an object`);
+    return;
+  }
+  for (const key of Object.keys(placement)) {
+    if (key === 'global')
+      errors.push(`${name}: x-tug.placement.global is not supported; use x-tug.global`);
+    else if (key !== 'nodes' && key !== 'labels')
+      errors.push(`${name}: x-tug.placement.${key} is not supported (supported: nodes, labels)`);
+  }
+  for (const key of ['nodes', 'labels']) {
+    const value = placement[key];
+    if (value === undefined) continue;
+    if (!Array.isArray(value) || value.some((item) => typeof item !== 'string' || !item))
+      errors.push(`${name}: x-tug.placement.${key} must be a list of names`);
+  }
+}
+
+/**
+ * An unknown type here would make the agent silently pass the service as healthy (anything outside
+ * `docker`/`tcp`/`http` falls through every branch), so the `x-tug.health` block is fully validated.
+ */
+function validateHealth(name: string, health: unknown, errors: string[]): void {
+  if (!isObject(health)) {
+    errors.push(`${name}: x-tug.health must be an object with type docker, tcp or http`);
+    return;
+  }
+  for (const key of Object.keys(health))
+    if (!['type', 'port', 'path', 'interval', 'timeout', 'retries'].includes(key))
+      errors.push(
+        `${name}: x-tug.health.${key} is not supported (supported: type, port, path, interval, timeout, retries)`,
+      );
+  const type = typeof health.type === 'string' ? health.type : undefined;
+  if (!type) errors.push(`${name}: x-tug.health needs type: docker, tcp or http`);
+  else if (!['docker', 'tcp', 'http'].includes(type))
+    errors.push(`${name}: x-tug.health.type must be docker, tcp or http`);
+  if (health.port === undefined) {
+    if (type === 'tcp')
+      errors.push(
+        `${name}: x-tug.health.port is required when type is tcp (the agent dials it on the container IP)`,
+      );
+  } else {
+    const port = Number(health.port);
+    if (!Number.isInteger(port) || port < 1 || port > 65535)
+      errors.push(`${name}: x-tug.health.port must be a port number`);
+  }
+  if (
+    health.path !== undefined &&
+    (typeof health.path !== 'string' || !health.path.startsWith('/'))
+  )
+    errors.push(`${name}: x-tug.health.path must be an absolute path such as / or /healthz`);
+  for (const key of ['interval', 'timeout'] as const)
+    if (health[key] !== undefined && !isDuration(health[key]))
+      errors.push(
+        `${name}: x-tug.health.${key} must be a duration such as 2s, 500ms or 1m, or a number of milliseconds`,
+      );
+  if (health.retries !== undefined) {
+    const retries = Number(health.retries);
+    if (!Number.isInteger(retries) || retries < 1)
+      errors.push(`${name}: x-tug.health.retries must be a whole number of 1 or more`);
+  }
+}
+
+/** The `x-tug` block of a service against its schema: keys first, then the scalar fields. */
+function validateServiceExtension(name: string, svc: ComposeService, errors: string[]): void {
+  const ext = svc['x-tug'];
+  if (ext === undefined) return;
+  if (!isObject(ext)) {
+    errors.push(`${name}: x-tug must be an object`);
+    return;
+  }
+  for (const key of Object.keys(ext))
+    if (!SERVICE_EXTENSION_KEYS.includes(key))
+      errors.push(
+        `${name}: x-tug.${key} is not supported (supported: ${SERVICE_EXTENSION_KEYS.join(', ')})`,
+      );
+  if (ext.replicas !== undefined) {
+    const replicas = Number(ext.replicas);
+    if (!Number.isInteger(replicas) || replicas < 1)
+      errors.push(`${name}: x-tug.replicas must be a whole number of 1 or more`);
+  }
+  const global = ext.global as unknown;
+  if (global !== undefined && global !== true && global !== false)
+    errors.push(`${name}: x-tug.global must be true or false`);
+  if ('placement' in ext) validatePlacement(name, ext.placement, errors);
+  if (ext.health !== undefined) validateHealth(name, ext.health, errors);
+}
+
+/** The `x-tug` block of a top-level volume against its schema. */
+function validateVolumeExtension(name: string, def: unknown, errors: string[]): void {
+  const ext = (isObject(def) ? (def as Record<string, unknown>) : {})['x-tug'];
+  if (ext === undefined) return;
+  const label = `volumes.${name}`;
+  if (!isObject(ext)) {
+    errors.push(`${label}: x-tug must be an object`);
+    return;
+  }
+  for (const key of Object.keys(ext))
+    if (!VOLUME_EXTENSION_KEYS.includes(key))
+      errors.push(
+        `${label}: x-tug.${key} is not supported (supported: ${VOLUME_EXTENSION_KEYS.join(', ')})`,
+      );
+  if (ext.type !== undefined && (typeof ext.type !== 'string' || !ext.type.trim()))
+    errors.push(`${label}: x-tug.type must be a driver type name such as local`);
+  if (ext.driver !== undefined && (typeof ext.driver !== 'string' || !ext.driver.trim()))
+    errors.push(`${label}: x-tug.driver must be a volume driver name`);
+  if (ext.persistent !== undefined && ext.persistent !== true && ext.persistent !== false)
+    errors.push(`${label}: x-tug.persistent must be true or false`);
+  if ('placement' in ext) validatePlacement(label, ext.placement, errors);
+}
 
 function validateSubset(
   name: string,
   svc: ComposeService,
   compose: ComposeFile,
   errors: string[],
+  normalized = true,
 ): void {
   for (const key of Object.keys(svc)) {
     if (SUPPORTED_SERVICE_KEYS.includes(key) || IGNORED_SERVICE_KEYS.includes(key)) continue;
@@ -289,6 +426,9 @@ function validateSubset(
   }
   if (!svc.image && !svc.build) errors.push(`${name}: image or build is required`);
   for (const mount of svc.volumes || []) {
+    // Short syntax is valid operator input: deploy normalizes it away with `docker compose config`,
+    // so only definitions checked in their canonical form have no business still writing it.
+    if (!normalized && typeof mount === 'string') continue;
     if (typeof mount === 'string') {
       errors.push(`${name}: volumes must be normalized by docker compose config (got "${mount}")`);
       continue;
@@ -357,39 +497,63 @@ export function ingressHostsOverlap(a: string, b: string): boolean {
 export function validateCompose(
   compose: ComposeFile | undefined,
   nodes: string[] = [],
+  options: ComposeValidationOptions = {},
 ): asserts compose is ComposeFile {
   if (!compose?.services || typeof compose.services !== 'object')
     throw new Error('compose file must define services');
+  const errors = composeErrors(compose, nodes, options);
+  if (errors.length) throw new Error(errors.join('; '));
+}
+
+export interface ComposeValidationOptions {
+  /** True when `docker compose config` produced the definitions, which expands short-syntax volumes. */
+  normalized?: boolean;
+}
+
+/**
+ * Every schema check of a Compose definition, one message per finding: the schema of every `x-tug`
+ * block, cross-references such as the ingress port and the conditions deploy finally enforces.
+ * `validateCompose` throws the joined list at deploy time; `tug lint` reports the list for a file as
+ * written, without deploy's context (a node list, or the canonical form Compose renders).
+ */
+export function composeErrors(
+  compose: ComposeFile | undefined,
+  nodes: string[] = [],
+  options: ComposeValidationOptions = {},
+): string[] {
+  if (!compose?.services || typeof compose.services !== 'object')
+    return ['compose file must define services'];
   const errors: string[] = [];
   const ingressHosts = new Map<string, string>();
-  for (const [name, svc] of Object.entries(compose.services)) {
-    validateSubset(name, svc, compose, errors);
-    const lp = svc['x-tug'] || {};
-    const placement = lp.placement || {};
-    const selected = placement.nodes || [];
+  for (const [name, svc] of Object.entries(compose?.services || {})) {
+    validateSubset(name, svc, compose as ComposeFile, errors, options.normalized !== false);
+    validateServiceExtension(name, svc, errors);
+    const ext = (isObject(svc['x-tug']) ? svc['x-tug'] : {}) as ServiceExtension;
+    const placement = isObject(ext.placement) ? ext.placement : {};
+    const selected = (placement as Placement).nodes ?? [];
     const hasLabels = Array.isArray(placement.labels) && placement.labels.length > 0;
-    const isGlobal = lp.global === true;
-    if ('global' in placement)
-      errors.push(`${name}: x-tug.placement.global is not supported; use x-tug.global`);
+    const isGlobal = ext.global === true;
     if (nodes.length > 1 && selected.length === 0 && !hasLabels && !isGlobal)
       errors.push(
         `${name}: multi-node deployments require x-tug.placement.nodes or placement.labels`,
       );
     if (
-      lp.replicas &&
+      ext.replicas &&
       selected.length &&
       !hasLabels &&
       !isGlobal &&
-      lp.replicas !== selected.length
+      Number(ext.replicas) !== selected.length
     )
       errors.push(`${name}: replicas must match placement node count in v1`);
     validateIngress(name, svc, ingressHosts, errors);
     validateRollout(name, svc, errors);
   }
-  validateTopLevel(compose, errors);
-  validateProjectExtension(compose, errors);
-  errors.push(...resolveBackups(compose).errors);
-  if (errors.length) throw new Error(errors.join('; '));
+  for (const [name, def] of Object.entries(compose?.volumes || {}))
+    validateVolumeExtension(name, def, errors);
+  validateTopLevel(compose as ComposeFile, errors);
+  validateProjectExtension(compose as ComposeFile, errors);
+  errors.push(...resolveBackups(compose as ComposeFile).errors);
+  return errors;
 }
 
 export interface BuildDesiredStateOptions {
