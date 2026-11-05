@@ -90,7 +90,7 @@ Control and the CLI must match closely enough that every route the CLI calls exi
 - The control is older than the CLI (or has no `/api/v1/version` route at all): the command is refused with `tug control setup <control host> --yes` as the fix. That redeploys the control container at the installed CLI's image tag and preserves the state and PKI in the `/data` volume.
 - The CLI is older than the control: the command proceeds with a warning naming `npm i -g @wpelevator/tug@<version>` to pin the CLI to the control's version.
 
-Before an upgrade, keep the fallback lane: `ssh <host> docker tag ghcr.io/wpelevator/tug:<previous> tug:rollback`, then redeploy with `tug control setup <ssh-target> --image tug:rollback` if the new control misbehaves. Confirm the upgrade with `tug doctor` and `tug ps` right after, and see the [mismatch runbook](troubleshooting.md#cli-control-version-or-credentialca-mismatches) when `tug doctor` reports a CA fingerprint mismatch.
+Before an upgrade, keep the fallback lane: `ssh <host> docker tag ghcr.io/wpelevator/tug:<previous> tug:rollback`, then redeploy with `tug control setup <ssh-target> --image tug:rollback` if the new control misbehaves. Confirm the upgrade with `tug doctor` and `tug ps` right after, then match the agents with `tug node add --all` (see [Upgrading an agent](nodes.md#image)); see the [mismatch runbook](troubleshooting.md#cli-control-version-or-credentialca-mismatches) when `tug doctor` reports a CA fingerprint mismatch.
 
 ## Moving the control plane
 
