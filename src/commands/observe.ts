@@ -57,7 +57,8 @@ export function registerObserve(program: Command): void {
           local.push({ name, ok: false, error: errMessage(e) });
         }
       }
-      let controlDiagnostics: { ok: boolean; checks?: { name: string; warnings?: string[] }[] } | undefined;
+      let controlDiagnostics:
+        { ok: boolean; checks?: { name: string; warnings?: string[] }[] } | undefined;
       try {
         controlDiagnostics = await request('GET', '/api/v1/diagnostics');
       } catch (error) {
@@ -92,12 +93,16 @@ export function registerObserve(program: Command): void {
         nodeDiagnostics?: unknown;
       } = {
         ok:
-          local.every((c) => c.ok) && Boolean(controlDiagnostics) && (controlDiagnostics?.ok ?? false),
+          local.every((c) => c.ok) &&
+          Boolean(controlDiagnostics) &&
+          (controlDiagnostics?.ok ?? false),
         ...(warnings.length && { warnings }),
         local,
         ...(controlDiagnostics
           ? { control: controlDiagnostics }
-          : { control: { ok: false, error: 'control diagnostics unavailable (see local checks)' } }),
+          : {
+              control: { ok: false, error: 'control diagnostics unavailable (see local checks)' },
+            }),
       };
       if (o.nodes || o.node) {
         const queued = await request<{ commands: { commandId: string; nodeId: string }[] }>(

@@ -22,7 +22,9 @@ export async function importCredential(
     try {
       return fingerprintPem(ca);
     } catch {
-      throw new Error("the credential's `ca` field is not a PEM certificate; re-issue the credential on the control");
+      throw new Error(
+        "the credential's `ca` field is not a PEM certificate; re-issue the credential on the control",
+      );
     }
   })(credential.ca);
   // A different CA in the replacement credential re-points the CLI at a different control; say so explicitly, since a
@@ -30,7 +32,9 @@ export async function importCredential(
   if (cfg.credential && fingerprintPem(cfg.credential.ca) !== caFingerprint)
     console.error(
       `note: this credential is signed by CA ${caFingerprint}, replacing one signed by ${fingerprintPem(cfg.credential.ca)}; the CLI now trusts a different control` +
-        (cfg.credentialFile ? `, and the previous file stays at ${cfg.credentialFile} until you switch back` : ''),
+        (cfg.credentialFile
+          ? `, and the previous file stays at ${cfg.credentialFile} until you switch back`
+          : ''),
     );
   // TUG_CREDENTIALS_DIR keeps scripts and tests out of the real home directory.
   const dir =

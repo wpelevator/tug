@@ -30,8 +30,15 @@ async function harness(): Promise<Harness> {
   };
 }
 
-async function credential(pki: Awaited<ReturnType<typeof Pki.load>>, name: string): Promise<Credential> {
-  const issued = await pki.issueClient(`tug:operator:cred_${name}`, LIFETIME_MS, 'https://control.test:8443');
+async function credential(
+  pki: Awaited<ReturnType<typeof Pki.load>>,
+  name: string,
+): Promise<Credential> {
+  const issued = await pki.issueClient(
+    `tug:operator:cred_${name}`,
+    LIFETIME_MS,
+    'https://control.test:8443',
+  );
   return issued.credential;
 }
 
@@ -79,7 +86,11 @@ test('importing a credential from a different CA never overwrites the previously
   const second = await Pki.load(await fs.mkdtemp(path.join(os.tmpdir(), 'tug-pki-b-')), true);
   const oldCred = await credential(first, 'old');
   const newCred = await credential(second, 'new');
-  assert.notEqual(fingerprintPem(oldCred.ca), fingerprintPem(newCred.ca), 'the test setup must use two different CAs');
+  assert.notEqual(
+    fingerprintPem(oldCred.ca),
+    fingerprintPem(newCred.ca),
+    'the test setup must use two different CAs',
+  );
 
   h.cfg.credential = oldCred;
   const errors: string[] = [];
@@ -91,7 +102,10 @@ test('importing a credential from a different CA never overwrites the previously
     await importCredential(h.cfg, JSON.stringify(oldCred), {});
     // The resolved config still points at the previous credential when the replacement is imported;
     // `writeInitConfig` flips the pointer only after the import decision.
-    h.cfg.credentialFile = path.join(process.env.TUG_CREDENTIALS_DIR!, `control.test_8443.${fingerprintPem(oldCred.ca).replace(/:/g, '').toLowerCase().slice(0, 12)}.json`);
+    h.cfg.credentialFile = path.join(
+      process.env.TUG_CREDENTIALS_DIR!,
+      `control.test_8443.${fingerprintPem(oldCred.ca).replace(/:/g, '').toLowerCase().slice(0, 12)}.json`,
+    );
     await importCredential(h.cfg, JSON.stringify(newCred), {});
   } finally {
     console.error = original;
@@ -104,13 +118,25 @@ test('importing a credential from a different CA never overwrites the previously
   const newPath = path.join(process.env.TUG_CREDENTIALS_DIR!, `control.test_8443.${caNew}.json`);
   const oldFile = JSON.parse(await fs.readFile(oldPath, 'utf8'));
   const newFile = JSON.parse(await fs.readFile(newPath, 'utf8'));
-  assert.equal(oldFile.ca, oldCred.ca, 'the previously working credential file is untouched after a different-CA import');
-  assert.equal(newFile.ca, newCred.ca, 'the different-CA credential is written to its own fingerprint-named file');
+  assert.equal(
+    oldFile.ca,
+    oldCred.ca,
+    'the previously working credential file is untouched after a different-CA import',
+  );
+  assert.equal(
+    newFile.ca,
+    newCred.ca,
+    'the different-CA credential is written to its own fingerprint-named file',
+  );
   assert.ok(
     errors.join('\n').includes(fingerprintPem(newCred.ca)),
     'the warning names the incoming credential CA fingerprint',
   );
-  assert.match(errors.join('\n'), /previous file stays/, 'the warning points at the preserved previous file');
+  assert.match(
+    errors.join('\n'),
+    /previous file stays/,
+    'the warning points at the preserved previous file',
+  );
 });
 
 test('re-importing the same CA credential reuses one file (idempotent, no name churn)', async () => {
@@ -128,5 +154,8 @@ test('re-importing the same CA credential reuses one file (idempotent, no name c
   const dir = process.env.TUG_CREDENTIALS_DIR!;
   const files = (await fs.readdir(dir)).filter((name) => name.endsWith('.json'));
   assert.equal(files.length, 1, 'two imports of one credential produce one file');
-  assert.equal(JSON.parse(await fs.readFile(files[0] && path.join(dir, files[0]), 'utf8')).ca, cred.ca);
+  assert.equal(
+    JSON.parse(await fs.readFile(files[0] && path.join(dir, files[0]), 'utf8')).ca,
+    cred.ca,
+  );
 });

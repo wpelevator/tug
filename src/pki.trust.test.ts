@@ -1,11 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  caTrustCode,
-  fingerprintPem,
-  describeCaMismatch,
-  type Credential,
-} from './pki.ts';
+import { caTrustCode, fingerprintPem, describeCaMismatch, type Credential } from './pki.ts';
 
 const ca = `-----BEGIN CERTIFICATE-----
 MIIBZDCCAQqgAwIBAgIPE14zhIG4l7ov73HrXf7IMAoGCCqGSM49BAMCMBExDzAN
@@ -31,17 +26,29 @@ test('caTrustCode falls back to the message text for transports that lose the co
     'CA verification declined',
     'an openssl-text-only failure is still classified',
   );
-  assert.equal(caTrustCode(new Error('network unreachable')), null, 'unrelated failures stay unclassified');
+  assert.equal(
+    caTrustCode(new Error('network unreachable')),
+    null,
+    'unrelated failures stay unclassified',
+  );
   assert.equal(caTrustCode(undefined), null, 'a missing error is not a trust failure');
 });
 
 test('fingerprintPem is the certificate SHA-256 fingerprint', () => {
-  assert.match(fingerprintPem(ca), /^[A-F0-9]{2}(:[A-F0-9]{2}){31}$/, 'OpenSSL-style SHA-256 colon fingerprint');
+  assert.match(
+    fingerprintPem(ca),
+    /^[A-F0-9]{2}(:[A-F0-9]{2}){31}$/,
+    'OpenSSL-style SHA-256 colon fingerprint',
+  );
 });
 
 test('describeCaMismatch names the trusted CA fingerprint and both remediations', () => {
   const message = describeCaMismatch(credential, 'https://control:8443');
-  assert.match(message, /this credential trusts [A-F0-9]/, 'the trusted CA fingerprint is in the message');
+  assert.match(
+    message,
+    /this credential trusts [A-F0-9]/,
+    'the trusted CA fingerprint is in the message',
+  );
   assert.match(message, /tug init/, 're-importing the matching credential is suggested');
   assert.match(message, /redeploy that control/, 'redeploying the control is suggested');
 });

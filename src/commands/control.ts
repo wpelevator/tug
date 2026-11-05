@@ -155,7 +155,9 @@ function addSetup(parent: Command, description: string): void {
             onDiskError = errMessage(e);
           }
           if (!onDiskFp)
-            console.error(`note: skipped the CA-consistency check — could not read the control's persisted CA (${onDiskError})`);
+            console.error(
+              `note: skipped the CA-consistency check — could not read the control's persisted CA (${onDiskError})`,
+            );
           else if (issuedFp !== onDiskFp)
             throw new Error(
               `the issued root credential is signed by CA ${issuedFp}, but the control persisted CA ${onDiskFp}; refusing to write local state — inspect /data/pki on ${sshTarget}`,

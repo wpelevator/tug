@@ -17,8 +17,14 @@ import type { ResolvedCliConfig } from '../cli-config.ts';
  */
 test('a credential from a different CA fails the preflight with the both-fingerprints message', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-preca-'));
-  const serverPki = await Pki.load(await fs.mkdtemp(path.join(os.tmpdir(), 'tug-server-ca-')), true);
-  const clientPki = await Pki.load(await fs.mkdtemp(path.join(os.tmpdir(), 'tug-client-ca-')), true);
+  const serverPki = await Pki.load(
+    await fs.mkdtemp(path.join(os.tmpdir(), 'tug-server-ca-')),
+    true,
+  );
+  const clientPki = await Pki.load(
+    await fs.mkdtemp(path.join(os.tmpdir(), 'tug-client-ca-')),
+    true,
+  );
   const issued = await serverPki.issueServer(serverNames('https://localhost:8443'));
   const credential = (
     await clientPki.issueClient(identityUri('operator', 'o1'), 86_400_000, 'https://localhost:8443')
@@ -51,7 +57,11 @@ test('a credential from a different CA fails the preflight with the both-fingerp
       /did not present a certificate signed by this credential's CA/,
       'the CA mismatch must surface as the actionable message from the first TLS connection (the preflight)',
     );
-    await assert.rejects(request('GET', '/api/v1/services?project=site'), /this credential trusts [A-F0-9]/, 'the message also names the trusted CA fingerprint');
+    await assert.rejects(
+      request('GET', '/api/v1/services?project=site'),
+      /this credential trusts [A-F0-9]/,
+      'the message also names the trusted CA fingerprint',
+    );
   } finally {
     https.closeAllConnections();
     await new Promise<void>((resolve) => https.close(() => resolve()));

@@ -489,7 +489,9 @@ export function probeServerCertificate(
       rejectUnauthorized: false,
       minVersion: 'TLSv1.3',
     });
-    socket.setTimeout(timeoutMs, () => socket.destroy(new Error(`no TLS answer from ${url.origin}`)));
+    socket.setTimeout(timeoutMs, () =>
+      socket.destroy(new Error(`no TLS answer from ${url.origin}`)),
+    );
     socket.on('secureConnect', () => {
       const cert = socket.getPeerCertificate(false);
       const issuer = socket.getPeerCertificate(true).issuer;

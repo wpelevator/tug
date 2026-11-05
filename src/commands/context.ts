@@ -111,11 +111,15 @@ export function versionVerdict(
     };
   const v = typeof report?.v === 'string' ? report.v : undefined;
   if (!v)
-    return { error: `the control at ${base} answered /api/v1/version without a version — ${upgrade}` };
+    return {
+      error: `the control at ${base} answered /api/v1/version without a version — ${upgrade}`,
+    };
   const [cMaj, cMin] = v.split('.').map(Number);
   const [lMaj, lMin] = cliVersion.split('.').map(Number);
   if (![cMaj, cMin, lMaj, lMin].every(Number.isFinite))
-    return { error: `the control at ${base} answered /api/v1/version with ${JSON.stringify(report?.v)}, not a version — ${upgrade}` };
+    return {
+      error: `the control at ${base} answered /api/v1/version with ${JSON.stringify(report?.v)}, not a version — ${upgrade}`,
+    };
   if (cMaj < lMaj || (cMaj === lMaj && cMin < lMin))
     return {
       error: `the control at ${base} runs ${v}, this CLI is ${cliVersion}; its commands may rely on newer routes — ${upgrade}`,
