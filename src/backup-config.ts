@@ -46,10 +46,12 @@ const MAX_MEMORY_BYTES = 16 * 1024 ** 3;
 const MIN_TIMEOUT_SEC = 60;
 const MAX_TIMEOUT_SEC = 24 * 3600;
 const MAX_JITTER_SEC = 3600;
-const RETENTION_KEYS = ['last', 'hourly', 'daily', 'weekly', 'monthly', 'yearly'] as const;
+export const RETENTION_KEYS = ['last', 'hourly', 'daily', 'weekly', 'monthly', 'yearly'] as const;
 const COMMON_KEYS = ['schedule', 'retention', 'jitter', 'timeout', 'memory', 'writers'];
-const SERVICE_KEYS = [...COMMON_KEYS, 'command', 'restore', 'filename', 'verify'];
-const VOLUME_KEYS = [...COMMON_KEYS, 'exclude'];
+/** Keys of a service `x-tug.backup` object; the editor schema mirrors them. */
+export const SERVICE_KEYS = [...COMMON_KEYS, 'command', 'restore', 'filename', 'verify'];
+/** Keys of a volume `x-tug.backup` object; the editor schema mirrors them. */
+export const VOLUME_KEYS = [...COMMON_KEYS, 'exclude'];
 const FILENAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 
 const isObject = (value: unknown): value is Record<string, unknown> =>

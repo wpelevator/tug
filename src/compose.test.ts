@@ -1,7 +1,8 @@
-import test from 'node:test';
+import test, { describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildDesiredState,
+  composeErrors,
   crossNodeHosts,
   publishedPort,
   serviceSecretNames,
@@ -448,4 +449,180 @@ test('secrets are the sentinels a service references', () => {
     web: { API_KEY: 3 },
     worker: {},
   });
+});
+
+/** The x-tug schema checks that lint reports rejoin the errors deploy throws. */
+describe('x-tug schema checks', () => {
+  const errorsFor = (compose: Partial<ComposeFile>, nodes: string[] = []) => {
+    try {
+      validateCompose(compose as ComposeFile, nodes);
+      return '';
+    } catch (e) {
+      return (e as Error).message;
+    }
+  };
+  const service = (xtug: unknown) =>
+    errorsFor({
+      services: {
+        web: { image: 'x', 'x-tug': xtug } as ComposeFile['services'][string],
+      },
+    });
+  const volume = (xtug: unknown) =>
+    errorsFor({
+      services: { web: { image: 'x' } },
+      volumes: { data: { 'x-tug': xtug } as Record<string, unknown> },
+    } as unknown as ComposeFile);
+
+  test('x-tug checks its own keys, so a typo cannot deploy silently ignored', () => {
+    assert.equal(service({ placement: { nodes: ['n1'] } }), '', 'a plain placement is valid');
+    assert.match(
+      service({ ingresss: { host: 'app.example.com', port: 80 } }),
+      /web: x-tug\.ingresss is not supported \(supported: placement, replicas, global, health, ingress, rollout, backup\)/,
+      'an unknown key names its location and the accepted ones',
+    );
+    assert.match(service('nginx'), /web: x-tug must be an object/, 'a scalar x-tug is rejected');
+    assert.match(
+      service({ replicas: 0 }),
+      /web: x-tug\.replicas must be a whole number of 1 or more/,
+    );
+    assert.match(service({ replicas: 'three' }), /x-tug\.replicas must be a whole number/);
+    assert.equal(service({ replicas: 1, placement: { nodes: ['n1'] } }), '', 'valid replicas pass');
+    assert.match(service({ global: 'yes' }), /web: x-tug\.global must be true or false/);
+    assert.equal(service({ global: true }), '', 'global is a boolean flag');
+  });
+
+  test('x-tug.placement takes nodes and labels as lists of names', () => {
+    assert.match(service({ placement: ['n1'] }), /web: x-tug\.placement must be an object/);
+    assert.match(
+      service({ placement: { nodes: 'n1' } }),
+      /placement\.nodes must be a list of names/,
+    );
+    assert.match(
+      service({ placement: { labels: { team: 'a' } } }),
+      /placement\.labels must be a list of names/,
+    );
+    assert.match(
+      service({ placement: { nodes: [''], region: ['eu'] } }),
+      /list of names|is not supported/,
+      'an empty name and an unknown key are both findings',
+    );
+    assert.match(
+      service({ placement: { global: true } }),
+      /x-tug\.placement\.global is not supported; use x-tug\.global/,
+      'global has exactly one location',
+    );
+    assert.equal(
+      service({ placement: { nodes: ['n1'], labels: ['edge'] } }),
+      '',
+      'nodes and labels combine',
+    );
+  });
+
+  test('x-tug.health validates type, port, path and timing', () => {
+    assert.equal(service({ health: { type: 'tcp', port: 3306 } }), '', 'a tcp probe is valid');
+    assert.equal(
+      service({ health: { type: 'http', port: 80, path: '/healthz' } }),
+      '',
+      'an http probe is valid',
+    );
+    assert.equal(service({ health: { type: 'docker' } }), '', 'docker waits for HEALTHCHECK');
+    assert.match(service({ health: 'docker' }), /x-tug\.health must be an object/);
+    assert.match(
+      service({ health: { port: 80 } }),
+      /web: x-tug\.health needs type: docker, tcp or http/,
+      'type is what makes a probe a probe',
+    );
+    assert.match(
+      service({ health: { type: 'htp' } }),
+      /web: x-tug\.health\.type must be docker, tcp or http/,
+      'an unknown type would silently pass as healthy on the agent',
+    );
+    assert.match(
+      service({ health: { type: 'tcp' } }),
+      /port is required when type is tcp/,
+      'tcp dials a port the operator chose',
+    );
+    assert.match(
+      service({ health: { type: 'tcp', port: '80!tcp' } }),
+      /port number/,
+      'the port must be a port',
+    );
+    assert.match(service({ health: { type: 'tcp', port: 70000 } }), /port number/);
+    assert.match(
+      service({ health: { type: 'http', path: 'healthz' } }),
+      /absolute path/,
+      'the agent appends nothing to a relative path',
+    );
+    assert.match(
+      service({ health: { type: 'tcp', port: 80, interval: 'soon' } }),
+      /interval must be a duration/,
+      'interval is checked as a duration like deploy would parse it',
+    );
+    assert.match(
+      service({ health: { type: 'tcp', port: 80, timeout: {} } }),
+      /timeout must be a duration/,
+    );
+    assert.match(
+      service({ health: { type: 'tcp', port: 80, retries: 0 } }),
+      /retries must be a whole number of 1 or more/,
+    );
+    assert.equal(
+      service({ health: { type: 'http', interval: 500, timeout: '2s', retries: '10' } }),
+      '',
+      'millisecond numbers and string integers are accepted',
+    );
+  });
+
+  test('volume x-tug takes type, driver, persistent, placement and backup', () => {
+    assert.equal(
+      volume({ type: 'local', persistent: true, placement: { nodes: ['n1'] } }),
+      '',
+      'the documented form is valid',
+    );
+    assert.match(volume({ persistant: true }), /volumes\.data: x-tug\.persistant is not supported/);
+    assert.match(volume({ type: 5 }), /x-tug\.type must be a driver type name/);
+    assert.match(volume({ driver: 5 }), /x-tug\.driver must be a volume driver name/);
+    assert.match(volume({ persistent: 'yes' }), /x-tug\.persistent must be true or false/);
+    assert.match(volume({ placement: 'n1' }), /volumes\.data: x-tug\.placement must be an object/);
+  });
+});
+
+test('composeErrors reports the findings lint shows without throwing', () => {
+  const compose = {
+    services: {
+      web: {
+        image: 'nginx',
+        volumes: ['data:/data'],
+        'x-tug': { health: { type: 'htp' } },
+      },
+    },
+    volumes: { data: {} },
+  } as unknown as ComposeFile;
+  assert.deepEqual(
+    composeErrors(compose, [], { normalized: false }),
+    ['web: x-tug.health.type must be docker, tcp or http'],
+    'the file as written is the deploy file before normalization; short syntax stays valid',
+  );
+  assert.match(
+    validatedThrowsWith(compose, []),
+    /volumes must be normalized by docker compose config/,
+    'and a canonical check keeps deploy strict',
+  );
+  assert.match(validatedThrowsWith(compose, []), /x-tug\.health\.type must be docker, tcp or http/);
+});
+
+/** validateCompose still throws the joined findings; composeErrors is its non-throwing core. */
+function validatedThrowsWith(compose: Partial<ComposeFile>, nodes: string[]): string {
+  try {
+    validateCompose(compose as ComposeFile, nodes);
+    return '';
+  } catch (e) {
+    return (e as Error).message;
+  }
+}
+
+test('composeErrors reports a file without services and validateCompose throws the same rule', () => {
+  assert.deepEqual(composeErrors(undefined as unknown as ComposeFile), [
+    'compose file must define services',
+  ]);
 });

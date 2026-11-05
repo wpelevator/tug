@@ -8,6 +8,7 @@ npm test
 npm run typecheck
 npm run lint
 npm run format
+npm run schema
 npm run build
 npm run test:smoke:dist
 ```
@@ -15,6 +16,8 @@ npm run test:smoke:dist
 Code style is enforced by Prettier (`.prettierrc.json`: 100 columns, single quotes, trailing commas; indentation comes from `.editorconfig`). `npm run lint` runs ESLint and then `prettier --check .`, and CI runs it, so an unformatted file fails the build. `npm run format` rewrites files with Prettier and then applies ESLint's autofixes. `eslint-config-prettier` switches off the ESLint rules that would fight the formatter, so ESLint only reports correctness problems. The one style rule it adds is `max-depth` (5) with `no-else-return`: early `return` guards are the house style, but a loop or state machine whose body needs several `continue`/`break` exits, or nests deeper than that, should be split into a function per item or per state that returns early instead (see `serviceTarget` in `src/backup-config.ts` and the `advance*` handlers in `src/backup-restore.ts`). `no-continue` is deliberately off: a one-line `continue` guard at the top of a short loop is fine. Prettier covers TypeScript, JavaScript and JSON; Markdown, YAML, the install templates and generated files are listed in `.prettierignore`. Prettier moves a trailing `// eslint-disable-line` comment when it rewraps a statement, so put suppressions on their own line above the code they cover (`// eslint-disable-next-line`).
 
 `npm test` runs `node --test 'src/**/*.test.ts'`. `npm run typecheck` runs `tsc --noEmit` over `src/` and `tests/` with `strict` on. `npm run build` compiles `src/` to `dist/` (JavaScript plus `.d.ts`) and copies `src/templates` to `dist/templates`. `npm run test:smoke:dist` builds and checks that `control setup` and `node add` render their templates from `dist/`.
+
+`npm run schema` regenerates the committed, published `x-tug.schema.json` (the editor schema for `x-tug`, see [Compose extensions](compose.md#editor-autocomplete-and-squiggles)) from `src/x-tug-schema.ts`. A test compares the committed file against a fresh generation, and further tests pin the schema's key lists and enums to the validator constants they mirror, so the schema cannot drift from `tug lint` and deploy; a schema change means changing the generator and running the script.
 
 Import specifiers in the source use the `.ts` extension (`import { x } from './util.ts'`) because Node's type stripping does not remap `.js` to `.ts`; `tsc` rewrites them to `.js` in `dist/` (`rewriteRelativeImportExtensions`). Only erasable TypeScript syntax is allowed (`erasableSyntaxOnly`: no enums or constructor parameter properties).
 

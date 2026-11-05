@@ -17,7 +17,7 @@ export interface Setting {
 
 /** Defaults for options of commands that work on the project (top level of the config file). */
 export const COMMAND_SETTINGS: Record<string, Setting> = {
-  file: { type: 'path', flag: '--file', commands: ['deploy'] },
+  file: { type: 'path', flag: '--file', commands: ['deploy', 'lint'] },
   buildLocal: { type: 'boolean', flag: '--build-local', commands: ['deploy'] },
   wait: {
     type: 'boolean',
