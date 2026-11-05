@@ -1,5 +1,0 @@
----
-'@wpelevator/tug': minor
----
-
-New `tug lint [-f --file <file>] [--json]` checks your Compose file against the `x-tug` schema in milliseconds, without deploying, Docker or a control connection: one finding per line on stderr naming the file, service or volume and the rule, exit 1 on any finding, and `--json` prints `{ ok, file, errors }` for scripts and editors. Lint reuses the same checks as deploy, so the schema became stricter for everyone: unknown keys in any `x-tug` block (a typo such as `ingresss` used to deploy silently ignored), unknown keys and malformed values in `x-tug.placement`, type checks for `x-tug.replicas` and `x-tug.global`, full validation of `x-tug.health` (type must be `docker`, `tcp` or `http`, a `tcp` probe requires a port, `interval`/`timeout` must be durations, `retries` a whole number) and the previously unchecked volume `x-tug` block (`type`/`driver`/`persistent`/`placement`/`backup`). An unrecognized health type fell through every check on the agent and silently passed the service as healthy; the same file is now rejected at deploy.
