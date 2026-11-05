@@ -9,6 +9,7 @@ import test from 'node:test';
 import { promisify } from 'node:util';
 import { WebSocketServer } from 'ws';
 import { Pki, identityUri, serverNames } from './pki.ts';
+import { packageVersion } from './image.ts';
 import { serverTlsOptions } from './tls-server.ts';
 
 const exec = promisify(execFile);
@@ -27,6 +28,11 @@ test('live command selection sends exact services, eligible nodes and remote arg
     (req, res) => {
       requests.push(req.url!);
       res.setHeader('content-type', 'application/json');
+      // The CLI's version preflight runs before any API command; answer it with the running CLI's version.
+      if (req.url === '/api/v1/version') {
+        res.end(JSON.stringify({ v: packageVersion() }));
+        return;
+      }
       res.end(
         JSON.stringify({
           services: [
@@ -142,15 +148,19 @@ test('live command selection sends exact services, eligible nodes and remote arg
     await run(['exec', 'web', '--node', 'app1', '--', 'true']);
     assert.equal(
       requests.length,
-      before,
-      'explicit service and node must bypass discovery entirely',
+      before + 1,
+      'explicit service and node must bypass discovery entirely; only the per-process version preflight is added',
     );
     await assert.rejects(
       run(['exec'], [], { CI: '1' }),
       /selection requires a terminal outside CI/,
       'CI must never prompt even when stdin and stdout appear to be terminals',
     );
-    assert.equal(requests.length, before, 'CI missing targets must fail before discovery');
+    assert.equal(
+      requests.length,
+      before + 1,
+      'CI missing targets must fail before any contact: the explicit run added its one preflight request, the CI run adds none',
+    );
   } finally {
     for (const socket of wss.clients) socket.terminate();
     await new Promise<void>((resolve) => wss.close(() => resolve()));

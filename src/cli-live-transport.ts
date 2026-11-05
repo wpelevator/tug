@@ -9,7 +9,7 @@ import type {
   LiveRequest,
 } from './cli-live.ts';
 
-import { clientTlsOptions } from './pki.ts';
+import { caTrustCode, clientTlsOptions, describeCaMismatch } from './pki.ts';
 import type { Credential } from './pki.ts';
 import {
   LIVE_MAX_FRAME_BYTES as MAX_FRAME,
@@ -133,8 +133,12 @@ export function createCliLiveTransport(
           socket.terminate();
         };
         const onError = (error: Error): void => {
-          if (!opened) reject(new CliLiveError(`live connection failed: ${error.message}`));
-          enqueue({ type: 'error', message: `live connection failed: ${error.message}` });
+          // A bare openssl string teaches nothing; a CA mismatch names both fixes at once.
+          const message = caTrustCode(error)
+            ? `live connection failed: ${describeCaMismatch(credential!, new URL(credential.url).origin)}`
+            : `live connection failed: ${error.message}`;
+          if (!opened) reject(new CliLiveError(message));
+          enqueue({ type: 'error', message });
         };
         const onMessage = (data: RawData, binary: boolean): void => {
           if (ended) return;

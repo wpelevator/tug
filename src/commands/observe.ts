@@ -1,6 +1,7 @@
 import { selectNode } from './selection.ts';
 import type { Command } from 'commander';
 import { errMessage } from '../util.ts';
+import { caTrustCode, describeCaMismatch, fingerprintPem, probeServerCertificate } from '../pki.ts';
 import { formatStatus } from '../cli-status.ts';
 import type { StatusResponse } from '../cli-status.ts';
 import { loadCfg, print, request, runCapture, waitForCommand } from './context.ts';
@@ -43,6 +44,7 @@ export function registerObserve(program: Command): void {
     .action(async (o: { nodes?: boolean; node?: string | boolean; timeout: string }) => {
       if (o.nodes && o.node) throw new Error('--nodes and --node cannot be combined');
       if (o.node === true) o.node = await selectNode();
+      const cfg = await loadCfg();
       const local: { name: string; ok: boolean; output?: string; error?: string }[] = [];
       for (const [name, cmd, args] of [
         ['node', 'node', ['--version']],
@@ -55,8 +57,30 @@ export function registerObserve(program: Command): void {
           local.push({ name, ok: false, error: errMessage(e) });
         }
       }
-      const controlDiagnostics = await request('GET', '/api/v1/diagnostics');
-      const warnings = (controlDiagnostics.checks ?? []).flatMap(
+      let controlDiagnostics: { ok: boolean; checks?: { name: string; warnings?: string[] }[] } | undefined;
+      try {
+        controlDiagnostics = await request('GET', '/api/v1/diagnostics');
+      } catch (error) {
+        // Name both fingerprints on a trust mismatch, so the operator can compare the credential with the server in one look.
+        const code = caTrustCode(error);
+        if (code && cfg.credential) {
+          let presented: string;
+          try {
+            const cert = await probeServerCertificate(cfg.credential);
+            presented = `, server presented ${cert.issuer} leaf ${cert.leafFingerprint}`;
+          } catch {
+            presented = ', no TLS answer from the control address';
+          }
+          local.push({
+            name: 'control_server_cert',
+            ok: false,
+            error: `${describeCaMismatch(cfg.credential, cfg.controlUrl ?? cfg.credential.url)} (${code}${presented})`,
+          });
+        } else {
+          throw error;
+        }
+      }
+      const warnings = (controlDiagnostics?.checks ?? []).flatMap(
         (check: { name: string; warnings?: string[] }) =>
           (check.warnings ?? []).map((warning) => `${check.name}: ${warning}`),
       );
@@ -67,10 +91,13 @@ export function registerObserve(program: Command): void {
         control: unknown;
         nodeDiagnostics?: unknown;
       } = {
-        ok: local.every((c) => c.ok) && controlDiagnostics.ok,
+        ok:
+          local.every((c) => c.ok) && Boolean(controlDiagnostics) && (controlDiagnostics?.ok ?? false),
         ...(warnings.length && { warnings }),
         local,
-        control: controlDiagnostics,
+        ...(controlDiagnostics
+          ? { control: controlDiagnostics }
+          : { control: { ok: false, error: 'control diagnostics unavailable (see local checks)' } }),
       };
       if (o.nodes || o.node) {
         const queued = await request<{ commands: { commandId: string; nodeId: string }[] }>(

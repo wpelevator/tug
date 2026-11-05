@@ -4,8 +4,8 @@ import type { Command } from 'commander';
 import { canPrompt, confirm } from '../cli-prompt.ts';
 import { CONTROL_CONTAINER, defaultControlUrl, shellQuote as sh } from '../cli-install.ts';
 import { assertImagePublished, resolveImage } from '../image.ts';
-import { decodeCredential, writeFileDurable } from '../pki.ts';
-import { loadTemplate } from '../util.ts';
+import { decodeCredential, fingerprintPem, writeFileDurable } from '../pki.ts';
+import { errMessage, loadTemplate } from '../util.ts';
 import { collect, loadCfg, print, request, runLocal, templatesDir } from './context.ts';
 import type { InstallOpts } from './context.ts';
 import { bootstrapDocker, hostHasDocker, preflightRemote, transferTugImage } from './host.ts';
@@ -128,6 +128,26 @@ function addSetup(parent: Command, description: string): void {
         } else {
           const text = `${String(out.stdout).trim()}\n`;
           decodeCredential(text);
+          // Fail closed before any local write: a credential for a CA the control did not persist is the
+          // control-rewrote-credentials incident exactly, and importing it silently breaks every later CLI call.
+          const persisted = await runProcess(
+            'ssh',
+            ['--', sshTarget, `docker exec ${sh(CONTROL_CONTAINER)} cat /data/pki/ca.crt`],
+            { capture: true },
+          );
+          try {
+            const issued = fingerprintPem(decodeCredential(text).ca);
+            const onDisk = fingerprintPem(String(persisted.stdout));
+            if (issued !== onDisk)
+              throw new Error(
+                `the issued root credential is signed by CA ${issued}, but the control persisted CA ${onDisk}; refusing to write local state — inspect /data/pki on ${sshTarget}`,
+              );
+          } catch (e: unknown) {
+            // The comparison runs only when both sides parse; an unreadable persisted CA (an older image, cat failure)
+            // degrades to a warning, while a genuinely different persisted CA still refuses the import through the throw.
+            if (persisted.status === 0 && /not signed by CA|control persisted/.test(String(errMessage(e)))) throw e;
+            console.error(`note: skipped the CA-consistency check (${errMessage(e)})`);
+          }
           if (o.credentialOut) {
             await writeFileDurable(o.credentialOut, text, 0o600);
             console.error(`root credential written to ${o.credentialOut}`);

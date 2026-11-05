@@ -24,7 +24,8 @@ async function stubSsh(dir: string) {
   await fs.mkdir(bin, { recursive: true });
   await fs.writeFile(
     path.join(bin, 'ssh'),
-    `#!/bin/sh\nfor a in "$@"; do printf '%s\\n' "$a"; done >> "${log}"\nprintf '\\n--END--\\n' >> "${log}"\ncase "$*" in\n  *"agent identity"*) cat "$TUG_STUB_CSR" ;;\n  *issue-credential*) cat "$TUG_STUB_CREDENTIAL" ;;\nesac\n`,
+    `#!/bin/sh\nfor a in "$@"; do printf '%s\\n' "$a"; done >> "${log}"\nprintf '\\n--END--\\n' >> "${log}"\ncase "$*" in\n  *"agent identity"*) cat "$TUG_STUB_CSR" ;;\n  *issue-credential*) cat "$TUG_STUB_CREDENTIAL" ;;
+  *"cat /data/pki/ca.crt"*) cat "\${TUG_STUB_PERSISTED_CA:-/dev/null}" ;;\nesac\n`,
     { mode: 0o755 },
   );
   return { bin, log };
@@ -34,7 +35,7 @@ test('control setup uses config controlUrl, with overlay, environment and flag o
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-control-config-'));
   const ssh = await stubSsh(dir);
   const credential = path.join(dir, 'stub.credential.json');
-  await writeCredentialFile(credential, 'https://credential.test:8443');
+  const stubCred = await writeCredentialFile(credential, 'https://credential.test:8443');
   const config = path.join(dir, 'install.yml');
   const overlay = path.join(dir, 'install.local.yml');
   const env = {
@@ -43,6 +44,8 @@ test('control setup uses config controlUrl, with overlay, environment and flag o
     TUG_CREDENTIAL: '',
     TUG_CREDENTIAL_FILE: credential,
     TUG_STUB_CREDENTIAL: credential,
+    // The stub answers the persisted-CA probe with this CA, exercising the positive (consistent) fail-closed path.
+    TUG_STUB_PERSISTED_CA: stubCred.ca,
   };
   let extraEnv: NodeJS.ProcessEnv = {};
   const cli = (...args: string[]) =>

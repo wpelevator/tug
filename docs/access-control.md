@@ -47,6 +47,7 @@ The project column says how a scoped credential's allowed projects are checked: 
 | `GET /api/v1/backup/snapshots` | `read` | Query; successful catalog backups for target |
 | `GET /api/v1/holds` | `admin` | Query; deployment move holds only |
 | `GET /api/v1/status` | `read` | Response is filtered to allowed projects |
+| `GET /api/v1/version` | `read` | None; reports control's own version |
 | `GET /api/v1/events` | `read` | `project` query, or filtered to allowed projects |
 | `GET /api/v1/projects/:project` | `read` | Path |
 | `GET /api/v1/deployments/:id` | `read` | Deployment's project |

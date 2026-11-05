@@ -427,6 +427,73 @@ export function clientTlsOptions(credential: Credential): tls.ConnectionOptions 
   };
 }
 
+/** SHA-256 fingerprint of a PEM certificate, the same value OpenSSL's `-fingerprint -sha256` prints. */
+export function fingerprintPem(certPem: string): string {
+  return new crypto.X509Certificate(certPem).fingerprint256;
+}
+
+/** TLS error codes that mean the peer's server chain fails verification against the credential's CA. */
+const CA_TRUST_CODES = new Set([
+  'SELF_SIGNED_CERT_IN_CHAIN',
+  'DEPTH_ZERO_SELF_SIGNED_CERT',
+  'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+  'UNABLE_TO_GET_LOCAL_ISSUER',
+]);
+
+/** Map an error to its CA-trust failure code, also by text, since transports surface the chain error variably. */
+export function caTrustCode(error: unknown): string | null {
+  const e = (error ?? {}) as { code?: string; message?: string; cause?: { code?: string; message?: string } };
+  const code = e.code || e.cause?.code;
+  if (code && CA_TRUST_CODES.has(code)) return code;
+  const text = e.message || e.cause?.message || String(e);
+  if (/self-signed/i.test(text) || /unable to verify/i.test(text) || /unable to get local issuer/i.test(text))
+    return 'CA verification declined';
+  return null;
+}
+
+/** The actionable message for a credential signed by a different control CA than the one that issued the server certificate. */
+export function describeCaMismatch(credential: Credential, base: string): string {
+  return (
+    `the control at ${base} did not present a certificate signed by this credential's CA ` +
+    `(this credential trusts ${fingerprintPem(credential.ca)}); ` +
+    're-run `tug init` with the credential matching the deployed control, or redeploy that control'
+  );
+}
+
+/**
+ * The server certificate control presents, fetched with the credential's client identity but without trusting the
+ * credential's CA. Diagnostic only: this is how `tug doctor` can name both sides of a trust mismatch in one line.
+ */
+export function probeServerCertificate(
+  credential: Credential,
+  timeoutMs = 10_000,
+): Promise<{ leafFingerprint: string; issuer: string }> {
+  return new Promise((resolve, reject) => {
+    const url = new URL(credential.url);
+    const socket = tls.connect({
+      host: url.hostname,
+      port: Number(url.port) || 8443,
+      servername: controlNameFromCa(credential.ca),
+      ca: credential.ca,
+      cert: credential.cert,
+      key: credential.key,
+      rejectUnauthorized: false,
+      minVersion: 'TLSv1.3',
+    });
+    socket.setTimeout(timeoutMs, () => socket.destroy(new Error(`no TLS answer from ${url.origin}`)));
+    socket.on('secureConnect', () => {
+      const cert = socket.getPeerCertificate(false);
+      const issuer = socket.getPeerCertificate(true).issuer;
+      socket.end();
+      resolve({
+        leafFingerprint: cert?.fingerprint256 ?? 'no certificate presented',
+        issuer: issuer ? `${issuer.CN}` : 'unknown issuer',
+      });
+    });
+    socket.on('error', reject);
+  });
+}
+
 /** The peer identity presented on a TLS socket, or null when none can be established. */
 export function peerIdentity(socket: tls.TLSSocket): {
   uri: string;
