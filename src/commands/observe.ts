@@ -1,7 +1,7 @@
 import { selectNode } from './selection.ts';
 import type { Command } from 'commander';
 import { errMessage } from '../util.ts';
-import { caTrustCode, describeCaMismatch, fingerprintPem, probeServerCertificate } from '../pki.ts';
+import { caTrustCode, describeCaMismatch, probeServerCertificate } from '../pki.ts';
 import { formatStatus } from '../cli-status.ts';
 import type { StatusResponse } from '../cli-status.ts';
 import { loadCfg, print, request, runCapture, waitForCommand } from './context.ts';
