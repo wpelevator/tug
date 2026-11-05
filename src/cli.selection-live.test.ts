@@ -28,7 +28,8 @@ test('live command selection sends exact services, eligible nodes and remote arg
     (req, res) => {
       requests.push(req.url!);
       res.setHeader('content-type', 'application/json');
-      // The CLI's version preflight runs before any API command; answer it with the running CLI's version.
+      // The CLI's skew check rides the stamped response; read commands no longer make a dedicated version request.
+      res.setHeader('x-tug-version', packageVersion());
       if (req.url === '/api/v1/version') {
         res.end(JSON.stringify({ v: packageVersion() }));
         return;

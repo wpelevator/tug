@@ -31,6 +31,7 @@ test('long-wait commands report progress on stderr and retain their results and 
     const route = `${req.method} ${req.url?.split('?')[0]}`;
     requested.push(route);
     // The CLI's version preflight runs before any API request route inside the same process.
+    res.setHeader('x-tug-version', packageVersion());
     if (route === 'GET /api/v1/version') {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ v: packageVersion() }));

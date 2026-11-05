@@ -585,6 +585,12 @@ export interface EnrollmentCredentialResponse {
   expiresAt: string;
 }
 
+/** The two integers a version-skew comparison runs on; null when the string is not at least `x.y` with finite parts. */
+export function majorMinor(version: string): [number, number] | null {
+  const [major, minor] = version.split('.').map(Number);
+  return [major, minor].every(Number.isFinite) ? [major, minor] : null;
+}
+
 /** The base64url-encoded JSON payload of TUG_JOIN_KEY. */
 export interface JoinKey {
   v: 2;

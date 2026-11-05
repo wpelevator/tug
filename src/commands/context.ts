@@ -6,6 +6,7 @@ export { runCapture, runLocal } from '../cli-process.ts';
 import crypto from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { majorMinor } from '../protocol.ts';
 import type { ResolvedCliConfig } from '../cli-config.ts';
 import { createTransport } from '../agent-credential.ts';
 import { createCliLiveTransport } from '../cli-live-transport.ts';
@@ -93,82 +94,95 @@ const versionChecked = new Set<string>();
 export function resetVersionChecks(): void {
   versionChecked.clear();
 }
+/** Cache key for one control: address override, base and the credential's CA mark (mismatches change the mark). */
+function versionKey(c: Config): string {
+  const credential = c.credential;
+  if (!credential) return '';
+  // A corrupt `ca` field would throw openssl text out of fingerprintPem; hash the raw value for the key instead, and
+  // let the actual TLS connection produce the diagnostic.
+  const caMark = (() => {
+    try {
+      return fingerprintPem(credential.ca);
+    } catch {
+      return crypto.createHash('sha256').update(credential.ca).digest('hex').slice(0, 32);
+    }
+  })();
+  return `${new URL(credential.url).origin}|${c.controlUrl ?? ''}|${caMark}`;
+}
 
-/** Verdict of the version preflight: an error to refuse on (CLI ahead of control), or a warning to print once. */
+/** Verdict of the version skew: an error to refuse on (this CLI ahead of the control), or a warning to print once.
+ * `controlVersion` comes from the control's `x-tug-version` response stamp or the version route; undefined means the
+ * control predates stamps and the route alike, which can only be an older control. */
 export function versionVerdict(
-  status: number,
-  report: { v?: unknown } | null,
+  controlVersion: string | undefined,
   cliVersion: string,
   base: string,
 ): { error?: string; warning?: string } {
   const upgrade = 'upgrade the control plane with: tug control setup <control host> --yes';
-  // Only a missing route proves an older control. Every other status (401 for a bad credential, 503 while control
-  // recovers) belongs to the command's own request, which surfaces its proper error right after this check.
-  if (status !== 200 && status !== 404 && status !== 405) return {};
-  if (status !== 200)
+  if (controlVersion === undefined)
     return {
-      error: `the control at ${base} did not answer /api/v1/version (HTTP ${status}); it is older than this CLI (${cliVersion}) — ${upgrade}`,
+      error: `the control at ${base} did not report a version; it is older than this CLI (${cliVersion}) — ${upgrade}`,
     };
-  const v = typeof report?.v === 'string' ? report.v : undefined;
-  if (!v)
+  const control = majorMinor(controlVersion);
+  const mine = majorMinor(cliVersion);
+  if (!control || !mine)
     return {
-      error: `the control at ${base} answered /api/v1/version without a version — ${upgrade}`,
+      error: `the control at ${base} reported ${JSON.stringify(controlVersion)}, not a version — ${upgrade}`,
     };
-  const [cMaj, cMin] = v.split('.').map(Number);
-  const [lMaj, lMin] = cliVersion.split('.').map(Number);
-  if (![cMaj, cMin, lMaj, lMin].every(Number.isFinite))
-    return {
-      error: `the control at ${base} answered /api/v1/version with ${JSON.stringify(report?.v)}, not a version — ${upgrade}`,
-    };
+  const [cMaj, cMin] = control;
+  const [lMaj, lMin] = mine;
   if (cMaj < lMaj || (cMaj === lMaj && cMin < lMin))
     return {
-      error: `the control at ${base} runs ${v}, this CLI is ${cliVersion}; its commands may rely on newer routes — ${upgrade}`,
+      error: `the control at ${base} runs ${controlVersion}, this CLI is ${cliVersion}; its commands may rely on newer routes — ${upgrade}`,
     };
   if (cMaj > lMaj || (cMaj === lMaj && cMin > lMin))
     return {
-      warning: `note: this CLI is ${cliVersion} while the control at ${base} runs ${v}; update the CLI with: npm i -g @wpelevator/tug@${v}`,
+      warning: `note: this CLI is ${cliVersion} while the control at ${base} runs ${controlVersion}; update the CLI with: npm i -g @wpelevator/tug@${controlVersion}`,
     };
   return {};
 }
 
-/** One extra request per control per process: refuse loudly when this CLI is ahead of the control, warn when behind. */
-async function preflightVersion(c: Config): Promise<void> {
-  if (!c.credential) return;
-  // A corrupt `ca` field would throw openssl text out of fingerprintPem; hash the raw value for the key instead, and
-  // let the actual TLS connection produce the diagnostic.
-  const caMark = await (async () => {
-    try {
-      return fingerprintPem(c.credential!.ca);
-    } catch {
-      return crypto.createHash('sha256').update(c.credential!.ca).digest('hex').slice(0, 32);
-    }
-  })();
-  const key = `${new URL(c.credential.url).origin}|${c.controlUrl ?? ''}|${caMark}`;
-  if (versionChecked.has(key)) return;
-  const transport = createTransport(c.credential, c.controlUrl);
+/** Explicit skew probe for the flows the header cannot cover: a first request that mutates (the refusal must not
+ * arrive after the harm is done) and flows with no HTTP request at all before acting (live commands, `node add`).
+ * Deprecated-equivalent of the header check: read-first flows see the `x-tug-version` stamp within their own request.
+ * One extra request per control per process; remember it per control (base + trusted CA mark) via versionChecked. */
+export async function preflightVersion(c: Config): Promise<void> {
+  const key = versionKey(c);
+  if (!key || versionChecked.has(key)) return;
+  const transport = createTransport(c.credential!, c.controlUrl);
   try {
     let res;
     try {
       res = await transport.http(`${transport.base}/api/v1/version`, { method: 'GET' });
     } catch (e) {
-      // The preflight is the first TLS connection a command opens, so the CA-mismatch diagnosis must happen HERE,
+      // The preflight may be the first TLS connection a command opens, so the CA-mismatch diagnosis must happen HERE,
       // not only in request(): mapping it there would make the mismatch message unreachable in practice.
       const code = caTrustCode(e);
       throw new Error(
         `GET /api/v1/version: could not reach control at ${transport.base}: ` +
           (code
-            ? `${describeCaMismatch(c.credential, transport.base)} (${code})`
+            ? `${describeCaMismatch(c.credential!, transport.base)} (${code})`
             : describeFetchError(e)),
         { cause: e },
       );
     }
-    const verdict = versionVerdict(
-      res.status,
-      res.ok ? ((await res.json().catch(() => null)) as { v?: unknown } | null) : null,
-      packageVersion(),
-      transport.base,
-    );
     versionChecked.add(key);
+    // The control refuses a client that declares itself newer before any handler runs; its own wording is
+    // authoritative there. Without that marker, a 404/405 on a route a current control always keeps (or an origin
+    // without the route at all) means the control predates the stamp: refused like a missing version. A 401 or 503
+    // belongs to the command's own request and is left to surface its proper error right after.
+    if (!res.ok) {
+      const body = (await res.json().catch(() => null)) as { error?: string; skew?: string } | null;
+      if (body?.skew === 'client-newer' && body.error) throw new Error(body.error);
+      if (res.status === 404 || res.status === 405)
+        throw new Error(versionVerdict(undefined, packageVersion(), transport.base).error);
+      return;
+    }
+    // The stamp leads; the route's body is the fallback for stamping-off controls that predate the middleware.
+    const body = (await res.json().catch(() => null)) as { v?: unknown } | null;
+    const controlVersion =
+      res.headers.get('x-tug-version') ?? (typeof body?.v === 'string' ? body.v : undefined);
+    const verdict = versionVerdict(controlVersion, packageVersion(), transport.base);
     if (verdict.warning) console.error(verdict.warning);
     if (verdict.error) throw new Error(verdict.error);
   } finally {
@@ -182,7 +196,6 @@ export async function transportFor(c: Config) {
     throw new Error(
       'no credential: run `tug init <credential-file>`, set TUG_CREDENTIAL_FILE or pass --credential',
     );
-  await preflightVersion(c);
   return createTransport(c.credential, c.controlUrl);
 }
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -193,6 +206,17 @@ export async function request<T = any>(
   multipart = false,
 ): Promise<T> {
   const c = await loadCfg();
+  if (!c.credential)
+    throw new Error(
+      'no credential: run `tug init <credential-file>`, set TUG_CREDENTIAL_FILE or pass --credential',
+    );
+  const key = versionKey(c);
+  // The skew check rides on ordinary traffic: a read's response carries the control's `x-tug-version` stamp and is
+  // judged after the fact (reads are safe to have run against an old control). A mutating first request is judged
+  // BEFORE it is sent, against the version route, because the harm of new-CLI-old-control semantics is already done
+  // once the old control received the mutation.
+  const firstRead = !!key && !versionChecked.has(key) && method === 'GET';
+  if (!!key && !versionChecked.has(key) && method !== 'GET') await preflightVersion(c);
   const transport = await transportFor(c);
   const headers: Record<string, string> = {};
   if (!multipart) headers['content-type'] = 'application/json';
@@ -215,6 +239,18 @@ export async function request<T = any>(
         `${method} ${route}: could not reach control at ${transport.base}: ${describeFetchError(error)}`,
         { cause: error },
       );
+    }
+    if (firstRead) {
+      // First read answered: judge the stamp here so the refusal (or one-time pin warning) lands before the command
+      // does anything else with the control. Missing or garbage stamps get the same verdict as an old control.
+      versionChecked.add(key!);
+      const verdict = versionVerdict(
+        res.headers.get('x-tug-version') ?? undefined,
+        packageVersion(),
+        transport.base,
+      );
+      if (verdict.warning) console.error(verdict.warning);
+      if (verdict.error) throw new Error(verdict.error);
     }
     if (!res.ok) throw new Error(`${method} ${route}: ${res.status} ${await res.text()}`);
     return (await res.json()) as T;

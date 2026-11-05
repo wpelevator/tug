@@ -77,6 +77,7 @@ import {
   LIVE_MAX_SESSIONS,
   LIVE_START_TIMEOUT_MS,
   BACKUP_COMMAND_TYPES,
+  majorMinor,
 } from './protocol.ts';
 import {
   isReservedProject,
@@ -724,6 +725,27 @@ export async function createApp(
     return cert ? resolvePrincipal(cert.uri, cert.keyHash) : null;
   };
   let restartRequired = false;
+  // Version skew, the VersionMiddleware bargain (Docker): every response names the control's version so a client can
+  // check its own against it without a dedicated probe, and a client declaring itself newer than this control is
+  // refused before a handler runs — the guard cannot exist in the client, whose version the control only learns here.
+  // Requests without the header (agents or tools predating it) are legacy-permitted.
+  app.use((req, res, next) => {
+    const own = packageVersion();
+    res.setHeader('x-tug-version', own);
+    const clientVersion = String(req.headers['x-tug-client-version'] || '');
+    const client = majorMinor(clientVersion);
+    const ownPair = majorMinor(own);
+    if (
+      client &&
+      ownPair &&
+      (client[0] > ownPair[0] || (client[0] === ownPair[0] && client[1] > ownPair[1]))
+    )
+      return void res.status(400).json({
+        error: `this client (${clientVersion}) is newer than the control running ${own}: upgrade the control plane with: tug control setup <control host> --yes`,
+        skew: 'client-newer',
+      });
+    next();
+  });
   app.use((_req, res, next) =>
     restartRequired
       ? res.status(503).json({ error: 'control restored; restart required', restartRequired: true })

@@ -1,6 +1,7 @@
 import WebSocket from 'ws';
 import type { RawData } from 'ws';
 import { CliLiveError } from './cli-live.ts';
+import { packageVersion } from './image.ts';
 import type {
   CliLiveSession,
   CliLiveTransport,
@@ -39,6 +40,9 @@ export function createCliLiveTransport(
         }
         const socket = new WebSocket(url, {
           ...(clientTlsOptions(credential) as object),
+          // The control only parses this header on its HTTP routes (express middleware does not run on upgrades);
+          // `runLive` runs the explicit version preflight for live commands instead.
+          headers: { 'x-tug-client-version': packageVersion() },
           followRedirects: false,
           maxPayload: MAX_FRAME,
           handshakeTimeout: LIVE_START_TIMEOUT_MS,
