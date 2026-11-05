@@ -10,6 +10,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import { createServer } from 'node:https';
 import type { TLSSocket } from 'node:tls';
+import { packageVersion } from './image.ts';
 import { Pki, identityUri, serverNames } from './pki.ts';
 import { serverTlsOptions } from './tls-server.ts';
 import { createCliLiveTransport } from './cli-live-transport.ts';
@@ -21,6 +22,13 @@ async function serverFixture() {
   const issued = await pki.issueServer(serverNames('https://localhost:8443'));
   const https = createServer(
     serverTlsOptions({ cert: issued.cert, key: issued.key, ca: pki.caPem }),
+    // The CLI's version preflight runs before any live command; answer it with the running CLI's version.
+    (req, res) => {
+      if (req.url === '/api/v1/version') {
+        res.setHeader('content-type', 'application/json');
+        res.end(JSON.stringify({ v: packageVersion() }));
+      } else res.end();
+    },
   );
   const server = new WebSocketServer({ server: https });
   https.listen(0, '127.0.0.1');

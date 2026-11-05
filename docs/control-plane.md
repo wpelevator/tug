@@ -20,7 +20,7 @@ Built images always travel as compressed archives over the authenticated control
 tug init root.credential.json
 ```
 
-`tug init` copies the credential (a file, or `-` for stdin) into a `0600` file under `~/.config/tug/credentials/` and points the git-ignored `tug.local.yml` at it. CI passes `TUG_CREDENTIAL` (the encoded credential) or `TUG_CREDENTIAL_FILE`; precedence is `--credential <file>`, then the environment (setting both is an error), then the overlay's `credential` path. Tracked configuration may not name a credential.
+`tug init` copies the credential (a file, or `-` for stdin) into a `0600` file under `~/.config/tug/credentials/`, named `<control host>_<port>.<ca12>.json` where `<ca12>` is the first 12 hex characters of the CA's SHA-256 fingerprint with colons removed, and points the git-ignored `tug.local.yml` at it. The CA fingerprint in the name makes importing a credential from a different control CA additive: it writes a new file and cannot overwrite the credential the CLI was working with, while a same-CA re-issue (for example a root recovery) keeps the same file. Importing across CAs prints a notice that names both fingerprints. CI passes `TUG_CREDENTIAL` (the encoded credential) or `TUG_CREDENTIAL_FILE`; precedence is `--credential <file>`, then the environment (setting both is an error), then the overlay's `credential` path. Tracked configuration may not name a credential.
 
 A release publishes the npm package a few minutes before its container image. A freshly updated CLI therefore fails `tug setup` and `tug node add` before touching the host, with a message that the image is not published yet; retry shortly, or pass `--image ghcr.io/wpelevator/tug:latest`.
 
@@ -82,6 +82,15 @@ This procedure was exercised with the published 0.9.0 release on two VPSes; see 
 5. Connect with the original operator credential and use `--control-url https://<replacement-host>:8443` if the address changed. Verify the recovered projects, deployments and backup catalog. Agents that still point to the old address must be repointed; the tested 0.9.0 path was `tug node replace <node> <ssh-target> --control-url https://<replacement-host>:8443 --agent-control-url https://<replacement-host>:8443 --credential <original-credential>`. Verify that each node returns online and that the site serves the expected data.
 
 A snapshot older than later node or operator changes does not contain those changes; follow the identity and revocation recovery notes in [Authentication and PKI](#authentication-and-pki). This sequence does not replace a separate, tested backup of workload volumes or databases.
+
+## Upgrading the control plane
+
+Control and the CLI must match closely enough that every route the CLI calls exists on the control. Every command does a one-request version preflight per control per process against `GET /api/v1/version` (read role), so a skew fails before it produces an unrelated 404:
+
+- The control is older than the CLI (or has no `/api/v1/version` route at all): the command is refused with `tug control setup <control host> --yes` as the fix. That redeploys the control container at the installed CLI's image tag and preserves the state and PKI in the `/data` volume.
+- The CLI is older than the control: the command proceeds with a warning naming `npm i -g @wpelevator/tug@<version>` to pin the CLI to the control's version.
+
+Before an upgrade, keep the fallback lane: `ssh <host> docker tag ghcr.io/wpelevator/tug:<previous> tug:rollback`, then redeploy with `tug control setup <ssh-target> --image tug:rollback` if the new control misbehaves. Confirm the upgrade with `tug doctor` and `tug ps` right after, then match the agents with `tug node add --all` (see [Upgrading an agent](nodes.md#image)); see the [mismatch runbook](troubleshooting.md#cli-control-version-or-credentialca-mismatches) when `tug doctor` reports a CA fingerprint mismatch.
 
 ## Moving the control plane
 

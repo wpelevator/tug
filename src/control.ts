@@ -12,6 +12,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
+import { packageVersion } from './image.ts';
 import { saveImageArchive, inspectImage, validateImageArchive, hashArchive } from './artifacts.ts';
 import type { ArchiveInfo } from './artifacts.ts';
 import { scanArchive } from './archive.ts';
@@ -3062,6 +3063,11 @@ export async function createApp(
         String(req.query.project || 'site'),
       ),
     });
+  });
+  // First call a happy client makes: the CLI's version preflight compares control's version with its own, so a
+  // version skew fails with the remediation command instead of a 404 on a route the CLI's own family depends on.
+  api('get', '/api/v1/version', null, async (req, res) => {
+    res.json({ v: packageVersion() });
   });
   api('get', '/api/v1/status', null, async (req, res) => {
     const staleSeconds = Number(process.env.TUG_STALE_SECONDS || 60);

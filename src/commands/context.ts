@@ -3,11 +3,14 @@ import { selectOne } from '../cli-selection.ts';
 import type { ServiceChoice } from './selection.ts';
 import { withProgress } from '../cli-progress.ts';
 export { runCapture, runLocal } from '../cli-process.ts';
+import crypto from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ResolvedCliConfig } from '../cli-config.ts';
 import { createTransport } from '../agent-credential.ts';
 import { createCliLiveTransport } from '../cli-live-transport.ts';
+import { caTrustCode, describeCaMismatch, fingerprintPem } from '../pki.ts';
+import { packageVersion } from '../image.ts';
 import { parseLiveRequest, runCliLive } from '../cli-live.ts';
 import type { LiveInput, LiveRequest } from '../cli-live.ts';
 import { TERMINAL_DEPLOYMENT_STATES } from '../protocol.ts';
@@ -84,12 +87,102 @@ export async function readStdin(): Promise<string> {
   for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
   return Buffer.concat(chunks).toString('utf8');
 }
+/** Version agreements are remembered per control (base + trusted CA fingerprint) per process. */
+const versionChecked = new Set<string>();
+/** Test isolation helper: forget the remembered version agreements. */
+export function resetVersionChecks(): void {
+  versionChecked.clear();
+}
+
+/** Verdict of the version preflight: an error to refuse on (CLI ahead of control), or a warning to print once. */
+export function versionVerdict(
+  status: number,
+  report: { v?: unknown } | null,
+  cliVersion: string,
+  base: string,
+): { error?: string; warning?: string } {
+  const upgrade = 'upgrade the control plane with: tug control setup <control host> --yes';
+  // Only a missing route proves an older control. Every other status (401 for a bad credential, 503 while control
+  // recovers) belongs to the command's own request, which surfaces its proper error right after this check.
+  if (status !== 200 && status !== 404 && status !== 405) return {};
+  if (status !== 200)
+    return {
+      error: `the control at ${base} did not answer /api/v1/version (HTTP ${status}); it is older than this CLI (${cliVersion}) — ${upgrade}`,
+    };
+  const v = typeof report?.v === 'string' ? report.v : undefined;
+  if (!v)
+    return {
+      error: `the control at ${base} answered /api/v1/version without a version — ${upgrade}`,
+    };
+  const [cMaj, cMin] = v.split('.').map(Number);
+  const [lMaj, lMin] = cliVersion.split('.').map(Number);
+  if (![cMaj, cMin, lMaj, lMin].every(Number.isFinite))
+    return {
+      error: `the control at ${base} answered /api/v1/version with ${JSON.stringify(report?.v)}, not a version — ${upgrade}`,
+    };
+  if (cMaj < lMaj || (cMaj === lMaj && cMin < lMin))
+    return {
+      error: `the control at ${base} runs ${v}, this CLI is ${cliVersion}; its commands may rely on newer routes — ${upgrade}`,
+    };
+  if (cMaj > lMaj || (cMaj === lMaj && cMin > lMin))
+    return {
+      warning: `note: this CLI is ${cliVersion} while the control at ${base} runs ${v}; update the CLI with: npm i -g @wpelevator/tug@${v}`,
+    };
+  return {};
+}
+
+/** One extra request per control per process: refuse loudly when this CLI is ahead of the control, warn when behind. */
+async function preflightVersion(c: Config): Promise<void> {
+  if (!c.credential) return;
+  // A corrupt `ca` field would throw openssl text out of fingerprintPem; hash the raw value for the key instead, and
+  // let the actual TLS connection produce the diagnostic.
+  const caMark = await (async () => {
+    try {
+      return fingerprintPem(c.credential!.ca);
+    } catch {
+      return crypto.createHash('sha256').update(c.credential!.ca).digest('hex').slice(0, 32);
+    }
+  })();
+  const key = `${new URL(c.credential.url).origin}|${c.controlUrl ?? ''}|${caMark}`;
+  if (versionChecked.has(key)) return;
+  const transport = createTransport(c.credential, c.controlUrl);
+  try {
+    let res;
+    try {
+      res = await transport.http(`${transport.base}/api/v1/version`, { method: 'GET' });
+    } catch (e) {
+      // The preflight is the first TLS connection a command opens, so the CA-mismatch diagnosis must happen HERE,
+      // not only in request(): mapping it there would make the mismatch message unreachable in practice.
+      const code = caTrustCode(e);
+      throw new Error(
+        `GET /api/v1/version: could not reach control at ${transport.base}: ` +
+          (code
+            ? `${describeCaMismatch(c.credential, transport.base)} (${code})`
+            : describeFetchError(e)),
+        { cause: e },
+      );
+    }
+    const verdict = versionVerdict(
+      res.status,
+      res.ok ? ((await res.json().catch(() => null)) as { v?: unknown } | null) : null,
+      packageVersion(),
+      transport.base,
+    );
+    versionChecked.add(key);
+    if (verdict.warning) console.error(verdict.warning);
+    if (verdict.error) throw new Error(verdict.error);
+  } finally {
+    void transport.close();
+  }
+}
+
 /** The pinned mTLS transport for the resolved credential; an address override only changes the connect target. */
 export async function transportFor(c: Config) {
   if (!c.credential)
     throw new Error(
       'no credential: run `tug init <credential-file>`, set TUG_CREDENTIAL_FILE or pass --credential',
     );
+  await preflightVersion(c);
   return createTransport(c.credential, c.controlUrl);
 }
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -112,6 +205,12 @@ export async function request<T = any>(
         body: multipart ? (body as FormData) : body ? JSON.stringify(body) : undefined,
       });
     } catch (error) {
+      const mismatch = caTrustCode(error);
+      if (mismatch)
+        throw new Error(
+          `${method} ${route}: could not reach control at ${transport.base}: ${describeCaMismatch(c.credential!, transport.base)} (${mismatch})`,
+          { cause: error },
+        );
       throw new Error(
         `${method} ${route}: could not reach control at ${transport.base}: ${describeFetchError(error)}`,
         { cause: error },
@@ -200,6 +299,9 @@ export async function runLive(
         })),
       );
   }
+  // Commands that skip the HTTP service listing (an explicit service name) would otherwise reach an old control on the
+  // live channel alone; the same per-control preflight as ordinary API requests applies here.
+  await preflightVersion(cfg);
   process.exitCode = await runCliLive(
     parseLiveRequest(operation, { ...input, project: cfg.project || 'site' }),
     createCliLiveTransport(cfg.credential, cfg.controlUrl),

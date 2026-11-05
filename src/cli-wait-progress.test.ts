@@ -8,7 +8,8 @@ import type { AddressInfo } from 'node:net';
 import { Command } from 'commander';
 import { Pki, identityUri, serverNames } from './pki.ts';
 import { serverTlsOptions } from './tls-server.ts';
-import { setResolvedConfig, waitForCommand } from './commands/context.ts';
+import { resetVersionChecks, setResolvedConfig, waitForCommand } from './commands/context.ts';
+import { packageVersion } from './image.ts';
 import { registerBackup } from './commands/backup.ts';
 import { registerRestore } from './commands/restore.ts';
 import { registerDeploy } from './commands/deploy.ts';
@@ -29,6 +30,12 @@ test('long-wait commands report progress on stderr and retain their results and 
   const server = https.createServer(serverTlsOptions({ ...issued, ca: pki.caPem }), (req, res) => {
     const route = `${req.method} ${req.url?.split('?')[0]}`;
     requested.push(route);
+    // The CLI's version preflight runs before any API request route inside the same process.
+    if (route === 'GET /api/v1/version') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ v: packageVersion() }));
+      return;
+    }
     req.resume();
     req.on('end', () => {
       const body = routes[route];
@@ -64,6 +71,8 @@ test('long-wait commands report progress on stderr and retain their results and 
     out.length = 0;
     err.length = 0;
     requested.length = 0;
+    // One CLI process is one new module state: forget the remembered version agreement between runs.
+    resetVersionChecks();
     const program = new Command();
     registerBackup(program);
     registerRestore(program);
@@ -115,8 +124,8 @@ test('long-wait commands report progress on stderr and retain their results and 
         await run('rollback', '--json', '--no-wait');
         assert.deepEqual(
           requested,
-          ['POST /api/v1/rollback'],
-          'no-wait rollback must not poll deployments',
+          ['GET /api/v1/version', 'POST /api/v1/rollback'],
+          'no-wait rollback must not poll deployments (the version preflight runs once per process)',
         );
         assert.doesNotMatch(
           err.join(''),
@@ -154,8 +163,8 @@ test('long-wait commands report progress on stderr and retain their results and 
       await run('backup', 'run', '--no-wait');
       assert.deepEqual(
         requested,
-        ['POST /api/v1/backups/run'],
-        'no-wait backup must not poll runs',
+        ['GET /api/v1/version', 'POST /api/v1/backups/run'],
+        'no-wait backup must not poll runs (the version preflight runs once per process)',
       );
       assert.doesNotMatch(
         err.join(''),
@@ -206,8 +215,8 @@ test('long-wait commands report progress on stderr and retain their results and 
         await run('restore', 'run', 'volume:data');
         assert.deepEqual(
           requested,
-          ['POST /api/v1/restores'],
-          'restore preview must never poll or execute a restore',
+          ['GET /api/v1/version', 'POST /api/v1/restores'],
+          'restore preview must never poll or execute a restore (the version preflight runs once per process)',
         );
         assert.doesNotMatch(err.join(''), /Restore r1:/, 'restore preview must skip wait progress');
       },

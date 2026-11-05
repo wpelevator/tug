@@ -4,8 +4,8 @@ import type { Command } from 'commander';
 import { canPrompt, confirm } from '../cli-prompt.ts';
 import { CONTROL_CONTAINER, defaultControlUrl, shellQuote as sh } from '../cli-install.ts';
 import { assertImagePublished, resolveImage } from '../image.ts';
-import { decodeCredential, writeFileDurable } from '../pki.ts';
-import { loadTemplate } from '../util.ts';
+import { decodeCredential, fingerprintPem, writeFileDurable } from '../pki.ts';
+import { errMessage, loadTemplate } from '../util.ts';
 import { collect, loadCfg, print, request, runLocal, templatesDir } from './context.ts';
 import type { InstallOpts } from './context.ts';
 import { bootstrapDocker, hostHasDocker, preflightRemote, transferTugImage } from './host.ts';
@@ -128,6 +128,40 @@ function addSetup(parent: Command, description: string): void {
         } else {
           const text = `${String(out.stdout).trim()}\n`;
           decodeCredential(text);
+          // Fail closed before any local write: a credential for a CA the control did not persist is the
+          // control-rewrote-credentials incident exactly, and importing it silently breaks every later CLI call.
+          const persisted = await runProcess(
+            'ssh',
+            ['--', sshTarget, `docker exec ${sh(CONTROL_CONTAINER)} cat /data/pki/ca.crt`],
+            { capture: true },
+          );
+          const issuedFp = (() => {
+            try {
+              return fingerprintPem(decodeCredential(text).ca);
+            } catch (e: unknown) {
+              throw new Error(
+                `the issued root credential holds no PEM CA (${errMessage(e)}); refusing to write local state`,
+                { cause: e },
+              );
+            }
+          })();
+          // An unreadable persisted CA (an older image, a failed cat) degrades to a warning: nothing to compare.
+          // A readable-but-different CA must refuse the write outside any parse guard, so it stays fail-closed.
+          let onDiskFp: string | undefined;
+          let onDiskError = '';
+          try {
+            onDiskFp = fingerprintPem(String(persisted.stdout));
+          } catch (e: unknown) {
+            onDiskError = errMessage(e);
+          }
+          if (!onDiskFp)
+            console.error(
+              `note: skipped the CA-consistency check — could not read the control's persisted CA (${onDiskError})`,
+            );
+          else if (issuedFp !== onDiskFp)
+            throw new Error(
+              `the issued root credential is signed by CA ${issuedFp}, but the control persisted CA ${onDiskFp}; refusing to write local state — inspect /data/pki on ${sshTarget}`,
+            );
           if (o.credentialOut) {
             await writeFileDurable(o.credentialOut, text, 0o600);
             console.error(`root credential written to ${o.credentialOut}`);
