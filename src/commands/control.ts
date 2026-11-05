@@ -135,19 +135,31 @@ function addSetup(parent: Command, description: string): void {
             ['--', sshTarget, `docker exec ${sh(CONTROL_CONTAINER)} cat /data/pki/ca.crt`],
             { capture: true },
           );
-          try {
-            const issued = fingerprintPem(decodeCredential(text).ca);
-            const onDisk = fingerprintPem(String(persisted.stdout));
-            if (issued !== onDisk)
+          const issuedFp = (() => {
+            try {
+              return fingerprintPem(decodeCredential(text).ca);
+            } catch (e: unknown) {
               throw new Error(
-                `the issued root credential is signed by CA ${issued}, but the control persisted CA ${onDisk}; refusing to write local state — inspect /data/pki on ${sshTarget}`,
+                `the issued root credential holds no PEM CA (${errMessage(e)}); refusing to write local state`,
+                { cause: e },
               );
+            }
+          })();
+          // An unreadable persisted CA (an older image, a failed cat) degrades to a warning: nothing to compare.
+          // A readable-but-different CA must refuse the write outside any parse guard, so it stays fail-closed.
+          let onDiskFp: string | undefined;
+          let onDiskError = '';
+          try {
+            onDiskFp = fingerprintPem(String(persisted.stdout));
           } catch (e: unknown) {
-            // The comparison runs only when both sides parse; an unreadable persisted CA (an older image, cat failure)
-            // degrades to a warning, while a genuinely different persisted CA still refuses the import through the throw.
-            if (persisted.status === 0 && /not signed by CA|control persisted/.test(String(errMessage(e)))) throw e;
-            console.error(`note: skipped the CA-consistency check (${errMessage(e)})`);
+            onDiskError = errMessage(e);
           }
+          if (!onDiskFp)
+            console.error(`note: skipped the CA-consistency check — could not read the control's persisted CA (${onDiskError})`);
+          else if (issuedFp !== onDiskFp)
+            throw new Error(
+              `the issued root credential is signed by CA ${issuedFp}, but the control persisted CA ${onDiskFp}; refusing to write local state — inspect /data/pki on ${sshTarget}`,
+            );
           if (o.credentialOut) {
             await writeFileDurable(o.credentialOut, text, 0o600);
             console.error(`root credential written to ${o.credentialOut}`);

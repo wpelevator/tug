@@ -3,6 +3,7 @@ import { selectOne } from '../cli-selection.ts';
 import type { ServiceChoice } from './selection.ts';
 import { withProgress } from '../cli-progress.ts';
 export { runCapture, runLocal } from '../cli-process.ts';
+import crypto from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ResolvedCliConfig } from '../cli-config.ts';
@@ -101,6 +102,9 @@ export function versionVerdict(
   base: string,
 ): { error?: string; warning?: string } {
   const upgrade = 'upgrade the control plane with: tug control setup <control host> --yes';
+  // Only a missing route proves an older control. Every other status (401 for a bad credential, 503 while control
+  // recovers) belongs to the command's own request, which surfaces its proper error right after this check.
+  if (status !== 200 && status !== 404 && status !== 405) return {};
   if (status !== 200)
     return {
       error: `the control at ${base} did not answer /api/v1/version (HTTP ${status}); it is older than this CLI (${cliVersion}) — ${upgrade}`,
@@ -110,6 +114,8 @@ export function versionVerdict(
     return { error: `the control at ${base} answered /api/v1/version without a version — ${upgrade}` };
   const [cMaj, cMin] = v.split('.').map(Number);
   const [lMaj, lMin] = cliVersion.split('.').map(Number);
+  if (![cMaj, cMin, lMaj, lMin].every(Number.isFinite))
+    return { error: `the control at ${base} answered /api/v1/version with ${JSON.stringify(report?.v)}, not a version — ${upgrade}` };
   if (cMaj < lMaj || (cMaj === lMaj && cMin < lMin))
     return {
       error: `the control at ${base} runs ${v}, this CLI is ${cliVersion}; its commands may rely on newer routes — ${upgrade}`,
@@ -124,7 +130,16 @@ export function versionVerdict(
 /** One extra request per control per process: refuse loudly when this CLI is ahead of the control, warn when behind. */
 async function preflightVersion(c: Config): Promise<void> {
   if (!c.credential) return;
-  const key = `${new URL(c.credential.url).origin}|${c.controlUrl ?? ''}|${fingerprintPem(c.credential.ca)}`;
+  // A corrupt `ca` field would throw openssl text out of fingerprintPem; hash the raw value for the key instead, and
+  // let the actual TLS connection produce the diagnostic.
+  const caMark = await (async () => {
+    try {
+      return fingerprintPem(c.credential!.ca);
+    } catch {
+      return crypto.createHash('sha256').update(c.credential!.ca).digest('hex').slice(0, 32);
+    }
+  })();
+  const key = `${new URL(c.credential.url).origin}|${c.controlUrl ?? ''}|${caMark}`;
   if (versionChecked.has(key)) return;
   const transport = createTransport(c.credential, c.controlUrl);
   try {
@@ -132,8 +147,14 @@ async function preflightVersion(c: Config): Promise<void> {
     try {
       res = await transport.http(`${transport.base}/api/v1/version`, { method: 'GET' });
     } catch (e) {
+      // The preflight is the first TLS connection a command opens, so the CA-mismatch diagnosis must happen HERE,
+      // not only in request(): mapping it there would make the mismatch message unreachable in practice.
+      const code = caTrustCode(e);
       throw new Error(
-        `GET /api/v1/version: could not reach control at ${transport.base}: ${describeFetchError(e)}`,
+        `GET /api/v1/version: could not reach control at ${transport.base}: ` +
+          (code
+            ? `${describeCaMismatch(c.credential, transport.base)} (${code})`
+            : describeFetchError(e)),
         { cause: e },
       );
     }
