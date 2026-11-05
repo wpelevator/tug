@@ -585,10 +585,26 @@ export interface EnrollmentCredentialResponse {
   expiresAt: string;
 }
 
+/** Version-skew protocol constants, shared by the control, the CLI and the agents so the names cannot drift apart. */
+/** The control stamps every response with its own version; clients judge their own against it on the first response. */
+export const VERSION_STAMP_HEADER = 'x-tug-version';
+/** Every request declares the calling process's version; the control refuses one newer than itself before handling. */
+export const CLIENT_VERSION_HEADER = 'x-tug-client-version';
+/** Marker in the control's skew-refusal body, telling the client its declination was a version-skew verdict. */
+export const SKEW_CLIENT_NEWER = 'client-newer';
+
 /** The two integers a version-skew comparison runs on; null when the string is not at least `x.y` with finite parts. */
 export function majorMinor(version: string): [number, number] | null {
-  const [major, minor] = version.split('.').map(Number);
+  const parts = version.split('.');
+  if (parts.length < 2 || parts.some((part) => part === '')) return null;
+  const [major, minor] = parts.map(Number);
   return [major, minor].every(Number.isFinite) ? [major, minor] : null;
+}
+
+/** One place for the strict rule both sides enforce: only a strictly newer client or control is refused; equal passes. */
+export function compareMajMin(a: [number, number], b: [number, number]): -1 | 0 | 1 {
+  if (a[0] !== b[0]) return a[0] < b[0] ? -1 : 1;
+  return a[1] === b[1] ? 0 : a[1] < b[1] ? -1 : 1;
 }
 
 /** The base64url-encoded JSON payload of TUG_JOIN_KEY. */

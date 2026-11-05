@@ -35,7 +35,8 @@ import { API_VERSION, DockerEngine, isNotFound } from './docker-api.ts';
 import type { ContainerSummary, DockerApi } from './docker-api.ts';
 import type { PortBind } from './compose.ts';
 import { JobRunner } from './agent-jobs.ts';
-import { LIVE_MAX_FRAME_BYTES, LIVE_START_TIMEOUT_MS } from './protocol.ts';
+import { LIVE_MAX_FRAME_BYTES, LIVE_START_TIMEOUT_MS, CLIENT_VERSION_HEADER } from './protocol.ts';
+import { packageVersion } from './image.ts';
 import type {
   AgentLiveCommand,
   AgentLiveFrame,
@@ -193,6 +194,9 @@ export class AgentWakeChannel {
       if (!credential) throw new Error('agent credential required');
       return new WebSocket(url, {
         ...(clientTlsOptions(credential) as object),
+        // Upgrade handling does not gate on this header (express middleware does not run on upgrades); it carries the
+        // agent's version the way every HTTP request from this process does.
+        headers: { [CLIENT_VERSION_HEADER]: packageVersion() },
         maxPayload: LIVE_MAX_FRAME_BYTES,
         followRedirects: false,
       });

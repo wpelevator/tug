@@ -21,6 +21,8 @@ interface Scenario {
   /** Value stamped on every response (and returned as `{ v }` by the version route); undefined = a legacy control. */
   stamp: string | undefined;
   noDeploymentRoute?: boolean;
+  /** The control decides the skew itself on every request, the way the real middleware refuses a newer client. */
+  refuseAll?: string;
 }
 
 interface Fixture {
@@ -47,6 +49,8 @@ function serve(
       res.setHeader('content-type', kind === 'json' ? 'application/json' : 'text/plain');
       res.end(body);
     };
+    if (scenario.refuseAll)
+      return send(400, 'json', JSON.stringify({ error: scenario.refuseAll, skew: 'client-newer' }));
     if (route === '/api/v1/version') {
       if (scenario.stamp === undefined) return send(404, 'text', 'Cannot GET /api/v1/version');
       return send(200, 'json', JSON.stringify({ v: scenario.stamp }));
@@ -224,4 +228,46 @@ test('a mutating first request is probed against the version route before it is 
       resetVersionChecks();
     }
   }
+});
+
+test("the control's own skew refusal is surfaced verbatim, on read and mutation alike", async () => {
+  // The real middleware refuses every request from a newer client with `skew: 'client-newer'`; whichever path sees
+  // the refusal first must carry the control's wording to the operator, not replace it with a synthesized one.
+  const controlError = 'this client (test) is newer than the control running own: fix it now';
+  const refusal = await (async () => {
+    const f = await startFixture({ stamp: packageVersion(), refuseAll: controlError });
+    await configure(f);
+    try {
+      return await request('GET', '/api/v1/status').then(
+        () => null,
+        (e) => String((e as Error).message),
+      );
+    } finally {
+      await f.close();
+      resetVersionChecks();
+    }
+  })();
+  const mutationRefusal = await (async () => {
+    const f = await startFixture({ stamp: packageVersion(), refuseAll: controlError });
+    await configure(f);
+    try {
+      return await request('POST', '/api/v1/deployments', { project: 'site' }).then(
+        () => null,
+        (e) => String((e as Error).message),
+      );
+    } finally {
+      await f.close();
+      resetVersionChecks();
+    }
+  })();
+  assert.equal(
+    refusal,
+    controlError,
+    'a read answered by the control-side refusal surfaces its exact message',
+  );
+  assert.equal(
+    mutationRefusal,
+    controlError,
+    "a mutation refused by the probe surfaces the control's exact message too",
+  );
 });

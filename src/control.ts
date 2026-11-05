@@ -77,6 +77,10 @@ import {
   LIVE_MAX_SESSIONS,
   LIVE_START_TIMEOUT_MS,
   BACKUP_COMMAND_TYPES,
+  CLIENT_VERSION_HEADER,
+  SKEW_CLIENT_NEWER,
+  VERSION_STAMP_HEADER,
+  compareMajMin,
   majorMinor,
 } from './protocol.ts';
 import {
@@ -728,21 +732,18 @@ export async function createApp(
   // Version skew, the VersionMiddleware bargain (Docker): every response names the control's version so a client can
   // check its own against it without a dedicated probe, and a client declaring itself newer than this control is
   // refused before a handler runs — the guard cannot exist in the client, whose version the control only learns here.
-  // Requests without the header (agents or tools predating it) are legacy-permitted.
+  // Requests without the header (agents or tools predating it) are legacy-permitted. Own version is read once: a
+  // per-request stat of package.json would put a filesystem read on every request.
+  const ownVersion = packageVersion();
   app.use((req, res, next) => {
-    const own = packageVersion();
-    res.setHeader('x-tug-version', own);
-    const clientVersion = String(req.headers['x-tug-client-version'] || '');
+    res.setHeader(VERSION_STAMP_HEADER, ownVersion);
+    const clientVersion = String(req.headers[CLIENT_VERSION_HEADER] || '');
     const client = majorMinor(clientVersion);
-    const ownPair = majorMinor(own);
-    if (
-      client &&
-      ownPair &&
-      (client[0] > ownPair[0] || (client[0] === ownPair[0] && client[1] > ownPair[1]))
-    )
+    const ownPair = majorMinor(ownVersion);
+    if (client && ownPair && compareMajMin(client, ownPair) === 1)
       return void res.status(400).json({
-        error: `this client (${clientVersion}) is newer than the control running ${own}: upgrade the control plane with: tug control setup <control host> --yes`,
-        skew: 'client-newer',
+        error: `this client (${clientVersion}) is newer than the control running ${ownVersion}: upgrade the control plane with: tug control setup <control host> --yes`,
+        skew: SKEW_CLIENT_NEWER,
       });
     next();
   });
@@ -3086,10 +3087,11 @@ export async function createApp(
       ),
     });
   });
-  // First call a happy client makes: the CLI's version preflight compares control's version with its own, so a
-  // version skew fails with the remediation command instead of a 404 on a route the CLI's own family depends on.
+  // First call a happy client makes: the CLI's version probe compares control's version with its own (for flows the
+  // stamp cannot cover), so a version skew fails with the remediation command instead of a 404 on a route the CLI's
+  // own family depends on.
   api('get', '/api/v1/version', null, async (req, res) => {
-    res.json({ v: packageVersion() });
+    res.json({ v: ownVersion });
   });
   api('get', '/api/v1/status', null, async (req, res) => {
     const staleSeconds = Number(process.env.TUG_STALE_SECONDS || 60);

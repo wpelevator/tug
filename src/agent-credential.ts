@@ -13,6 +13,7 @@ import {
 } from './pki.ts';
 import type { Credential, PersistHooks } from './pki.ts';
 import type { IdentityResponse } from './protocol.ts';
+import { CLIENT_VERSION_HEADER } from './protocol.ts';
 import { packageVersion } from './image.ts';
 
 /** The agent's persisted identity: the common credential plus the node it names. */
@@ -130,7 +131,7 @@ export function createTransport(credential: Credential, connectUrl?: string) {
     // Every request declares the calling process's version, so the control can refuse one that is newer than it is
     // before running the handler; the CLI's own skew checks flow from the stamped responses this header rides on.
     const headers = new Headers(init?.headers);
-    if (!headers.has('x-tug-client-version')) headers.set('x-tug-client-version', packageVersion());
+    if (!headers.has(CLIENT_VERSION_HEADER)) headers.set(CLIENT_VERSION_HEADER, packageVersion());
     let request = { ...init, headers } as RequestInit;
     // The runtime's FormData is not the undici package's FormData, which would stringify it. Serialize it with the
     // runtime's own Response and stream the result.

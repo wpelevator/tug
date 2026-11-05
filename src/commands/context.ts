@@ -3,14 +3,13 @@ import { selectOne } from '../cli-selection.ts';
 import type { ServiceChoice } from './selection.ts';
 import { withProgress } from '../cli-progress.ts';
 export { runCapture, runLocal } from '../cli-process.ts';
-import crypto from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { majorMinor } from '../protocol.ts';
+import { SKEW_CLIENT_NEWER, VERSION_STAMP_HEADER, compareMajMin, majorMinor } from '../protocol.ts';
 import type { ResolvedCliConfig } from '../cli-config.ts';
 import { createTransport } from '../agent-credential.ts';
 import { createCliLiveTransport } from '../cli-live-transport.ts';
-import { caTrustCode, describeCaMismatch, fingerprintPem } from '../pki.ts';
+import { caTrustCode, describeCaMismatch } from '../pki.ts';
 import { packageVersion } from '../image.ts';
 import { parseLiveRequest, runCliLive } from '../cli-live.ts';
 import type { LiveInput, LiveRequest } from '../cli-live.ts';
@@ -88,31 +87,24 @@ export async function readStdin(): Promise<string> {
   for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
   return Buffer.concat(chunks).toString('utf8');
 }
-/** Version agreements are remembered per control (base + trusted CA fingerprint) per process. */
+/** Version agreements are remembered per control (base + trusted CA mark) per process. */
 const versionChecked = new Set<string>();
 /** Test isolation helper: forget the remembered version agreements. */
 export function resetVersionChecks(): void {
   versionChecked.clear();
 }
-/** Cache key for one control: address override, base and the credential's CA mark (mismatches change the mark). */
+/** Cache key for one control: address override, base and the credential's CA mark (mismatches change the mark). The
+ * process-local set never compares CAs across processes, so the raw values distinguish all it needs to, without
+ * cryptographic work and without depending on fingerprintPem with corrupt input. */
 function versionKey(c: Config): string {
   const credential = c.credential;
   if (!credential) return '';
-  // A corrupt `ca` field would throw openssl text out of fingerprintPem; hash the raw value for the key instead, and
-  // let the actual TLS connection produce the diagnostic.
-  const caMark = (() => {
-    try {
-      return fingerprintPem(credential.ca);
-    } catch {
-      return crypto.createHash('sha256').update(credential.ca).digest('hex').slice(0, 32);
-    }
-  })();
-  return `${new URL(credential.url).origin}|${c.controlUrl ?? ''}|${caMark}`;
+  return `${new URL(credential.url).origin}|${c.controlUrl ?? ''}|${credential.ca}`;
 }
 
 /** Verdict of the version skew: an error to refuse on (this CLI ahead of the control), or a warning to print once.
- * `controlVersion` comes from the control's `x-tug-version` response stamp or the version route; undefined means the
- * control predates stamps and the route alike, which can only be an older control. */
+ * `controlVersion` comes from the control's `x-tug-version` response stamp; undefined means the control predates
+ * stamps and the route alike, which can only be an older control. */
 export function versionVerdict(
   controlVersion: string | undefined,
   cliVersion: string,
@@ -129,17 +121,33 @@ export function versionVerdict(
     return {
       error: `the control at ${base} reported ${JSON.stringify(controlVersion)}, not a version — ${upgrade}`,
     };
-  const [cMaj, cMin] = control;
-  const [lMaj, lMin] = mine;
-  if (cMaj < lMaj || (cMaj === lMaj && cMin < lMin))
+  // The same strict-major.minor rule the control enforces in its version middleware, via the shared comparison.
+  if (compareMajMin(control, mine) === -1)
     return {
       error: `the control at ${base} runs ${controlVersion}, this CLI is ${cliVersion}; its commands may rely on newer routes — ${upgrade}`,
     };
-  if (cMaj > lMaj || (cMaj === lMaj && cMin > lMin))
+  if (compareMajMin(control, mine) === 1)
     return {
       warning: `note: this CLI is ${cliVersion} while the control at ${base} runs ${controlVersion}; update the CLI with: npm i -g @wpelevator/tug@${controlVersion}`,
     };
   return {};
+}
+
+/** Apply a decided skew verdict: the one-time warning and the refusal, shared by both judging paths. */
+function applyVerdict(verdict: { error?: string; warning?: string }): void {
+  if (verdict.warning) console.error(verdict.warning); // once per process: versionChecked gates the callers
+  if (verdict.error) throw new Error(verdict.error);
+}
+/** A control refusal the client should take verbatim: the control's own wording is authoritative, so surface it
+ * exactly instead of rewording it with route and status. Returns null when the body is not a skew refusal. */
+function skewRefusalBody(text: string): string | null {
+  let body: { error?: string; skew?: string } | undefined;
+  try {
+    body = JSON.parse(text) as { error?: string; skew?: string } | undefined;
+  } catch {
+    return null;
+  }
+  return body?.skew === SKEW_CLIENT_NEWER && typeof body.error === 'string' ? body.error : null;
 }
 
 /** Explicit skew probe for the flows the header cannot cover: a first request that mutates (the refusal must not
@@ -166,25 +174,29 @@ export async function preflightVersion(c: Config): Promise<void> {
         { cause: e },
       );
     }
-    versionChecked.add(key);
     // The control refuses a client that declares itself newer before any handler runs; its own wording is
     // authoritative there. Without that marker, a 404/405 on a route a current control always keeps (or an origin
-    // without the route at all) means the control predates the stamp: refused like a missing version. A 401 or 503
-    // belongs to the command's own request and is left to surface its proper error right after.
+    // without the route at all) means the control predates the stamp: refused like a missing version. An
+    // unclassified failure (401, 503) belongs to the command's own request and is left to surface its proper error
+    // right after — and the control is left unremembered, so the next request probes again.
     if (!res.ok) {
-      const body = (await res.json().catch(() => null)) as { error?: string; skew?: string } | null;
-      if (body?.skew === 'client-newer' && body.error) throw new Error(body.error);
+      const refusal = skewRefusalBody(await res.text().catch(() => ''));
+      if (refusal) throw new Error(refusal);
       if (res.status === 404 || res.status === 405)
         throw new Error(versionVerdict(undefined, packageVersion(), transport.base).error);
       return;
     }
-    // The stamp leads; the route's body is the fallback for stamping-off controls that predate the middleware.
-    const body = (await res.json().catch(() => null)) as { v?: unknown } | null;
-    const controlVersion =
-      res.headers.get('x-tug-version') ?? (typeof body?.v === 'string' ? body.v : undefined);
-    const verdict = versionVerdict(controlVersion, packageVersion(), transport.base);
-    if (verdict.warning) console.error(verdict.warning);
-    if (verdict.error) throw new Error(verdict.error);
+    // Judged: remember the control for the rest of the process.
+    versionChecked.add(key);
+    // The probe judges the same stamp the read path does; a stampless 200 without the `{ v }` route's own stamp is
+    // refused the same as on the read path, keeping one rule for both directions of the check.
+    applyVerdict(
+      versionVerdict(
+        res.headers.get(VERSION_STAMP_HEADER) ?? undefined,
+        packageVersion(),
+        transport.base,
+      ),
+    );
   } finally {
     void transport.close();
   }
@@ -211,12 +223,13 @@ export async function request<T = any>(
       'no credential: run `tug init <credential-file>`, set TUG_CREDENTIAL_FILE or pass --credential',
     );
   const key = versionKey(c);
+  const unseen = !!key && !versionChecked.has(key);
   // The skew check rides on ordinary traffic: a read's response carries the control's `x-tug-version` stamp and is
   // judged after the fact (reads are safe to have run against an old control). A mutating first request is judged
   // BEFORE it is sent, against the version route, because the harm of new-CLI-old-control semantics is already done
   // once the old control received the mutation.
-  const firstRead = !!key && !versionChecked.has(key) && method === 'GET';
-  if (!!key && !versionChecked.has(key) && method !== 'GET') await preflightVersion(c);
+  const firstRead = unseen && method === 'GET';
+  if (unseen && method !== 'GET') await preflightVersion(c);
   const transport = await transportFor(c);
   const headers: Record<string, string> = {};
   if (!multipart) headers['content-type'] = 'application/json';
@@ -244,13 +257,18 @@ export async function request<T = any>(
       // First read answered: judge the stamp here so the refusal (or one-time pin warning) lands before the command
       // does anything else with the control. Missing or garbage stamps get the same verdict as an old control.
       versionChecked.add(key!);
-      const verdict = versionVerdict(
-        res.headers.get('x-tug-version') ?? undefined,
-        packageVersion(),
-        transport.base,
+      applyVerdict(
+        versionVerdict(
+          res.headers.get(VERSION_STAMP_HEADER) ?? undefined,
+          packageVersion(),
+          transport.base,
+        ),
       );
-      if (verdict.warning) console.error(verdict.warning);
-      if (verdict.error) throw new Error(verdict.error);
+    }
+    if (!res.ok) {
+      // A control may refuse the request itself when this CLI is newer than it; its own wording is authoritative.
+      const text = await res.text().catch(() => '');
+      throw new Error(skewRefusalBody(text) ?? `${method} ${route}: ${res.status} ${text}`);
     }
     if (!res.ok) throw new Error(`${method} ${route}: ${res.status} ${await res.text()}`);
     return (await res.json()) as T;
