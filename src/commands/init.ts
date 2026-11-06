@@ -29,9 +29,17 @@ export async function importCredential(
   })(credential.ca);
   // A different CA in the replacement credential re-points the CLI at a different control; say so explicitly, since a
   // silent swap is how a running deployment ended up with a credential its control never issued (see docs/troubleshooting.md).
-  if (cfg.credential && fingerprintPem(cfg.credential.ca) !== caFingerprint)
+  // The credential being replaced may be the broken one the operator is fixing: an unreadable CA there is not a reason to refuse.
+  const previousFingerprint = (() => {
+    try {
+      return cfg.credential ? fingerprintPem(cfg.credential.ca) : undefined;
+    } catch {
+      return undefined;
+    }
+  })();
+  if (previousFingerprint && previousFingerprint !== caFingerprint)
     console.error(
-      `note: this credential is signed by CA ${caFingerprint}, replacing one signed by ${fingerprintPem(cfg.credential.ca)}; the CLI now trusts a different control` +
+      `note: this credential is signed by CA ${caFingerprint}, replacing one signed by ${previousFingerprint}; the CLI now trusts a different control` +
         (cfg.credentialFile
           ? `, and the previous file stays at ${cfg.credentialFile} until you switch back`
           : ''),

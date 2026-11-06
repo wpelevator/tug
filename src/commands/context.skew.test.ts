@@ -271,3 +271,19 @@ test("the control's own skew refusal is surfaced verbatim, on read and mutation 
     "a mutation refused by the probe surfaces the control's exact message too",
   );
 });
+
+test('a refused control is judged again on the next request, never waved through', async () => {
+  const f = await startFixture({ stamp: minorBump(-1) });
+  await configure(f);
+  try {
+    for (const attempt of [1, 2])
+      await assert.rejects(
+        request('GET', '/api/v1/status'),
+        /tug control setup <control host> --yes/,
+        `attempt ${attempt} against a stale control is refused: a refusal must not be remembered as agreement`,
+      );
+  } finally {
+    await f.close();
+    resetVersionChecks();
+  }
+});

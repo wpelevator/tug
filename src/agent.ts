@@ -35,7 +35,12 @@ import { API_VERSION, DockerEngine, isNotFound } from './docker-api.ts';
 import type { ContainerSummary, DockerApi } from './docker-api.ts';
 import type { PortBind } from './compose.ts';
 import { JobRunner } from './agent-jobs.ts';
-import { LIVE_MAX_FRAME_BYTES, LIVE_START_TIMEOUT_MS, CLIENT_VERSION_HEADER } from './protocol.ts';
+import {
+  LIVE_MAX_FRAME_BYTES,
+  LIVE_START_TIMEOUT_MS,
+  CLIENT_VERSION_HEADER,
+  skewRefusalMessage,
+} from './protocol.ts';
 import { packageVersion } from './image.ts';
 import type {
   AgentLiveCommand,
@@ -163,8 +168,16 @@ async function api<T = unknown>(
     ...opts,
     headers: (opts.headers as Record<string, string> | undefined) || {},
   });
-  if (!res.ok)
-    throw new Error(`${opts.method || 'GET'} ${route}: ${res.status} ${await res.text()}`);
+  if (!res.ok) {
+    const text = await res.text();
+    // An agent ahead of its control is refused before any handler runs: say what to do instead of echoing the JSON.
+    const skew = skewRefusalMessage(text);
+    throw new Error(
+      skew
+        ? `${skew} (agent ${packageVersion()}; its containers keep running, and it resumes once the control is upgraded or the agent is rolled back to the control's version)`
+        : `${opts.method || 'GET'} ${route}: ${res.status} ${text}`,
+    );
+  }
   return res.json() as Promise<T>;
 }
 

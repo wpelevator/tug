@@ -159,3 +159,22 @@ test('re-importing the same CA credential reuses one file (idempotent, no name c
     cred.ca,
   );
 });
+
+test('replacing a credential whose CA is unreadable still imports and skips the CA-change notice', async () => {
+  const h = await harness();
+  const pki = await Pki.load(await fs.mkdtemp(path.join(os.tmpdir(), 'tug-pki-bad-')), true);
+  const good = await credential(pki, 'repair');
+  h.cfg = { ...h.cfg, credential: { ...good, ca: 'not a certificate' } } as ResolvedCliConfig;
+  const errors: string[] = [];
+  const original = console.error;
+  console.error = (...args: unknown[]) => errors.push(args.join(' '));
+  try {
+    await importCredential(h.cfg, JSON.stringify(good), {});
+  } finally {
+    console.error = original;
+  }
+  assert.ok(
+    !errors.some((line) => line.includes('signed by CA')),
+    'a corrupt previous credential is exactly what a re-import repairs; it must not block or confuse the import',
+  );
+});

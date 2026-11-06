@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
+import http from 'node:http';
 import https from 'node:https';
 import os from 'node:os';
 import path from 'node:path';
@@ -223,5 +224,48 @@ test('multipart bodies from the global FormData reach an mTLS server intact', as
   } finally {
     server.closeAllConnections();
     server.close();
+  }
+});
+
+test('the client version header goes to the control only, never to other origins the client dials', async () => {
+  const pki = await Pki.load(await fs.mkdtemp(path.join(os.tmpdir(), 'tug-hdr-')), true);
+  const issued = await pki.issueServer(serverNames('https://localhost:8443'));
+  const seen: Record<string, string | undefined> = {};
+  const control = https.createServer(
+    serverTlsOptions({ cert: issued.cert, key: issued.key, ca: pki.caPem }),
+    (req, res) => {
+      seen.control = req.headers['x-tug-client-version'] as string | undefined;
+      res.end('{}');
+    },
+  );
+  const app = http.createServer((req, res) => {
+    seen.app = req.headers['x-tug-client-version'] as string | undefined;
+    res.end('ok');
+  });
+  await new Promise<void>((r) => control.listen(0, '127.0.0.1', r));
+  await new Promise<void>((r) => app.listen(0, '127.0.0.1', r));
+  try {
+    const client = await pki.issueClient(
+      identityUri('operator', 'o1'),
+      86_400_000,
+      'https://localhost:8443',
+    );
+    const transport = createTransport(
+      client.credential,
+      `https://127.0.0.1:${(control.address() as AddressInfo).port}`,
+    );
+    await transport.http(`${transport.base}/api/v1/status`);
+    await transport.http(`http://127.0.0.1:${(app.address() as AddressInfo).port}/health`);
+    void transport.close();
+    assert.ok(seen.control, 'requests to the control declare the client version');
+    assert.equal(
+      seen.app,
+      undefined,
+      'an application container health check must not learn the Tug version',
+    );
+  } finally {
+    control.closeAllConnections();
+    control.close();
+    app.close();
   }
 });

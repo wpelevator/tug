@@ -593,6 +593,17 @@ export const CLIENT_VERSION_HEADER = 'x-tug-client-version';
 /** Marker in the control's skew-refusal body, telling the client its declination was a version-skew verdict. */
 export const SKEW_CLIENT_NEWER = 'client-newer';
 
+/** The control's own skew-refusal wording from a response body, or null when the body is not a skew refusal. */
+export function skewRefusalMessage(text: string): string | null {
+  let body: { error?: unknown; skew?: unknown } | null;
+  try {
+    body = JSON.parse(text) as { error?: unknown; skew?: unknown } | null;
+  } catch {
+    return null;
+  }
+  return body?.skew === SKEW_CLIENT_NEWER && typeof body.error === 'string' ? body.error : null;
+}
+
 /** The two integers a version-skew comparison runs on; null when the string is not at least `x.y` with finite parts. */
 export function majorMinor(version: string): [number, number] | null {
   const parts = version.split('.');
