@@ -593,6 +593,17 @@ export const CLIENT_VERSION_HEADER = 'x-tug-client-version';
 /** Marker in the control's skew-refusal body, telling the client its declination was a version-skew verdict. */
 export const SKEW_CLIENT_NEWER = 'client-newer';
 
+/** The control's own skew-refusal wording from a response body, or null when the body is not a skew refusal. */
+export function skewRefusalMessage(text: string): string | null {
+  let body: { error?: unknown; skew?: unknown } | null;
+  try {
+    body = JSON.parse(text) as { error?: unknown; skew?: unknown } | null;
+  } catch {
+    return null;
+  }
+  return body?.skew === SKEW_CLIENT_NEWER && typeof body.error === 'string' ? body.error : null;
+}
+
 /** The two integers a version-skew comparison runs on; null when the string is not at least `x.y` with finite parts. */
 export function majorMinor(version: string): [number, number] | null {
   const parts = version.split('.');
@@ -601,10 +612,27 @@ export function majorMinor(version: string): [number, number] | null {
   return [major, minor].every(Number.isFinite) ? [major, minor] : null;
 }
 
-/** One place for the strict rule both sides enforce: only a strictly newer client or control is refused; equal passes. */
+/** Plain major.minor ordering: -1 when `a` is older than `b`, 1 when newer, 0 when equal. */
 export function compareMajMin(a: [number, number], b: [number, number]): -1 | 0 | 1 {
   if (a[0] !== b[0]) return a[0] < b[0] ? -1 : 1;
   return a[1] === b[1] ? 0 : a[1] < b[1] ? -1 : 1;
+}
+
+/**
+ * The part of a version that signals a breaking change, by semver: the major from 1.0 on, and the whole `0.minor`
+ * while the major is 0 (semver promises nothing for 0.x, so any minor may break). Within one compatibility key a newer
+ * minor only adds, and a patch never changes what the control, CLI and agents say to each other.
+ */
+export function compatKey(version: [number, number]): [number, number] {
+  return version[0] === 0 ? version : [version[0], 0];
+}
+
+/**
+ * The one skew rule the control, CLI and agent share: compares compatibility keys, so only a difference that semver
+ * calls breaking counts. -1 when `a` is on an older key than `b`, 1 when newer, 0 when they are compatible.
+ */
+export function compareCompat(a: [number, number], b: [number, number]): -1 | 0 | 1 {
+  return compareMajMin(compatKey(a), compatKey(b));
 }
 
 /** The base64url-encoded JSON payload of TUG_JOIN_KEY. */

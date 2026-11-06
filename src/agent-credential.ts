@@ -130,8 +130,11 @@ export function createTransport(credential: Credential, connectUrl?: string) {
   const http: HttpClient = (url, init) => {
     // Every request declares the calling process's version, so the control can refuse one that is newer than it is
     // before running the handler; the CLI's own skew checks flow from the stamped responses this header rides on.
+    // Only toward the control: this client is also handed to agent health checks that dial application containers, which
+    // must not learn the Tug version.
     const headers = new Headers(init?.headers);
-    if (!headers.has(CLIENT_VERSION_HEADER)) headers.set(CLIENT_VERSION_HEADER, packageVersion());
+    if (!headers.has(CLIENT_VERSION_HEADER) && new URL(url).origin === base)
+      headers.set(CLIENT_VERSION_HEADER, packageVersion());
     let request = { ...init, headers } as RequestInit;
     // The runtime's FormData is not the undici package's FormData, which would stringify it. Serialize it with the
     // runtime's own Response and stream the result.

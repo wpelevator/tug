@@ -5,7 +5,13 @@ import { withProgress } from '../cli-progress.ts';
 export { runCapture, runLocal } from '../cli-process.ts';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { SKEW_CLIENT_NEWER, VERSION_STAMP_HEADER, compareMajMin, majorMinor } from '../protocol.ts';
+import {
+  VERSION_STAMP_HEADER,
+  compareCompat,
+  compareMajMin,
+  majorMinor,
+  skewRefusalMessage,
+} from '../protocol.ts';
 import type { ResolvedCliConfig } from '../cli-config.ts';
 import { createTransport } from '../agent-credential.ts';
 import { createCliLiveTransport } from '../cli-live-transport.ts';
@@ -121,12 +127,18 @@ export function versionVerdict(
     return {
       error: `the control at ${base} reported ${JSON.stringify(controlVersion)}, not a version — ${upgrade}`,
     };
-  // The same strict-major.minor rule the control enforces in its version middleware, via the shared comparison.
-  if (compareMajMin(control, mine) === -1)
+  // The same semver compatibility rule the control enforces in its version middleware: only a difference in the
+  // compatibility key (the major, or `0.minor` before 1.0) is breaking; inside one key a newer minor only adds.
+  const relation = compareCompat(control, mine);
+  if (relation === -1)
     return {
       error: `the control at ${base} runs ${controlVersion}, this CLI is ${cliVersion}; its commands may rely on newer routes — ${upgrade}`,
     };
-  if (compareMajMin(control, mine) === 1)
+  if (relation === 1 && control[0] !== mine[0])
+    return {
+      error: `the control at ${base} runs ${controlVersion}, a newer major than this CLI (${cliVersion}), which it no longer supports — update the CLI with: npm i -g @wpelevator/tug@${controlVersion}`,
+    };
+  if (relation === 1)
     return {
       warning: `note: this CLI is ${cliVersion} while the control at ${base} runs ${controlVersion}; update the CLI with: npm i -g @wpelevator/tug@${controlVersion}`,
     };
@@ -138,23 +150,11 @@ function applyVerdict(verdict: { error?: string; warning?: string }): void {
   if (verdict.warning) console.error(verdict.warning); // once per process: versionChecked gates the callers
   if (verdict.error) throw new Error(verdict.error);
 }
-/** A control refusal the client should take verbatim: the control's own wording is authoritative, so surface it
- * exactly instead of rewording it with route and status. Returns null when the body is not a skew refusal. */
-function skewRefusalBody(text: string): string | null {
-  let body: { error?: string; skew?: string } | undefined;
-  try {
-    body = JSON.parse(text) as { error?: string; skew?: string } | undefined;
-  } catch {
-    return null;
-  }
-  return body?.skew === SKEW_CLIENT_NEWER && typeof body.error === 'string' ? body.error : null;
-}
-
 /** Explicit skew probe for the flows the header cannot cover: a first request that mutates (the refusal must not
  * arrive after the harm is done) and flows with no HTTP request at all before acting (live commands, `node add`).
  * Deprecated-equivalent of the header check: read-first flows see the `x-tug-version` stamp within their own request.
  * One extra request per control per process; remember it per control (base + trusted CA mark) via versionChecked. */
-export async function preflightVersion(c: Config): Promise<void> {
+async function preflightVersion(c: Config): Promise<void> {
   const key = versionKey(c);
   if (!key || versionChecked.has(key)) return;
   const transport = createTransport(c.credential!, c.controlUrl);
@@ -180,14 +180,12 @@ export async function preflightVersion(c: Config): Promise<void> {
     // unclassified failure (401, 503) belongs to the command's own request and is left to surface its proper error
     // right after — and the control is left unremembered, so the next request probes again.
     if (!res.ok) {
-      const refusal = skewRefusalBody(await res.text().catch(() => ''));
+      const refusal = skewRefusalMessage(await res.text().catch(() => ''));
       if (refusal) throw new Error(refusal);
       if (res.status === 404 || res.status === 405)
         throw new Error(versionVerdict(undefined, packageVersion(), transport.base).error);
       return;
     }
-    // Judged: remember the control for the rest of the process.
-    versionChecked.add(key);
     // The probe judges the same stamp the read path does; a stampless 200 without the `{ v }` route's own stamp is
     // refused the same as on the read path, keeping one rule for both directions of the check.
     applyVerdict(
@@ -197,17 +195,45 @@ export async function preflightVersion(c: Config): Promise<void> {
         transport.base,
       ),
     );
+    // Remembered only after a passing verdict (a warning passes), so a refused control is probed again.
+    versionChecked.add(key);
   } finally {
     void transport.close();
   }
 }
 
+/**
+ * A newer minor inside one major only adds, so a CLI ahead of its control may call a route the control lacks. The
+ * control's stamp then explains the 404, instead of the bare express body.
+ */
+export function missingRouteHint(
+  res: Response,
+  base: string,
+  cliVersion = packageVersion(),
+): string {
+  if (res.status !== 404) return '';
+  const stamp = res.headers.get(VERSION_STAMP_HEADER);
+  const control = stamp ? majorMinor(stamp) : null;
+  const mine = majorMinor(cliVersion);
+  if (!control || !mine || compareMajMin(control, mine) !== -1) return '';
+  return ` (the control at ${base} runs ${stamp}, this CLI is ${cliVersion}; this command may need a newer control: tug control setup <control host> --yes)`;
+}
+
+/**
+ * How a caller opens the control, chosen explicitly so a new command cannot forget the skew policy:
+ * `probe` runs the explicit version probe first (mutations, live channels and `node add`, which must be refused
+ * before the control hears them), `stamp` leaves the check to the caller's own first read, whose response carries the
+ * control's version stamp (`request()` judges it).
+ */
+export type SkewGuard = 'probe' | 'stamp';
+
 /** The pinned mTLS transport for the resolved credential; an address override only changes the connect target. */
-export async function transportFor(c: Config) {
+export async function transportFor(c: Config, guard: SkewGuard) {
   if (!c.credential)
     throw new Error(
       'no credential: run `tug init <credential-file>`, set TUG_CREDENTIAL_FILE or pass --credential',
     );
+  if (guard === 'probe') await preflightVersion(c);
   return createTransport(c.credential, c.controlUrl);
 }
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -229,8 +255,7 @@ export async function request<T = any>(
   // BEFORE it is sent, against the version route, because the harm of new-CLI-old-control semantics is already done
   // once the old control received the mutation.
   const firstRead = unseen && method === 'GET';
-  if (unseen && method !== 'GET') await preflightVersion(c);
-  const transport = await transportFor(c);
+  const transport = await transportFor(c, unseen && method !== 'GET' ? 'probe' : 'stamp');
   const headers: Record<string, string> = {};
   if (!multipart) headers['content-type'] = 'application/json';
   try {
@@ -256,7 +281,7 @@ export async function request<T = any>(
     if (firstRead) {
       // First read answered: judge the stamp here so the refusal (or one-time pin warning) lands before the command
       // does anything else with the control. Missing or garbage stamps get the same verdict as an old control.
-      versionChecked.add(key!);
+      // The control is remembered only once the verdict passed, so a refused control is judged again, never waved through.
       applyVerdict(
         versionVerdict(
           res.headers.get(VERSION_STAMP_HEADER) ?? undefined,
@@ -264,13 +289,16 @@ export async function request<T = any>(
           transport.base,
         ),
       );
+      versionChecked.add(key!);
     }
     if (!res.ok) {
       // A control may refuse the request itself when this CLI is newer than it; its own wording is authoritative.
       const text = await res.text().catch(() => '');
-      throw new Error(skewRefusalBody(text) ?? `${method} ${route}: ${res.status} ${text}`);
+      throw new Error(
+        skewRefusalMessage(text) ??
+          `${method} ${route}: ${res.status} ${text}${missingRouteHint(res, transport.base)}`,
+      );
     }
-    if (!res.ok) throw new Error(`${method} ${route}: ${res.status} ${await res.text()}`);
     return (await res.json()) as T;
   } finally {
     void transport.close();
@@ -355,7 +383,7 @@ export async function runLive(
   }
   // Commands that skip the HTTP service listing (an explicit service name) would otherwise reach an old control on the
   // live channel alone; the same per-control preflight as ordinary API requests applies here.
-  await preflightVersion(cfg);
+  await transportFor(cfg, 'probe').then((t) => t.close());
   process.exitCode = await runCliLive(
     parseLiveRequest(operation, { ...input, project: cfg.project || 'site' }),
     createCliLiveTransport(cfg.credential, cfg.controlUrl),

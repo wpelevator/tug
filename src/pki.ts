@@ -449,9 +449,9 @@ export function caTrustCode(error: unknown): string | null {
     if (cand.code && CA_TRUST_CODES.has(cand.code)) return cand.code;
     if (
       cand.message &&
-      (/self-signed/i.test(cand.message) ||
-        /unable to verify/i.test(cand.message) ||
-        /unable to get local issuer/i.test(cand.message))
+      (/self[- ]signed certificate/i.test(cand.message) ||
+        /unable to verify the first certificate/i.test(cand.message) ||
+        /unable to get local issuer certificate/i.test(cand.message))
     )
       return 'CA verification declined';
     if (cand.cause === e) break;

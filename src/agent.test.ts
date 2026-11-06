@@ -855,3 +855,22 @@ test('published-image pulls use project registry auth only in the Engine request
     'registry credentials must never be written to generated project files',
   );
 });
+
+test('an agent refused as newer than its control reports the remedy, not raw JSON', async () => {
+  const ctx = await makeCtx({
+    http: (async () =>
+      new Response(
+        JSON.stringify({
+          error: 'this client (9.9) is newer than the control running 0.1',
+          skew: 'client-newer',
+        }),
+        { status: 400 },
+      )) as HttpClient,
+  });
+  await assert.rejects(
+    pollOnce(ctx),
+    /newer than the control running 0\.1.*containers keep running/s,
+    'the agent surfaces the control wording plus what to do, and does not touch its containers',
+  );
+  assert.equal(fake(ctx).calls?.length ?? 0, 0, 'a refused poll performs no Docker work');
+});

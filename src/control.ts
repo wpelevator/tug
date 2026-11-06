@@ -80,7 +80,7 @@ import {
   CLIENT_VERSION_HEADER,
   SKEW_CLIENT_NEWER,
   VERSION_STAMP_HEADER,
-  compareMajMin,
+  compareCompat,
   majorMinor,
 } from './protocol.ts';
 import {
@@ -740,7 +740,7 @@ export async function createApp(
     const clientVersion = String(req.headers[CLIENT_VERSION_HEADER] || '');
     const client = majorMinor(clientVersion);
     const ownPair = majorMinor(ownVersion);
-    if (client && ownPair && compareMajMin(client, ownPair) === 1)
+    if (client && ownPair && compareCompat(client, ownPair) === 1)
       return void res.status(400).json({
         error: `this client (${clientVersion}) is newer than the control running ${ownVersion}: upgrade the control plane with: tug control setup <control host> --yes`,
         skew: SKEW_CLIENT_NEWER,
