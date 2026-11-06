@@ -12,6 +12,16 @@ npm run changeset
 
 It asks for the bump (`patch`, `minor` or `major`) and a summary, and writes a Markdown file in `.changeset/` that you commit with the PR. The summary becomes the changelog entry, so write it for users. Changes with no user-facing effect (CI, refactors, tests) need none.
 
+## Choosing the bump
+
+Tug trusts semver, and the control, CLI and agents enforce it (see [Upgrading the control plane](control-plane.md#upgrading-the-control-plane)): they interoperate while their major matches, and a client on a newer major than its control is refused. The bump in a changeset is therefore a compatibility promise, not a measure of how big the change feels:
+
+- `patch`: fixes and changes that do not alter what the control, CLI and agents say to each other, including documentation.
+- `minor`: new features. Additive wire changes (a new route, an optional field, a new agent command) are minor: older peers keep working, and a newer CLI against an older control reports the missing route.
+- `major`: anything that breaks an older peer: removing or renaming a route, header or field, adding a required one, narrowing accepted values, or changing the meaning of an existing message. A major also moves the `/api/v1` and `/agent/v1` roots to the new major only when old and new must be served side by side; otherwise the root keeps its name.
+
+Before 1.0 semver gives no guarantees, so the whole `0.minor` is the compatibility key: any minor bump is a skew boundary and the control, CLI and agents upgrade together, so keep `minor` for wire changes and use `patch` for the rest.
+
 ## Release flow
 
 The npm package includes the compiled runtime in `dist/` and the documentation in `docs/`, as listed in `package.json`'s `files` allowlist. npm also includes the root README and package metadata. To inspect the release contents locally without publishing, run `npm pack --dry-run`; its `prepack` hook builds the runtime first.

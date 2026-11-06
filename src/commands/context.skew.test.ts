@@ -177,19 +177,15 @@ test('a stale stamp or stampless control refuses the read-first command with the
   }
 });
 
-test('a control newer than the CLI warns once per process on the first stamped read', async () => {
-  const f = await startFixture({ stamp: minorBump(1) });
+test('a control on a newer patch is compatible and stays silent', async () => {
+  const [major, minor, patch] = packageVersion().split('.').map(Number);
+  const f = await startFixture({ stamp: `${major}.${minor}.${(patch || 0) + 1}` });
   await configure(f);
   quiet();
   try {
     await request('GET', '/api/v1/status');
     await request('GET', '/api/v1/status');
-    assert.equal(warnings.length, 1, 'the pin warning prints once, not per request');
-    assert.match(
-      warnings[0] ?? '',
-      /npm i -g @wpelevator\/tug@/,
-      'the warning names the pin command',
-    );
+    assert.deepEqual(warnings, [], 'a patch never changes the wire, so no pin warning is printed');
   } finally {
     speak();
     await f.close();

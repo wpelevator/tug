@@ -7,6 +7,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   VERSION_STAMP_HEADER,
+  compareCompat,
   compareMajMin,
   majorMinor,
   skewRefusalMessage,
@@ -126,12 +127,18 @@ export function versionVerdict(
     return {
       error: `the control at ${base} reported ${JSON.stringify(controlVersion)}, not a version — ${upgrade}`,
     };
-  // The same strict-major.minor rule the control enforces in its version middleware, via the shared comparison.
-  if (compareMajMin(control, mine) === -1)
+  // The same semver compatibility rule the control enforces in its version middleware: only a difference in the
+  // compatibility key (the major, or `0.minor` before 1.0) is breaking; inside one key a newer minor only adds.
+  const relation = compareCompat(control, mine);
+  if (relation === -1)
     return {
       error: `the control at ${base} runs ${controlVersion}, this CLI is ${cliVersion}; its commands may rely on newer routes — ${upgrade}`,
     };
-  if (compareMajMin(control, mine) === 1)
+  if (relation === 1 && control[0] !== mine[0])
+    return {
+      error: `the control at ${base} runs ${controlVersion}, a newer major than this CLI (${cliVersion}), which it no longer supports — update the CLI with: npm i -g @wpelevator/tug@${controlVersion}`,
+    };
+  if (relation === 1)
     return {
       warning: `note: this CLI is ${cliVersion} while the control at ${base} runs ${controlVersion}; update the CLI with: npm i -g @wpelevator/tug@${controlVersion}`,
     };
@@ -193,6 +200,23 @@ async function preflightVersion(c: Config): Promise<void> {
   } finally {
     void transport.close();
   }
+}
+
+/**
+ * A newer minor inside one major only adds, so a CLI ahead of its control may call a route the control lacks. The
+ * control's stamp then explains the 404, instead of the bare express body.
+ */
+export function missingRouteHint(
+  res: Response,
+  base: string,
+  cliVersion = packageVersion(),
+): string {
+  if (res.status !== 404) return '';
+  const stamp = res.headers.get(VERSION_STAMP_HEADER);
+  const control = stamp ? majorMinor(stamp) : null;
+  const mine = majorMinor(cliVersion);
+  if (!control || !mine || compareMajMin(control, mine) !== -1) return '';
+  return ` (the control at ${base} runs ${stamp}, this CLI is ${cliVersion}; this command may need a newer control: tug control setup <control host> --yes)`;
 }
 
 /**
@@ -270,7 +294,10 @@ export async function request<T = any>(
     if (!res.ok) {
       // A control may refuse the request itself when this CLI is newer than it; its own wording is authoritative.
       const text = await res.text().catch(() => '');
-      throw new Error(skewRefusalMessage(text) ?? `${method} ${route}: ${res.status} ${text}`);
+      throw new Error(
+        skewRefusalMessage(text) ??
+          `${method} ${route}: ${res.status} ${text}${missingRouteHint(res, transport.base)}`,
+      );
     }
     return (await res.json()) as T;
   } finally {
