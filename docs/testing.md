@@ -22,7 +22,7 @@ Managed-ingress convergence tests exercise current and outdated configuration ha
 | `deploy --build-local` was rejected on containerd image stores, where `docker save` lists a build attestation as an extra top-level entry | Local integration run on Docker Desktop | Tier 1: `src/artifacts.test.ts` builds synthetic archives, including the rejected variants |
 | `secret set` printed success but stayed running with stdin open; auditing prompts also found stale readline listeners that echoed later hidden answers | CLI bug report and subprocess reproduction | Tier 1: `src/commands/secret.test.ts` and `src/cli-prompt.test.ts` check exit with open input, listener cleanup, hidden answers and EOF errors |
 | The first rolling deploy started two revisions of the same image | Real hosts | Not guarded yet, see backlog item 1 |
-| A control database from before scoped credentials lacks columns the current control writes | Real hosts | Not guarded yet, see backlog item 2 |
+| A control database from before scoped credentials lacks columns the current control writes | Real hosts | Tier 1: `src/db-migrate.test.ts` upgrades the committed `v0.2.0` and `v0.14.0` schemas (`tests/fixtures/db/`) and requires them to match a fresh database column for column |
 | The earlier Compose-based agent failed `depends_on.condition: service_healthy` when the image had no Docker `HEALTHCHECK`, and the deploy error omitted the Compose message | Historical real-host evaluation | The Engine API agent now falls back to checking that the dependency is running; `src/agent.test.ts` covers this and `src/control.rollout.test.ts` checks apply errors are reported |
 
 ## Tier 1: mocked tests
@@ -56,8 +56,7 @@ Inject the clock and sleep into the rollout code so drain and poll timing is tes
 ### Backlog of mocked tests (proposed)
 
 1. **One revision per deployment as endpoints settle.** A rolling service on one node gets an `extra_hosts` entry in its container definition for every service on another node that is serving. Those entries are part of the revision's identity, so when the other node's service becomes ready between two polls, the agent starts a second revision of the same image. On the real hosts the first deploy ended with two revisions of the same image, and the surviving one carries such an entry, which points to this cause. The old revision drained and no request failed, but the app was started twice. Decide whether those entries should be excluded from the identity, and pin the decision with a test that counts the revisions started.
-2. **Control on a database from an earlier version.** Tug has no migrations by design, but control should say so clearly instead of failing on the first write. Decide between refusing to start with a message that names the fix and another behavior, then test it.
-3. **Rollout metrics from the fakes**: at most two revisions of a service at once, host ports released after the drain, unchanged services never stopped, a failed candidate removed while the previous revision keeps serving, and exactly one automatic rollback.
+2. **Rollout metrics from the fakes**: at most two revisions of a service at once, host ports released after the drain, unchanged services never stopped, a failed candidate removed while the previous revision keeps serving, and exactly one automatic rollback.
 
 ### Adding a tier 1 test
 
