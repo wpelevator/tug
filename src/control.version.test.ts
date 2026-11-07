@@ -77,7 +77,8 @@ test('a client declaring a newer version is refused before any handler runs', as
   const s = await server();
   try {
     const [major, minor] = packageVersion().split('.').map(Number);
-    const newer = minor >= 9 ? `${major + 1}.0` : `${major}.${minor + 1}`;
+    // Before 1.0 a newer minor is already incompatible; from 1.0 only a newer major is, and a newer minor is served.
+    const newer = major >= 1 ? `${major + 1}.0` : `${major}.${minor + 1}`;
     // A route that does not exist saves the point: a 400 skew refusal can only come from the middleware, not a handler.
     const res = await fetch(`${s.base}/api/v1/not-a-route`, {
       headers: { ...op(), 'x-tug-client-version': newer },
@@ -108,6 +109,24 @@ test('a client declaring a newer version is refused before any handler runs', as
       headers: { ...op(), 'x-tug-client-version': packageVersion() },
     });
     assert.equal(same.status, 200, 'the control refuses only clients strictly newer than itself');
+  } finally {
+    await s.close();
+  }
+});
+
+test('from 1.0 a client on a newer minor of the same major is served', async (t) => {
+  const [major, minor] = packageVersion().split('.').map(Number);
+  if (major < 1) return t.skip('before 1.0 a newer minor is incompatible and refused');
+  const s = await server();
+  try {
+    const res = await fetch(`${s.base}/api/v1/version`, {
+      headers: { ...op(), 'x-tug-client-version': `${major}.${minor + 1}` },
+    });
+    assert.equal(
+      res.status,
+      200,
+      'inside one major a newer minor only adds, so the control serves it',
+    );
   } finally {
     await s.close();
   }

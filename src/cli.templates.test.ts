@@ -5,7 +5,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { startMtlsControl, writeCredentialFile } from '../tests/helpers.ts';
+import { startMtlsControl, writeCredentialFile, writeStubDocker } from '../tests/helpers.ts';
 import { createCsr, generateKeyPair } from './pki.ts';
 import { defaultImage } from './image.ts';
 import { createTransport } from './agent-credential.ts';
@@ -22,6 +22,7 @@ async function stubSsh(dir: string) {
   const bin = path.join(dir, 'bin');
   const log = path.join(dir, 'ssh.log');
   await fs.mkdir(bin, { recursive: true });
+  await writeStubDocker(bin);
   await fs.writeFile(
     path.join(bin, 'ssh'),
     `#!/bin/sh\nfor a in "$@"; do printf '%s\\n' "$a"; done >> "${log}"\nprintf '\\n--END--\\n' >> "${log}"\ncase "$*" in\n  *"agent identity"*) cat "$TUG_STUB_CSR" ;;\n  *issue-credential*) cat "$TUG_STUB_CREDENTIAL" ;;
