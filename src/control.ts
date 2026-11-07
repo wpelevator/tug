@@ -64,11 +64,14 @@ import {
   serverNames,
   writeFileDurable,
 } from './pki.ts';
-import { EXPIRY_WARN_DAYS, certificateExpiry, diagnoseNode } from './diagnostics.ts';
+import { EXPIRY_WARN_DAYS, certificateExpiry, diagnoseNode, nodeStatus } from './diagnostics.ts';
 import { serverTlsOptions } from './tls-server.ts';
 import { isNodeHost } from './node-address.ts';
 import { buildIngressWork, ingressConfigHash, resolveServiceEndpoints } from './ingress.ts';
 import { parseStatusReport } from './status-report.ts';
+import { advance, advanceWhere, statesSql } from './lifecycle.ts';
+import { buildLifecycle, commandLifecycle, deploymentLifecycle } from './lifecycles.ts';
+import type { DeploymentState } from './lifecycles.ts';
 import type { NodeView } from './ingress.ts';
 import {
   ACTIVE_DEPLOYMENT_STATES,
@@ -561,7 +564,7 @@ function deploymentFailureMessage(rows: { node: string; status_json: string }[])
 
 /** Versions of rollback deployments start with this; `tug deploy` may not use it, which is how automatic rollback tells them apart. */
 const ROLLBACK_VERSION_PREFIX = 'rollback-';
-const ACTIVE_STATES_SQL = ACTIVE_DEPLOYMENT_STATES.map((s) => `'${s}'`).join(',');
+const ACTIVE_STATES_SQL = statesSql(ACTIVE_DEPLOYMENT_STATES);
 
 const PORT = Number(process.env.PORT || 8443);
 
@@ -905,16 +908,15 @@ export async function createApp(
       .filter((node) => reportsRevision(node) && byNode.get(node)?.health === 'failed')
       .map((node) => byNode.get(node)!);
     if (failedNodes.length) {
-      const marked = db.run(
-        'UPDATE deployments SET state=?,error_message=?,updated_at=? WHERE id=? AND state=?',
-        'failed',
-        deploymentFailureMessage(failedNodes),
-        now(),
+      const marked = advance(
+        db,
+        deploymentLifecycle,
         project.current_deployment_id,
         'rolling_out',
+        'failed',
+        { error_message: deploymentFailureMessage(failedNodes), updated_at: now() },
       );
-      if (marked.changes === 1)
-        scheduleAutoRollback(projectId, project.current_deployment_id, state);
+      if (marked) scheduleAutoRollback(projectId, project.current_deployment_id, state);
     }
     const ok = [...required].every(
       (node) =>
@@ -978,13 +980,9 @@ export async function createApp(
         }
       });
     if (ok && ingressReady)
-      db.run(
-        'UPDATE deployments SET state=?,updated_at=? WHERE id=? AND state=?',
-        'succeeded',
-        now(),
-        project.current_deployment_id,
-        'rolling_out',
-      );
+      advance(db, deploymentLifecycle, project.current_deployment_id, 'rolling_out', 'succeeded', {
+        updated_at: now(),
+      });
   }
 
   /** Events control writes when it rolls back on its own; they are attributed to a reserved system actor. */
@@ -1375,8 +1373,11 @@ export async function createApp(
   const isStale = (row: { last_seen_at: string | null }) =>
     !!row.last_seen_at &&
     Date.parse(row.last_seen_at) < Date.now() - Number(process.env.TUG_STALE_SECONDS || 60) * 1000;
+  /** The status a client sees: staleness is derived from `last_seen_at` on every read, never stored. */
+  const statusOf = (row: Pick<NodeRow, 'status' | 'disabled_at' | 'last_seen_at'>) =>
+    nodeStatus(row, Date.now(), Number(process.env.TUG_STALE_SECONDS || 60));
   const NODE_INFO_SQL =
-    'SELECT id,name,address,labels_json,status,created_at,updated_at FROM nodes WHERE id=?';
+    'SELECT id,name,address,labels_json,status,disabled_at,last_seen_at,created_at,updated_at FROM nodes WHERE id=?';
 
   const NODE_RENEW_MIN_INTERVAL_MS = () =>
     Number(process.env.TUG_RENEW_MIN_INTERVAL_MS ?? 60 * 60 * 1000);
@@ -1388,7 +1389,7 @@ export async function createApp(
       name: row.name,
       address: row.address,
       labels: row.labels_json ? (JSON.parse(row.labels_json) as string[]) : [],
-      status: row.status,
+      status: statusOf(row),
       created_at: row.created_at,
       updated_at: row.updated_at,
     };
@@ -1651,12 +1652,9 @@ export async function createApp(
     res.json({
       nodes: rows.map((row) => {
         const { labels_json, ...rest } = row;
-        // `status` is stored when `/status` is read, so judge staleness here too: a node must not list as online with
-        // a last contact older than the stale window while `tug status` calls it stale.
-        const status = !row.disabled_at && isStale(row) ? 'stale' : row.status;
         return {
           ...rest,
-          status,
+          status: statusOf(row),
           labels: labels_json ? (JSON.parse(labels_json) as string[]) : [],
         };
       }),
@@ -2088,7 +2086,7 @@ export async function createApp(
     for (const row of rows) {
       if (refs.has(row.id) || imageRefs.has(row.image_ref)) continue;
       const active = db.get(
-        "SELECT 1 FROM deployments WHERE id=? AND state IN ('uploading','building')",
+        "SELECT 1 FROM deployments WHERE id=? AND state='building'",
         row.deployment_id,
       );
       if (active) continue;
@@ -2105,8 +2103,19 @@ export async function createApp(
       if (!owned.has(name)) await fs.rm(path.join(artifactDir, name), { force: true });
   }
   // Previous-process builds cannot finish after a restart; clear their unpublished files.
-  db.run(
-    "UPDATE deployments SET state='build_failed',error_message='control restarted during build' WHERE state IN ('uploading','building')",
+  advanceWhere(db, buildLifecycle, 'building', 'failed', {
+    sql: 'deployment_id IN (SELECT id FROM deployments WHERE state=?)',
+    params: ['building'],
+  });
+  advanceWhere(
+    db,
+    deploymentLifecycle,
+    'building',
+    'build_failed',
+    { sql: '1=1' },
+    {
+      error_message: 'control restarted during build',
+    },
   );
   /** Archives deleted by `image prune`, or missing from a backup taken without images, can no longer be deployed. */
   async function markMissingArtifacts(): Promise<void> {
@@ -2114,11 +2123,10 @@ export async function createApp(
       "SELECT * FROM builds WHERE state='complete' AND artifact_path IS NOT NULL",
     ))
       if (!(await fs.stat(path.join(DATA_DIR, row.artifact_path!)).catch(() => null)))
-        db.run(
-          "UPDATE builds SET state='pruned',artifact_path=NULL,updated_at=? WHERE id=?",
-          now(),
-          row.id,
-        );
+        advance(db, buildLifecycle, row.id, 'complete', 'pruned', {
+          artifact_path: null,
+          updated_at: now(),
+        });
   }
   /** Throws a 409 when a desired state needs a build archive that was pruned. */
   function assertArtifactsAvailable(state: DesiredState, action: string): void {
@@ -2179,11 +2187,10 @@ export async function createApp(
       pruned.push({ id: build.id, service: build.service, sizeBytes: build.size_bytes });
       if (dryRun) continue;
       await fs.rm(path.join(DATA_DIR, build.artifact_path!), { force: true });
-      db.run(
-        "UPDATE builds SET state='pruned',artifact_path=NULL,updated_at=? WHERE id=?",
-        now(),
-        build.id,
-      );
+      advance(db, buildLifecycle, build.id, 'complete', 'pruned', {
+        artifact_path: null,
+        updated_at: now(),
+      });
       const shared = db.get(
         "SELECT 1 FROM builds WHERE image_ref=? AND state='complete'",
         build.image_ref,
@@ -2477,17 +2484,14 @@ export async function createApp(
           await fs.rename(temporary, final);
           const artifact: ImageArtifact = { buildId, imageRef, ...info };
           spec.artifact = artifact;
-          db.run(
-            'UPDATE builds SET state=?,image_id=?,platform=?,sha256=?,size_bytes=?,artifact_path=?,updated_at=? WHERE id=?',
-            'complete',
-            info.imageId,
-            info.platform,
-            info.sha256,
-            info.sizeBytes,
-            relative,
-            now(),
-            buildId,
-          );
+          advance(db, buildLifecycle, buildId, 'building', 'complete', {
+            image_id: info.imageId,
+            platform: info.platform,
+            sha256: info.sha256,
+            size_bytes: info.sizeBytes,
+            artifact_path: relative,
+            updated_at: now(),
+          });
         } finally {
           if (importedClientRef)
             await images.run('docker', ['image', 'rm', importedClientRef]).catch(() => {});
@@ -2522,12 +2526,15 @@ export async function createApp(
         if (!owned || !pending)
           throw httpError(409, 'deployment was cancelled or its build lease was lost');
         immediateTransaction(db, () => {
-          const published = db.run(
-            "UPDATE deployments SET state='rolling_out',updated_at=? WHERE id=? AND state='building'",
-            now(),
+          const published = advance(
+            db,
+            deploymentLifecycle,
             publishingId,
+            'building',
+            'rolling_out',
+            { updated_at: now() },
           );
-          if (published.changes !== 1 || !locks.owns(buildLock.name, buildLock.owner, now()))
+          if (!published || !locks.owns(buildLock.name, buildLock.owner, now()))
             throw httpError(409, 'deployment was cancelled or its build lease was lost');
           db.run(
             'INSERT INTO desired_states(id,project_id,deployment_id,version,state_json,created_at) VALUES(?,?,?,?,?,?)',
@@ -2596,11 +2603,20 @@ export async function createApp(
     } catch (e) {
       if (depId)
         try {
-          db.run(
-            "UPDATE deployments SET state='build_failed',error_message=?,updated_at=? WHERE id=? AND state='building'",
-            errMessage(e),
-            now(),
-            depId,
+          advance(db, deploymentLifecycle, depId, 'building', 'build_failed', {
+            error_message: errMessage(e),
+            updated_at: now(),
+          });
+          advanceWhere(
+            db,
+            buildLifecycle,
+            'building',
+            'failed',
+            {
+              sql: 'deployment_id=?',
+              params: [depId],
+            },
+            { updated_at: now() },
           );
         } catch {
           /* Best-effort bookkeeping. */
@@ -2657,14 +2673,15 @@ export async function createApp(
       if (!row) return res.status(404).json({ error: 'deployment not found' });
       if (!(ACTIVE_DEPLOYMENT_STATES as readonly string[]).includes(row.state))
         return res.status(409).json({ error: `deployment is ${row.state}` });
-      const result = db.run(
-        `UPDATE deployments SET state=?,updated_at=? WHERE id=? AND state IN (${ACTIVE_STATES_SQL})`,
-        'cancelled',
-        now(),
+      const cancelled = advance(
+        db,
+        deploymentLifecycle,
         String(req.params.id),
+        row.state as DeploymentState,
+        'cancelled',
+        { updated_at: now() },
       );
-      if (result.changes !== 1)
-        return res.status(409).json({ error: 'deployment is no longer active' });
+      if (!cancelled) return res.status(409).json({ error: 'deployment is no longer active' });
       audit(req.actor!, {
         type: 'cancel',
         project: row.project_id,
@@ -3060,7 +3077,7 @@ export async function createApp(
             )
             .map((node) => ({
               name: node.name,
-              status: node.disabled_at ? 'disabled' : isStale(node) ? 'stale' : node.status,
+              status: statusOf(node),
             })),
         }))
         .sort((a, b) => a.name.localeCompare(b.name)),
@@ -3101,13 +3118,6 @@ export async function createApp(
     res.json({ v: ownVersion });
   });
   api('get', '/api/v1/status', null, async (req, res) => {
-    const staleSeconds = Number(process.env.TUG_STALE_SECONDS || 60);
-    const cutoff = new Date(Date.now() - staleSeconds * 1000).toISOString();
-    db.run(
-      "UPDATE nodes SET status='stale',updated_at=? WHERE last_seen_at IS NOT NULL AND last_seen_at < ? AND disabled_at IS NULL",
-      now(),
-      cutoff,
-    );
     const projects = projectScope(req.actor!, 'id');
     const deployments = projectScope(req.actor!, 'project_id');
     const statuses = projectScope(req.actor!, 's.project_id');
@@ -3117,7 +3127,16 @@ export async function createApp(
         `SELECT * FROM deployments WHERE ${deployments.where} ORDER BY created_at DESC LIMIT 20`,
         ...deployments.args,
       ),
-      nodes: db.all('SELECT id,name,status,last_seen_at FROM nodes'),
+      nodes: db
+        .all<Pick<NodeRow, 'id' | 'name' | 'status' | 'disabled_at' | 'last_seen_at'>>(
+          'SELECT id,name,status,disabled_at,last_seen_at FROM nodes',
+        )
+        .map((row) => ({
+          id: row.id,
+          name: row.name,
+          status: statusOf(row),
+          last_seen_at: row.last_seen_at,
+        })),
       statuses: db.all(
         `SELECT s.*,n.name AS node FROM node_statuses s LEFT JOIN nodes n ON n.id=s.node_id WHERE ${statuses.where}`,
         ...statuses.args,
@@ -3336,23 +3355,24 @@ export async function createApp(
       ),
     );
     // A command past its deadline is never delivered late; the backup scheduler turns it into a missed run.
-    db.run(
-      "UPDATE commands SET state='expired',updated_at=? WHERE node_id=? AND state='pending' AND deadline IS NOT NULL AND deadline<?",
-      now(),
-      node.id,
-      now(),
+    advanceWhere(
+      db,
+      commandLifecycle,
+      'pending',
+      'expired',
+      { sql: 'node_id=? AND deadline IS NOT NULL AND deadline<?', params: [node.id, now()] },
+      { updated_at: now() },
     );
     const commands = db.all<CommandRow>(
       'SELECT * FROM commands WHERE node_id=? AND state=?',
       node.id,
       'pending',
     );
-    if (commands.length)
-      db.run(
-        `UPDATE commands SET state='running',attempts=attempts+1,updated_at=? WHERE node_id=? AND state='pending'`,
-        now(),
-        node.id,
-      );
+    for (const command of commands)
+      advance(db, commandLifecycle, command.id, 'pending', 'running', {
+        attempts: command.attempts + 1,
+        updated_at: now(),
+      });
     const retainedImages = [
       ...new Set(
         retainedStates().flatMap((state) =>
@@ -3434,13 +3454,13 @@ export async function createApp(
     for (const cr of report.commandResults) {
       if (!runningHere(cr.commandId)) continue;
       backups.onResult(cr.commandId, cr.state, cr.result);
-      db.run(
-        "UPDATE commands SET state=?,result_json=?,updated_at=? WHERE id=? AND node_id=? AND state='running'",
+      advanceWhere(
+        db,
+        commandLifecycle,
+        'running',
         cr.state,
-        JSON.stringify(cr.result),
-        ts,
-        cr.commandId,
-        req.node!.id,
+        { sql: 'id=? AND node_id=?', params: [cr.commandId, req.node!.id] },
+        { result_json: JSON.stringify(cr.result), updated_at: ts },
       );
     }
     if (report.ingress)

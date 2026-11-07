@@ -5,7 +5,7 @@ const NODE_NAME = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/;
 
 /**
  * A node name from an SSH target's host: the first DNS label (`app1` for `root@app1.example.com`). An IP address
- * says nothing about the machine, so it yields no name and the operator has to choose one.
+ * says nothing about the lifecycle, so it yields no name and the operator has to choose one.
  */
 export const isValidNodeName = (name: string): boolean => NODE_NAME.test(name);
 

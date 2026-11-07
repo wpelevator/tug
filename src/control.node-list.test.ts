@@ -47,8 +47,8 @@ test('the node list calls a node stale as soon as its last contact is outside th
     );
     assert.deepEqual(
       await listed(),
-      { fresh: 'online', silent: 'stale', new: 'registered', off: 'online' },
-      'a silent node lists as stale without anyone having read /status first; a fresh, a never-seen and a disabled node keep their stored status',
+      { fresh: 'online', silent: 'stale', new: 'registered', off: 'disabled' },
+      'a silent node lists as stale without anyone having read /status first; a fresh node stays online, a never-seen one stays registered and a disabled one is disabled',
     );
     const status = (await get('/api/v1/status')) as { nodes: { name: string; status: string }[] };
     assert.equal(

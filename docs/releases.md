@@ -48,6 +48,10 @@ The npm package includes the compiled runtime in `dist/` and the documentation i
 
 Nothing is released by hand: do not run `npm publish` or create tags yourself. Pull requests created by the workflow with `GITHUB_TOKEN` do not trigger other workflows, so CI does not start on the "Version Packages" PR by itself; push an empty commit to its branch or close and reopen it if you want checks on it.
 
+## Native binary
+
+A self-contained `tug` client built with `bun build --compile` is prototyped but not part of the release flow yet: no release job builds it and there is no Homebrew formula. When it ships it will be a `binaries` job after step 3 that attaches per-target tarballs and checksums to the GitHub Release. The prototype results, the one-binary-or-two decision (ship the client only; control stays on Node in the image) and the remaining checklist are in [Standalone binary](standalone-binary.md).
+
 ## npm trusted publishing
 
 The workflow publishes with npm [trusted publishing](https://docs.npmjs.com/trusted-publishers) over OIDC, so there is no `NPM_TOKEN` secret. The package on npmjs.com is configured with GitHub repository `wpelevator/tug` and workflow file `release.yml`, so that file must keep its name. The job has `permissions: id-token: write` and installs npm >= 11.5.1, the first version that supports trusted publishing.

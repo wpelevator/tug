@@ -5,6 +5,14 @@ import path from 'node:path';
 import { ensureDir, now } from './util.ts';
 import { addColumnIfMissing, assertSchemaSupported, migrate } from './db-migrate.ts';
 import type { Migration } from './db-migrate.ts';
+import { stateCheck } from './lifecycle.ts';
+import {
+  backupRunLifecycle,
+  buildLifecycle,
+  commandLifecycle,
+  deploymentLifecycle,
+  restoreLifecycle,
+} from './lifecycles.ts';
 
 // One composition point for all writable and snapshot connections.
 export const { openDb, openAgentDb, openSnapshotDb } = databaseAccess(connectNodeDb);
@@ -298,14 +306,14 @@ CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, name TEXT UNIQUE NOT NULL, current_deployment_id TEXT, created_at TEXT, updated_at TEXT);
 CREATE TABLE IF NOT EXISTS nodes(id TEXT PRIMARY KEY, name TEXT UNIQUE NOT NULL, address TEXT, ingress INTEGER NOT NULL DEFAULT 0, ingress_status_json TEXT, status TEXT, labels_json TEXT, key_hash TEXT, disabled_at TEXT, cert_not_after TEXT, last_renewed_at TEXT, last_seen_at TEXT, clock_skew_ms INTEGER, clock_observed_at TEXT, created_at TEXT, updated_at TEXT);
 CREATE TABLE IF NOT EXISTS enrollment_credentials(id TEXT PRIMARY KEY, key_hash TEXT UNIQUE NOT NULL, name TEXT NOT NULL, labels_json TEXT, expires_at TEXT NOT NULL, revoked_at TEXT, node_id TEXT, reserved_node_id TEXT NOT NULL, node_key_hash TEXT, created_at TEXT);
-CREATE TABLE IF NOT EXISTS deployments(id TEXT PRIMARY KEY, project_id TEXT, version TEXT, state TEXT, created_at TEXT, updated_at TEXT, error_message TEXT, actor TEXT);
+CREATE TABLE IF NOT EXISTS deployments(id TEXT PRIMARY KEY, project_id TEXT, version TEXT, state TEXT ${stateCheck(deploymentLifecycle)}, created_at TEXT, updated_at TEXT, error_message TEXT, actor TEXT);
 CREATE TABLE IF NOT EXISTS desired_states(id TEXT PRIMARY KEY, project_id TEXT, deployment_id TEXT, version TEXT, state_json TEXT, created_at TEXT);
 CREATE TABLE IF NOT EXISTS node_statuses(id TEXT PRIMARY KEY, node_id TEXT, project_id TEXT, observed_version TEXT, status_json TEXT, health TEXT, updated_at TEXT, UNIQUE(node_id, project_id));
-CREATE TABLE IF NOT EXISTS builds(id TEXT PRIMARY KEY, project_id TEXT, deployment_id TEXT, service TEXT, source_hash TEXT, image_ref TEXT, image_id TEXT, platform TEXT, sha256 TEXT, size_bytes INTEGER, artifact_path TEXT, state TEXT, logs_path TEXT, created_at TEXT, updated_at TEXT);
+CREATE TABLE IF NOT EXISTS builds(id TEXT PRIMARY KEY, project_id TEXT, deployment_id TEXT, service TEXT, source_hash TEXT, image_ref TEXT, image_id TEXT, platform TEXT, sha256 TEXT, size_bytes INTEGER, artifact_path TEXT, state TEXT ${stateCheck(buildLifecycle)}, logs_path TEXT, created_at TEXT, updated_at TEXT);
 CREATE TABLE IF NOT EXISTS secrets(id TEXT PRIMARY KEY, project_id TEXT, name TEXT, encrypted_value TEXT, version INTEGER, created_at TEXT, updated_at TEXT, UNIQUE(project_id, name));
 CREATE TABLE IF NOT EXISTS volumes(id TEXT PRIMARY KEY, project_id TEXT, name TEXT, type TEXT, driver TEXT, node_id TEXT, config_json TEXT, created_at TEXT, updated_at TEXT, UNIQUE(project_id, name));
 CREATE TABLE IF NOT EXISTS backups(id TEXT PRIMARY KEY, project_id TEXT, target TEXT, node_id TEXT, state TEXT, artifact_ref TEXT, metadata_json TEXT, created_at TEXT, completed_at TEXT);
-CREATE TABLE IF NOT EXISTS commands(id TEXT PRIMARY KEY, node_id TEXT, project_id TEXT, type TEXT, state TEXT, payload_json TEXT, result_json TEXT, attempts INTEGER DEFAULT 0, run_after TEXT, deadline TEXT, created_at TEXT, updated_at TEXT);
+CREATE TABLE IF NOT EXISTS commands(id TEXT PRIMARY KEY, node_id TEXT, project_id TEXT, type TEXT, state TEXT ${stateCheck(commandLifecycle)}, payload_json TEXT, result_json TEXT, attempts INTEGER DEFAULT 0, run_after TEXT, deadline TEXT, created_at TEXT, updated_at TEXT);
 CREATE TABLE IF NOT EXISTS events(id TEXT PRIMARY KEY, project_id TEXT, deployment_id TEXT, node_id TEXT, level TEXT, type TEXT, message TEXT, metadata_json TEXT, created_at TEXT, actor TEXT);
 CREATE INDEX IF NOT EXISTS events_project_created ON events(project_id, created_at);
 CREATE TABLE IF NOT EXISTS operator_credentials(id TEXT PRIMARY KEY, name TEXT UNIQUE NOT NULL, key_hash TEXT UNIQUE NOT NULL, role TEXT NOT NULL, projects_json TEXT, created_at TEXT, created_by TEXT, last_used_at TEXT, expires_at TEXT, revoked_at TEXT);
@@ -313,8 +321,8 @@ CREATE INDEX IF NOT EXISTS events_by_time ON events(created_at);
 CREATE TABLE IF NOT EXISTS locks(name TEXT PRIMARY KEY, owner TEXT, expires_at TEXT, created_at TEXT);
 CREATE TABLE IF NOT EXISTS backup_destination(id TEXT PRIMARY KEY CHECK(id='default'), url TEXT NOT NULL, env_names_json TEXT NOT NULL, checked_at TEXT, check_result_json TEXT, updated_at TEXT);
 CREATE TABLE IF NOT EXISTS backup_schedules(id TEXT PRIMARY KEY, project_id TEXT NOT NULL, target TEXT NOT NULL, type TEXT NOT NULL, node_id TEXT, config_json TEXT NOT NULL, schedule TEXT NOT NULL, jitter_seconds INTEGER NOT NULL, next_run_at TEXT NOT NULL, last_run_at TEXT, last_success_at TEXT, last_status TEXT, stale_notified_at TEXT, deployment_id TEXT, enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT, updated_at TEXT, UNIQUE(project_id, target));
-CREATE TABLE IF NOT EXISTS backup_runs(id TEXT PRIMARY KEY, schedule_id TEXT, project_id TEXT NOT NULL, target TEXT NOT NULL, type TEXT NOT NULL, node_id TEXT, command_id TEXT, trigger TEXT NOT NULL, state TEXT NOT NULL, scheduled_for TEXT, queued_at TEXT, started_at TEXT, finished_at TEXT, snapshot_id TEXT, size_bytes INTEGER, added_bytes INTEGER, duration_ms INTEGER, restic_version TEXT, error TEXT, actor TEXT, deployment_version TEXT, metadata_json TEXT);
-CREATE TABLE IF NOT EXISTS restore_runs(id TEXT PRIMARY KEY, project_id TEXT NOT NULL, target TEXT NOT NULL, node_id TEXT, snapshot_id TEXT NOT NULL, mode TEXT NOT NULL, scratch_volume TEXT, safety_backup INTEGER NOT NULL DEFAULT 1, safety_run_id TEXT, writers_json TEXT NOT NULL DEFAULT '[]', state TEXT NOT NULL, command_id TEXT, actor TEXT, started_at TEXT, state_changed_at TEXT, finished_at TEXT, error TEXT);
+CREATE TABLE IF NOT EXISTS backup_runs(id TEXT PRIMARY KEY, schedule_id TEXT, project_id TEXT NOT NULL, target TEXT NOT NULL, type TEXT NOT NULL, node_id TEXT, command_id TEXT, trigger TEXT NOT NULL, state TEXT NOT NULL ${stateCheck(backupRunLifecycle)}, scheduled_for TEXT, queued_at TEXT, started_at TEXT, finished_at TEXT, snapshot_id TEXT, size_bytes INTEGER, added_bytes INTEGER, duration_ms INTEGER, restic_version TEXT, error TEXT, actor TEXT, deployment_version TEXT, metadata_json TEXT);
+CREATE TABLE IF NOT EXISTS restore_runs(id TEXT PRIMARY KEY, project_id TEXT NOT NULL, target TEXT NOT NULL, node_id TEXT, snapshot_id TEXT NOT NULL, mode TEXT NOT NULL, scratch_volume TEXT, safety_backup INTEGER NOT NULL DEFAULT 1, safety_run_id TEXT, writers_json TEXT NOT NULL DEFAULT '[]', state TEXT NOT NULL ${stateCheck(restoreLifecycle)}, command_id TEXT, actor TEXT, started_at TEXT, state_changed_at TEXT, finished_at TEXT, error TEXT);
 CREATE TABLE IF NOT EXISTS service_holds(project_id TEXT NOT NULL, service TEXT NOT NULL, reason TEXT NOT NULL, restore_id TEXT, created_at TEXT, PRIMARY KEY(project_id, service));
 CREATE UNIQUE INDEX IF NOT EXISTS backup_runs_slot ON backup_runs(schedule_id, scheduled_for) WHERE trigger='schedule';
 CREATE INDEX IF NOT EXISTS backup_runs_target ON backup_runs(project_id, target, finished_at);

@@ -445,7 +445,7 @@ test('failed local build/save still removes only generated tags without masking 
   }
 });
 
-test('local image builds target the host architecture, not the build machine', () => {
+test('local image builds target the host architecture, not the build lifecycle', () => {
   assert.equal(
     dockerPlatform('x86_64\n'),
     'linux/amd64',

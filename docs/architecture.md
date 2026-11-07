@@ -49,7 +49,21 @@ Control metadata and agent applied/event state use Node's built-in synchronous S
 
 SQL executes on the owning process's event loop. Busy waits, snapshots and integrity checks can pause APIs, WebSocket traffic and timers; backup blocking is described in [Control plane](control-plane.md#backup-and-restore). Database-only work does not return promises. Filesystem preparation and other asynchronous workflows retain their asynchronous interfaces.
 
-A future Bun bundle that includes control or agent code can supply a `bun:sqlite` adapter through the same factory. Select it at build time so the bundle never imports the Node adapter; normalize results, bindings, error categories and connection cleanup, and run the same factory-driven database contract tests. Bun implementation and build aliases are deferred. The proposed CLI-only executable does not access SQLite and needs no adapter.
+A Bun bundle of control or agent code needs no separate adapter today: Bun 1.4.4 implements `node:sqlite`, including the `errcode` values this adapter classifies, so the same module runs unchanged. If that ever stops holding, a `bun:sqlite` adapter can be supplied through the same factory, selected at build time, with the same factory-driven database contract tests. The CLI-only executable does not access SQLite. Hosting control on Bun is blocked elsewhere, by the missing peer certificate on HTTPS request sockets, and has a possible route through a raw TLS listener ([Standalone binary](standalone-binary.md#peer-certificate-under-bun)).
+
+## Lifecycles
+
+Five lifecycles are stored as a `state` column and are declared in `src/lifecycles.ts` as transition tables: `from: [possible next states]`. `src/lifecycle.ts` holds the only code that writes those columns after insert. `advance` and `advanceWhere` refuse a transition the table does not declare (a programming error that throws) and apply a legal one as `UPDATE ... WHERE state IN (from)`, so two writers racing for the same row cannot both win and the loser learns it from the change count. The baseline schema generates a `CHECK` constraint on each state column from the same table, so an undeclared state is rejected at insert in a database created by this release. Tables created by an earlier release keep the definition they were created with (SQLite cannot add a `CHECK` to an existing column), so an upgraded database relies on the guarded writer alone. Tests check that every target is a declared state and that every state is reachable, so a state that nothing writes cannot be declared.
+
+| Lifecycle | States |
+| --- | --- |
+| Deployment | `building → rolling_out → succeeded`, with `build_failed`, `failed` and `cancelled` as the other exits. A rollback is inserted already `rolling_out`. |
+| Command | `pending → running → succeeded \| failed`, plus `pending → expired` (past its deadline, never delivered late) and `pending → cancelled`. |
+| Backup run | `queued → running → succeeded \| failed`, plus `queued → missed`. Runs that never reached a node are inserted as `missed` or `cancelled`. |
+| Restore | `locking → holding → safety_backup → restoring → verifying → succeeded` for in-place restores; scratch restores go straight to `restoring`. `failed` before any data changed, `interrupted` after, then `restoring` again (`restore resume`) or `released`. |
+| Build | `building → complete → pruned`, or `building → failed` when the deployment's build failed or control restarted mid-build. |
+
+A node's status is not a stored lifecycle. The column records `registered`, `online` or `disabled`, and `stale` is derived from `last_seen_at` by `nodeStatus` on every read, so it never lags behind the clock.
 
 ## Image artifacts
 
