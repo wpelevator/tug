@@ -211,6 +211,7 @@ Start with the [single-VPS tutorial](docs/getting-started.md), then choose the t
   - [Standalone binary (prototype)](docs/standalone-binary.md)
   - [Docker Swarm comparison](docs/swarm-comparison.md)
   - [Podman and other container engines (proposal)](docs/container-engines.md)
+  - [File-mounted workload secrets (proposal)](docs/secrets.md)
 
 ## Development
 

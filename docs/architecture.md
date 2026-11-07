@@ -251,6 +251,8 @@ Rules the agent follows (`src/reconciler.ts`):
 
 Secrets are encrypted at rest with AES-256-GCM using the control master key, and versioned per project. An agent only receives the secrets referenced by the `environment` of services placed on its node, substituted into the container environment by the agent (no file on disk). When only a referenced secret's version changes, the agent force-recreates just the affected services.
 
+A possible evolution is delivering secrets as read-only files under `/run/secrets/` instead of environment variables, which would keep values out of `Config.Env` and `docker inspect`; see [File-mounted workload secrets](secrets.md).
+
 ## Runtime paths
 
 Agents write generated state under `TUG_STATE_DIR` (default `/var/lib/tug`):
