@@ -95,3 +95,20 @@ test('a terminal gets one live line and finished stages stay as lines', (t) => {
   for (const text of screen.split(/\r\x1b\[K/))
     assert.ok(text.replace('\n', '').length <= 60, 'live lines must fit the terminal width');
 });
+
+test('printing above the live line clears it first and draws it again', (t) => {
+  t.mock.timers.enable({ apis: ['Date', 'setInterval'], now: 0 });
+  let screen = '';
+  const progress = createProgress({
+    live: { write: (text) => (screen += text), columns: () => 80 },
+  });
+  progress.stage('Installing');
+  screen = '';
+  progress.print('apt output');
+  assert.equal(
+    screen,
+    '\r\x1b[Kapt output\n\r\x1b[K[0s] Installing',
+    'the line is cleared, the output printed on its own line and the status drawn again below it',
+  );
+  progress.stop();
+});

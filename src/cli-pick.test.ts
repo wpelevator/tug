@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import { PassThrough } from 'node:stream';
 import test from 'node:test';
-import { createPicker } from './cli-pick.ts';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { clipToColumns, createNumberedPicker, createPicker } from './cli-pick.ts';
 
 const UP = '\x1b[A';
 const DOWN = '\x1b[B';
@@ -129,4 +133,146 @@ test('long menus scroll inside the terminal height and labels cannot inject esca
   );
   assert.ok(!text.includes('\x1b[2J'), 'control characters in labels must be neutralized');
   assert.match(text, /\d+-\d+ of 12/, 'a scrolled menu should show which entries are visible');
+});
+
+test('Ctrl-D cancels like EOF would, and Ctrl-N/P and paging move the cursor', async () => {
+  const eof = terminal();
+  const cancelled = eof.picker.one('Target', labels);
+  await eof.keys('\x04');
+  await assert.rejects(cancelled, /cancelled; nothing was changed/, 'Ctrl-D should cancel');
+  const emacs = terminal();
+  const moved = emacs.picker.one('Target', labels);
+  await emacs.keys('\x0e\x0e\x10\r');
+  assert.equal(await moved, 1, 'Ctrl-N twice and Ctrl-P once should land on the second entry');
+  const paged = terminal();
+  const many = Array.from({ length: 30 }, (_, i) => `entry ${i}`);
+  const result = paged.picker.one('Target', many);
+  await paged.keys('\x1b[6~\r');
+  assert.ok((await result) > 3, 'PageDown should move by a page, not one entry');
+});
+
+test('typed digits form one number so entries past nine are reachable', async () => {
+  const t = terminal();
+  const many = Array.from({ length: 15 }, (_, i) => `entry ${i + 1}`);
+  const result = t.picker.one('Target', many);
+  await t.keys('12\r');
+  assert.equal(await result, 11, 'typing 1 then 2 should select the twelfth entry');
+  const overshoot = terminal();
+  const second = overshoot.picker.one('Target', many);
+  await overshoot.keys('99\r');
+  assert.equal(await second, 8, 'a number past the end starts over from the last digit');
+});
+
+test('wide characters are clipped by terminal columns and a short terminal still fits the menu', async () => {
+  assert.equal(clipToColumns('abcdef', 10), 'abcdef', 'short text is untouched');
+  assert.equal(
+    clipToColumns('日本語日本語', 7),
+    '日本語…',
+    'each wide character counts as two columns',
+  );
+  assert.ok([...clipToColumns('🙂'.repeat(20), 11)].length <= 6, 'emoji count as two columns each');
+  const input = new PassThrough();
+  const output = Object.assign(new PassThrough(), { columns: 40, rows: 6 });
+  let text = '';
+  output.on('data', (chunk) => (text += String(chunk)));
+  const result = createPicker({ input, output }).many('Targets', ['a', 'b', 'c', 'd', 'e']);
+  await new Promise((resolve) => setImmediate(resolve));
+  const lines = text.split('\n').filter((line) => line && !line.includes('\x1b['));
+  assert.ok(
+    lines.length <= 5,
+    'menu height must stay under the terminal rows so redraw can erase it',
+  );
+  input.write('q');
+  await assert.rejects(result, /cancelled/, 'q still cancels a squeezed menu');
+});
+
+test('a resize redraws the menu and finishing removes every process hook', async () => {
+  const input = new PassThrough();
+  const output = Object.assign(new PassThrough(), { columns: 60, rows: 24 });
+  let text = '';
+  output.on('data', (chunk) => (text += String(chunk)));
+  const hooks = () => ['exit', 'SIGTERM', 'SIGHUP'].map((name) => process.listenerCount(name));
+  const before = hooks();
+  const result = createPicker({ input, output }).one('Target', labels);
+  await new Promise((resolve) => setImmediate(resolve));
+  const drawn = text.split('Target').length;
+  output.columns = 30;
+  output.emit('resize');
+  assert.ok(text.split('Target').length > drawn, 'a resize should draw the menu again');
+  input.write('\r');
+  await result;
+  assert.deepEqual(
+    hooks(),
+    before,
+    'a finished menu must not leave exit or signal handlers behind',
+  );
+});
+
+test('a terminated process shows the cursor again and still dies of the signal', async () => {
+  const picker = pathToFileURL(path.resolve('src/cli-pick.ts')).href;
+  const child = spawn(
+    process.execPath,
+    [
+      '--input-type=module',
+      '-e',
+      `import { createPicker } from ${JSON.stringify(picker)};
+      createPicker({ input: process.stdin, output: process.stderr }).one('Target', ['a', 'b']);`,
+    ],
+    { stdio: ['pipe', 'pipe', 'pipe'] },
+  );
+  let stderr = '';
+  child.stderr.on('data', (chunk) => (stderr += String(chunk)));
+  while (!stderr.includes('cancel)')) await new Promise((resolve) => setTimeout(resolve, 20));
+  child.kill('SIGTERM');
+  const [code, signal] = await once(child, 'close');
+  assert.equal(
+    signal,
+    'SIGTERM',
+    `a SIGTERM during a menu must still end the process (exit ${code})`,
+  );
+  assert.ok(
+    stderr.lastIndexOf('\x1b[?25h') > stderr.lastIndexOf('\x1b[?25l'),
+    'the cursor must be visible again after the process is terminated',
+  );
+});
+
+test('numbered menus answer plain terminals, with a default only when the menu offers one', async () => {
+  const shown: string[] = [];
+  const answers = ['', '9', 'x', '2'];
+  const picker = createNumberedPicker(
+    async () => answers.shift() ?? 'q',
+    (line) => shown.push(line),
+  );
+  assert.equal(
+    await picker.one('Target', ['a', 'b']),
+    1,
+    'blank, out of range and junk are refused',
+  );
+  assert.deepEqual(shown, ['Target', '  1) a', '  2) b'], 'entries are listed with their numbers');
+  const withDefault = createNumberedPicker(
+    async () => '',
+    () => {},
+  );
+  assert.equal(
+    await withDefault.one('Address', ['a', 'b'], 1),
+    1,
+    'blank takes the offered default',
+  );
+  const several = createNumberedPicker(
+    async () => '3, 1,3',
+    () => {},
+  );
+  assert.deepEqual(
+    await several.many('Targets', ['a', 'b', 'c']),
+    [0, 2],
+    'several numbers come back deduplicated in list order',
+  );
+  await assert.rejects(
+    createNumberedPicker(
+      async () => 'q',
+      () => {},
+    ).many('Targets', ['a']),
+    /cancelled; nothing was changed/,
+    'q cancels a numbered menu',
+  );
 });

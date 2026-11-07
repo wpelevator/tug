@@ -68,6 +68,12 @@ export function createProgress({
       detail = line.trim();
       draw();
     },
+    /** Print a line of output above the live line, which is then drawn again below it. */
+    print(line: string) {
+      if (live && !paused && label) live.write(`${CLEAR_LINE}${line}\n`);
+      else write(line);
+      draw();
+    },
     /** Lift the live line off the screen while another process writes to the terminal directly. */
     suspend() {
       if (live && !paused && label) live.write(CLEAR_LINE);

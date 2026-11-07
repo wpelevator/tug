@@ -71,6 +71,8 @@ test('async process helpers preserve errors and bound captured output', async ()
 });
 
 test('runStep hides output, turns markers into stages, and reports the tail on failure', async () => {
+  const { setVerbose } = await import('./cli-process.ts');
+  setVerbose(false);
   const stages: string[] = [];
   const details: string[] = [];
   const seen: string[] = [];
@@ -120,6 +122,47 @@ test('runStep streams output under --verbose and accepts stdin', async () => {
     );
   } finally {
     process.stderr.write = write;
+    setVerbose(false);
   }
   assert.deepEqual(seen, ['got credential\n'], 'verbose mode should stream the step output');
+});
+
+test('verbose output goes through the progress line and shows spoofed markers instead of hiding them', async () => {
+  const { runStep, setVerbose } = await import('./cli-process.ts');
+  const printed: string[] = [];
+  const stages: string[] = [];
+  try {
+    setVerbose(true);
+    await runStep(
+      process.execPath,
+      ['-e', "console.log('::tug:: Real stage'); console.log('plain output')"],
+      {
+        progress: {
+          stage: (label) => stages.push(label),
+          print: (line) => printed.push(line),
+        },
+      },
+    );
+  } finally {
+    setVerbose(false);
+  }
+  assert.deepEqual(
+    printed,
+    ['::tug:: Real stage', 'plain output'],
+    'verbose lines are printed above the live line, markers included',
+  );
+  assert.deepEqual(stages, ['Real stage'], 'markers still become stages');
+});
+
+test('a step that never ends its line cannot grow memory without bound', async () => {
+  const { runStep, setVerbose } = await import('./cli-process.ts');
+  setVerbose(false);
+  await assert.rejects(
+    runStep(process.execPath, ['-e', "process.stdout.write('x'.repeat(1e6)); process.exit(4)"]),
+    (error: Error) => {
+      assert.ok(error.message.length < 10_000, 'the failure message must be bounded');
+      return /failed \(exit 4\)/.test(error.message);
+    },
+    'an endless line is truncated in the failure report',
+  );
 });

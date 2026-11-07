@@ -9,6 +9,7 @@ import {
 } from './cli-config.ts';
 import { CliLiveError } from './cli-live.ts';
 import { setVerbose } from './cli-process.ts';
+import { isUsageError } from './cli-usage.ts';
 import { CREDENTIAL_NAME_PATTERN, PROJECT_NAME_PATTERN } from './credentials.ts';
 import { packageVersion } from './image.ts';
 import { errMessage } from './util.ts';
@@ -30,8 +31,6 @@ import { registerVolume } from './commands/volume.ts';
 
 const VERBOSE_HELP =
   'show the output of quiet steps, such as Docker pulls and installers on a remote host (also TUG_VERBOSE=1)';
-/** Set once a command's arguments are validated: from then on an error is not a usage mistake. */
-let handlerStarted = false;
 const program = new Command();
 program
   .name('tug')
@@ -139,7 +138,6 @@ program.hook('preAction', async (_root, command) => {
       ? nodeSettings(resolved, nodeName)
       : {}),
   });
-  handlerStarted = true;
 });
 
 /** Every command that does work accepts the connection options, so they can follow the command. */
@@ -159,7 +157,8 @@ function addConnectionOptions(command: Command): void {
       '--credential <file>',
       'credential file (overrides TUG_CREDENTIAL, TUG_CREDENTIAL_FILE and config)',
     );
-  command.option('--verbose', VERBOSE_HELP);
+  // exec and run forward everything after the service to a remote command, which may take its own --verbose.
+  if (!['exec', 'run'].includes(command.name())) command.option('--verbose', VERBOSE_HELP);
   if (!command.options.some((option) => option.long === '--project'))
     command.option('--project <name>', 'project (overrides TUG_PROJECT and config; default: site)');
 }
@@ -172,7 +171,9 @@ forbidExtraArguments(program);
 program.showHelpAfterError();
 program.parseAsync().catch((e: unknown) => {
   console.error(
-    handlerStarted ? errMessage(e) : `${errMessage(e)}\nRun tug <command> --help for usage.`,
+    isUsageError(errMessage(e))
+      ? `${errMessage(e)}\nRun tug <command> --help for usage.`
+      : errMessage(e),
   );
   process.exitCode = e instanceof CliLiveError ? e.exitCode : 1;
 });

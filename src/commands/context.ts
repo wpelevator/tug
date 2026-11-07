@@ -1,4 +1,5 @@
 import { canPrompt } from '../cli-prompt.ts';
+import { markWorkStarted } from '../cli-usage.ts';
 import { selectOne } from '../cli-selection.ts';
 import type { ServiceChoice } from './selection.ts';
 import { withProgress } from '../cli-progress.ts';
@@ -252,6 +253,7 @@ async function noCredentialMessage(c: Config): Promise<string> {
 
 /** The pinned mTLS transport for the resolved credential; an address override only changes the connect target. */
 export async function transportFor(c: Config, guard: SkewGuard) {
+  markWorkStarted();
   if (!c.credential) throw new Error(await noCredentialMessage(c));
   if (guard === 'probe') await preflightVersion(c);
   return createTransport(c.credential, c.controlUrl);
@@ -263,6 +265,7 @@ export async function request<T = any>(
   body?: unknown,
   multipart = false,
 ): Promise<T> {
+  markWorkStarted();
   const c = await loadCfg();
   if (!c.credential) throw new Error(await noCredentialMessage(c));
   const key = versionKey(c);

@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { RUN_OUTPUT_LIMIT } from './build.ts';
 import { suspendProgress } from './cli-progress.ts';
+import { markWorkStarted } from './cli-usage.ts';
 
 /** Keep the event loop free for progress timers during SSH, Docker and file transfers. */
 export function runProcess(
@@ -8,6 +9,7 @@ export function runProcess(
   args: string[],
   { capture = false, input }: { capture?: boolean; input?: string } = {},
 ): Promise<{ status: number | null; stdout: string; stderr: string }> {
+  markWorkStarted();
   const resume = capture ? () => {} : suspendProgress();
   return new Promise<{ status: number | null; stdout: string; stderr: string }>(
     (resolve, reject) => {
@@ -58,18 +60,24 @@ export async function runCapture(
 let verbose = ['1', 'true'].includes(process.env.TUG_VERBOSE ?? '');
 /** `--verbose` (or `TUG_VERBOSE=1`): stream the output of quiet steps instead of keeping it for failures. */
 export function setVerbose(value: boolean): void {
-  verbose = value || verbose;
+  verbose = value;
 }
 
 /** A line a script prints to start a named stage of its work: `::tug:: Pulling the image`. */
 export const STAGE_MARKER = '::tug:: ';
 const TAIL_LINES = 40;
+/** A step that prints without ever ending a line must not grow memory without bound. */
+const MAX_LINE = 4096;
 // eslint-disable-next-line no-control-regex
 const ANSI = /\x1b\[[0-9;?]*[A-Za-z]/g;
 
 export interface StepProgress {
   stage(label: string): void;
   detail?(line: string): void;
+  /** Print a line above the live status line (used by `--verbose`). */
+  print?(line: string): void;
+  suspend?(): void;
+  resume?(): void;
 }
 
 /**
@@ -82,17 +90,31 @@ export async function runStep(
   args: string[],
   { progress, input }: { progress?: StepProgress; input?: string } = {},
 ): Promise<void> {
+  markWorkStarted();
   const tail: string[] = [];
+  // ssh and scp may ask for a password or passphrase on the terminal, which a redrawn status line would wipe: keep the
+  // line off the screen until the step produces its first output.
+  const mayPrompt = Boolean(process.stdin.isTTY) && (cmd === 'ssh' || cmd === 'scp');
+  let resumed = !mayPrompt;
+  const resume = () => {
+    if (resumed) return;
+    resumed = true;
+    progress?.resume?.();
+  };
+  if (mayPrompt) progress?.suspend?.();
+  const emit = (text: string) =>
+    progress?.print ? progress.print(text) : void process.stderr.write(`${text}\n`);
   const child = spawn(cmd, args, {
     stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
   });
   const lines = (stream: NodeJS.ReadableStream) => {
     let pending = '';
     const take = (line: string) => {
-      const text = line.replace(ANSI, '').trimEnd();
+      const text = line.replace(ANSI, '').trimEnd().slice(0, MAX_LINE);
       if (!text) return;
+      resume();
+      if (verbose) emit(text);
       if (text.startsWith(STAGE_MARKER)) return progress?.stage(text.slice(STAGE_MARKER.length));
-      if (verbose) process.stderr.write(`${text}\n`);
       tail.push(text);
       if (tail.length > TAIL_LINES) tail.shift();
       progress?.detail?.(text);
@@ -100,7 +122,7 @@ export async function runStep(
     stream.on('data', (chunk) => {
       // Docker redraws progress with carriage returns, which count as line ends here.
       const parts = (pending + String(chunk)).split(/\r\n|\r|\n/);
-      pending = parts.pop() ?? '';
+      pending = (parts.pop() ?? '').slice(-MAX_LINE);
       parts.forEach(take);
     });
     stream.on('end', () => take(pending));
@@ -114,6 +136,7 @@ export async function runStep(
   const status = await new Promise<number | null>((resolve, reject) => {
     child.on('error', reject);
     child.on('close', (code, signal) => {
+      resume();
       if (signal) reject(new Error(`${cmd} terminated by ${signal}`));
       else resolve(code);
     });
