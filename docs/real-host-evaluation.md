@@ -328,3 +328,25 @@ After the release workflow finished (the npm package, the GitHub release and bot
 
 Two fresh Ubuntu 24.04 arm64 VMs under QEMU (the official cloud image, checksum verified; 2 vCPU and 3 GB each, NAT plus a private `10.0.0.0/24` link), driven by the CLI from source. `tug setup root@vm1 --install-docker -y` installed Docker and control in 52 seconds and printed twelve progress lines, with no per-layer pull output. In a pseudo-terminal, `tug node add root@vm2` offered Docker, showed the address menu (arrow key to the private link address, enter), asked about ingress and confirmed; the node came online and reported over the private link. A failing step (unresolvable SSH host) printed its error as the last lines, `--verbose` streamed the preflight output, and a multi-choice menu refused an empty confirmation and accepted space then enter. The published-image pull was exercised on both VMs (`ghcr.io/wpelevator/tug:1.0.0`); a TTY run of `tug setup` itself and arm64-only hosts were not repeated.
 
+
+## Cloud-init first boot and the bootstrap retries on QEMU VMs, 7 November 2026
+
+`tools/scripts/qemu-first-boot.js` booted the official arm64 cloud images with HVF (2 vCPU, 2 GB, QEMU user networking), each image checksum verified against its publisher's file, with the user-data from `tug node enroll --install-docker` as a NoCloud seed beside an operator part that adds an SSH key. Control ran on the laptop with its certificate naming `10.0.2.2`. Every run was a real first boot of a fresh copy-on-write disk, not a `cloud-init clean` replay, and the guest pulled `ghcr.io/wpelevator/tug:1.0.0` from the registry. The repository's main branch at that point was `92d85eb` plus the bootstrap retry change.
+
+| Image | Condition | Result |
+|---|---|---|
+| Ubuntu 24.04 (noble) arm64 | Clean | Node enrolled and online in 66 seconds, agent running (Docker 29.9.3) |
+| Ubuntu 24.04 arm64 | `download.docker.com` unreachable for about 40 seconds | Three retries, then Docker installed; enrolled in 104 seconds |
+| Ubuntu 24.04 arm64 | `download.docker.com` unreachable for 900 seconds | Gave up after five attempts and logged `tug-bootstrap: failed during: adding the Docker apt repository (exit 1)`; the harness saw cloud-init's error state after 88 seconds |
+| Fedora Cloud Base 44 arm64 | Clean | Enrolled in 58 seconds through the dnf path, agent running |
+| Fedora Cloud Base 44 arm64 | `download.docker.com` unreachable for about 45 seconds | Four retries, then the repository file was fetched and Docker installed; enrolled in 108 seconds |
+| Alpine 3.24.2 arm64 (cloud-init image) | Clean | Refused as designed: `Unsupported Docker bootstrap OS: alpine; install Docker Engine and Compose manually.`, exit 20; no agent started and the harness saw cloud-init's error state 34 seconds in |
+
+**Findings.**
+
+- The retry window is about 50 seconds. Fedora's outage of 45 seconds from early boot recovered only on the fifth and last attempt, so a longer outage fails. That is the intended bound, not slack.
+- A first version of the outage simulation hung the guest at boot (a `systemd-run` call inside cloud-init's `bootcmd`); this was the harness, not the bootstrap, and a detached background sleeper replaced it.
+- The Alpine refusal reached `/var/log/cloud-init-output.log` but not the serial console, unlike Ubuntu and Fedora, so a user without SSH access to such an image sees nothing. Whether a manual Docker install on Alpine (plain `node enroll` without `--install-docker`) works was not tried.
+- The join key remains in `/var/lib/cloud/instance/user-data.txt` and `scripts/runcmd` on the guest after enrollment (readable by root only, and the key is single-use) and in the agent container's environment.
+
+**Not run:** Debian, Rocky or AlmaLinux, RHEL, amd64 guests, Ubuntu 26.04, a real provider's user-data and metadata service, or a distribution that needs the manual path with a working Docker.

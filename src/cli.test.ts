@@ -702,6 +702,139 @@ test('Docker bootstrap preserves a working installation without package-manager 
   }
 });
 
+/** Run the bootstrap's own retry/stage helpers (the block between its begin/end markers) with a test body. */
+async function runBootstrapHelpers(body: string, env: Record<string, string> = {}) {
+  const source = await fs.readFile(path.resolve('src/templates/install-docker.sh'), 'utf8');
+  const helpers = /# begin helpers[^\n]*\n([\s\S]*?)# end helpers/.exec(source)?.[1];
+  assert.ok(
+    helpers,
+    'install-docker.sh should keep its retry and stage helpers between begin/end markers',
+  );
+  return exec('/bin/sh', ['-c', `${helpers}\n${body}`], {
+    env: { ...process.env, TUG_BOOTSTRAP_RETRY_DELAY: '0', ...env },
+  }).then(
+    (result) => ({ code: 0, out: result.stdout.trim(), err: result.stderr }),
+    (error: { code: number; stdout: string; stderr: string }) => ({
+      code: error.code,
+      out: error.stdout?.trim() ?? '',
+      err: error.stderr,
+    }),
+  );
+}
+
+test('Docker bootstrap retries a network step that fails briefly and then succeeds', async () => {
+  const result = await runBootstrapHelpers(
+    'calls=0; flaky() { calls=$((calls + 1)); [ "$calls" -ge 3 ]; }; retry flaky; echo "calls=$calls"',
+  );
+  assert.deepEqual(
+    [result.code, result.out],
+    [0, 'calls=3'],
+    'a step that fails twice and then succeeds should be attempted three times and then succeed',
+  );
+  assert.match(result.err, /attempt 1 failed; retrying/, 'the log should show the first retry');
+  assert.match(result.err, /attempt 2 failed; retrying/, 'the log should show the second retry');
+});
+
+test('Docker bootstrap gives up after the configured attempts and says so', async () => {
+  const result = await runBootstrapHelpers('retry false', { TUG_BOOTSTRAP_RETRIES: '3' });
+  assert.notEqual(result.code, 0, 'a step that never succeeds should fail the bootstrap');
+  assert.match(
+    result.err,
+    /giving up after 3 attempts: false/,
+    'the log should say how many attempts were made and which command failed',
+  );
+  assert.doesNotMatch(
+    result.err,
+    /attempt 3 failed; retrying/,
+    'it should not retry past the limit',
+  );
+});
+
+test('Docker bootstrap pauses longer after each failed attempt and reports the failing command status', async () => {
+  const paused = await runBootstrapHelpers('sleep() { echo "slept $1"; }; retry false', {
+    TUG_BOOTSTRAP_RETRY_DELAY: '5',
+  });
+  assert.equal(
+    paused.out,
+    'slept 5\nslept 10\nslept 15\nslept 20',
+    'five attempts should pause 5, 10, 15 and 20 seconds between them, as the docs promise',
+  );
+  const status = await runBootstrapHelpers("retry sh -c 'exit 100'", {
+    TUG_BOOTSTRAP_RETRIES: '2',
+  });
+  assert.equal(
+    status.code,
+    100,
+    'giving up should return the failing command status, not a generic 1',
+  );
+});
+
+test('Docker bootstrap sends every network step through the retry helper', async () => {
+  const source = await fs.readFile(path.resolve('src/templates/install-docker.sh'), 'utf8');
+  const body = source.replace(/# begin helpers[\s\S]*?# end helpers\n/, '');
+  const lines = body.split('\n').filter((line) => !line.trim().startsWith('#'));
+  const bare = lines.filter(
+    (line) =>
+      (/\bapt-get\b/.test(line) && !/^\s*aptget\(\)/.test(line)) ||
+      (/\bcurl -/.test(line) && !/^\s*fetch\(\)/.test(line)) ||
+      (/\bdnf install\b/.test(line) && !/\bretry dnf install\b/.test(line)),
+  );
+  assert.deepEqual(
+    bare,
+    [],
+    'curl, apt-get and dnf install should only run through fetch, aptget or retry so a brief outage cannot fail the install',
+  );
+  for (const required of [
+    'DPkg::Lock::Timeout=',
+    'Acquire::Retries=',
+    '--connect-timeout',
+    '--max-time',
+    '"$2.part"',
+  ]) {
+    assert.ok(
+      body.includes(required),
+      `the bootstrap should keep ${required} (lock wait, bounded downloads, atomic key and repo files)`,
+    );
+  }
+  for (const name of [
+    'checking for conflicting packages',
+    'adding the Docker apt repository',
+    'adding the Docker dnf repository',
+    'installing Docker Engine',
+    'starting Docker',
+    'verifying Docker',
+  ]) {
+    assert.ok(
+      body.includes(`stage '${name}'`),
+      `the bootstrap should announce the stage '${name}'`,
+    );
+  }
+});
+
+test('Docker bootstrap names the stage that failed, and stays quiet on success and early refusals', async () => {
+  const failed = await runBootstrapHelpers("stage 'installing Docker Engine'; exit 7");
+  assert.equal(failed.code, 7, 'the failing stage should keep its exit status');
+  assert.match(
+    failed.err,
+    /tug-bootstrap: failed during: installing Docker Engine \(exit 7\)/,
+    'the log should name the stage that was running when the bootstrap failed',
+  );
+  const ok = await runBootstrapHelpers("stage 'verifying Docker'");
+  assert.equal(ok.code, 0, 'a completed stage should succeed');
+  assert.doesNotMatch(
+    ok.err,
+    /failed during/,
+    'a successful bootstrap should not report a failure',
+  );
+  const refused = await runBootstrapHelpers('exit 20');
+  assert.equal(refused.code, 20, 'an early refusal should keep exit 20');
+  assert.doesNotMatch(
+    refused.err,
+    /failed during/,
+    'a refusal before any stage already prints its own message and needs no stage line',
+  );
+});
+
 test('source upload applies Docker ignore semantics and never includes credential documents', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-ignore-'));
   const archive = path.join(os.tmpdir(), `tug-ignore-${path.basename(dir)}.tar.gz`);
