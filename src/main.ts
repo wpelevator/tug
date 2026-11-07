@@ -28,8 +28,16 @@ switch (role) {
       break;
     }
     const { createApp, listen } = await import('./control.ts');
-    const app = await createApp();
-    await listen(app);
+    const { SchemaTooNewError } = await import('./db-migrate.ts');
+    try {
+      const app = await createApp();
+      await listen(app);
+    } catch (error) {
+      // The container is restarted by Docker until the operator acts, so make the one line in its log the remedy.
+      if (!(error instanceof SchemaTooNewError)) throw error;
+      console.error(`error: ${error.message}`);
+      process.exit(1);
+    }
     break;
   }
   case 'agent': {
@@ -62,7 +70,14 @@ switch (role) {
       break;
     }
     const { main } = await import('./agent.ts');
-    await main();
+    const { SchemaTooNewError } = await import('./db-migrate.ts');
+    try {
+      await main();
+    } catch (error) {
+      if (!(error instanceof SchemaTooNewError)) throw error;
+      console.error(`error: ${error.message}`);
+      process.exit(1);
+    }
     break;
   }
   default: {

@@ -25,9 +25,14 @@ function latestVersion(migrations: readonly Migration[]): number {
   return migrations.length;
 }
 
-/** The message for a database written by a newer Tug than this one, shared by writable and read-only opens. */
-function tooNewMessage(label: string, found: number, supported: number): string {
-  return `the ${label} database is at schema version ${found}, newer than the ${supported} this Tug supports; upgrade Tug, or restore a backup taken by this version`;
+/** A database written by a newer Tug than this one: an operator problem to read, not a bug to debug with a stack. */
+export class SchemaTooNewError extends Error {
+  constructor(label: string, found: number, supported: number) {
+    super(
+      `the ${label} database is at schema version ${found}, newer than the ${supported} this Tug supports; upgrade Tug, or restore a backup taken by this version`,
+    );
+    this.name = 'SchemaTooNewError';
+  }
 }
 
 /** Refuses a database from a newer Tug without changing it; read-only snapshots use this instead of migrating. */
@@ -38,7 +43,7 @@ export function assertSchemaSupported(
 ): void {
   const supported = latestVersion(migrations);
   const found = schemaVersion(db);
-  if (found > supported) throw new Error(tooNewMessage(label, found, supported));
+  if (found > supported) throw new SchemaTooNewError(label, found, supported);
 }
 
 /** Adds a column an older release lacked; a no-op when it is already there. SQLite cannot `ADD COLUMN IF NOT EXISTS`. */
@@ -66,7 +71,7 @@ export function migrate(
 ): void {
   const latest = latestVersion(migrations);
   const current = schemaVersion(db);
-  if (current > latest) throw new Error(tooNewMessage(options.label, current, latest));
+  if (current > latest) throw new SchemaTooNewError(options.label, current, latest);
   const pending = migrations.filter((m) => m.version > current);
   if (!pending.length) return;
   let backup: string | undefined;

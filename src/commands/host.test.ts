@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import * as tar from 'tar';
-import { transferTugImage } from './host.ts';
+import { immutableLocalTag, transferTugImage } from './host.ts';
 
 test('runtime image transfer reports build, export, copy and load in order and cleans temporary archives', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-transfer-progress-'));
@@ -33,12 +33,18 @@ const cmd = path.basename(process.argv[1]);
 const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(commandsFile)}, JSON.stringify([cmd, ...args]) + '\\n');
 if (args.at(-1) === 'uname -m') process.stdout.write('x86_64');
+if (cmd === 'docker' && args[0] === 'image') process.stdout.write('sha256:0123456789abcdef0123\\n');
 if (cmd === 'docker' && args[0] === 'save') process.stdout.write(fs.readFileSync(${JSON.stringify(archive)}));
 `;
     for (const cmd of ['ssh', 'docker', 'scp'])
       await fs.writeFile(path.join(dir, cmd), stub, { mode: 0o755 });
     process.env.PATH = dir + path.delimiter + previousPath;
-    await transferTugImage('root@host', 'tug:local', (label) => stages.push(label));
+    const runTag = await transferTugImage('root@host', 'tug:local', (label) => stages.push(label));
+    assert.equal(
+      runTag,
+      'tug:local-0123456789ab',
+      'the host runs the build under a tag that names this image, so a later rebuild of tug:local cannot orphan the running container',
+    );
     assert.deepEqual(
       stages,
       [
@@ -58,6 +64,11 @@ if (cmd === 'docker' && args[0] === 'save') process.stdout.write(fs.readFileSync
       commands[1],
       ['docker', 'build', '--platform', 'linux/amd64', '-t', 'tug:local', '.'],
       'async builds must still target the host architecture',
+    );
+    assert.match(
+      commands.find(([cmd, , , script]) => cmd === 'ssh' && /docker load/.test(script ?? ''))![3],
+      /docker tag 'tug:local' 'tug:local-0123456789ab'/,
+      'the loaded image gets the immutable tag on the host',
     );
     const copiedArchive = commands.find(([cmd]) => cmd === 'scp')![2];
     await assert.rejects(
@@ -84,4 +95,17 @@ if (cmd === 'docker' && args[0] === 'save') process.stdout.write(fs.readFileSync
     else process.env.PATH = previousPath;
     await fs.rm(dir, { recursive: true, force: true });
   }
+});
+
+test('the local image tag names the image ID, whatever the requested tag', () => {
+  assert.equal(
+    immutableLocalTag('tug:local', 'sha256:a17ed756592c0000deadbeef'),
+    'tug:local-a17ed756592c',
+    'twelve hex characters of the ID identify the build',
+  );
+  assert.equal(
+    immutableLocalTag('mine:dev', 'a17ed756592c0000'),
+    'mine:dev-a17ed756592c',
+    'an explicit --image keeps its own name and an ID without the sha256 prefix works',
+  );
 });

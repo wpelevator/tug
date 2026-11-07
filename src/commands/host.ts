@@ -73,11 +73,20 @@ ${checks.map(([name, cmd, fix]) => `echo "preflight: ${name}"; (${cmd}) || { ech
   await runLocal('ssh', ['--', target, script]);
 }
 
+/**
+ * The tag a locally built image runs under on the host: the requested tag plus the image ID, so rebuilding `tug:local`
+ * never leaves a running container pointing at a tag that now names another image (Docker would show its ID).
+ */
+export function immutableLocalTag(imageTag: string, imageId: string): string {
+  return `${imageTag}-${imageId.replace(/^sha256:/, '').slice(0, 12)}`;
+}
+
+/** Builds the runtime image from the checkout, copies it to the host and returns the immutable tag to run. */
 export async function transferTugImage(
   target: string,
   imageTag: string,
   stage: (label: string) => void,
-): Promise<void> {
+): Promise<string> {
   stage(`Checking architecture on ${target}`);
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-runtime-'));
   const archive = path.join(directory, 'image.tar.gz');
@@ -86,6 +95,10 @@ export async function transferTugImage(
     const uname = await runCapture('ssh', ['--', target, 'uname -m']);
     stage(`Building Tug image ${imageTag}`);
     await runLocal('docker', localImageBuildArgs(imageTag, uname));
+    const runTag = immutableLocalTag(
+      imageTag,
+      (await runCapture('docker', ['image', 'inspect', '--format', '{{.Id}}', imageTag])).trim(),
+    );
     stage(`Exporting Tug image ${imageTag}`);
     await saveImageArchive(imageTag, archive);
     stage(`Transferring Tug image to ${target}`);
@@ -94,8 +107,9 @@ export async function transferTugImage(
     await runLocal('ssh', [
       '--',
       target,
-      `set -eu\ntrap ${sh(`rm -f ${sh(remote)}`)} EXIT\ndocker load --input ${sh(remote)}`,
+      `set -eu\ntrap ${sh(`rm -f ${sh(remote)}`)} EXIT\ndocker load --input ${sh(remote)}\ndocker tag ${sh(imageTag)} ${sh(runTag)}`,
     ]);
+    return runTag;
   } finally {
     await fs.rm(directory, { recursive: true, force: true });
   }

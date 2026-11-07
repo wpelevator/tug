@@ -60,3 +60,27 @@ test('agent identity --current refuses an agent enrolled as another node with a 
     'a missing node name is a plain usage error',
   );
 });
+
+test('the control refuses a database from a newer Tug with one plain line and a failing exit', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-main-newer-db-'));
+  const { DatabaseSync } = await import('node:sqlite');
+  const db = new DatabaseSync(path.join(dir, 'tug.db'));
+  db.exec('PRAGMA user_version = 99');
+  db.close();
+  await assert.rejects(
+    exec(process.execPath, [entry, 'control'], {
+      env: { ...process.env, TUG_DATA_DIR: dir, TUG_CONTROL_URL: 'https://control.test:8443' },
+      timeout: 20_000,
+    }),
+    (error: { code: number; stderr: string }) => {
+      assert.equal(error.code, 1, 'the container must stop with a failure status');
+      assert.match(
+        error.stderr,
+        /^error: the control database is at schema version 99, newer than the 1 this Tug supports; upgrade Tug, or restore a backup taken by this version\n$/,
+        'the container log holds the remedy and nothing else',
+      );
+      return true;
+    },
+    'the control must not start on a database it does not understand',
+  );
+});

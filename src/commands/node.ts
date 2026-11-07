@@ -118,8 +118,10 @@ async function installNodeIdentity(
     await preflightRemote(sshTarget, {
       controlUrl: connectUrl ?? cfg.credential?.url,
     });
-    const image = resolveImage(o.image, o.buildLocalImage);
-    if (o.buildLocalImage) await transferTugImage(sshTarget, image, progress.stage);
+    const requestedImage = resolveImage(o.image, o.buildLocalImage);
+    const image = o.buildLocalImage
+      ? await transferTugImage(sshTarget, requestedImage, progress.stage)
+      : requestedImage;
     const started = new Date().toISOString();
     if (repair)
       await runLocal('ssh', [
@@ -367,6 +369,10 @@ export function registerNode(program: Command): void {
         ),
     )
       .option('--select', 'choose registered nodes with configured SSH targets')
+      .option(
+        '-y, --yes',
+        'accepted so scripts can pass the same flags as node add; this never asks',
+      )
       .action(
         async (
           name: string | undefined,

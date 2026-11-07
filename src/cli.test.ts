@@ -829,3 +829,14 @@ test('network failures name their cause instead of only "fetch failed"', async (
     'errors without a cause pass through',
   );
 });
+
+test('node replace and node repair accept -y like node add, so scripts can share the flags', async () => {
+  for (const verb of ['replace', 'repair']) {
+    const { stdout } = await promisify(execFile)(
+      process.execPath,
+      [path.resolve('src/cli.ts'), 'node', verb, '--help'],
+      { timeout: 20_000 },
+    );
+    assert.match(stdout, /-y, --yes/, `node ${verb} must list -y, --yes`);
+  }
+});

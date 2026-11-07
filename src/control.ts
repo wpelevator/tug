@@ -1651,7 +1651,14 @@ export async function createApp(
     res.json({
       nodes: rows.map((row) => {
         const { labels_json, ...rest } = row;
-        return { ...rest, labels: labels_json ? (JSON.parse(labels_json) as string[]) : [] };
+        // `status` is stored when `/status` is read, so judge staleness here too: a node must not list as online with
+        // a last contact older than the stale window while `tug status` calls it stale.
+        const status = !row.disabled_at && isStale(row) ? 'stale' : row.status;
+        return {
+          ...rest,
+          status,
+          labels: labels_json ? (JSON.parse(labels_json) as string[]) : [],
+        };
       }),
     });
   });
