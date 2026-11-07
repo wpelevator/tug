@@ -278,4 +278,34 @@ A third fresh Ubuntu 24.04.5 arm64 VM (no Docker, no private link, forwarded por
 
 **Finding, fixed.** The address question offered `docker0` and Docker's `br-<id>` network bridge next to the real interface (`1) 10.0.2.15 (nic0, private)`, `2) 172.17.0.1 (docker0, private)`, `3) 172.18.0.1 (br-…, private)`). Those addresses only reach containers on the host, so `tug node add` now leaves out Docker and CNI bridge interfaces (`docker0`, `br-<12 hex>`, `veth*`, `cni*`) and keeps operator bridges such as `br-lan`.
 
-**Not yet run on this candidate:** the control and workload recovery drill, workload backups to S3-compatible storage, the published image, amd64, real NAT and certificate renewal.
+### Recovery drill
+
+The same VMs, rebuilt from `main` at the 1.0.0 candidate (the merged release preparation, the lifecycle and image-reuse changes, and the changesets applied, so version 1.0.0), ran the control and workload recovery drill. vm1 held control and `app1`, vm2 `app2`, and vm3 (re-provisioned as a standalone host, so the quick start above no longer exists on disk) held a RustFS S3 store (`rustfs/rustfs:latest`, digest `sha256:ed9210d6…`). The QEMU socket link joins only two VMs, so vm1 and vm2 reached the store through the laptop at `http://10.0.2.2:9000`: an S3-protocol exercise over plain HTTP, not a hosted S3 or TLS validation. The control on vm1 was the one upgraded from 0.14, so its database had been migrated. The project was the WordPress example with MariaDB 11.4.8 and WordPress 6.8.3, placed on `app1` with the `db-data` and `wp-content` named volumes and no ingress (port 8090). It was initialized through the web installer, a table with a marker row was added to the database, and two files (1 MiB of random data and a token file) were written to `wp-content/uploads`; their SHA-256 sums and the marker were recorded before any backup. Both targets were backed up with `tug backup run` (database 108 KiB, `wp-content` 15 MiB), the repository password and the control archive (24 MiB, including a built image) were copied off the VMs, and the original root credential was kept next to them.
+
+**Phase A: the workload node is lost, control survives.** `app1`'s agent and containers were stopped (the fence) and the project was re-placed on `app2`.
+
+| Step | Result |
+|---|---|
+| `tug deploy` with the new placement | Refused with `409`: `db, wordpress would start empty on a different node`, naming `--move db --move wordpress` |
+| Same deploy with both `--move` flags | `succeeded` in about 30 seconds; `app2` started a fresh database and WordPress |
+| `tug restore run db` and `wp-content` without `--confirm` | Both plans named `app2` and the pre-loss snapshots, and said nothing was changed |
+| The same with `--confirm` | Database restore 21 seconds, uploads restore 14 seconds, each with a safety backup tagged `pre-restore` |
+| Verification | The marker row and site title matched, both upload files matched their SHA-256 sums byte for byte, `GET /` returned 200; about three minutes from fence to verified, including the finding below |
+| `tug backup run` from `app2` | Both targets succeeded into the same repository, so the recovered node received the credentials from control |
+
+**Finding, fixed.** After the `--move` deploy WordPress on `app2` was running and redirecting to `/wp-admin/install.php` against the empty database: the hold that should have stopped it did not exist. The deploy held only the writers of a moved service that were not themselves acknowledged moves, but WordPress mounts a volume, so the refusal asked for it to be acknowledged too, and acknowledging it exempted it from the hold. Following Tug's own instruction therefore exposed a fresh installer. The data was never at risk, because the in-place restore replaced everything. Every writer of a moved service is now held, whether or not it moved too, with a regression test, and the replacement-node procedure now says to deploy with `--move`.
+
+**Phase B: the control plane is lost.** The control container on vm1 was removed and its data directory moved aside. The site on `app2` kept returning 200 and the agent logged `fetch failed`. Recovery followed [Recover control on another host](control-plane.md#recover-control-on-another-host) onto vm2, with the laptop reaching the new control through an SSH tunnel because the forwarded port belonged to vm1.
+
+| Step | Result |
+|---|---|
+| `tug control setup root@vm2 --no-import --credential-out …` | A temporary control and bootstrap credential in about 8 seconds |
+| Copy the archive to `/var/lib/tug-control`, `tug control restore /data/restore-input.tar.gz --confirm`, restart control | Restore in about a second; the control listened again after the restart |
+| The bootstrap credential | Refused after the restart: its CA was replaced by the restored one |
+| The original root credential | Worked: projects, nodes, secrets, operator credentials, the backup destination and the events up to the archive (1,204) came back; `LATE_SECRET`, set after the archive was taken, was absent, as documented |
+| Node status | `app2` showed `stale` until `tug node replace app2 root@vm2 --agent-control-url https://10.0.0.12:8443`, then `online` within about ten seconds |
+| Verification | The site returned 200 with the original title; `tug backup password` returned the escrowed repository password and URL; the catalog held the original snapshots and the safety backups; a new `tug backup run` succeeded; a redeploy through the recovered control succeeded; a scratch restore of `wp-content` read the old snapshot back with matching SHA-256 sums; the built image archive was present in the restored image directory; about a minute and a half from the lost control to verified |
+
+**What this does not show.** Loss of the S3 store, or of control and a workload node at once; TLS or a hosted object store; amd64 or a real network; a changed control host name (the public host stayed the same and only the connect address moved, so DNS repointing was not exercised); recovery of `app1`, which stayed stale. The timings are scripted runs on local VMs with small data, not recovery-time claims. The published image was not used, as the 1.0.0 image does not exist yet.
+
+**Not yet run on this candidate:** the published image, amd64, real NAT and certificate renewal.

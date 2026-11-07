@@ -2626,18 +2626,19 @@ export async function createApp(
             JSON.stringify(desired),
             ts,
           );
-          // The moved service starts empty: keep what writes to it stopped until its data is restored.
+          // The moved service starts empty: keep what writes to it stopped until its data is restored. A writer
+          // that moved too is held as well: acknowledging its own move says its files start empty, and it would
+          // otherwise run (a fresh WordPress installer) against the database that is still empty.
           for (const moved of acknowledgedMoves.filter((name: string) => compose.services?.[name]))
             for (const writer of discoverWriters(compose, `service:${moved}`))
-              if (!acknowledgedMoves.includes(writer))
-                db.run(
-                  'INSERT OR REPLACE INTO service_holds(project_id,service,reason,restore_id,created_at) VALUES(?,?,?,?,?)',
-                  project,
-                  writer,
-                  `moved ${moved}`,
-                  null,
-                  ts,
-                );
+              db.run(
+                'INSERT OR REPLACE INTO service_holds(project_id,service,reason,restore_id,created_at) VALUES(?,?,?,?,?)',
+                project,
+                writer,
+                `moved ${moved}`,
+                null,
+                ts,
+              );
           for (const [volumeName, volumeSpec] of Object.entries(compose.volumes || {})) {
             const lp = volumeSpec?.['x-tug'] || {};
             const nodeName = lp.placement?.nodes?.[0] || null;
