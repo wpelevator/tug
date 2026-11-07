@@ -44,6 +44,7 @@ Consequences:
 Decision: Caddy, as one managed container per ingress node, configured by a Caddyfile that control renders.
 
 ```yaml
+# yaml-language-server: $schema=https://unpkg.com/@wpelevator/tug/x-tug.schema.json
 services:
   web:
     image: nginx:1.27-alpine

@@ -27,6 +27,7 @@ Each section says what was exercised on a real host and what comes only from rea
 If a service pins explicit nodes (`x-tug.placement.nodes: [web-1]`), moving it means editing the Compose file. If it selects nodes by label, moving it only means adding a node that carries the label and removing the old one:
 
 ```yaml
+# yaml-language-server: $schema=https://unpkg.com/@wpelevator/tug/x-tug.schema.json
 services:
   php-fpm:
     x-tug:

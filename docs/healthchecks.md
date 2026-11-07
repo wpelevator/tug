@@ -13,6 +13,7 @@ A health check tells Tug when a service is ready to serve. During a deployment, 
 This example gives MariaDB a TCP check and nginx an HTTP check:
 
 ```yaml
+# yaml-language-server: $schema=https://unpkg.com/@wpelevator/tug/x-tug.schema.json
 services:
   db:
     image: mariadb:11.4.8

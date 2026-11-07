@@ -34,6 +34,7 @@ The schema is generated from the same rule set `tug lint` and deploy enforce: un
 ## Services
 
 ```yaml
+# yaml-language-server: $schema=https://unpkg.com/@wpelevator/tug/x-tug.schema.json
 services:
   web:
     image: nginx:1.27-alpine
@@ -83,6 +84,7 @@ Services with `build:` are built by control from uploaded source, or on the oper
 By default a changed service is recreated in place, which drops its traffic for a moment. A service behind the managed ingress can instead opt in to a rolling rollout:
 
 ```yaml
+# yaml-language-server: $schema=https://unpkg.com/@wpelevator/tug/x-tug.schema.json
 services:
   web:
     image: ghcr.io/acme/web:2
@@ -119,6 +121,7 @@ How it works, and its limits:
 Add a top-level `x-tug` block to roll back failed deployments on its own:
 
 ```yaml
+# yaml-language-server: $schema=https://unpkg.com/@wpelevator/tug/x-tug.schema.json
 x-tug:
   rollback: auto      # manual (default) | auto
 
@@ -131,6 +134,7 @@ When a deployment turns `failed` because an assigned node reported failed health
 ## Volumes
 
 ```yaml
+# yaml-language-server: $schema=https://unpkg.com/@wpelevator/tug/x-tug.schema.json
 volumes:
   cache-data:
     x-tug:
@@ -147,6 +151,7 @@ Before starting workloads, the agent verifies that an existing Tug project netwo
 Tug does not manage network file systems. To share a directory between nodes, mount it with the plain Compose `driver: local` and `driver_opts` against a server you run, such as a NAS, a managed export or your own NFS host, and install the NFS client (`nfs-common` on Debian and Ubuntu) on the nodes that use it:
 
 ```yaml
+# yaml-language-server: $schema=https://unpkg.com/@wpelevator/tug/x-tug.schema.json
 volumes:
   uploads:
     driver: local
@@ -161,6 +166,7 @@ Every node that uses the volume mounts it itself, so the file server is a single
 ## Backups
 
 ```yaml
+# yaml-language-server: $schema=https://unpkg.com/@wpelevator/tug/x-tug.schema.json
 x-tug:
   backup:
     schedule: "0 3 * * *"
@@ -217,6 +223,7 @@ Secrets are referenced by variable name and resolved by control at deploy time; 
 An app reaches a database by Compose's own DNS only when they are on the same node. A name injected for a service on another node points at that node's address, and the client has to use the published host port, so an unpublished database is not reachable across nodes. Local volumes are not copied between nodes; label placement can spread replicas across matching nodes.
 
 ```yaml
+# yaml-language-server: $schema=https://unpkg.com/@wpelevator/tug/x-tug.schema.json
 services:
   db:
     image: mariadb:11.4
