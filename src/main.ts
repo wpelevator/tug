@@ -37,12 +37,18 @@ switch (role) {
       // One-shot: print the CSR for the pending key (generated into the state volume on first use). Safe to repeat.
       // `--current <node>` reuses the installed key when this host is already enrolled as that node.
       const { agentIdentityCsr } = await import('./agent-credential.ts');
-      const flag = process.argv.indexOf('--current');
-      const current = flag === -1 ? undefined : process.argv[flag + 1];
-      if (flag !== -1 && !current) throw new Error('--current needs a node name');
-      process.stdout.write(
-        await agentIdentityCsr(process.env.TUG_STATE_DIR || '/var/lib/tug', { current }),
-      );
+      // An operator reads this through `tug node add` over SSH: a plain message, not a stack trace.
+      try {
+        const flag = process.argv.indexOf('--current');
+        const current = flag === -1 ? undefined : process.argv[flag + 1];
+        if (flag !== -1 && !current) throw new Error('--current needs a node name');
+        process.stdout.write(
+          await agentIdentityCsr(process.env.TUG_STATE_DIR || '/var/lib/tug', { current }),
+        );
+      } catch (error) {
+        console.error(`error: ${error instanceof Error ? error.message : String(error)}`);
+        process.exit(1);
+      }
       break;
     }
     if (command === 'install-cert') {
