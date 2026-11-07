@@ -308,4 +308,18 @@ The same VMs, rebuilt from `main` at the 1.0.0 candidate (the merged release pre
 
 **What this does not show.** Loss of the S3 store, or of control and a workload node at once; TLS or a hosted object store; amd64 or a real network; a changed control host name (the public host stayed the same and only the connect address moved, so DNS repointing was not exercised); recovery of `app1`, which stayed stale. The timings are scripted runs on local VMs with small data, not recovery-time claims. The published image was not used, as the 1.0.0 image does not exist yet.
 
-**Not yet run on this candidate:** the published image, amd64, real NAT and certificate renewal.
+### Published 1.0.0 smoke test
+
+After the release workflow finished (the npm package, the GitHub release and both image jobs succeeded), the published artifacts were tested with nothing built locally. npm carries `@wpelevator/tug@1.0.0` as `latest`, and `ghcr.io/wpelevator/tug:1.0.0` and `:latest` are the same multi-arch index (amd64 and arm64, digest `sha256:a11a92e8…`). The VMs are arm64, so the amd64 variant was not run. The CLI came from `npm install @wpelevator/tug@1.0.0` into a clean directory instead of `-g`, because the laptop is shared, and the prompts were driven through a pseudo-terminal. The NAT deviations are the same as in the quick start above (`--control-url https://127.0.0.1:9443` for the CLI, `--agent-control-url https://127.0.0.1:8443` for the agent).
+
+| Step | Result |
+|---|---|
+| `tug --version` after the install | `1.0.0` |
+| `tug setup root@vm3 --control-url …` on a freshly provisioned VM with no Docker | Installed Docker and the Compose plugin, pulled `ghcr.io/wpelevator/tug:1.0.0`, started control and imported the credential; about 37 seconds. The image on the host carries the registry's index digest |
+| `tug node add root@vm3 --name app1 …` | Offered only the real interface (`nic0`) and `none` as the address, asked about ingress, showed the plan with the published image and confirmed; the node was online within about nine seconds, running the published image |
+| `tug deploy` with the guide's nginx `compose.yaml` | `succeeded` in about seven seconds, `web` serving, `tug logs web` worked and the forwarded port returned HTTP 200 and the nginx welcome page |
+| The control and agent of the recovery drill (an existing, migrated and restored data directory, running the candidate build) switched with `tug control setup root@vm2 --yes` and `tug node add root@vm2 --name app2 …` | Control opened the existing data with the same root credential, the projects, nodes and secrets were intact, `node add` upgraded the agent in place (same key, no 409) and it was online within seconds, and the recovered WordPress still returned its original title |
+
+**Finding, fixed.** CI on the release commit itself failed in all three Node jobs with five tests, although the release and the published artifacts were fine. Four install tests asked the real registry whether the default image exists, which is false on the commit that cuts a release because its image builds minutes later, and one skew test still assumed that a newer minor is refused, which stopped being true at 1.0 and had never failed because the package version only became 1.0.0 in that commit. The tests now use a stub `docker` and the 1.0 rule. I had not run the suite on the version-bumped tree before the release.
+
+**Not yet run:** amd64, real NAT, certificate renewal and an upgrade straight from the published 0.14.0 to the published 1.0.0 image (the upgrade above started from the candidate build).
