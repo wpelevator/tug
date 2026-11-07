@@ -110,6 +110,28 @@ test('credential create, credential list and credential revoke work against cont
       'credential create should warn on stderr that the secret is shown once',
     );
 
+    const mixed = JSON.parse(
+      (
+        await tug(
+          OPERATOR,
+          'credential',
+          'create',
+          'ci-list',
+          '--role',
+          'read',
+          '--project',
+          'site, blog',
+          '--project',
+          'docs',
+        )
+      ).stdout,
+    );
+    assert.deepEqual(
+      mixed.projects,
+      ['blog', 'docs', 'site'],
+      'credential create should accept a comma-separated --project list mixed with repeated flags',
+    );
+
     const listed = await tug(OPERATOR, 'credential', 'list');
     assert.ok(
       !listed.stdout.includes(body.credential) && !listed.stdout.includes('token_hash'),

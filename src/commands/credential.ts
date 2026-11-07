@@ -3,7 +3,7 @@ import { selectResource } from './selection.ts';
 import type { Command } from 'commander';
 import { Option } from 'commander';
 import { ROLES } from '../credentials.ts';
-import { print, request } from './context.ts';
+import { collectList, print, request } from './context.ts';
 
 export function registerCredential(program: Command): void {
   const credential = program
@@ -25,10 +25,10 @@ export function registerCredential(program: Command): void {
     .addOption(
       new Option(
         '--project <name>',
-        'limit a read or deploy credential to this project; repeat for several',
+        'limit a read or deploy credential to this project; repeat or comma-separate for several',
       )
         .default([] as string[], 'all projects')
-        .argParser((value: string, previous: string[]) => [...previous, value]),
+        .argParser(collectList),
     )
     .option('--select-projects', 'choose existing projects for the credential scope')
     .option(

@@ -19,7 +19,7 @@ import { assertImagePublished, resolveImage } from '../image.ts';
 import type { EnrollmentCredentialResponse, IdentityResponse, JoinKey } from '../protocol.ts';
 import { errMessage, loadTemplate } from '../util.ts';
 import {
-  collect,
+  collectList,
   loadCfg,
   print,
   readStdin,
@@ -59,7 +59,7 @@ const AGENT_STATE = '/var/lib/tug';
 function addNodeIdentityOptions(command: Command): Command {
   return command
     .option('--address <addr>', 'private inter-node address for this node')
-    .option('--label <label>', 'node label (repeatable)', collect, [])
+    .option('--label <label>', 'node label (repeat or comma-separate for several)', collectList, [])
     .option(
       '--all',
       'walk every node with an ssh target in the config file, continuing after failures',
@@ -415,7 +415,7 @@ export function registerNode(program: Command): void {
       '--image <tag>',
       "agent image used in the printed docker run (default: ghcr.io/wpelevator/tug:<this CLI's version>)",
     )
-    .option('--label <label>', 'node label (repeatable)', collect, [])
+    .option('--label <label>', 'node label (repeat or comma-separate for several)', collectList, [])
     .option('--install-docker', 'print cloud-init that installs Docker and starts the agent')
     .option('--json', 'print JSON including the command or cloud-init payload')
     .action(
@@ -489,7 +489,7 @@ export function registerNode(program: Command): void {
     .requiredOption('--csr <file>', 'PEM certificate request generated on the node (- for stdin)')
     .option('--mode <mode>', 'create a new node or replace an existing node key', 'create')
     .option('--address <addr>')
-    .option('--label <label>', 'node label (repeatable)', collect, [])
+    .option('--label <label>', 'node label (repeat or comma-separate for several)', collectList, [])
     .action(
       async (name: string, o: { csr: string; mode: string; address?: string; label: string[] }) => {
         if (o.mode !== 'create' && o.mode !== 'replace')

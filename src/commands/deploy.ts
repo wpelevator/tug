@@ -12,7 +12,7 @@ import { composeHash } from '../compose.ts';
 import { normalizeCompose } from '../normalize.ts';
 import {
   loadCfg,
-  collect,
+  collectList,
   formatDeployment,
   print,
   printResult,
@@ -63,8 +63,8 @@ export function registerDeploy(program: Command): void {
     .option('--json', 'print the full result, including the desired state, as JSON')
     .option(
       '--move <service>',
-      'acknowledge that a service placed on another node starts empty (its data does not move); the services that write to it are held until you restore it or run `tug hold release` (repeatable)',
-      collect,
+      'acknowledge that a service placed on another node starts empty (its data does not move); the services that write to it are held until you restore it or run `tug hold release` (repeat or comma-separate for several)',
+      collectList,
       [],
     )
     .action(

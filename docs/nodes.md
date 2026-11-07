@@ -87,7 +87,7 @@ Options:
 - `--address <addr>` supplies the private node address to the generated agent command and cloud-init. When omitted, set `TUG_NODE_ADDRESS` on the agent before its first enrollment if cross-node networking is needed.
 - `--agent-control-url <url>` sets `connectUrl`, a connect-only target; verification still uses the control name from the pinned CA.
 - `--ttl <seconds>` sets the key lifetime (default `3600`).
-- `--label <label>` sets node labels (repeatable).
+- `--label <label>` sets node labels (repeatable, or comma-separated: `--label gpu,eu`).
 - `--image <tag>` sets the image in the printed command (default `ghcr.io/wpelevator/tug:<CLI version>`).
 - `--json` prints machine-readable output.
 - `--install-docker` prints a complete cloud-init document that installs Docker Engine before starting the agent. With `--json`, the result includes both `command` and `cloudInit` fields.
@@ -122,7 +122,7 @@ It adds Docker's official apt or dnf repository, installs Engine and Buildx, and
 
 ## Node labels
 
-`node add`, `node enroll` and `node register` accept a repeatable `--label <label>`. Labels are plain string tags stored on the node and listed by the node list API; services select nodes that carry all of their `x-tug.placement.labels` (see [Compose extensions](compose.md#services)). They are set when the node is created (`node add`, `node register --mode create` or the enrollment credential); `node replace` keeps them. They are unrelated to Docker container labels.
+`node add`, `node enroll` and `node register` accept a repeatable `--label <label>`, which also takes a comma-separated list, so a label cannot contain a comma. Labels are plain string tags stored on the node and listed by the node list API; services select nodes that carry all of their `x-tug.placement.labels` (see [Compose extensions](compose.md#services)). They are set when the node is created (`node add`, `node register --mode create` or the enrollment credential); `node replace` keeps them. They are unrelated to Docker container labels.
 
 ## Agent host networking
 
