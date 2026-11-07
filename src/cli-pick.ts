@@ -40,6 +40,11 @@ function graphemeWidth(grapheme: string): number {
   return WIDE.test(grapheme) || /\p{Emoji_Presentation}/u.test(grapheme) ? 2 : 1;
 }
 
+/** Terminal columns `text` occupies. */
+export function columnWidth(text: string): number {
+  return [...segmenter.segment(text)].reduce((sum, part) => sum + graphemeWidth(part.segment), 0);
+}
+
 /** `text` cut to at most `columns` terminal columns, ending in an ellipsis when it was cut. */
 export function clipToColumns(text: string, columns: number): string {
   let used = 0;
@@ -76,6 +81,7 @@ function pick(
   let top = 0;
   let note = '';
   let drawn = 0;
+  let drawnWidths: number[] = [];
   let typed = '';
   let typedAt = 0;
   const hint = multiple ? 'space select, a all, enter done, q cancel' : 'enter select, q cancel';
@@ -105,6 +111,14 @@ function pick(
     erase();
     output.write(`${lines.join('\n')}\n`);
     drawn = lines.length;
+    drawnWidths = lines.map(columnWidth);
+  };
+  // Narrowing a terminal re-wraps the rows already drawn, so erase as many rows as they now take, not as many as lines.
+  const redraw = () => {
+    const columns = Math.max(1, output.columns ?? 80);
+    if (drawn)
+      drawn = drawnWidths.reduce((rows, w) => rows + Math.max(1, Math.ceil(w / columns)), 0);
+    render();
   };
 
   return new Promise<number[]>((resolve, reject) => {
@@ -127,7 +141,7 @@ function pick(
       input.off('keypress', onKey);
       input.off('end', onEnd);
       input.off('error', onError);
-      output.off('resize', render);
+      output.off('resize', redraw);
       process.off('exit', onExit);
       for (const name of signals) process.off(name, onSignal);
       input.setRawMode?.(false);
@@ -194,7 +208,7 @@ function pick(
     input.on('keypress', onKey);
     input.once('end', onEnd);
     input.once('error', onError);
-    output.on('resize', render);
+    output.on('resize', redraw);
     process.once('exit', onExit);
     for (const name of signals) process.once(name, onSignal);
     output.write(HIDE_CURSOR);

@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { RUN_OUTPUT_LIMIT } from './build.ts';
 import { suspendProgress } from './cli-progress.ts';
 import { markWorkStarted } from './cli-usage.ts';
@@ -63,8 +64,11 @@ export function setVerbose(value: boolean): void {
   verbose = value;
 }
 
-/** A line a script prints to start a named stage of its work: `::tug:: Pulling the image`. */
-export const STAGE_MARKER = '::tug:: ';
+/**
+ * A line a script prints to start a named stage of its work: `::tug:1a2b3c4d5e6f:: Pulling the image`. The random part is
+ * chosen per run and only the scripts this CLI sends know it, so output of the programs they run cannot spoof a stage.
+ */
+export const STAGE_MARKER = `::tug:${randomBytes(6).toString('hex')}:: `;
 const TAIL_LINES = 40;
 /** A step that prints without ever ending a line must not grow memory without bound. */
 const MAX_LINE = 4096;

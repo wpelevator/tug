@@ -1,5 +1,5 @@
 import { withProgress } from '../cli-progress.ts';
-import { runProcess, runStep } from '../cli-process.ts';
+import { runProcess, runStep, STAGE_MARKER } from '../cli-process.ts';
 import type { Command } from 'commander';
 import { canPrompt, confirm } from '../cli-prompt.ts';
 import { CONTROL_CONTAINER, defaultControlUrl, shellQuote as sh } from '../cli-install.ts';
@@ -114,6 +114,7 @@ function addSetup(parent: Command, description: string): void {
         });
         const remote = await loadTemplate(templatesDir, 'control-install.sh', {
           COMPOSE: compose,
+          MARKER: STAGE_MARKER,
           CONTAINER_SH: sh(CONTROL_CONTAINER),
         });
         progress.stage(`Installing control on ${sshTarget}`);

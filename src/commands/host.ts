@@ -10,7 +10,7 @@ import {
   sortCandidates,
 } from '../cli-onboarding.ts';
 import type { AddressCandidate } from '../cli-onboarding.ts';
-import { runStep } from '../cli-process.ts';
+import { runStep, STAGE_MARKER } from '../cli-process.ts';
 import type { StepProgress } from '../cli-process.ts';
 import { runCapture, templatesDir } from './context.ts';
 

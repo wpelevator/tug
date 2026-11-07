@@ -14,7 +14,7 @@ import type { AddressCandidate } from '../cli-onboarding.ts';
 import { formatNodePlan, inferNodeName, isValidNodeName } from '../cli-onboarding.ts';
 import { ask, canPrompt, confirm } from '../cli-prompt.ts';
 import { terminalPicker } from '../cli-pick.ts';
-import { runStep } from '../cli-process.ts';
+import { runStep, STAGE_MARKER } from '../cli-process.ts';
 import type { Prompter } from '../cli-prompt.ts';
 import { isNodeHost } from '../node-address.ts';
 import { assertImagePublished, resolveImage } from '../image.ts';
@@ -154,6 +154,7 @@ async function installNodeIdentity(
     const remote = await loadTemplate(templatesDir, 'node-install.sh', {
       ENV: env,
       IMAGE_SH: sh(image),
+      MARKER: STAGE_MARKER,
       RUN_FLAGS: `${HOST_NETWORK_FLAG} `,
     });
     await runStep('ssh', ['--', sshTarget, remote], { progress });

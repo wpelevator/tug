@@ -276,3 +276,26 @@ test('numbered menus answer plain terminals, with a default only when the menu o
     'q cancels a numbered menu',
   );
 });
+
+test('narrowing the terminal erases the rows the drawn lines now wrap onto', async () => {
+  const input = new PassThrough();
+  const output = Object.assign(new PassThrough(), { columns: 40, rows: 24 });
+  let text = '';
+  output.on('data', (chunk) => (text += String(chunk)));
+  const result = createPicker({ input, output }).one(
+    'A question that is fairly long for a narrow terminal',
+    ['a', 'b'],
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  const drawn = text.length;
+  output.columns = 20;
+  output.emit('resize');
+  // eslint-disable-next-line no-control-regex
+  const upMoves = [...text.slice(drawn).matchAll(/\x1b\[(\d+)A/g)].map((match) => Number(match[1]));
+  assert.ok(
+    upMoves[0] > 4,
+    'the 4 drawn lines wrap onto more rows after narrowing, so more rows must be erased than lines drawn',
+  );
+  input.write('q');
+  await assert.rejects(result, /cancelled/, 'the menu still works after a resize');
+});

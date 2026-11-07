@@ -94,7 +94,7 @@ test('runStep hides output, turns markers into stages, and reports the tail on f
       'carriage-return redraws should count as separate lines for the status line',
     );
     assert.ok(
-      !details.some((line) => line.includes('::tug::')),
+      !details.some((line) => line.includes(STAGE_MARKER.trim())),
       'markers should not appear as output lines',
     );
     assert.deepEqual(seen, [], 'a successful quiet step must print nothing');
@@ -127,15 +127,18 @@ test('runStep streams output under --verbose and accepts stdin', async () => {
   assert.deepEqual(seen, ['got credential\n'], 'verbose mode should stream the step output');
 });
 
-test('verbose output goes through the progress line and shows spoofed markers instead of hiding them', async () => {
-  const { runStep, setVerbose } = await import('./cli-process.ts');
+test("verbose output goes through the progress line, and only this run's marker starts a stage", async () => {
+  const { runStep, setVerbose, STAGE_MARKER } = await import('./cli-process.ts');
   const printed: string[] = [];
   const stages: string[] = [];
   try {
     setVerbose(true);
     await runStep(
       process.execPath,
-      ['-e', "console.log('::tug:: Real stage'); console.log('plain output')"],
+      [
+        '-e',
+        `console.log(${JSON.stringify(STAGE_MARKER)} + 'Real stage'); console.log('::tug:: Spoofed'); console.log('plain output')`,
+      ],
       {
         progress: {
           stage: (label) => stages.push(label),
@@ -148,10 +151,14 @@ test('verbose output goes through the progress line and shows spoofed markers in
   }
   assert.deepEqual(
     printed,
-    ['::tug:: Real stage', 'plain output'],
+    [`${STAGE_MARKER}Real stage`, '::tug:: Spoofed', 'plain output'],
     'verbose lines are printed above the live line, markers included',
   );
-  assert.deepEqual(stages, ['Real stage'], 'markers still become stages');
+  assert.deepEqual(
+    stages,
+    ['Real stage'],
+    "only the marker with this run's random part becomes a stage; a lookalike from program output is just output",
+  );
 });
 
 test('a step that never ends its line cannot grow memory without bound', async () => {
