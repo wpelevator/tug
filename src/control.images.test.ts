@@ -29,6 +29,7 @@ async function server(openDatabase?: typeof openDb) {
   let fail = false;
   // By default every build produces a new image; `identicalImages` makes rebuilds produce the one the project already has.
   let identical = false;
+  let failMaintenance = false;
   let buildGate: Promise<void> | undefined;
   const app = await createApp({
     identity: testIdentity,
@@ -44,16 +45,18 @@ async function server(openDatabase?: typeof openDb) {
         await fs.writeFile(file, bytes);
         return info;
       },
-      inspect: async (ref) =>
-        identical
-          ? imageInfo
-          : {
-              ...imageInfo,
-              imageId: `sha256:${createHash('sha256').update(String(ref)).digest('hex')}`,
-            },
+      // The daemon's ID is not the archive's config digest on a containerd-store daemon, so it differs from
+      // `info.imageId` here; an unchanged rebuild repeats the same daemon ID, a changed one never does.
+      inspect: async (ref) => ({
+        ...imageInfo,
+        imageId: identical
+          ? `sha256:${'b'.repeat(64)}`
+          : `sha256:${createHash('sha256').update(String(ref)).digest('hex')}`,
+      }),
       validate: async () => info,
       run: async (_cmd, args) => {
         calls.push(args.join(' '));
+        if (failMaintenance && args[0] === 'builder') throw new Error('prune broke');
         return { out: '', err: '' };
       },
     },
@@ -138,6 +141,9 @@ async function server(openDatabase?: typeof openDb) {
     },
     identicalImages: () => {
       identical = true;
+    },
+    failMaintenance: () => {
+      failMaintenance = true;
     },
     close: async () => {
       await new Promise((resolve) => srv.close(resolve));
@@ -897,11 +903,117 @@ test('automatic image maintenance can be turned off', async () => {
 });
 
 test('an invalid TUG_BUILD_CACHE_KEEP is rejected at startup', async () => {
-  await withEnv({ TUG_BUILD_CACHE_KEEP: 'plenty' }, async () => {
-    await assert.rejects(
-      server(),
-      /TUG_BUILD_CACHE_KEEP must be a size/,
-      'a malformed cache size must fail startup instead of being ignored',
-    );
+  for (const value of ['plenty', '10', '-1GB'])
+    await withEnv({ TUG_BUILD_CACHE_KEEP: value }, async () => {
+      await assert.rejects(
+        server(),
+        /TUG_BUILD_CACHE_KEEP must be a size with a unit/,
+        `${JSON.stringify(value)} must fail startup: a bare number would be read as bytes and wipe the cache`,
+      );
+    });
+});
+
+test('an empty TUG_BUILD_CACHE_KEEP uses the default cap', async () => {
+  await withEnv({ TUG_BUILD_CACHE_KEEP: '' }, async () => {
+    const s = await server();
+    try {
+      await s.node('n1');
+      await json(await s.deploy('v1'));
+      await until(() => s.calls.some((call) => call.startsWith('builder prune')));
+      assert.ok(
+        s.calls.includes('builder prune --all --force --keep-storage 10GB'),
+        'an empty value must mean the 10GB default, not a startup failure',
+      );
+    } finally {
+      await s.close();
+    }
   });
+});
+
+test('a reused archive that is missing from disk is rebuilt and saved again', async () => {
+  const s = await server();
+  try {
+    const n1 = await s.node('n1');
+    const first = await json(await s.deploy('v1'));
+    await s.report(n1.nodeId, first.desiredState);
+    s.identicalImages();
+    await fs.rm(
+      path.join(s.dir, 'images', `${first.desiredState.services.app.artifact.buildId}.tar.gz`),
+    );
+    const second = await json(await s.deploy('v2'));
+    assert.notEqual(
+      second.desiredState.services.app.artifact.buildId,
+      first.desiredState.services.app.artifact.buildId,
+      'an earlier archive that is gone from disk must not be reused',
+    );
+    assert.deepEqual(
+      (await fs.readdir(path.join(s.dir, 'images'))).sort(),
+      [`${second.desiredState.services.app.artifact.buildId}.tar.gz`],
+      'the new archive must be written',
+    );
+  } finally {
+    await s.close();
+  }
+});
+
+test('image prune counts distinct builds, so redeploying an unchanged image keeps the last different one', async () => {
+  const s = await server();
+  try {
+    const n1 = await s.node('n1');
+    const builds: string[] = [];
+    const deployAndReport = async (version: string) => {
+      const deployed = await json(await s.deploy(version));
+      builds.push(deployed.desiredState.services.app.artifact.buildId);
+      await s.report(n1.nodeId, deployed.desiredState);
+    };
+    await deployAndReport('v1');
+    await deployAndReport('v2');
+    s.identicalImages();
+    await deployAndReport('v3');
+    await deployAndReport('v4');
+    assert.equal(builds[3], builds[2], 'the unchanged redeploys must share one archive');
+    const keepTwo = await json(await s.post('/api/v1/images/prune', { keep: 2, dryRun: true }));
+    assert.equal(
+      keepTwo.pruned.length,
+      0,
+      'keeping two builds must keep both distinct archives even though four deployments exist',
+    );
+    const keepOne = await json(await s.post('/api/v1/images/prune', { keep: 1, dryRun: true }));
+    assert.deepEqual(
+      keepOne.pruned.map((build: { id: string }) => build.id),
+      [builds[0]],
+      'keeping one build must prune only the older, different archive',
+    );
+  } finally {
+    await s.close();
+  }
+});
+
+test('a failing build-cache prune is logged without breaking later deploys', async () => {
+  const s = await server();
+  try {
+    const n1 = await s.node('n1');
+    s.failMaintenance();
+    const originalError = console.error;
+    const logged: string[] = [];
+    console.error = (...args: unknown[]) => void logged.push(args.join(' '));
+    try {
+      const first = await json(await s.deploy('v1'));
+      await until(() => logged.some((line) => line.includes('image maintenance failed')));
+      await s.report(n1.nodeId, first.desiredState);
+    } finally {
+      console.error = originalError;
+    }
+    assert.ok(
+      logged.some((line) => line.includes('image maintenance failed: prune broke')),
+      'a failing maintenance step must be logged with its reason',
+    );
+    assert.equal(
+      (await s.deploy('v2')).status,
+      200,
+      'a failed maintenance run must not block the next deploy',
+    );
+  } finally {
+    await s.close();
+  }
 });

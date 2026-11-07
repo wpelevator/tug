@@ -2141,7 +2141,7 @@ export async function createApp(
     }
   }
   /**
-   * Deletes build archives no longer needed: everything except the newest `keep` desired states of each project,
+   * Deletes build archives no longer needed: everything except the newest `keep` distinct builds of each project,
    * the current deployment and any version a node still reports. The desired states stay, so history lists them,
    * but rolling back to a pruned one is refused.
    */
@@ -2164,11 +2164,19 @@ export async function createApp(
         .map((row) => row.current_deployment_id),
     );
     const rows = db.all<DesiredStateRow>('SELECT * FROM desired_states ORDER BY created_at DESC');
-    const seen = new Map<string, number>();
+    // Deployments that reuse an archive share it, so `keep` counts distinct sets of archives, newest first:
+    // redeploying an unchanged image must not push the last different build out of reach of rollback.
+    const ranks = new Map<string, Map<string, number>>();
     for (const row of rows) {
-      const index = seen.get(row.project_id) ?? 0;
-      seen.set(row.project_id, index + 1);
       const state: DesiredState = JSON.parse(row.state_json);
+      const projectRanks = ranks.get(row.project_id) ?? new Map<string, number>();
+      ranks.set(row.project_id, projectRanks);
+      const set = Object.values(state.services)
+        .flatMap((service) => (service.artifact ? [service.artifact.buildId] : []))
+        .sort()
+        .join(',');
+      if (!projectRanks.has(set)) projectRanks.set(set, projectRanks.size);
+      const index = projectRanks.get(set)!;
       const lagging = reported.some(
         (r) =>
           r.project === row.project_id &&
@@ -2200,24 +2208,23 @@ export async function createApp(
     return { pruned, freedBytes: pruned.reduce((sum, build) => sum + build.sizeBytes, 0) };
   }
   const IMAGE_KEEP = envCount('TUG_IMAGE_KEEP', 5);
-  const BUILD_CACHE_KEEP = (process.env.TUG_BUILD_CACHE_KEEP ?? '10GB').trim();
-  if (!/^(0|\d+(\.\d+)?\s?([kmgt]?b)?)$/i.test(BUILD_CACHE_KEEP))
-    throw new Error('TUG_BUILD_CACHE_KEEP must be a size such as 10GB, or 0 to turn it off');
+  const BUILD_CACHE_KEEP = process.env.TUG_BUILD_CACHE_KEEP?.trim() || '10GB';
+  if (!/^(0|\d+(\.\d+)?\s?[kmgt]b)$/i.test(BUILD_CACHE_KEEP))
+    throw new Error(
+      'TUG_BUILD_CACHE_KEEP must be a size with a unit such as 10GB, or 0 to turn it off',
+    );
+  const CAP_BUILD_CACHE = Number.parseFloat(BUILD_CACHE_KEEP) > 0;
   /**
-   * Bounds growth after each successful deploy: archives beyond the newest `TUG_IMAGE_KEEP` deployments per project
-   * (the rules of `tug image prune`) and the daemon's build cache above `TUG_BUILD_CACHE_KEEP`. It queues behind the
-   * writer, so it cannot delete an archive a running deploy is reusing. Failures are logged, never raised.
+   * Bounds growth after each successful deploy that built images: archives beyond the newest `TUG_IMAGE_KEEP` distinct
+   * builds per project (the rules of `tug image prune`, run behind the writer so it cannot delete an archive a running
+   * deploy is reusing) and the daemon's build cache above `TUG_BUILD_CACHE_KEEP` (outside the writer: it touches no
+   * database state and can take a while). Failures are logged, never raised.
    */
   function scheduleImageMaintenance(): void {
-    if (
-      IMAGE_KEEP === 0 &&
-      /^0/.test(BUILD_CACHE_KEEP) &&
-      Number.parseFloat(BUILD_CACHE_KEEP) === 0
-    )
-      return;
-    void withWriter(async () => {
-      if (IMAGE_KEEP > 0) await pruneArtifacts(IMAGE_KEEP, false);
-      if (Number.parseFloat(BUILD_CACHE_KEEP) > 0)
+    if (IMAGE_KEEP === 0 && !CAP_BUILD_CACHE) return;
+    void (async () => {
+      if (IMAGE_KEEP > 0) await withWriter(() => pruneArtifacts(IMAGE_KEEP, false));
+      if (CAP_BUILD_CACHE)
         await images.run('docker', [
           'builder',
           'prune',
@@ -2226,7 +2233,7 @@ export async function createApp(
           '--keep-storage',
           BUILD_CACHE_KEEP.replace(/\s/g, ''),
         ]);
-    }).catch((e) => console.error('image maintenance failed:', errMessage(e)));
+    })().catch((e) => console.error('image maintenance failed:', errMessage(e)));
   }
   await collectArtifacts();
   await markMissingArtifacts();
@@ -2521,19 +2528,26 @@ export async function createApp(
             });
           // An unchanged rebuild produces the image the project already has an archive for: point at that
           // artifact instead of saving, hashing and storing another full copy. Nodes match by image ID, so they
-          // download nothing and the running container is kept.
+          // download nothing and the running container is kept. The stored `image_id` is the archive's config
+          // digest, which is not what a containerd-store daemon reports as an image ID, so compare what the
+          // daemon says about the earlier tag (it stays while any retained state references it).
           const built = await images.inspect(imageRef);
-          const prior = db.get<BuildRow>(
-            "SELECT * FROM builds WHERE project_id=? AND service=? AND image_id=? AND platform=? AND state='complete' AND artifact_path IS NOT NULL ORDER BY created_at DESC LIMIT 1",
+          let prior: BuildRow | undefined;
+          for (const candidate of db.all<BuildRow>(
+            "SELECT * FROM builds WHERE project_id=? AND service=? AND platform=? AND state='complete' AND artifact_path IS NOT NULL ORDER BY created_at DESC LIMIT 20",
             project,
             service,
-            built.imageId,
             built.platform,
-          );
-          if (
-            prior &&
-            (await fs.stat(path.join(DATA_DIR, prior.artifact_path!)).catch(() => null))
-          ) {
+          )) {
+            if (!(await fs.stat(path.join(DATA_DIR, candidate.artifact_path!)).catch(() => null)))
+              continue;
+            const earlier = await images.inspect(candidate.image_ref).catch(() => undefined);
+            if (earlier?.imageId === built.imageId && earlier.platform === built.platform) {
+              prior = candidate;
+              break;
+            }
+          }
+          if (prior) {
             spec.image = prior.image_ref;
             spec.artifact = {
               buildId: prior.id,
