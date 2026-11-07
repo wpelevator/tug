@@ -192,7 +192,7 @@ Start with the [single-VPS tutorial](docs/getting-started.md), then choose the t
   - [Roadmap](docs/roadmap.md)
   - [Observability status and proposal](docs/observability.md)
   - [Terminology](docs/terminology.md)
-  - [Standalone binary proposal](docs/standalone-binary.md)
+  - [Standalone binary (prototype)](docs/standalone-binary.md)
   - [Docker Swarm comparison](docs/swarm-comparison.md)
 
 ## Development

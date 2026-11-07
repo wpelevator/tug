@@ -49,7 +49,7 @@ Control metadata and agent applied/event state use Node's built-in synchronous S
 
 SQL executes on the owning process's event loop. Busy waits, snapshots and integrity checks can pause APIs, WebSocket traffic and timers; backup blocking is described in [Control plane](control-plane.md#backup-and-restore). Database-only work does not return promises. Filesystem preparation and other asynchronous workflows retain their asynchronous interfaces.
 
-A future Bun bundle that includes control or agent code can supply a `bun:sqlite` adapter through the same factory. Select it at build time so the bundle never imports the Node adapter; normalize results, bindings, error categories and connection cleanup, and run the same factory-driven database contract tests. Bun implementation and build aliases are deferred. The proposed CLI-only executable does not access SQLite and needs no adapter.
+A Bun bundle of control or agent code needs no separate adapter today: Bun 1.4.4 implements `node:sqlite`, including the `errcode` values this adapter classifies, so the same module runs unchanged. If that ever stops holding, a `bun:sqlite` adapter can be supplied through the same factory, selected at build time, with the same factory-driven database contract tests. The CLI-only executable does not access SQLite. Hosting control on Bun is blocked elsewhere, by the missing peer certificate on HTTPS request sockets, and has a possible route through a raw TLS listener ([Standalone binary](standalone-binary.md#peer-certificate-under-bun)).
 
 ## Lifecycles
 
