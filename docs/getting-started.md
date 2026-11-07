@@ -42,6 +42,7 @@ Accept Docker installation if prompted, choose an address belonging to the VPS a
 Save this as `compose.yaml` in the same directory:
 
 ```yaml
+# yaml-language-server: $schema=https://unpkg.com/@wpelevator/tug/x-tug.schema.json
 services:
   web:
     image: nginx:1.27-alpine

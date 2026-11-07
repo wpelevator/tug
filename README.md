@@ -57,6 +57,7 @@ tug moves the checks earlier: your images are built (on control, or on your mach
 This example builds on the [quickstart](docs/getting-started.md). It pins the app, database and database volume to `app1`. Placement can be omitted with one node, but explicit placement keeps the database on its chosen server when you add more nodes. Enable ingress with `tug node ingress app1`, point the hostname's DNS at the VPS, and allow public ports 80 and 443. Save this as `compose.yaml` and replace the hostname with yours:
 
 ```yaml
+# yaml-language-server: $schema=https://unpkg.com/@wpelevator/tug/x-tug.schema.json
 services:
   db:
     image: mariadb:11.4.8

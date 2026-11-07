@@ -17,6 +17,7 @@ tug node list
 3. In your existing `compose.yaml`, add placement to `web`. Keep its image, port and health check:
 
 ```yaml
+# yaml-language-server: $schema=https://unpkg.com/@wpelevator/tug/x-tug.schema.json
 services:
   web:
     image: nginx:1.27-alpine
@@ -47,6 +48,7 @@ This places one container on each named node; it does not load-balance the two p
 A named local volume is local to a node. For an application with a database, pin the database service and its volume to the node holding the data, while choosing placement for every other service. For example, add these blocks to your existing database service and volume definitions:
 
 ```yaml
+# yaml-language-server: $schema=https://unpkg.com/@wpelevator/tug/x-tug.schema.json
 services:
   db:
     x-tug:
