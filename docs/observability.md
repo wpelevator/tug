@@ -62,7 +62,7 @@ Naming follows the Prometheus conventions: a `tug_` prefix, base units (`_second
 | Metric | Type | Labels | Meaning |
 | --- | --- | --- | --- |
 | `tug_build_info` | gauge | `version` | Constant 1; the running control version |
-| `tug_deployments` | gauge | `project`, `state` | Deployments currently in each state (`uploading`, `building`, `pending_dependencies`, `rolling_out`, `succeeded`, `failed`, `build_failed`, `cancelled`) |
+| `tug_deployments` | gauge | `project`, `state` | Deployments currently in each state (`building`, `rolling_out`, `succeeded`, `failed`, `build_failed`, `cancelled`) |
 | `tug_deployment_duration_seconds` | histogram | `project`, `outcome` | Time from creation to a terminal state |
 | `tug_rollout_outcomes_total` | counter | `project`, `outcome` | Rollout results: `rolled_out`, `rejected` (a candidate failed its health check while the old revision kept serving), `auto_rollback` |
 | `tug_nodes` | gauge | `status` | Registered nodes by `online` or `stale`, computed from `last_seen_at` at scrape time rather than stored |

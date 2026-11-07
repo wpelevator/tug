@@ -1,4 +1,7 @@
 import { id } from './util.ts';
+import { advance as advanceRow, isTerminal, terminalStates, statesSql } from './state-machine.ts';
+import { RESTORE_LOCKED_STATES, restoreMachine } from './machines.ts';
+import type { RestoreState } from './machines.ts';
 import { scratchVolumeName } from './container-spec.ts';
 import type { BackupService } from './backup-scheduler.ts';
 import type { Db, BackupRunRow, CommandRow, RestoreRunRow, NodeStatusRow } from './db.ts';
@@ -9,9 +12,6 @@ const LOCK_TTL_MS = 15 * MINUTE;
 const HOLD_TIMEOUT_MS = 5 * MINUTE;
 /** How long a finished restore waits for its writers to serve again before it reports that they did not. */
 const VERIFY_TIMEOUT_MS = 5 * MINUTE;
-/** Restore states in which the project must stay locked. */
-const LOCKED_STATES = ['locking', 'holding', 'safety_backup', 'restoring', 'interrupted'];
-const TERMINAL = ['succeeded', 'failed', 'released'];
 
 export interface RestoreRequest {
   project: string;
@@ -290,23 +290,21 @@ export function createRestoreService(deps: RestoreDeps) {
     deps.wake(restore.project_id);
   }
 
+  /** Moves a restore along `restoreMachine`; an undeclared move throws, and a lost race leaves the row as it was. */
   function move(
     restore: RestoreRunRow,
-    state: string,
+    state: RestoreState,
     extra: { error?: string; commandId?: string; safetyRunId?: string } = {},
   ): void {
-    db.run(
-      `UPDATE restore_runs SET state=?,state_changed_at=?,error=COALESCE(?,error),command_id=COALESCE(?,command_id),safety_run_id=COALESCE(?,safety_run_id),
-       finished_at=CASE WHEN ? THEN ? ELSE finished_at END WHERE id=?`,
-      state,
-      stamp(),
-      extra.error ?? null,
-      extra.commandId ?? null,
-      extra.safetyRunId ?? null,
-      TERMINAL.includes(state) ? 1 : 0,
-      stamp(),
-      restore.id,
-    );
+    const at = stamp();
+    const moved = advanceRow(db, restoreMachine, restore.id, restore.state as RestoreState, state, {
+      state_changed_at: at,
+      ...(extra.error !== undefined ? { error: extra.error } : {}),
+      ...(extra.commandId !== undefined ? { command_id: extra.commandId } : {}),
+      ...(extra.safetyRunId !== undefined ? { safety_run_id: extra.safetyRunId } : {}),
+      ...(isTerminal(restoreMachine, state) ? { finished_at: at } : {}),
+    });
+    if (moved) restore.state = state;
   }
 
   /** Starts a restore. Scratch restores run straight away; in-place restores lock, hold, snapshot, restore, release. */
@@ -518,7 +516,11 @@ export function createRestoreService(deps: RestoreDeps) {
       clock().getTime() -
       new Date(restore.state_changed_at ?? restore.started_at ?? stamp()).getTime();
     // Keep the project locked while a restore is unfinished, across a control restart.
-    if (restore.mode === 'in-place' && LOCKED_STATES.includes(restore.state)) lock(restore);
+    if (
+      restore.mode === 'in-place' &&
+      (RESTORE_LOCKED_STATES as readonly string[]).includes(restore.state)
+    )
+      lock(restore);
     const writers = JSON.parse(restore.writers_json) as string[];
     switch (restore.state) {
       case 'holding':
@@ -535,7 +537,7 @@ export function createRestoreService(deps: RestoreDeps) {
   /** Advances every restore that is waiting on something; safe to call often. */
   function advance(): void {
     for (const restore of db.all<RestoreRunRow>(
-      `SELECT * FROM restore_runs WHERE state NOT IN ('succeeded','failed','released')`,
+      `SELECT * FROM restore_runs WHERE state NOT IN (${statesSql(terminalStates(restoreMachine))})`,
     ))
       advanceRestore(restore);
   }

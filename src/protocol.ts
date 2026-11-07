@@ -2,6 +2,9 @@
 // desired-state shape persisted in `desired_states.state_json`. Types plus a few shared constants;
 // control.ts, agent.ts, compose.ts and cli.ts all import from here.
 
+import { deploymentMachine } from './machines.ts';
+import { activeStates, terminalStates } from './state-machine.ts';
+
 // ---- Compose input (what the operator deploys) -------------------------------------------------
 
 export interface Placement {
@@ -182,22 +185,11 @@ export interface DesiredState {
 
 // ---- Deployments -------------------------------------------------------------------------------
 
-/** Deployment states during which a project is considered busy. */
-export const ACTIVE_DEPLOYMENT_STATES = [
-  'uploading',
-  'building',
-  'pending_dependencies',
-  'rolling_out',
-] as const;
+/** Deployment states during which a project is considered busy; derived from the transition table. */
+export const ACTIVE_DEPLOYMENT_STATES = activeStates(deploymentMachine);
 /** Deployment states a CLI wait loop stops on. */
-export const TERMINAL_DEPLOYMENT_STATES = [
-  'succeeded',
-  'failed',
-  'build_failed',
-  'cancelled',
-] as const;
-export type DeploymentState =
-  (typeof ACTIVE_DEPLOYMENT_STATES)[number] | (typeof TERMINAL_DEPLOYMENT_STATES)[number];
+export const TERMINAL_DEPLOYMENT_STATES = terminalStates(deploymentMachine);
+export type { DeploymentState } from './machines.ts';
 
 // ---- Commands (control -> agent) ---------------------------------------------------------------
 
