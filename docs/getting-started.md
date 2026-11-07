@@ -2,6 +2,8 @@
 
 Install Tug's control plane and agent on one Linux VPS, deploy nginx, and visit its welcome page.
 
+A typical VPS is a durable, always-on computer with enough CPU, memory and disk to host several sites or a medium-size application and its database, so you do not need a cluster, a per-app platform plan or a pile of managed services to run it well. Tug gives you the parts that usually make self-hosting a chore, namely image delivery (with an optional registry), rollbacks, scheduled backups, HTTPS and encrypted secrets, so you can keep the savings of a plain server. This tutorial uses one server; adding more later is covered in [service placement](service-placement.md).
+
 ## Before you start
 
 You need a VPS with a public IP and SSH access as root, Node.js 22.18 or newer and Docker Compose v2 on your computer. The VPS must run Debian, Ubuntu, Fedora or a RHEL-compatible distribution if you want Tug to install Docker; otherwise install Docker Engine and the Compose plugin there first. The VPS needs outbound access to pull images. Allow your computer and the agent to reach control on TCP 8443, and allow your computer to reach TCP 8080 for this temporary example. Check your provider firewall as well as any host firewall.
