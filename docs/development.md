@@ -130,6 +130,18 @@ Layers `docker-compose.integration-rollout.yml` over the same stack with a singl
 limactl start --name=vps template-vps.yml
 ```
 
+## First boot with QEMU
+
+`tools/scripts/qemu-first-boot.js` checks the cloud-init enrollment path on a real first boot, which the Docker fake VPS and the Lima template cannot: it needs `qemu-system-aarch64`, `qemu-img` and `xorriso` (on macOS, `brew install qemu xorriso`), Apple Silicon (it uses HVF) and an Ubuntu cloud image such as `ubuntu-24.04-server-cloudimg-arm64.img` from `cloud-images.ubuntu.com`. Keep Canonical's `SHA256SUMS` next to the image and the script verifies it.
+
+```bash
+node tools/scripts/qemu-first-boot.js --image ~/images/ubuntu-24.04-server-cloudimg-arm64.img --work /tmp/tug-qemu --keep
+```
+
+It starts a throwaway control on this machine whose certificate names `10.0.2.2` (how QEMU user networking reaches the host, so no bridge or root is needed), mints user-data with `tug node enroll --install-docker`, boots a copy-on-write disk with that user-data as a NoCloud seed and prints a timeline until the node reports to control. The guest needs outbound internet to install Docker and pull the agent image from the registry; `--agent-image` points it at another tag. An operator part with an SSH key is merged beside tug's part, as a user's own user-data would be, so the script can inspect the guest; `--keep` leaves the VM running for `ssh -p 2222 -i <work>/id_ed25519 ubuntu@127.0.0.1`. On failure it fails as soon as cloud-init reports an error and prints the serial console and cloud-init output.
+
+`--block-docker-seconds N` makes `download.docker.com` unreachable inside the guest for the first N seconds to exercise the bootstrap's retries: a block shorter than the retry window (about 50 seconds) should still enroll, and a longer one should fail with `tug-bootstrap: failed during: adding the Docker apt repository`. A clean run takes about a minute on a laptop.
+
 ### Networking integration test
 
 ```bash

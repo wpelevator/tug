@@ -25,7 +25,7 @@ const flag = (name) => argv.includes(`--${name}`);
 const image = opt('image');
 if (!image) {
   console.error(
-    'usage: qemu-first-boot.js --image <cloud image> [--work dir] [--name node] [--keep]',
+    'usage: qemu-first-boot.js --image <cloud image> [--work dir] [--name node] [--keep] [--block-docker-seconds N]',
   );
   process.exit(2);
 }
@@ -35,6 +35,7 @@ const port = Number(opt('port', '8443'));
 const sshPort = Number(opt('ssh-port', '2222'));
 const timeoutSeconds = Number(opt('timeout', '900'));
 const agentImage = opt('agent-image');
+const blockSeconds = Number(opt('block-docker-seconds', '0'));
 const hostAddress = '10.0.2.2';
 const controlUrl = `https://${hostAddress}:${port}`;
 const start = Date.now();
@@ -158,7 +159,17 @@ const enrollArgs = [
 if (agentImage) enrollArgs.push('--image', agentImage);
 const tugPart = tug(enrollArgs).stdout;
 fs.writeFileSync(path.join(work, 'tug-part.yaml'), tugPart, { mode: 0o600 });
-const operatorPart = `#cloud-config\nssh_authorized_keys:\n  - ${fs.readFileSync(`${keyPath}.pub`, 'utf8').trim()}\n`;
+// --block-docker-seconds N makes download.docker.com unreachable for the first N seconds (via /etc/hosts and a detached
+// sleeper), to exercise the bootstrap's retries: a short outage should recover, a long one should fail naming its stage.
+let operatorPart = `#cloud-config\nssh_authorized_keys:\n  - ${fs.readFileSync(`${keyPath}.pub`, 'utf8').trim()}\n`;
+if (blockSeconds > 0) {
+  operatorPart +=
+    `bootcmd:\n` +
+    `  - echo '127.0.0.1 download.docker.com' >> /etc/hosts\n` +
+    // Detached from cloud-init's pipes, or it would wait for the sleeper to exit.
+    `  - setsid sh -c "sleep ${blockSeconds}; sed -i '/download.docker.com/d' /etc/hosts" </dev/null >/dev/null 2>&1 &\n`;
+  log(`download.docker.com blocked inside the guest for ${blockSeconds}s`);
+}
 fs.writeFileSync(
   path.join(work, 'user-data'),
   mime([
@@ -270,6 +281,10 @@ try {
       if (!sshUp && ssh('true').status === 0) {
         sshUp = true;
         log('SSH reachable (cloud-init network stage done)');
+      }
+      // Once cloud-init has finished with an error there is nothing left to wait for.
+      if (sshUp && /status: (error|degraded)/.test(ssh('cloud-init status').stdout)) {
+        throw new Error('cloud-init finished with an error');
       }
       const list = tug(
         ['node', 'list', '--json', '--control-url', `https://127.0.0.1:${port}`],

@@ -1,4 +1,19 @@
 set -eu
+# begin helpers (tests extract this block)
+# Name the step that failed, because on a first boot nobody is watching and the log is all there is.
+stage_name=''
+stage() { stage_name="$1"; echo "tug-bootstrap: $1" >&2; }
+trap 'status=$?; [ "$status" = 0 ] || [ -z "$stage_name" ] || echo "tug-bootstrap: failed during: $stage_name (exit $status)" >&2' EXIT
+# Retry a network step with a growing pause: mirrors, DNS and the first-boot package lock are often briefly unavailable.
+retry() {
+  attempts="${TUG_BOOTSTRAP_RETRIES:-5}"; delay="${TUG_BOOTSTRAP_RETRY_DELAY:-5}"; n=1
+  until "$@"; do
+    [ "$n" -lt "$attempts" ] || { echo "tug-bootstrap: giving up after $n attempts: $*" >&2; return 1; }
+    echo "tug-bootstrap: attempt $n failed; retrying in $((n * delay))s: $*" >&2
+    sleep "$((n * delay))"; n=$((n + 1))
+  done
+}
+# end helpers
 # Nodes need only the Docker Engine. The control host also runs its own install with Docker Compose,
 # which the caller asks for with TUG_INSTALL_COMPOSE=1.
 want_compose="${TUG_INSTALL_COMPOSE:-0}"
@@ -43,18 +58,24 @@ fi
 conflict() { echo "Conflicting package $1 is installed; review Docker's installation instructions before replacing it." >&2; exit 20; }
 # TUG_MARKER is set by the CLI so this stage shows in its progress; cloud-init runs without it and prints the plain text.
 echo "${TUG_MARKER:-}Installing Docker packages (this can take a few minutes)"
+# Fetch with a bounded wait so a stalled connection fails and is retried instead of hanging the boot.
+fetch() { retry curl -fsSL --connect-timeout 15 --max-time 120 "$1" -o "$2"; }
+stage 'checking for conflicting packages'
 if [ "$family" = apt ]; then
   [ -n "${VERSION_CODENAME:-}" ] || { echo 'OS release must declare VERSION_CODENAME.' >&2; exit 20; }
   export DEBIAN_FRONTEND=noninteractive
+  # A first boot often runs unattended upgrades that hold the dpkg lock; wait for it rather than fail.
+  aptget() { retry apt-get -o Acquire::Retries=3 -o DPkg::Lock::Timeout=300 "$@"; }
   if [ "$engine_present" = false ]; then
     for package in docker.io docker-compose docker-compose-v2 podman-docker containerd runc; do
       if dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -q 'install ok installed'; then conflict "$package"; fi
     done
   fi
-  apt-get update >&2
-  apt-get install -y ca-certificates curl >&2
+  stage 'adding the Docker apt repository'
+  aptget update >&2
+  aptget install -y ca-certificates curl >&2
   install -m 0755 -d /etc/apt/keyrings
-  curl -fsSL "https://download.docker.com/linux/$repo_os/gpg" -o /etc/apt/keyrings/docker.asc
+  fetch "https://download.docker.com/linux/$repo_os/gpg" /etc/apt/keyrings/docker.asc
   chmod a+r /etc/apt/keyrings/docker.asc
   cat > /etc/apt/sources.list.d/docker.sources <<REPO
 Types: deb
@@ -64,12 +85,13 @@ Components: stable
 Architectures: $(dpkg --print-architecture)
 Signed-By: /etc/apt/keyrings/docker.asc
 REPO
-  apt-get update >&2
+  aptget update >&2
+  stage 'installing Docker Engine'
   if [ "$engine_present" = true ]; then
-    [ "$want_compose" != 1 ] || apt-get install -y --no-upgrade --no-remove docker-compose-plugin >&2
+    [ "$want_compose" != 1 ] || aptget install -y --no-upgrade --no-remove docker-compose-plugin >&2
   else
-    apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin >&2
-    [ "$want_compose" != 1 ] || apt-get install -y docker-compose-plugin >&2
+    aptget install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin >&2
+    [ "$want_compose" != 1 ] || aptget install -y docker-compose-plugin >&2
   fi
 else
   if [ "$engine_present" = false ]; then
@@ -78,15 +100,19 @@ else
     done
   fi
   # curl-minimal already provides curl on many EL images; installing curl over it conflicts.
-  command -v curl >/dev/null 2>&1 || dnf install -y curl >&2
-  curl -fsSL "https://download.docker.com/linux/$repo_os/docker-ce.repo" -o /etc/yum.repos.d/docker-ce.repo
+  stage 'adding the Docker dnf repository'
+  command -v curl >/dev/null 2>&1 || retry dnf install -y curl >&2
+  fetch "https://download.docker.com/linux/$repo_os/docker-ce.repo" /etc/yum.repos.d/docker-ce.repo
+  stage 'installing Docker Engine'
   if [ "$engine_present" = true ]; then
-    [ "$want_compose" != 1 ] || dnf install -y docker-compose-plugin >&2
+    [ "$want_compose" != 1 ] || retry dnf install -y docker-compose-plugin >&2
   else
-    dnf install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin >&2
-    [ "$want_compose" != 1 ] || dnf install -y docker-compose-plugin >&2
+    retry dnf install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin >&2
+    [ "$want_compose" != 1 ] || retry dnf install -y docker-compose-plugin >&2
   fi
 fi
+stage 'starting Docker'
 [ "$engine_present" = true ] || systemctl enable --now docker >&2
+stage 'verifying Docker'
 docker version >/dev/null
 [ "$want_compose" != 1 ] || docker compose version >/dev/null
