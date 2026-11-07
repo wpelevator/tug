@@ -141,8 +141,13 @@ The agent stops running the `docker compose` CLI and reconciles containers throu
 - **Control on a runtime node.** Installing control and a node on the same host is supported, so a small setup needs no dedicated control VPS. Control's API is then served through the node's managed Caddy, since both need ports 80 and 443. Keep a direct control port bound to loopback or a private node address as break-glass access, so a broken ingress or agent never locks out the fix path.
 - **Builder nodes.** Builds run on a node labelled `builder`: control queues a build command, the agent downloads the source context from control, builds it and uploads the saved image to control the way `deploy --build-local` does. Without a builder node, control builds, as today. This keeps untrusted Dockerfile builds and their CPU and memory use off the host that holds the secrets database.
 
+### M16 — Capabilities and delegated authority
+
+Proposed, after 1.0, and additive, so every step is a minor. The `root` credential `tug control setup` imports is an admin, and the only narrower choices are two coarser roles plus a project list. Automation, CI, teammates and AI agents driving the CLI each need exactly their job's authority, and nothing today lets a client be safely handed less than `deploy` (which includes `exec` and so the workload's secrets). The design is in [Capabilities](capabilities.md): operations and resources instead of route roles, grants with typed caveats, sessions that intersect with their parent and cascade on revoke, plans with risk tags, approvals bound to a plan hash, and explained denials. Steps: operation table with a golden compatibility test, grants with `whoami` and per-secret grants, sessions and attribution, plan and risks, approvals, then consumers. The engine reduces the blast radius of confused or injected automation and leaked narrow credentials; it is not tenant isolation ([product decisions](#product-decisions-and-reasoning)). Judge it by whether a consumer can be handed less than root and whether its denials are understandable.
+
 ## Later / only if needed
 
+- **Consoles and agent-built control planes**: a console that is a client of the controller (never embedded in it), hosting dashboards that users prompt an agent to build, plus a generated OpenAPI description, a change feed, `tug mcp` for desktop and IDE frontends and a remote MCP endpoint with OAuth for hosted ones. Depends on M16; the options and the demo design are in [Consoles](consoles.md).
 - Warm-standby control plane (WAL shipping or periodic backup plus promote), see [Positioning](#positioning).
 - A stable cross-node name and port for rolling services, so clients need not switch to an ingress hostname or discover the serving revision's port. Revisit only with a concrete multi-node need; a solution must work over the operator's network and must not assume a Tug-owned overlay.
 - Avoid recreating client containers when cross-node `extra_hosts` endpoints change, while preserving health-aware names and zero-downtime rollouts. This is an endpoint-update problem, not a reason to recreate a Tug-owned overlay.
@@ -240,6 +245,15 @@ The test layers, the metrics milestones are held to and the backlog of mocked te
 - [x] One mutual-TLS port for operators, CI and nodes, certificates from control's private CA, immutable node IDs, and `tug doctor` certificate expiry and clock skew ([Control plane](control-plane.md#authentication-and-pki), [Nodes](nodes.md))
 - [ ] M15 control on a runtime node behind the managed Caddy, with a break-glass control port
 - [ ] M15 builds on `builder`-labelled nodes, uploaded to control as saved images
+- [ ] M16 operation table (`ROUTES`) with a golden test that the three roles decide every route as before, live operations split
+- [ ] M16 grants, `decide`, `credential create --grant`, `whoami`, `authz/check`, explained denials, root-equivalence warnings, per-secret grants
+- [ ] M16 sessions with lineage, intersection and cascade revoke, `on_behalf_of` attribution, `tug session`, `tug login`, `tug sudo`
+- [ ] M16 deployment plan route, risk tags, `denyRisks` and `images` caveats
+- [ ] M16 proposals and approvals bound to a plan hash
+- [ ] Consoles: generated OpenAPI from the operation table, change feed and events cursor, idempotency keys ([Consoles](consoles.md#controller-changes))
+- [ ] Consoles: `tug mcp` over stdio with a curated tool set, annotations from effect classes and a tool list that follows the session's grants ([Generic AI frontends](consoles.md#generic-ai-frontends-and-mcp))
+- [ ] Consoles: remote MCP endpoint with OAuth, one session per client connection, for hosted chat frontends
+- [ ] Consoles: demo console deployed as a Tug project, hosting dashboards published with `publish_dashboard` ([Demo console](consoles.md#demo-console))
 - [ ] Scaled WordPress reference example (code in image, shared uploads) validated on real hosts
 - [ ] Mocked tests from the [Testing](testing.md#backlog-of-mocked-tests-proposed) backlog: revisions started per deployment and old-schema database behavior
 - [x] M13 uncloud release baseline rechecked and updated in [Positioning](#positioning); repeat at the start of each milestone
