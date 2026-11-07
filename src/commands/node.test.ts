@@ -20,6 +20,11 @@ function deps(over: Partial<PlanDeps>, answers: string[] = []): PlanDeps & { ask
       asked.push(question);
       return answers.shift() ?? '';
     },
+    // The menu's highlighted entry is what enter takes, so the default stands in for a person pressing enter.
+    pickOne: async (question, _labels, initial) => {
+      asked.push(question);
+      return initial;
+    },
     ...over,
     asked,
   };
@@ -69,12 +74,12 @@ test('a terminal offers Docker, a private address first, ingress and a final con
         { interface: 'eth0', address: '203.0.113.7', private: false },
       ],
     },
-    ['y', '', 'y', ''],
+    ['y', 'y', ''],
   );
   const o = opts();
   await quiet(() => planNodeAdd('root@app1', 'app1', o, d));
   assert.equal(o.installDocker, true, 'accepting the offer installs Docker');
-  assert.equal(o.address, '10.0.0.7', 'the empty answer takes the private address');
+  assert.equal(o.address, '10.0.0.7', 'enter on the highlighted entry takes the private address');
   assert.equal(o.ingress, true, 'accepting the ingress question enables ingress');
   assert.equal(d.asked.length, 4, 'Docker, address, ingress and confirmation are each asked once');
 });

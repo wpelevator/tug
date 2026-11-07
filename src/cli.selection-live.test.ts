@@ -11,6 +11,7 @@ import { WebSocketServer } from 'ws';
 import { Pki, identityUri, serverNames } from './pki.ts';
 import { packageVersion } from './image.ts';
 import { serverTlsOptions } from './tls-server.ts';
+import { keysFor, menuCount } from './test-keys.ts';
 
 const exec = promisify(execFile);
 test('live command selection sends exact services, eligible nodes and remote arguments without contaminating stdout', async () => {
@@ -97,9 +98,9 @@ test('live command selection sends exact services, eligible nodes and remote arg
     let answered = 0;
     running.child.stderr!.on('data', (data) => {
       text += String(data);
-      const count = (text.match(/\(or q to cancel\): /g) || []).length;
+      const count = menuCount(text);
       while (answered < count && answered < answers.length)
-        running.child.stdin!.write(answers[answered++] + '\n');
+        running.child.stdin!.write(keysFor(answers[answered++], text));
     });
     return running;
   };
@@ -127,7 +128,7 @@ test('live command selection sends exact services, eligible nodes and remote arg
         );
       assert.ok(!result.stdout.includes('Choose'), 'menus must not mix with remote output');
       assert.ok(
-        !result.stderr.includes('3) worker-only'),
+        !result.stderr.includes('worker-only (online)'),
         'node choices must exclude nodes outside the selected service placement',
       );
       if (operation === 'inspect')

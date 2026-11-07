@@ -69,3 +69,57 @@ test('async process helpers preserve errors and bound captured output', async ()
     'captured output must retain only a bounded tail',
   );
 });
+
+test('runStep hides output, turns markers into stages, and reports the tail on failure', async () => {
+  const stages: string[] = [];
+  const details: string[] = [];
+  const seen: string[] = [];
+  const write = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((chunk: string) => (seen.push(String(chunk)), true)) as typeof write;
+  try {
+    const { runStep, STAGE_MARKER } = await import('./cli-process.ts');
+    const script = `
+      console.log(${JSON.stringify(STAGE_MARKER)} + 'Pulling image');
+      process.stdout.write('layer 1: Downloading\\rlayer 1: Extracting\\n');
+      console.error('layer 2: Pull complete');
+      console.log(${JSON.stringify(STAGE_MARKER)} + 'Starting');`;
+    await runStep(process.execPath, ['-e', script], {
+      progress: { stage: (label) => stages.push(label), detail: (line) => details.push(line) },
+    });
+    assert.deepEqual(stages, ['Pulling image', 'Starting'], 'marker lines should become stages');
+    assert.ok(
+      details.includes('layer 1: Downloading') && details.includes('layer 1: Extracting'),
+      'carriage-return redraws should count as separate lines for the status line',
+    );
+    assert.ok(
+      !details.some((line) => line.includes('::tug::')),
+      'markers should not appear as output lines',
+    );
+    assert.deepEqual(seen, [], 'a successful quiet step must print nothing');
+    await assert.rejects(
+      runStep(process.execPath, ['-e', "console.error('boom: no space left'); process.exit(3)"]),
+      /failed \(exit 3\)\nboom: no space left/,
+      'a failure should include the lines the step printed',
+    );
+  } finally {
+    process.stderr.write = write;
+  }
+});
+
+test('runStep streams output under --verbose and accepts stdin', async () => {
+  const { runStep, setVerbose } = await import('./cli-process.ts');
+  const seen: string[] = [];
+  const write = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((chunk: string) => (seen.push(String(chunk)), true)) as typeof write;
+  try {
+    setVerbose(true);
+    await runStep(
+      process.execPath,
+      ['-e', "process.stdin.on('data', (d) => console.log('got ' + d))"],
+      { input: 'credential' },
+    );
+  } finally {
+    process.stderr.write = write;
+  }
+  assert.deepEqual(seen, ['got credential\n'], 'verbose mode should stream the step output');
+});

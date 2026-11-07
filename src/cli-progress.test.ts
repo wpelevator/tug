@@ -62,3 +62,36 @@ test('scoped progress stops heartbeats on success, early return and rejection', 
     );
   }
 });
+
+test('a terminal gets one live line and finished stages stay as lines', (t) => {
+  t.mock.timers.enable({ apis: ['Date', 'setInterval'], now: 0 });
+  let screen = '';
+  const progress = createProgress({
+    live: { write: (text) => (screen += text), columns: () => 60 },
+  });
+  progress.stage('Pulling image');
+  progress.detail('abc123: Pull complete');
+  t.mock.timers.tick(2_000);
+  assert.match(
+    screen,
+    /\[2s\] Pulling image · abc123: Pull complete/,
+    'the live line shows elapsed time and the latest output',
+  );
+  progress.suspend();
+  const suspended = screen;
+  t.mock.timers.tick(2_000);
+  assert.equal(screen, suspended, 'a suspended line must not draw over another process');
+  progress.resume();
+  progress.stage('Starting');
+  progress.stop();
+  assert.match(
+    screen,
+    /\[4s\] Pulling image\n/,
+    'a finished stage should remain with its elapsed time',
+  );
+  assert.match(screen, /\[0s\] Starting\n$/, 'stopping keeps the last stage as a finished line');
+  assert.ok(!screen.includes('[10s]'), 'a terminal does not need the ten-second heartbeat lines');
+  // eslint-disable-next-line no-control-regex
+  for (const text of screen.split(/\r\x1b\[K/))
+    assert.ok(text.replace('\n', '').length <= 60, 'live lines must fit the terminal width');
+});

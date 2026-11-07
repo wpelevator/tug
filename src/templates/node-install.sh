@@ -4,4 +4,8 @@ cat > /etc/tug/agent.env <<'ENV'
 {{ENV}}ENV
 chmod 0600 /etc/tug/agent.env
 docker rm -f tug-agent >/dev/null 2>&1 || true
+# Pull here, not inside `docker run`, so the pull is a named stage and a locally loaded image is left alone.
+echo '::tug:: Pulling the agent image'
+docker image inspect {{IMAGE_SH}} >/dev/null 2>&1 || docker pull --quiet {{IMAGE_SH}} >/dev/null
+echo '::tug:: Starting the agent'
 docker run -d --name tug-agent --restart unless-stopped --env-file /etc/tug/agent.env {{RUN_FLAGS}}-v /var/run/docker.sock:/var/run/docker.sock -v /var/lib/tug:/var/lib/tug {{IMAGE_SH}} agent

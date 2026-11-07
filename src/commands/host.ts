@@ -10,7 +10,9 @@ import {
   sortCandidates,
 } from '../cli-onboarding.ts';
 import type { AddressCandidate } from '../cli-onboarding.ts';
-import { runCapture, runLocal, templatesDir } from './context.ts';
+import { runStep } from '../cli-process.ts';
+import type { StepProgress } from '../cli-process.ts';
+import { runCapture, templatesDir } from './context.ts';
 
 export async function preflightRemote(
   target: string,
@@ -19,12 +21,14 @@ export async function preflightRemote(
     ports = [],
     minDiskMb = 1024,
     compose = false,
+    progress,
   }: {
     controlUrl?: string;
     ports?: number[];
     minDiskMb?: number;
     /** Requires the Compose plugin; only the control host runs Compose, nodes need the Docker Engine alone. */
     compose?: boolean;
+    progress?: StepProgress;
   } = {},
 ): Promise<void> {
   const checks: [string, string, string][] = [
@@ -70,7 +74,7 @@ export async function preflightRemote(
   const script = `set -e
 ${checks.map(([name, cmd, fix]) => `echo "preflight: ${name}"; (${cmd}) || { echo "FAILED ${name}: ${fix}" >&2; exit 20; }`).join('\n')}
 `;
-  await runLocal('ssh', ['--', target, script]);
+  await runStep('ssh', ['--', target, script], { progress });
 }
 
 /**
@@ -85,8 +89,11 @@ export function immutableLocalTag(imageTag: string, imageId: string): string {
 export async function transferTugImage(
   target: string,
   imageTag: string,
-  stage: (label: string) => void,
+  progressOrStage: StepProgress | ((label: string) => void),
 ): Promise<string> {
+  const progress =
+    typeof progressOrStage === 'function' ? { stage: progressOrStage } : progressOrStage;
+  const { stage } = progress;
   stage(`Checking architecture on ${target}`);
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-runtime-'));
   const archive = path.join(directory, 'image.tar.gz');
@@ -94,7 +101,7 @@ export async function transferTugImage(
   try {
     const uname = await runCapture('ssh', ['--', target, 'uname -m']);
     stage(`Building Tug image ${imageTag}`);
-    await runLocal('docker', localImageBuildArgs(imageTag, uname));
+    await runStep('docker', localImageBuildArgs(imageTag, uname), { progress });
     const runTag = immutableLocalTag(
       imageTag,
       (await runCapture('docker', ['image', 'inspect', '--format', '{{.Id}}', imageTag])).trim(),
@@ -102,13 +109,17 @@ export async function transferTugImage(
     stage(`Exporting Tug image ${imageTag}`);
     await saveImageArchive(imageTag, archive);
     stage(`Transferring Tug image to ${target}`);
-    await runLocal('scp', ['--', archive, `${target}:${remote}`]);
+    await runStep('scp', ['-q', '--', archive, `${target}:${remote}`], { progress });
     stage(`Loading Tug image on ${target}`);
-    await runLocal('ssh', [
-      '--',
-      target,
-      `set -eu\ntrap ${sh(`rm -f ${sh(remote)}`)} EXIT\ndocker load --input ${sh(remote)}\ndocker tag ${sh(imageTag)} ${sh(runTag)}`,
-    ]);
+    await runStep(
+      'ssh',
+      [
+        '--',
+        target,
+        `set -eu\ntrap ${sh(`rm -f ${sh(remote)}`)} EXIT\ndocker load --input ${sh(remote)}\ndocker tag ${sh(imageTag)} ${sh(runTag)}`,
+      ],
+      { progress },
+    );
     return runTag;
   } finally {
     await fs.rm(directory, { recursive: true, force: true });
@@ -120,12 +131,20 @@ export async function dockerBootstrap(): Promise<string> {
 }
 
 /** Installs Docker over SSH; `compose` also installs the Compose plugin, which only the control host needs. */
-export async function bootstrapDocker(target: string, compose = false): Promise<void> {
-  await runLocal('ssh', [
-    '--',
-    target,
-    `${compose ? 'TUG_INSTALL_COMPOSE=1 ' : ''}sh -eu -c ${sh(await dockerBootstrap())}`,
-  ]);
+export async function bootstrapDocker(
+  target: string,
+  compose = false,
+  progress?: StepProgress,
+): Promise<void> {
+  await runStep(
+    'ssh',
+    [
+      '--',
+      target,
+      `${compose ? 'TUG_INSTALL_COMPOSE=1 ' : ''}sh -eu -c ${sh(await dockerBootstrap())}`,
+    ],
+    { progress },
+  );
 }
 
 /** Whether the host already has the Docker Engine (and the Compose plugin when `compose`). */

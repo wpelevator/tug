@@ -8,6 +8,7 @@ import { promisify } from 'node:util';
 import { createTransport } from './agent-credential.ts';
 import { openDb } from './db.ts';
 import { startMtlsControl } from '../tests/helpers.ts';
+import { keysFor, menuCount } from './test-keys.ts';
 
 const exec = promisify(execFile);
 const terminal = `data:text/javascript,${encodeURIComponent('process.stdin.isTTY = true; process.stdout.isTTY = true;')}`;
@@ -53,9 +54,9 @@ test('CLI selections mutate only chosen resources, preserve output and abort wit
     let answered = 0;
     running.child.stderr!.on('data', (data) => {
       output += String(data);
-      const questions = (output.match(/\(or q to cancel\): /g) || []).length;
+      const questions = menuCount(output);
       while (answered < questions && answered < answers.length)
-        running.child.stdin!.write(answers[answered++] + '\n');
+        running.child.stdin!.write(keysFor(answers[answered++], output));
     });
     return running;
   };
@@ -98,7 +99,7 @@ test('CLI selections mutate only chosen resources, preserve output and abort wit
       2,
       'cancellation must preserve every secret',
     );
-    const removed = await run(['secret', 'remove'], ['', '2']);
+    const removed = await run(['secret', 'remove'], ['2']);
     assert.equal(
       JSON.parse(removed.stdout).ok,
       true,
@@ -204,11 +205,11 @@ test('CLI selections mutate only chosen resources, preserve output and abort wit
         (error: Error & { stderr?: string }) => {
           assert.match(
             error.stderr || '',
-            /1\) n1/,
+            /\[ \] n1/,
             'bulk node choices should include registered nodes with SSH config',
           );
           assert.ok(
-            !error.stderr?.includes('2) n2'),
+            !error.stderr?.includes('n2 ('),
             'bulk node choices should exclude nodes without SSH config',
           );
           return /cancelled/.test(error.message);

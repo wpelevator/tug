@@ -12,7 +12,9 @@ import {
 } from '../cli-install.ts';
 import type { AddressCandidate } from '../cli-onboarding.ts';
 import { formatNodePlan, inferNodeName, isValidNodeName } from '../cli-onboarding.ts';
-import { ask, canPrompt, choose, confirm } from '../cli-prompt.ts';
+import { ask, canPrompt, confirm } from '../cli-prompt.ts';
+import { terminalPicker } from '../cli-pick.ts';
+import { runStep } from '../cli-process.ts';
 import type { Prompter } from '../cli-prompt.ts';
 import { isNodeHost } from '../node-address.ts';
 import { assertImagePublished, resolveImage } from '../image.ts';
@@ -112,15 +114,16 @@ async function installNodeIdentity(
     assertImagePublished(resolveImage(o.image, o.buildLocalImage));
     if (o.installDocker) {
       progress.stage(`Installing Docker on node ${name}`);
-      await bootstrapDocker(sshTarget);
+      await bootstrapDocker(sshTarget, false, progress);
     }
     progress.stage(`Checking host ${name}`);
     await preflightRemote(sshTarget, {
       controlUrl: connectUrl ?? cfg.credential?.url,
+      progress,
     });
     const requestedImage = resolveImage(o.image, o.buildLocalImage);
     const image = o.buildLocalImage
-      ? await transferTugImage(sshTarget, requestedImage, progress.stage)
+      ? await transferTugImage(sshTarget, requestedImage, progress)
       : requestedImage;
     const started = new Date().toISOString();
     if (repair)
@@ -153,7 +156,7 @@ async function installNodeIdentity(
       IMAGE_SH: sh(image),
       RUN_FLAGS: `${HOST_NETWORK_FLAG} `,
     });
-    await runLocal('ssh', ['--', sshTarget, remote]);
+    await runStep('ssh', ['--', sshTarget, remote], { progress });
     if (o.ingress)
       await request('POST', `/api/v1/nodes/${encodeURIComponent(name)}/ingress`, { enabled: true });
     const result = { ok: true, node: response.node, ...(o.ingress ? { ingress: true } : {}) };
@@ -189,6 +192,8 @@ export interface PlanDeps {
   hasDocker: (target: string) => boolean;
   discover: (target: string) => AddressCandidate[];
   prompt: Prompter;
+  /** The inter-node address menu: the labels to show and the entry enter takes; resolves to the chosen index. */
+  pickOne: (question: string, labels: readonly string[], initial: number) => Promise<number>;
 }
 
 const realPlanDeps = (): PlanDeps => ({
@@ -196,6 +201,7 @@ const realPlanDeps = (): PlanDeps => ({
   hasDocker: (target) => hostHasDocker(target),
   discover: discoverAddresses,
   prompt: ask,
+  pickOne: (question, labels, initial) => terminalPicker.one(question, labels, initial),
 });
 
 /**
@@ -226,11 +232,10 @@ export async function planNodeAdd(
         none,
       ];
       // A public address would carry cross-node traffic in the clear, so it is never the default.
-      const index = await choose(
+      const index = await deps.pickOne(
         `Which address should other nodes use to reach ${name}?`,
         options,
         candidates[0].private ? 0 : options.length - 1,
-        prompt,
       );
       if (index < candidates.length) o.address = candidates[index].address;
     }

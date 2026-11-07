@@ -10,6 +10,8 @@ export type Prompter = (question: string, hidden?: boolean) => Promise<string>;
 
 /** Ask a line of text on the terminal; with `hidden` the typed characters are not echoed. */
 export const ask: Prompter = async (question, hidden = false) => {
+  // A keyboard menu leaves stdin unreferenced so a finished menu cannot hold the process open; a question needs it held.
+  process.stdin.ref?.();
   const muted = { on: false };
   const output = new Writable({
     write(chunk, _encoding, callback) {
@@ -47,22 +49,5 @@ export async function confirm(
     if (answer === '') return fallback;
     if (answer === 'y' || answer === 'yes') return true;
     if (answer === 'n' || answer === 'no') return false;
-  }
-}
-
-/** Pick one of `options` by number; an empty answer takes the option at `fallback`. */
-export async function choose(
-  question: string,
-  options: readonly string[],
-  fallback = 0,
-  prompt: Prompter = ask,
-): Promise<number> {
-  console.error(question);
-  options.forEach((option, index) => console.error(`  ${index + 1}) ${option}`));
-  for (;;) {
-    const answer = (await prompt(`Choose 1-${options.length} (${fallback + 1}): `)).trim();
-    if (answer === '') return fallback;
-    const index = Number(answer) - 1;
-    if (Number.isInteger(index) && index >= 0 && index < options.length) return index;
   }
 }

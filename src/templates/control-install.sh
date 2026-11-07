@@ -3,7 +3,9 @@ mkdir -p /opt/tug-control /var/lib/tug-control
 chmod 700 /var/lib/tug-control
 cat > /opt/tug-control/docker-compose.yml <<'YAML'
 {{COMPOSE}}YAML
+echo '::tug:: Pulling the control image and starting control'
 docker compose -f /opt/tug-control/docker-compose.yml up -d
+echo '::tug:: Waiting for control to create its CA'
 # Wait for the CA so credential issuance does not race the first start.
 for i in $(seq 1 60); do
   docker exec {{CONTAINER_SH}} test -s /data/pki/ca.crt 2>/dev/null && exit 0
