@@ -354,6 +354,81 @@ test('moving a service with data to another node needs --move and holds its writ
   }
 });
 
+test('a writer that moves together with its database is held until the data is restored', async () => {
+  const s = await makeServer();
+  try {
+    const nodeA = await post(s.base, '/api/v1/nodes/register', { name: 'a' });
+    await post(s.base, '/api/v1/nodes/register', { name: 'b' });
+    // A WordPress-shaped project: web keeps files in a volume, so moving the project to another node moves both
+    // services, and the refusal asks for both to be acknowledged.
+    const compose = (node: string) =>
+      normalized({
+        services: {
+          db: {
+            image: 'mariadb',
+            volumes: [{ type: 'volume', source: 'data', target: '/var/lib/mysql' }],
+            'x-tug': { placement: { nodes: [node] } },
+          },
+          web: {
+            image: 'wordpress',
+            depends_on: ['db'],
+            environment: { WORDPRESS_DB_HOST: 'db' },
+            volumes: [{ type: 'volume', source: 'content', target: '/var/www/html/wp-content' }],
+            'x-tug': { placement: { nodes: [node] } },
+          },
+        },
+        volumes: { data: {}, content: {} },
+      });
+    const deploy = (version: string, node: string, moves?: string[]) =>
+      fetch(`${s.base}/api/v1/deployments`, {
+        method: 'POST',
+        headers: op,
+        body: JSON.stringify({ project: 'site', version, compose: compose(node), moves }),
+      });
+    const first = await deploy('v1', 'a');
+    assert.equal(first.status, 200, 'the first deployment places both services on a');
+    const desired = (await json(first)).desiredState;
+    await fetch(`${s.base}/agent/v1/status`, {
+      method: 'POST',
+      headers: { ...op, 'x-tug-test-node': nodeA.nodeId },
+      body: JSON.stringify({
+        projects: [
+          {
+            project: 'site',
+            observedVersion: desired.version,
+            observedRevision: desired.revision,
+            health: 'serving',
+          },
+        ],
+      }),
+    });
+    const refused = await deploy('v2', 'b');
+    assert.equal(refused.status, 409, 'moving both services without --move should be refused');
+    assert.match(
+      (await json(refused)).error,
+      /db, web would start empty.*--move db --move web/,
+      'the refusal asks for both moves to be acknowledged',
+    );
+    assert.equal(
+      (await deploy('v2', 'b', ['db', 'web'])).status,
+      200,
+      'acknowledging both moves deploys',
+    );
+    const work = await json(
+      await fetch(`${s.base}/agent/v1/work`, {
+        headers: { ...op, 'x-tug-test-node': nodeA.nodeId },
+      }),
+    );
+    assert.deepEqual(
+      work.holds,
+      { site: ['web'] },
+      'web is held although it moved too, so it cannot serve against the empty database',
+    );
+  } finally {
+    await s.close();
+  }
+});
+
 test('a deploy refused because another is rolling out names the command that cancels it', async () => {
   const s = await makeServer();
   try {
