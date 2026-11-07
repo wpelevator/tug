@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { planNodeAdd } from './node.ts';
+import { agentIdentityArgs, planNodeAdd } from './node.ts';
 import type { NodeIdentityOpts, PlanDeps } from './node.ts';
 
 const opts = (over: Partial<NodeIdentityOpts> = {}): NodeIdentityOpts => ({
@@ -94,5 +94,18 @@ test('declining the final confirmation cancels before anything changes', async (
     quiet(() => planNodeAdd('root@app1', 'app1', opts({ ingress: false, address: '10.0.0.7' }), d)),
     /cancelled; nothing was changed/,
     'saying no stops node add with a clear message',
+  );
+});
+
+test('node add asks the host for its installed key, replace and repair ask for a new one', () => {
+  assert.equal(
+    agentIdentityArgs('create', 'app1'),
+    "identity --current 'app1'",
+    're-running node add must reuse an enrolled agent key so control sees an idempotent retry',
+  );
+  assert.equal(
+    agentIdentityArgs('replace', 'app1'),
+    'identity',
+    'node replace and node repair must rotate the key, so they never ask for the installed one',
   );
 });

@@ -152,6 +152,7 @@ The agent stops running the `docker compose` CLI and reconciles containers throu
 - A minimal read-only web dashboard over `/api/v1/status` and `/api/v1/events`.
 - Load-balanced service names and multiple routes per service, wildcard certificates.
 - Managed DNS convenience domain for ingress, similar to uncloud's `*.uncloud.run`.
+- Proposals evaluated and not started, kept as local working files until one is accepted: a Swarm-backed Tug (`plan-swarm-backend.md`), an SSH hub-and-spoke controller instead of outbound agents (`plan-ssh-architecture.md`), file-mounted workload secrets (`plan-file-secrets.md`), staging as a project per environment rather than new deploy machinery (`plan-staging.md`), and removing container recreation on topology changes with cross-project service names (`plan-service-dns.md`, `plan-project-exports.md`). Each needs a demonstrated need and a comparison against the contracts frozen at 1.0 before it moves out of this list.
 
 ## Product decisions and reasoning
 
@@ -167,11 +168,24 @@ Claims must match verified behavior. Image rollback does not undo data, schema o
 
 ## Sequencing
 
-1. Review the current security work against the trusted-operator contract. Preserve independently useful data-safety and confidentiality fixes, assess grants and restrictions on their own merits, and do not claim a tenant-isolation boundary.
-2. Prove recovery on disposable hosts using published artifacts: install WordPress, deploy a meaningful change, back up database, uploads, control state, credentials and image artifacts; recover a lost workload host and then a lost control plane onto fresh storage, reconnect the fleet and verify the site. Record elapsed time, data-loss window, manual actions and gaps; fix and retest failures. The control and workload backups are separate and both must be recoverable.
-3. Improve the ordinary operator experience: clear human-readable status and errors, backup freshness and actionable alerts, and explicit deployment progress and success semantics including ingress acknowledgement where promised.
-4. Harden the actual production path: bounded work and storage, safe build inputs, credential handling, and repeatable release, install and upgrade checks.
+1. **Done:** review the security work against the trusted-operator contract. The independently useful data-safety and confidentiality fixes are in; the Docker-socket finding (SEC-01) is accepted by design and recorded as such in [Security](security.md); grants stay out, and no tenant-isolation boundary is claimed.
+2. **Done on 0.9.0, to repeat on the release candidate:** prove recovery on disposable hosts using published artifacts: install WordPress, back up database, uploads, control state, credentials and image artifacts; recover a lost workload host and then a lost control plane onto fresh storage and verify the site ([Real-host evaluation](real-host-evaluation.md#recovery-drill-with-the-published-090-release-2-november-2026)). The control and workload backups are separate and both must be recoverable.
+3. **Tag 1.0.0** when the [gate below](#road-to-100) passes.
+4. **Then:** actionable backup alerts and deployment results as outbound webhooks (the smallest slice of M8 and M9, since `backup list --check` is only an interim), the rest of observability, and the production-path hardening that remains: bounded uploads and queue occupancy (SEC-09) and build-input confidentiality (SEC-06).
 5. Reconsider flexible node roles, release hooks, scaled WordPress, additional networking, dashboards and stronger isolation only for a demonstrated need. Co-locating control is attractive for small installations but requires an independently tested off-host recovery path and an explicit host trust model.
+
+## Road to 1.0.0
+
+A 1.0 tag promises that [these contracts](releases.md#what-10-freezes) change only compatibly inside a major, so the gate is about being able to keep that promise, not about features:
+
+- [x] Control and agent databases carry a schema version and ordered migrations, copy a database aside before the first migration and refuse one from a newer Tug ([Architecture](architecture.md#sqlite-storage)); the committed `v0.2.0` and `v0.14.0` schemas upgrade in `src/db-migrate.test.ts`.
+- [x] Version skew follows semver: only a newer major (or `0.minor` before 1.0) is refused, and `releases.md` ties the bump to wire compatibility.
+- [x] The public contracts are listed in [Releases](releases.md#what-10-freezes) and the `x-tug` schema is published and linted against the validator.
+- [x] SEC-01 is recorded as accepted by design instead of left open; no other original finding is open.
+- [ ] A real-host run of the release candidate [follows the README quick start as written, upgrades from 0.14 and exercises the control rollback lane](real-host-evaluation.md#100-release-candidate-on-qemu-vms-7-november-2026): done on QEMU VMs for the quick start, the upgrade, migration and agent upgrade, and the rollback lane including the `.pre-v<N>.bak` copy; still to do are the recovery drill with S3-compatible workload backups and, once the 1.0.0 image is published, a smoke test of the published image.
+- [ ] Decide whether the two partly fixed findings are acceptable at 1.0 or gate it: SEC-06 (default credential placement, unknown secrets in build contexts) and SEC-09 (unbounded upload totals, preparation inside the global writer).
+
+Not gates: webhooks, metrics, `x-tug.release`, `tug move`, builder nodes, the Swarm and SSH proposals. They are additive and ship as minors.
 
 M10 is done; M12 is cancelled and its residual limitations are deferred. M14 and much of M11 are implemented; the current priority is verifying the complete operating journey rather than repeating those milestones. The milestone descriptions and checklist record existing work and candidates, not commitments that override this sequence.
 
@@ -231,4 +245,9 @@ The test layers, the metrics milestones are held to and the backlog of mocked te
 - [x] M13 uncloud release baseline rechecked and updated in [Positioning](#positioning); repeat at the start of each milestone
 - [x] Guided onboarding: grouped `tug <subject> <verb>` commands, `tug setup`, name inference and `node add` prompts that never run without a terminal
 - [ ] Follow the README quick start, prompts included, on fresh hosts and record the result in [real-host evaluation](real-host-evaluation.md)
+- [x] `tug lint` and the published `x-tug.schema.json`, kept in step with the validator by a test
+- [x] Version skew checked on ordinary traffic (`x-tug-version`, `x-tug-client-version`), following semver, with a CA/credential mismatch diagnosis in `tug doctor`
+- [x] Schema versioning and migrations for control and agent databases
+- [x] Interactive selection of services and nodes, and progress reporting for long-running commands
+- [ ] 1.0.0: the [gate above](#road-to-100) passes and the release is tagged
 - [ ] Each milestone: tests added, README.md and docs updated, its own plan file folded into docs and deleted when done

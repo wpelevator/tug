@@ -3,6 +3,8 @@ import type { ConnectDb, Db } from './db-driver.ts';
 export type { Db } from './db-driver.ts';
 import path from 'node:path';
 import { ensureDir, now } from './util.ts';
+import { addColumnIfMissing, assertSchemaSupported, migrate } from './db-migrate.ts';
+import type { Migration } from './db-migrate.ts';
 import { stateCheck } from './lifecycle.ts';
 import {
   backupRunLifecycle,
@@ -233,17 +235,34 @@ export interface AppliedStateRow {
 /** Shared policy for every driver, including read-only restore validation. */
 export function databaseAccess(connect: ConnectDb) {
   function openSnapshotDb(filename: string): Db {
-    return configure(connect(filename, { readOnly: true }), false);
+    return configure(connect(filename, { readOnly: true }), false, (db) =>
+      assertSchemaSupported(db, 'control', CONTROL_MIGRATIONS),
+    );
   }
 
   async function openDb(filename: string): Promise<Db> {
     await ensureDir(path.dirname(filename));
-    return configure(connect(filename, { readOnly: false }), true, initializeControl);
+    return configure(connect(filename, { readOnly: false }), true, (db) =>
+      migrate(db, CONTROL_MIGRATIONS, { label: 'control', filename }),
+    );
   }
 
   async function openAgentDb(filename: string): Promise<Db> {
     await ensureDir(path.dirname(filename));
     return configure(connect(filename, { readOnly: false }), true, (db) =>
+      migrate(db, AGENT_MIGRATIONS, { label: 'agent', filename }),
+    );
+  }
+
+  return { openDb, openAgentDb, openSnapshotDb };
+}
+
+/** Agent state: what it last applied and announced. */
+const AGENT_MIGRATIONS: readonly Migration[] = [
+  {
+    version: 1,
+    name: 'baseline',
+    up: (db) =>
       db.exec(`
 CREATE TABLE IF NOT EXISTS applied_state(
   project TEXT PRIMARY KEY,
@@ -259,13 +278,29 @@ CREATE TABLE IF NOT EXISTS event_state(
   phase TEXT NOT NULL
 );
 `),
-    );
-  }
+  },
+];
 
-  return { openDb, openAgentDb, openSnapshotDb };
-}
+/** Columns releases before 0.8 lacked on `nodes`; `CREATE TABLE IF NOT EXISTS` never added them to an existing table. */
+const LEGACY_NODE_COLUMNS: readonly [string, string][] = [
+  ['labels_json', 'TEXT'],
+  ['key_hash', 'TEXT'],
+  ['disabled_at', 'TEXT'],
+  ['cert_not_after', 'TEXT'],
+  ['last_renewed_at', 'TEXT'],
+  ['clock_skew_ms', 'INTEGER'],
+  ['clock_observed_at', 'TEXT'],
+];
 
-function initializeControl(db: Db): void {
+/**
+ * Control state. Append a step for every schema change, never edit a released one (see docs/releases.md). Step 1 is the
+ * schema of every release from 0.8; it creates a fresh database and brings an older one up to it.
+ */
+const CONTROL_MIGRATIONS: readonly Migration[] = [
+  { version: 1, name: 'baseline', up: baselineControl },
+];
+
+function baselineControl(db: Db): void {
   db.exec(`
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, name TEXT UNIQUE NOT NULL, current_deployment_id TEXT, created_at TEXT, updated_at TEXT);
@@ -292,6 +327,8 @@ CREATE TABLE IF NOT EXISTS service_holds(project_id TEXT NOT NULL, service TEXT 
 CREATE UNIQUE INDEX IF NOT EXISTS backup_runs_slot ON backup_runs(schedule_id, scheduled_for) WHERE trigger='schedule';
 CREATE INDEX IF NOT EXISTS backup_runs_target ON backup_runs(project_id, target, finished_at);
 `);
+  for (const [column, definition] of LEGACY_NODE_COLUMNS)
+    addColumnIfMissing(db, 'nodes', column, definition);
   const row = db.get('SELECT value FROM meta WHERE key = ?', 'schema_created_at');
   if (!row) db.run('INSERT INTO meta(key,value) VALUES(?,?)', 'schema_created_at', now());
 }

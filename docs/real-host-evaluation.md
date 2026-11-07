@@ -222,3 +222,60 @@ For control recovery, an updated control backup was copied off-host. The test co
 A second control backup cycle included a small Tug-built image. After restoring that backup into another fresh control data directory, the disposable probe container and its local image were removed from the replacement node. Its agent downloaded the retained artifact from restored control and recreated the container; the file baked into the image contained the expected marker. An initial remote-build attempt launched from the repository directory with an absolute Compose path failed with `source context has unsafe entries or exceeds expanded limits`; running the same deployment from its own clean context directory succeeded. The cause of the first rejection was not established.
 
 A further control recovery used the other VPS: a separate control container was bootstrapped on a distinct port and empty data directory without replacing that host’s pre-existing control instance. The off-host backup containing the built image was copied into the new data directory, restored using the temporary bootstrap credential, and activated by restart. The original test control was stopped to prevent two active authorities. The original operator credential then worked with a control URL override, and `node replace` repointed the replacement agent to the recovered control; the node reported online and the backup catalog was present. The probe’s local container and image were deleted once more, and the agent re-downloaded the restored built image from control on the new host; the image marker matched and WordPress returned HTTP 200. This confirms manual cross-host control recovery for this topology, but the replacement host also held the test object store and site, so it did not test simultaneous loss of that host or its object store. `node add` for the existing node returned 409 and required the identity-replacement command.
+
+## 1.0.0 release candidate on QEMU VMs, 7 November 2026
+
+A partial run of the [Road to 1.0.0](roadmap.md#road-to-100) gate on two fresh Ubuntu 24.04.5 arm64 VMs under QEMU with hardware acceleration on an Apple Silicon laptop: 2 vCPU, 3 GB RAM and a 19 GB disk each, a second NIC joining them on a private `10.0.0.0/24` link, NAT to the internet and no public IPs. vm1 ran control and the node `app1`, vm2 the node `app2`. The baseline used the published `@wpelevator/tug@0.14.0` CLI and `ghcr.io/wpelevator/tug:0.14.0` image. The candidate was the `release/1.0-prep` branch with its changesets applied (version 1.0.0), packed with `npm pack` and installed as a tarball, with the image built on the laptop and copied to the VMs by `--build-local-image`, so the published-image pipeline was not exercised. This is arm64, not the amd64 of earlier runs, and not a real VPS network: no public DNS, Let's Encrypt, NAT between hosts or latency.
+
+**Baseline on 0.14.0.** `tug setup root@vm1 --install-docker` took about 60 seconds including the Docker install. `tug node add` took about 8 seconds on the host that had Docker and 50 seconds on the one that did not. MariaDB 11.4.8 and WordPress 6.8.3 were deployed on `app1` (about 33 seconds), WordPress was installed through its web installer, and an upload sentinel file was written. The 0.14 control database reported `PRAGMA user_version` 0. A control backup was copied off the VM.
+
+| Check | Result |
+|---|---|
+| 1.0.0 CLI against the 0.14 control, read and mutation | Refused with `tug control setup <control host> --yes`, exit status 1 |
+| 0.14 CLI against the 0.14 control | Works |
+| `tug control setup --build-local-image` over the 0.14 control (about 77 seconds) | Control recreated, database at schema 1, `tug.db.pre-v1.bak` present at schema 0 with the same project count, workload containers not restarted |
+| 0.14 agents while control restarted | A few `fetch failed` lines, then quiet; both nodes online without intervention |
+| 0.14 CLI against the 1.0.0 control | Warns `update the CLI with: npm i -g @wpelevator/tug@1.0.0` and proceeds (the 0.14 code only warns about a newer control) |
+| `tug doctor` and `tug doctor --nodes` on the upgraded fleet | `ok: true`, no warnings |
+| Agent upgrade of both nodes | Workload containers kept running; both nodes online on the 1.0.0 image |
+| Site after the upgrade, before any redeploy | Title and upload sentinel hash unchanged |
+| `tug deploy` with a changed environment variable, then `tug control backup` | Succeeded on the migrated database. The container was recreated and the database volume persisted (the site title survived), but the upload sentinel was gone: the compose file declared no volume for `/var/www/html`, so the image's anonymous volume went with the old container. That is a flaw of this test compose file, not of the upgrade. |
+| `tug node add` on an enrolled host | **Failed with `409 node already exists`** (below); passes after the fix: same key hash before and after, node online, workload untouched |
+| `tug node add --name <other>` on an enrolled host | Refused with ``use `tug node replace app1` ``, nothing registered, no stack trace |
+| `tug node replace` | Still rotates the key (key hash changed), node back online |
+
+**Finding, fixed.** `agent identity` built its CSR from the pending key file only, so re-running `tug node add` on an enrolled host sent a new key, which control rightly refused, although [Nodes](nodes.md#image) promised an in-place upgrade. `agent identity --current <node>` now reuses the installed key when the host is enrolled as that node and refuses another name; `node add` asks for it and `node replace` and `node repair` still rotate the key. Covered by `src/agent-credential.test.ts` (reuse, rotation, refusal, fresh host), `src/commands/node.test.ts` (the arguments per mode) and `src/main.test.ts` (the plain error through the real entrypoint), and re-verified on the VMs with a rebuilt candidate.
+
+**Observations, fixed afterwards.** `tug node replace` and `tug node repair` now accept `-y` like `tug node add` (they never ask, and `--all` still needs the nodes declared in `tug.yml`). `--build-local-image` now runs the build on the host under `<tag>-<image id>` (for example `tug:local-a17ed756592c`) as well as `tug:local`, so rebuilding `tug:local` no longer leaves the running control or agent container showing an image ID.
+
+### Rollback lane
+
+Before the rollback the 0.14.0 control image was tagged `tug:rollback` on vm1, as the upgrade docs recommend, and a fresh control backup was taken. Then `tug control setup root@vm1 --image tug:rollback --yes` ran with the 1.0.0 CLI, followed by `tug control setup --build-local-image` to go forward again.
+
+| Check | Result |
+|---|---|
+| Rollback command | About 11 seconds; the 0.14.0 control started on the schema-1 database without complaint. `user_version` stayed 1 and no project data was lost, because schema 1 is the schema every release from 0.8 shares and 0.14 ignores `user_version`. |
+| Writes by the 0.14 control on that database | A secret created through the 0.14 CLI persisted and was still there after going forward again |
+| 1.0.0 agents against the 0.14 control | Refused on every poll (8 times in a minute) with the control's message plus the agent's remedy: `this client (1.0.0) is newer than the control running 0.14.0 … its containers keep running, and it resumes once the control is upgraded or the agent is rolled back to the control's version` |
+| Workloads during the refusal | MariaDB and WordPress kept running and the site answered HTTP 200 |
+| Status while agents were refused | `tug status` showed both nodes `stale` after 60 seconds, but `tug node list` kept showing them `online` with an old last-seen time |
+| 1.0.0 CLI against the rolled-back control | Refused with `tug control setup <control host> --yes`, as designed; the 0.14 CLI worked |
+| Going forward again with `--build-local-image` | About 17 seconds; no migration ran (`user_version` already 1) and `tug.db.pre-v1.bak` was not rewritten (same timestamp as the first upgrade); both agents resumed within the poll interval with nothing logged and both nodes online |
+| A database from a newer Tug (`user_version` set to 2 on the stopped control) | The 1.0.0 control refused to start with ``the control database is at schema version 2, newer than the 1 this Tug supports; upgrade Tug, or restore a backup taken by this version``, left the file untouched (still version 2, same project count) and the container restarted in a loop. Setting the version back to 1 and starting it recovered everything. |
+
+**Observations, fixed afterwards.** The refusal to open a newer database used to print a stack trace in the control's log. The control and the agent now print one `error:` line with the remedy and exit 1; Docker's restart policy still restarts the container until the operator acts, so the log holds that single line repeated. `tug node list` reported a node `online` from its stored status while `tug status` correctly said `stale`; the list now judges staleness itself, so the two agree.
+
+### Quick start on a fresh host
+
+A third fresh Ubuntu 24.04.5 arm64 VM (no Docker, no private link, forwarded ports 9443 and 9080) followed [Deploy your first service](getting-started.md) with the 1.0.0 candidate, driving the prompts through a pseudo-terminal so they behaved as in an interactive shell. Three deviations from the text were forced by the setup, not by Tug: the candidate CLI came from the packed tarball instead of `npm install -g`, the image was built locally (`--build-local-image`, the 1.0.0 image is not published), and the VM sits behind NAT, so `--control-url https://127.0.0.1:9443` told the CLI where to connect and `--agent-control-url https://127.0.0.1:8443` told the agent.
+
+| Step | Result |
+|---|---|
+| `tug setup root@vm3` | Asked once whether to install Docker with the Compose plugin, showed the control plan (host, control URL, mTLS port, image, Docker, credential) and asked to confirm; installed Docker, built and copied the image, started control, wrote `tug.yml` and `tug.local.yml` and imported the credential |
+| `tug status` | `No projects`, no nodes |
+| `tug node add root@vm3 --name app1` | Docker already present, so no Docker question; asked for the address other nodes should use, whether the node handles ingress, then showed the node plan and asked to confirm; the node reported online |
+| `tug deploy` with the guide's nginx `compose.yaml` | `succeeded` in about 8 seconds, `web` serving; `tug logs web` worked and `curl` through the forwarded port returned HTTP 200 and the nginx welcome page |
+
+**Finding, fixed.** The address question offered `docker0` and Docker's `br-<id>` network bridge next to the real interface (`1) 10.0.2.15 (nic0, private)`, `2) 172.17.0.1 (docker0, private)`, `3) 172.18.0.1 (br-…, private)`). Those addresses only reach containers on the host, so `tug node add` now leaves out Docker and CNI bridge interfaces (`docker0`, `br-<12 hex>`, `veth*`, `cni*`) and keeps operator bridges such as `br-lan`.
+
+**Not yet run on this candidate:** the control and workload recovery drill, workload backups to S3-compatible storage, the published image, amd64, real NAT and certificate renewal.

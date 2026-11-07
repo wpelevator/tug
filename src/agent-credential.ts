@@ -74,8 +74,31 @@ async function pendingKey(stateDir: string): Promise<string> {
   return keys.privateKeyPem;
 }
 
-/** `agent identity`: reuse or generate the pending key and return its CSR. Safe to repeat. */
-export async function agentIdentityCsr(stateDir: string): Promise<string> {
+/**
+ * `agent identity`: reuse or generate the pending key and return its CSR. Safe to repeat.
+ *
+ * `current` names the node an operator is (re-)adding on this host. When the host is already enrolled as that node,
+ * the CSR is made from the installed key, so control sees the same key and treats the request as an idempotent retry:
+ * this is what lets `node add` upgrade an enrolled agent in place. The installed key becomes the pending key, which is
+ * what `install-cert` validates the response against. An agent enrolled as another node is refused, because a second
+ * node must never share its key. Without `current`, or on a host with no installed identity, a pending key is
+ * generated as before, and `node replace` therefore rotates the key.
+ */
+export async function agentIdentityCsr(
+  stateDir: string,
+  options: { current?: string } = {},
+): Promise<string> {
+  if (options.current !== undefined) {
+    const installed = await loadAgentDocument(stateDir);
+    if (installed) {
+      if (installed.nodeName !== options.current)
+        throw new Error(
+          `this host is enrolled as node ${installed.nodeName}, not ${options.current}; use \`tug node replace ${installed.nodeName}\` to re-enroll it, or remove that node first`,
+        );
+      await writeFileDurable(pendingFile(stateDir), JSON.stringify({ v: 1, key: installed.key }));
+      return createCsr(installed.key);
+    }
+  }
   return createCsr(await pendingKey(stateDir));
 }
 

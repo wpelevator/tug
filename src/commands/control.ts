@@ -101,10 +101,12 @@ function addSetup(parent: Command, description: string): void {
           minDiskMb: 2048,
           compose: true,
         });
-        if (o.buildLocalImage) await transferTugImage(sshTarget, image, progress.stage);
+        const runImage = o.buildLocalImage
+          ? await transferTugImage(sshTarget, image, progress.stage)
+          : image;
         const yamlValue = (value: string) => JSON.stringify(value);
         const compose = await loadTemplate(templatesDir, 'control-compose.yml', {
-          IMAGE: yamlValue(image),
+          IMAGE: yamlValue(runImage),
           CONTROL_URL: yamlValue(new URL(controlUrl).origin),
           EXTRA_SANS: yamlValue(o.extraSan.join(',')),
           PORT: o.port,
