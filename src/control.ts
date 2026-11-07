@@ -69,9 +69,9 @@ import { serverTlsOptions } from './tls-server.ts';
 import { isNodeHost } from './node-address.ts';
 import { buildIngressWork, ingressConfigHash, resolveServiceEndpoints } from './ingress.ts';
 import { parseStatusReport } from './status-report.ts';
-import { advance, advanceWhere, statesSql } from './state-machine.ts';
-import { buildMachine, commandMachine, deploymentMachine } from './machines.ts';
-import type { DeploymentState } from './machines.ts';
+import { advance, advanceWhere, statesSql } from './lifecycle.ts';
+import { buildLifecycle, commandLifecycle, deploymentLifecycle } from './lifecycles.ts';
+import type { DeploymentState } from './lifecycles.ts';
 import type { NodeView } from './ingress.ts';
 import {
   ACTIVE_DEPLOYMENT_STATES,
@@ -910,7 +910,7 @@ export async function createApp(
     if (failedNodes.length) {
       const marked = advance(
         db,
-        deploymentMachine,
+        deploymentLifecycle,
         project.current_deployment_id,
         'rolling_out',
         'failed',
@@ -980,7 +980,7 @@ export async function createApp(
         }
       });
     if (ok && ingressReady)
-      advance(db, deploymentMachine, project.current_deployment_id, 'rolling_out', 'succeeded', {
+      advance(db, deploymentLifecycle, project.current_deployment_id, 'rolling_out', 'succeeded', {
         updated_at: now(),
       });
   }
@@ -2103,13 +2103,13 @@ export async function createApp(
       if (!owned.has(name)) await fs.rm(path.join(artifactDir, name), { force: true });
   }
   // Previous-process builds cannot finish after a restart; clear their unpublished files.
-  advanceWhere(db, buildMachine, 'building', 'failed', {
+  advanceWhere(db, buildLifecycle, 'building', 'failed', {
     sql: 'deployment_id IN (SELECT id FROM deployments WHERE state=?)',
     params: ['building'],
   });
   advanceWhere(
     db,
-    deploymentMachine,
+    deploymentLifecycle,
     'building',
     'build_failed',
     { sql: '1=1' },
@@ -2123,7 +2123,7 @@ export async function createApp(
       "SELECT * FROM builds WHERE state='complete' AND artifact_path IS NOT NULL",
     ))
       if (!(await fs.stat(path.join(DATA_DIR, row.artifact_path!)).catch(() => null)))
-        advance(db, buildMachine, row.id, 'complete', 'pruned', {
+        advance(db, buildLifecycle, row.id, 'complete', 'pruned', {
           artifact_path: null,
           updated_at: now(),
         });
@@ -2187,7 +2187,7 @@ export async function createApp(
       pruned.push({ id: build.id, service: build.service, sizeBytes: build.size_bytes });
       if (dryRun) continue;
       await fs.rm(path.join(DATA_DIR, build.artifact_path!), { force: true });
-      advance(db, buildMachine, build.id, 'complete', 'pruned', {
+      advance(db, buildLifecycle, build.id, 'complete', 'pruned', {
         artifact_path: null,
         updated_at: now(),
       });
@@ -2484,7 +2484,7 @@ export async function createApp(
           await fs.rename(temporary, final);
           const artifact: ImageArtifact = { buildId, imageRef, ...info };
           spec.artifact = artifact;
-          advance(db, buildMachine, buildId, 'building', 'complete', {
+          advance(db, buildLifecycle, buildId, 'building', 'complete', {
             image_id: info.imageId,
             platform: info.platform,
             sha256: info.sha256,
@@ -2528,7 +2528,7 @@ export async function createApp(
         immediateTransaction(db, () => {
           const published = advance(
             db,
-            deploymentMachine,
+            deploymentLifecycle,
             publishingId,
             'building',
             'rolling_out',
@@ -2603,13 +2603,13 @@ export async function createApp(
     } catch (e) {
       if (depId)
         try {
-          advance(db, deploymentMachine, depId, 'building', 'build_failed', {
+          advance(db, deploymentLifecycle, depId, 'building', 'build_failed', {
             error_message: errMessage(e),
             updated_at: now(),
           });
           advanceWhere(
             db,
-            buildMachine,
+            buildLifecycle,
             'building',
             'failed',
             {
@@ -2675,7 +2675,7 @@ export async function createApp(
         return res.status(409).json({ error: `deployment is ${row.state}` });
       const cancelled = advance(
         db,
-        deploymentMachine,
+        deploymentLifecycle,
         String(req.params.id),
         row.state as DeploymentState,
         'cancelled',
@@ -3357,7 +3357,7 @@ export async function createApp(
     // A command past its deadline is never delivered late; the backup scheduler turns it into a missed run.
     advanceWhere(
       db,
-      commandMachine,
+      commandLifecycle,
       'pending',
       'expired',
       { sql: 'node_id=? AND deadline IS NOT NULL AND deadline<?', params: [node.id, now()] },
@@ -3369,7 +3369,7 @@ export async function createApp(
       'pending',
     );
     for (const command of commands)
-      advance(db, commandMachine, command.id, 'pending', 'running', {
+      advance(db, commandLifecycle, command.id, 'pending', 'running', {
         attempts: command.attempts + 1,
         updated_at: now(),
       });
@@ -3456,7 +3456,7 @@ export async function createApp(
       backups.onResult(cr.commandId, cr.state, cr.result);
       advanceWhere(
         db,
-        commandMachine,
+        commandLifecycle,
         'running',
         cr.state,
         { sql: 'id=? AND node_id=?', params: [cr.commandId, req.node!.id] },

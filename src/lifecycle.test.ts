@@ -9,48 +9,48 @@ import {
   advance,
   advanceWhere,
   canMove,
-  defineMachine,
+  defineLifecycle,
   isTerminal,
   statesOf,
   terminalStates,
-} from './state-machine.ts';
+} from './lifecycle.ts';
 import {
-  backupRunMachine,
-  buildMachine,
-  commandMachine,
-  deploymentMachine,
-  restoreMachine,
+  backupRunLifecycle,
+  buildLifecycle,
+  commandLifecycle,
+  deploymentLifecycle,
+  restoreLifecycle,
   RESTORE_LOCKED_STATES,
-} from './machines.ts';
+} from './lifecycles.ts';
 import { ACTIVE_DEPLOYMENT_STATES, TERMINAL_DEPLOYMENT_STATES } from './protocol.ts';
 import { nodeStatus } from './diagnostics.ts';
 
-const machines = [
-  deploymentMachine,
-  commandMachine,
-  backupRunMachine,
-  restoreMachine,
-  buildMachine,
+const lifecycles = [
+  deploymentLifecycle,
+  commandLifecycle,
+  backupRunLifecycle,
+  restoreLifecycle,
+  buildLifecycle,
 ] as const;
 
-test('every machine only moves to declared states and starts in a declared state', () => {
-  for (const machine of machines) {
-    const states = statesOf(machine as never) as string[];
-    for (const initial of machine.initial)
-      assert.ok(states.includes(initial), `${machine.name}: initial ${initial} is a state`);
-    for (const [from, targets] of Object.entries(machine.transitions))
+test('every lifecycle only moves to declared states and starts in a declared state', () => {
+  for (const lifecycle of lifecycles) {
+    const states = statesOf(lifecycle as never) as string[];
+    for (const initial of lifecycle.initial)
+      assert.ok(states.includes(initial), `${lifecycle.name}: initial ${initial} is a state`);
+    for (const [from, targets] of Object.entries(lifecycle.transitions))
       for (const to of targets as readonly string[])
-        assert.ok(states.includes(to), `${machine.name}: ${from} -> ${to} targets a state`);
+        assert.ok(states.includes(to), `${lifecycle.name}: ${from} -> ${to} targets a state`);
   }
 });
 
-test('every state of a machine is reachable from an initial state', () => {
-  for (const machine of machines) {
-    const seen = new Set<string>(machine.initial);
-    const queue = [...machine.initial] as string[];
+test('every state of a lifecycle is reachable from an initial state', () => {
+  for (const lifecycle of lifecycles) {
+    const seen = new Set<string>(lifecycle.initial);
+    const queue = [...lifecycle.initial] as string[];
     while (queue.length) {
       const from = queue.pop()!;
-      for (const to of (machine.transitions as Record<string, readonly string[]>)[from])
+      for (const to of (lifecycle.transitions as Record<string, readonly string[]>)[from])
         if (!seen.has(to)) {
           seen.add(to);
           queue.push(to);
@@ -58,16 +58,16 @@ test('every state of a machine is reachable from an initial state', () => {
     }
     assert.deepEqual(
       [...seen].sort(),
-      (statesOf(machine as never) as string[]).sort(),
-      `${machine.name}: no state is dead, so a state that is never written cannot be declared`,
+      (statesOf(lifecycle as never) as string[]).sort(),
+      `${lifecycle.name}: no state is dead, so a state that is never written cannot be declared`,
     );
   }
 });
 
-test('defineMachine rejects a table that moves to an undeclared state', () => {
+test('defineLifecycle rejects a table that moves to an undeclared state', () => {
   assert.throws(
     () =>
-      defineMachine({
+      defineLifecycle({
         name: 'broken',
         table: 'commands',
         column: 'state',
@@ -86,9 +86,9 @@ test('deployment states: busy states can still change and finished ones cannot',
     ['build_failed', 'cancelled', 'failed', 'succeeded'],
     'the CLI wait loop stops on exactly the states with no exits',
   );
-  assert.equal(isTerminal(deploymentMachine, 'succeeded'), true);
+  assert.equal(isTerminal(deploymentLifecycle, 'succeeded'), true);
   assert.equal(
-    canMove(deploymentMachine, 'succeeded', 'rolling_out'),
+    canMove(deploymentLifecycle, 'succeeded', 'rolling_out'),
     false,
     'a finished deployment never restarts',
   );
@@ -96,13 +96,13 @@ test('deployment states: busy states can still change and finished ones cannot',
 
 test('a locked restore state is never a finished one', () => {
   for (const state of RESTORE_LOCKED_STATES)
-    assert.equal(isTerminal(restoreMachine, state), false, `${state} keeps the project locked`);
-  assert.deepEqual(terminalStates(restoreMachine).sort(), ['failed', 'released', 'succeeded']);
-  assert.ok(activeStates(restoreMachine).includes('verifying'), 'verifying is not terminal');
+    assert.equal(isTerminal(restoreLifecycle, state), false, `${state} keeps the project locked`);
+  assert.deepEqual(terminalStates(restoreLifecycle).sort(), ['failed', 'released', 'succeeded']);
+  assert.ok(activeStates(restoreLifecycle).includes('verifying'), 'verifying is not terminal');
 });
 
 async function fixture() {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-machine-'));
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-lifecycle-'));
   const db = await openDb(path.join(dir, 'tug.db'));
   const insert = (rowId: string, state: string, node = 'n1') =>
     db.run(
@@ -120,7 +120,7 @@ async function fixture() {
 test('advance moves a row in the expected state and records the extra columns', async () => {
   const { db, insert, stateOf, close } = await fixture();
   insert('c1', 'pending');
-  assert.equal(advance(db, commandMachine, 'c1', 'pending', 'running', { attempts: 1 }), true);
+  assert.equal(advance(db, commandLifecycle, 'c1', 'pending', 'running', { attempts: 1 }), true);
   assert.equal(stateOf('c1'), 'running', 'the row moved');
   assert.equal(
     db.get<{ attempts: number }>('SELECT attempts FROM commands WHERE id=?', 'c1')?.attempts,
@@ -134,7 +134,7 @@ test('advance reports a lost race instead of overwriting the winner', async () =
   const { db, insert, stateOf, close } = await fixture();
   insert('c1', 'cancelled');
   assert.equal(
-    advance(db, commandMachine, 'c1', 'pending', 'running'),
+    advance(db, commandLifecycle, 'c1', 'pending', 'running'),
     false,
     'a row that already left the expected state is not moved',
   );
@@ -142,11 +142,11 @@ test('advance reports a lost race instead of overwriting the winner', async () =
   close();
 });
 
-test('advance refuses a transition the machine does not declare', async () => {
+test('advance refuses a transition the lifecycle does not declare', async () => {
   const { db, insert, stateOf, close } = await fixture();
   insert('c1', 'succeeded');
   assert.throws(
-    () => advance(db, commandMachine, 'c1', 'succeeded', 'running'),
+    () => advance(db, commandLifecycle, 'c1', 'succeeded', 'running'),
     /succeeded cannot move to running/,
     'an illegal move is a programming error, not a silent no-op',
   );
@@ -159,7 +159,7 @@ test('advanceWhere moves only matching rows in the listed source states', async 
   insert('a', 'pending', 'n1');
   insert('b', 'pending', 'n2');
   insert('c', 'running', 'n1');
-  const moved = advanceWhere(db, commandMachine, 'pending', 'expired', {
+  const moved = advanceWhere(db, commandLifecycle, 'pending', 'expired', {
     sql: 'node_id=?',
     params: ['n1'],
   });
@@ -199,4 +199,14 @@ test('nodeStatus derives stale from the clock and never needs a stored value', (
     'disabled',
     'disabled wins over stale',
   );
+});
+
+test('the database rejects a state the lifecycle does not declare', async () => {
+  const { db, insert, close } = await fixture();
+  assert.throws(
+    () => insert('c1', 'rollingout'),
+    'a typo in a state name fails at INSERT instead of being stored',
+  );
+  assert.doesNotThrow(() => insert('c2', 'pending'), 'a declared state is accepted');
+  close();
 });

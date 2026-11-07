@@ -13,7 +13,7 @@ export function dockerPlatform(uname: string): string {
   );
 }
 
-/** Build for the host the image will run on, not the machine that builds it (an arm64 laptop and an amd64 VPS differ). */
+/** Build for the host the image will run on, not the lifecycle that builds it (an arm64 laptop and an amd64 VPS differ). */
 export function localImageBuildArgs(imageTag: string, uname: string): string[] {
   return ['build', '--platform', dockerPlatform(uname), '-t', imageTag, '.'];
 }

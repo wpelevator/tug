@@ -51,11 +51,11 @@ SQL executes on the owning process's event loop. Busy waits, snapshots and integ
 
 A future Bun bundle that includes control or agent code can supply a `bun:sqlite` adapter through the same factory. Select it at build time so the bundle never imports the Node adapter; normalize results, bindings, error categories and connection cleanup, and run the same factory-driven database contract tests. Bun implementation and build aliases are deferred. The proposed CLI-only executable does not access SQLite and needs no adapter.
 
-## State machines
+## Lifecycles
 
-Five lifecycles are stored as a `state` column and are declared in `src/machines.ts` as transition tables: `from: [possible next states]`. `src/state-machine.ts` holds the only code that writes those columns after insert. `advance` and `advanceWhere` refuse a transition the table does not declare (a programming error that throws) and apply a legal one as `UPDATE ... WHERE state IN (from)`, so two writers racing for the same row cannot both win and the loser learns it from the change count. Tests check that every target is a declared state and that every state is reachable, so a state that nothing writes cannot be declared.
+Five lifecycles are stored as a `state` column and are declared in `src/lifecycles.ts` as transition tables: `from: [possible next states]`. `src/lifecycle.ts` holds the only code that writes those columns after insert. `advance` and `advanceWhere` refuse a transition the table does not declare (a programming error that throws) and apply a legal one as `UPDATE ... WHERE state IN (from)`, so two writers racing for the same row cannot both win and the loser learns it from the change count. The schema generates a `CHECK` constraint on each state column from the same table, so an undeclared state is rejected at insert. Tests check that every target is a declared state and that every state is reachable, so a state that nothing writes cannot be declared.
 
-| Machine | States |
+| Lifecycle | States |
 | --- | --- |
 | Deployment | `building → rolling_out → succeeded`, with `build_failed`, `failed` and `cancelled` as the other exits. A rollback is inserted already `rolling_out`. |
 | Command | `pending → running → succeeded \| failed`, plus `pending → expired` (past its deadline, never delivered late) and `pending → cancelled`. |

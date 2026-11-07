@@ -4,9 +4,9 @@ import { projectRepository } from './backup-destination.ts';
 import { volumeName } from './container-spec.ts';
 import { id } from './util.ts';
 import { isUniqueViolation } from './db-driver.ts';
-import { advance } from './state-machine.ts';
-import { backupRunMachine, commandMachine } from './machines.ts';
-import { isTerminal } from './state-machine.ts';
+import { advance } from './lifecycle.ts';
+import { backupRunLifecycle, commandLifecycle } from './lifecycles.ts';
+import { isTerminal } from './lifecycle.ts';
 import { backupDestinationQueries } from './db-backup-destination.ts';
 import type { ResolvedBackup } from './backup-config.ts';
 import type { Db } from './db.ts';
@@ -406,7 +406,7 @@ export function createBackupService(deps: BackupServiceDeps) {
       nodeId: schedule.node_id,
     });
     if (!inserted) {
-      advance(db, commandMachine, commandId, 'pending', 'cancelled');
+      advance(db, commandLifecycle, commandId, 'pending', 'cancelled');
       return { error: 'this slot already has a run' };
     }
     return { runId };
@@ -431,8 +431,8 @@ export function createBackupService(deps: BackupServiceDeps) {
        WHERE r.state='queued' AND c.state IN ('pending','expired') AND c.deadline IS NOT NULL AND c.deadline<?`,
       iso,
     )) {
-      advance(db, commandMachine, run.command_id!, 'pending', 'expired', { updated_at: iso });
-      advance(db, backupRunMachine, run.id, 'queued', 'missed', {
+      advance(db, commandLifecycle, run.command_id!, 'pending', 'expired', { updated_at: iso });
+      advance(db, backupRunLifecycle, run.id, 'queued', 'missed', {
         finished_at: iso,
         error: 'node_offline',
       });
@@ -460,11 +460,11 @@ export function createBackupService(deps: BackupServiceDeps) {
     for (const run of db.all<BackupRunRow>("SELECT * FROM backup_runs WHERE state='running'")) {
       const last = heartbeats.get(run.command_id ?? '') ?? started;
       if (at.getTime() - last < AGENT_LOST_MS) continue;
-      advance(db, backupRunMachine, run.id, 'running', 'failed', {
+      advance(db, backupRunLifecycle, run.id, 'running', 'failed', {
         finished_at: iso,
         error: 'agent_lost',
       });
-      advance(db, commandMachine, run.command_id!, 'running', 'failed', { updated_at: iso });
+      advance(db, commandLifecycle, run.command_id!, 'running', 'failed', { updated_at: iso });
       noteOutcome(run, 'failed', iso, false);
       event(
         'error',
@@ -579,7 +579,7 @@ export function createBackupService(deps: BackupServiceDeps) {
         job.commandId,
       );
       if (queued)
-        advance(db, backupRunMachine, queued.id, 'queued', 'running', {
+        advance(db, backupRunLifecycle, queued.id, 'queued', 'running', {
           started_at: job.startedAt,
         });
     }
@@ -587,12 +587,12 @@ export function createBackupService(deps: BackupServiceDeps) {
 
   function onResult(commandId: string, state: string, result: CommandResultPayload): void {
     const run = db.get<BackupRunRow>('SELECT * FROM backup_runs WHERE command_id=?', commandId);
-    if (!run || isTerminal(backupRunMachine, run.state)) return;
+    if (!run || isTerminal(backupRunLifecycle, run.state)) return;
     const at = stamp();
     heartbeats.delete(commandId);
     if (state === 'succeeded') {
       const r = result as BackupJobResult;
-      advance(db, backupRunMachine, run.id, ['queued', 'running'], 'succeeded', {
+      advance(db, backupRunLifecycle, run.id, ['queued', 'running'], 'succeeded', {
         finished_at: at,
         snapshot_id: r.snapshotId ?? null,
         size_bytes: r.totalBytes ?? null,
@@ -626,7 +626,7 @@ export function createBackupService(deps: BackupServiceDeps) {
       0,
       2000,
     );
-    advance(db, backupRunMachine, run.id, ['queued', 'running'], 'failed', {
+    advance(db, backupRunLifecycle, run.id, ['queued', 'running'], 'failed', {
       finished_at: at,
       error,
     });

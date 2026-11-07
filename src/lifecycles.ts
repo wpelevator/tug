@@ -1,8 +1,8 @@
-import { defineMachine } from './state-machine.ts';
+import { defineLifecycle } from './lifecycle.ts';
 
 // Every persisted lifecycle in one place. Read the tables as "from: [possible next states]".
 
-export const deploymentMachine = defineMachine({
+export const deploymentLifecycle = defineLifecycle({
   name: 'deployment',
   table: 'deployments',
   column: 'state',
@@ -17,10 +17,10 @@ export const deploymentMachine = defineMachine({
     cancelled: [],
   },
 });
-export type DeploymentState = keyof typeof deploymentMachine.transitions;
+export type DeploymentState = keyof typeof deploymentLifecycle.transitions;
 
 /** A node command. `expired` is a command nobody fetched before its deadline; it is never delivered late. */
-export const commandMachine = defineMachine({
+export const commandLifecycle = defineLifecycle({
   name: 'command',
   table: 'commands',
   column: 'state',
@@ -34,10 +34,10 @@ export const commandMachine = defineMachine({
     cancelled: [],
   },
 });
-export type CommandState = keyof typeof commandMachine.transitions;
+export type CommandState = keyof typeof commandLifecycle.transitions;
 
 /** One run of a backup. `missed` and `cancelled` runs never reached a node, so they are inserted already finished. */
-export const backupRunMachine = defineMachine({
+export const backupRunLifecycle = defineLifecycle({
   name: 'backup run',
   table: 'backup_runs',
   column: 'state',
@@ -52,14 +52,14 @@ export const backupRunMachine = defineMachine({
     cancelled: [],
   },
 });
-export type BackupRunState = keyof typeof backupRunMachine.transitions;
+export type BackupRunState = keyof typeof backupRunLifecycle.transitions;
 
 /**
  * An in-place restore holds, snapshots, restores and verifies; a scratch restore goes straight to `restoring`.
  * `interrupted` means the data may be partly restored, so the writers stay held until the operator resumes
  * (back to `restoring`) or releases it.
  */
-export const restoreMachine = defineMachine({
+export const restoreLifecycle = defineLifecycle({
   name: 'restore',
   table: 'restore_runs',
   column: 'state',
@@ -77,7 +77,7 @@ export const restoreMachine = defineMachine({
     released: [],
   },
 });
-export type RestoreState = keyof typeof restoreMachine.transitions;
+export type RestoreState = keyof typeof restoreLifecycle.transitions;
 
 /** Restore states during which an in-place restore keeps the project locked. */
 export const RESTORE_LOCKED_STATES: readonly RestoreState[] = [
@@ -89,7 +89,7 @@ export const RESTORE_LOCKED_STATES: readonly RestoreState[] = [
 ];
 
 /** An image build. `pruned` archives can no longer be deployed; `failed` builds never produced one. */
-export const buildMachine = defineMachine({
+export const buildLifecycle = defineLifecycle({
   name: 'build',
   table: 'builds',
   column: 'state',
@@ -101,4 +101,4 @@ export const buildMachine = defineMachine({
     pruned: [],
   },
 });
-export type BuildState = keyof typeof buildMachine.transitions;
+export type BuildState = keyof typeof buildLifecycle.transitions;

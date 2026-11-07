@@ -30,7 +30,7 @@ export const agentFile = (stateDir: string) => path.join(stateDir, 'agent.json')
 export const pendingFile = (stateDir: string) => path.join(stateDir, 'agent-pending.json');
 
 const NO_AGENT_IDENTITY =
-  'this node has no identity: run `tug node add`, `tug node enroll` or `tug node repair` from an operator machine';
+  'this node has no identity: run `tug node add`, `tug node enroll` or `tug node repair` from an operator lifecycle';
 
 async function readJson(file: string): Promise<unknown | null> {
   let text: string;

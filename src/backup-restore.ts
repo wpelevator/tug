@@ -1,7 +1,7 @@
 import { id } from './util.ts';
-import { advance as advanceRow, isTerminal, terminalStates, statesSql } from './state-machine.ts';
-import { RESTORE_LOCKED_STATES, restoreMachine } from './machines.ts';
-import type { RestoreState } from './machines.ts';
+import { advance as advanceRow, isTerminal, terminalStates, statesSql } from './lifecycle.ts';
+import { RESTORE_LOCKED_STATES, restoreLifecycle } from './lifecycles.ts';
+import type { RestoreState } from './lifecycles.ts';
 import { scratchVolumeName } from './container-spec.ts';
 import type { BackupService } from './backup-scheduler.ts';
 import type { Db, BackupRunRow, CommandRow, RestoreRunRow, NodeStatusRow } from './db.ts';
@@ -290,20 +290,27 @@ export function createRestoreService(deps: RestoreDeps) {
     deps.wake(restore.project_id);
   }
 
-  /** Moves a restore along `restoreMachine`; an undeclared move throws, and a lost race leaves the row as it was. */
+  /** Moves a restore along `restoreLifecycle`; an undeclared move throws, and a lost race leaves the row as it was. */
   function move(
     restore: RestoreRunRow,
     state: RestoreState,
     extra: { error?: string; commandId?: string; safetyRunId?: string } = {},
   ): void {
     const at = stamp();
-    const moved = advanceRow(db, restoreMachine, restore.id, restore.state as RestoreState, state, {
-      state_changed_at: at,
-      ...(extra.error !== undefined ? { error: extra.error } : {}),
-      ...(extra.commandId !== undefined ? { command_id: extra.commandId } : {}),
-      ...(extra.safetyRunId !== undefined ? { safety_run_id: extra.safetyRunId } : {}),
-      ...(isTerminal(restoreMachine, state) ? { finished_at: at } : {}),
-    });
+    const moved = advanceRow(
+      db,
+      restoreLifecycle,
+      restore.id,
+      restore.state as RestoreState,
+      state,
+      {
+        state_changed_at: at,
+        ...(extra.error !== undefined ? { error: extra.error } : {}),
+        ...(extra.commandId !== undefined ? { command_id: extra.commandId } : {}),
+        ...(extra.safetyRunId !== undefined ? { safety_run_id: extra.safetyRunId } : {}),
+        ...(isTerminal(restoreLifecycle, state) ? { finished_at: at } : {}),
+      },
+    );
     if (moved) restore.state = state;
   }
 
@@ -537,7 +544,7 @@ export function createRestoreService(deps: RestoreDeps) {
   /** Advances every restore that is waiting on something; safe to call often. */
   function advance(): void {
     for (const restore of db.all<RestoreRunRow>(
-      `SELECT * FROM restore_runs WHERE state NOT IN (${statesSql(terminalStates(restoreMachine))})`,
+      `SELECT * FROM restore_runs WHERE state NOT IN (${statesSql(terminalStates(restoreLifecycle))})`,
     ))
       advanceRestore(restore);
   }
