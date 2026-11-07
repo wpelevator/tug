@@ -624,7 +624,7 @@ export function runsInContainer(): boolean {
 
 /**
  * Health checks dial the container's address on the project network. An agent that runs as a plain host process
- * cannot reach it on a machine where Docker lives in a VM (macOS, Windows), and the bare timeout does not say why.
+ * cannot reach it on a lifecycle where Docker lives in a VM (macOS, Windows), and the bare timeout does not say why.
  */
 export function outsideContainerHint(health: HealthCheck, inContainer = runsInContainer()): string {
   if (inContainer || health.type === 'docker') return '';

@@ -4,6 +4,9 @@ import { projectRepository } from './backup-destination.ts';
 import { volumeName } from './container-spec.ts';
 import { id } from './util.ts';
 import { isUniqueViolation } from './db-driver.ts';
+import { advance } from './lifecycle.ts';
+import { backupRunLifecycle, commandLifecycle } from './lifecycles.ts';
+import { isTerminal } from './lifecycle.ts';
 import { backupDestinationQueries } from './db-backup-destination.ts';
 import type { ResolvedBackup } from './backup-config.ts';
 import type { Db } from './db.ts';
@@ -403,7 +406,7 @@ export function createBackupService(deps: BackupServiceDeps) {
       nodeId: schedule.node_id,
     });
     if (!inserted) {
-      db.run("UPDATE commands SET state='cancelled' WHERE id=?", commandId);
+      advance(db, commandLifecycle, commandId, 'pending', 'cancelled');
       return { error: 'this slot already has a run' };
     }
     return { runId };
@@ -428,13 +431,11 @@ export function createBackupService(deps: BackupServiceDeps) {
        WHERE r.state='queued' AND c.state IN ('pending','expired') AND c.deadline IS NOT NULL AND c.deadline<?`,
       iso,
     )) {
-      db.run("UPDATE commands SET state='expired',updated_at=? WHERE id=?", iso, run.command_id);
-      db.run(
-        "UPDATE backup_runs SET state='missed',finished_at=?,error=? WHERE id=?",
-        iso,
-        'node_offline',
-        run.id,
-      );
+      advance(db, commandLifecycle, run.command_id!, 'pending', 'expired', { updated_at: iso });
+      advance(db, backupRunLifecycle, run.id, 'queued', 'missed', {
+        finished_at: iso,
+        error: 'node_offline',
+      });
       noteOutcome(run, 'missed', iso, false);
       event(
         'error',
@@ -459,17 +460,11 @@ export function createBackupService(deps: BackupServiceDeps) {
     for (const run of db.all<BackupRunRow>("SELECT * FROM backup_runs WHERE state='running'")) {
       const last = heartbeats.get(run.command_id ?? '') ?? started;
       if (at.getTime() - last < AGENT_LOST_MS) continue;
-      db.run(
-        "UPDATE backup_runs SET state='failed',finished_at=?,error=? WHERE id=?",
-        iso,
-        'agent_lost',
-        run.id,
-      );
-      db.run(
-        "UPDATE commands SET state='failed',updated_at=? WHERE id=? AND state='running'",
-        iso,
-        run.command_id,
-      );
+      advance(db, backupRunLifecycle, run.id, 'running', 'failed', {
+        finished_at: iso,
+        error: 'agent_lost',
+      });
+      advance(db, commandLifecycle, run.command_id!, 'running', 'failed', { updated_at: iso });
       noteOutcome(run, 'failed', iso, false);
       event(
         'error',
@@ -579,32 +574,33 @@ export function createBackupService(deps: BackupServiceDeps) {
     const at = clock().getTime();
     for (const job of jobs) {
       heartbeats.set(job.commandId, at);
-      db.run(
-        "UPDATE backup_runs SET state='running',started_at=COALESCE(started_at,?) WHERE command_id=? AND state='queued'",
-        job.startedAt,
+      const queued = db.get<Pick<BackupRunRow, 'id'>>(
+        'SELECT id FROM backup_runs WHERE command_id=?',
         job.commandId,
       );
+      if (queued)
+        advance(db, backupRunLifecycle, queued.id, 'queued', 'running', {
+          started_at: job.startedAt,
+        });
     }
   }
 
   function onResult(commandId: string, state: string, result: CommandResultPayload): void {
     const run = db.get<BackupRunRow>('SELECT * FROM backup_runs WHERE command_id=?', commandId);
-    if (!run || ['succeeded', 'failed', 'missed', 'cancelled'].includes(run.state)) return;
+    if (!run || isTerminal(backupRunLifecycle, run.state)) return;
     const at = stamp();
     heartbeats.delete(commandId);
     if (state === 'succeeded') {
       const r = result as BackupJobResult;
-      db.run(
-        `UPDATE backup_runs SET state='succeeded',finished_at=?,snapshot_id=?,size_bytes=?,added_bytes=?,duration_ms=?,restic_version=?,metadata_json=? WHERE id=?`,
-        at,
-        r.snapshotId ?? null,
-        r.totalBytes ?? null,
-        r.addedBytes ?? null,
-        r.durationMs ?? null,
-        r.resticVersion ?? null,
-        JSON.stringify({ warnings: r.warnings ?? [] }),
-        run.id,
-      );
+      advance(db, backupRunLifecycle, run.id, ['queued', 'running'], 'succeeded', {
+        finished_at: at,
+        snapshot_id: r.snapshotId ?? null,
+        size_bytes: r.totalBytes ?? null,
+        added_bytes: r.addedBytes ?? null,
+        duration_ms: r.durationMs ?? null,
+        restic_version: r.resticVersion ?? null,
+        metadata_json: JSON.stringify({ warnings: r.warnings ?? [] }),
+      });
       noteOutcome(run, 'succeeded', at, true);
       db.run('UPDATE backup_schedules SET stale_notified_at=NULL WHERE id=?', run.schedule_id);
       event(
@@ -630,12 +626,10 @@ export function createBackupService(deps: BackupServiceDeps) {
       0,
       2000,
     );
-    db.run(
-      "UPDATE backup_runs SET state='failed',finished_at=?,error=? WHERE id=?",
-      at,
+    advance(db, backupRunLifecycle, run.id, ['queued', 'running'], 'failed', {
+      finished_at: at,
       error,
-      run.id,
-    );
+    });
     noteOutcome(run, 'failed', at, false);
     event(
       'error',

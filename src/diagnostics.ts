@@ -55,6 +55,22 @@ export interface NodeDiagnostic {
   warnings: string[];
 }
 
+/**
+ * The one definition of a node's status. The column only stores what happened (`registered`, `online`,
+ * `disabled`); `stale` is a function of the clock and is derived here on every read so it cannot lag or be missed.
+ */
+export type NodeStatus = 'registered' | 'online' | 'stale' | 'disabled';
+export function nodeStatus(
+  node: { status: string; disabled_at: string | null; last_seen_at: string | null },
+  nowMs: number,
+  staleSeconds: number,
+): NodeStatus {
+  if (node.disabled_at) return 'disabled';
+  if (node.last_seen_at && Date.parse(node.last_seen_at) < nowMs - staleSeconds * 1000)
+    return 'stale';
+  return node.status === 'online' ? 'online' : 'registered';
+}
+
 export function diagnoseNode(
   node: NodeDiagnosticInput,
   nowMs: number,

@@ -2,7 +2,7 @@
 // `env_file` merging and short-syntax expansion, so control and agents only ever see canonical JSON.
 // The CLI reads Compose's YAML rendering: its `--format json` drops every service-level extension
 // (`x-tug`), while the YAML rendering keeps them.
-// Control secrets are not resolved on the operator's machine: each one is interpolated as a sentinel
+// Control secrets are not resolved on the operator's lifecycle: each one is interpolated as a sentinel
 // that the agent replaces with the node's released value when it creates the container.
 import * as yaml from 'js-yaml';
 import { run } from './build.ts';
@@ -85,7 +85,7 @@ export async function normalizeCompose(
     const message = error instanceof Error ? error.message : String(error);
     if ((error as NodeJS.ErrnoException)?.code === 'ENOENT' || /docker: .*not found/i.test(message))
       throw new Error(
-        'tug deploy needs Docker with the Compose plugin on this machine to read the Compose file (`docker compose config`); install Docker Compose v2',
+        'tug deploy needs Docker with the Compose plugin on this lifecycle to read the Compose file (`docker compose config`); install Docker Compose v2',
         { cause: error },
       );
     throw new Error(`docker compose config failed for ${file}: ${message}`, { cause: error });

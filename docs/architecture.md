@@ -51,6 +51,20 @@ SQL executes on the owning process's event loop. Busy waits, snapshots and integ
 
 A future Bun bundle that includes control or agent code can supply a `bun:sqlite` adapter through the same factory. Select it at build time so the bundle never imports the Node adapter; normalize results, bindings, error categories and connection cleanup, and run the same factory-driven database contract tests. Bun implementation and build aliases are deferred. The proposed CLI-only executable does not access SQLite and needs no adapter.
 
+## Lifecycles
+
+Five lifecycles are stored as a `state` column and are declared in `src/lifecycles.ts` as transition tables: `from: [possible next states]`. `src/lifecycle.ts` holds the only code that writes those columns after insert. `advance` and `advanceWhere` refuse a transition the table does not declare (a programming error that throws) and apply a legal one as `UPDATE ... WHERE state IN (from)`, so two writers racing for the same row cannot both win and the loser learns it from the change count. The schema generates a `CHECK` constraint on each state column from the same table, so an undeclared state is rejected at insert. Tests check that every target is a declared state and that every state is reachable, so a state that nothing writes cannot be declared.
+
+| Lifecycle | States |
+| --- | --- |
+| Deployment | `building → rolling_out → succeeded`, with `build_failed`, `failed` and `cancelled` as the other exits. A rollback is inserted already `rolling_out`. |
+| Command | `pending → running → succeeded \| failed`, plus `pending → expired` (past its deadline, never delivered late) and `pending → cancelled`. |
+| Backup run | `queued → running → succeeded \| failed`, plus `queued → missed`. Runs that never reached a node are inserted as `missed` or `cancelled`. |
+| Restore | `locking → holding → safety_backup → restoring → verifying → succeeded` for in-place restores; scratch restores go straight to `restoring`. `failed` before any data changed, `interrupted` after, then `restoring` again (`restore resume`) or `released`. |
+| Build | `building → complete → pruned`, or `building → failed` when the deployment's build failed or control restarted mid-build. |
+
+A node's status is not a stored lifecycle. The column records `registered`, `online` or `disabled`, and `stale` is derived from `last_seen_at` by `nodeStatus` on every read, so it never lags behind the clock.
+
 ## Image artifacts
 
 The `builds` table records immutable image references, config-digest identity, platform, archive SHA-256/size and a relative artifact path. Image save/download/hash operations stream bytes; saved archives are validated before import. Build archives finalize before the desired-state transaction becomes current. Failed publication leaves the previous deployment current. `GET /agent/v1/images/:buildId` authenticates the node certificate and checks the retained service placement; `WorkResponse.retainedImages` protects rollback images from agent pruning.
