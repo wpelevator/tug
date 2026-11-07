@@ -1017,3 +1017,35 @@ test('a failing build-cache prune is logged without breaking later deploys', asy
     await s.close();
   }
 });
+
+test('nodes stop being told to keep the image of a pruned archive', async () => {
+  const s = await server();
+  try {
+    const n1 = await s.node('n1');
+    const refs: string[] = [];
+    for (const version of ['v1', 'v2']) {
+      const deployed = await json(await s.deploy(version));
+      refs.push(deployed.desiredState.services.app.image);
+      await s.report(n1.nodeId, deployed.desiredState);
+    }
+    const retained = async (): Promise<string[]> =>
+      (
+        await json(
+          await fetch(`${s.base}/agent/v1/work`, { headers: { 'x-tug-test-node': n1.nodeId } }),
+        )
+      ).retainedImages;
+    assert.deepEqual(
+      (await retained()).sort(),
+      [...refs].sort(),
+      'every image with an archive must stay on the nodes that run it, for rollback',
+    );
+    await json(await s.post('/api/v1/images/prune', { keep: 1 }));
+    assert.deepEqual(
+      await retained(),
+      [refs[1]],
+      'the image of a pruned archive must leave the retained list so the agent can remove it',
+    );
+  } finally {
+    await s.close();
+  }
+});

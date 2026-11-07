@@ -3456,6 +3456,11 @@ export async function createApp(
         attempts: command.attempts + 1,
         updated_at: now(),
       });
+    // A pruned archive refuses rollback, so no node needs its image: leave it off the list and the agent removes it
+    // (an image a container still uses is kept regardless).
+    const prunedBuilds = new Set(
+      db.all<{ id: string }>("SELECT id FROM builds WHERE state='pruned'").map((row) => row.id),
+    );
     const retainedImages = [
       ...new Set(
         retainedStates().flatMap((state) =>
@@ -3463,6 +3468,7 @@ export async function createApp(
             .filter(
               (service) =>
                 service.artifact &&
+                !prunedBuilds.has(service.artifact.buildId) &&
                 (!service.placement.nodes?.length || service.placement.nodes.includes(node.name)),
             )
             .map((service) => service.image!),
