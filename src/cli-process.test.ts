@@ -151,8 +151,8 @@ test("verbose output goes through the progress line, and only this run's marker 
   }
   assert.deepEqual(
     printed,
-    [`${STAGE_MARKER}Real stage`, '::tug:: Spoofed', 'plain output'],
-    'verbose lines are printed above the live line, markers included',
+    ['::tug:: Spoofed', 'plain output'],
+    'verbose lines are printed above the live line; a genuine marker is a stage, not output, and a lookalike is output',
   );
   assert.deepEqual(
     stages,

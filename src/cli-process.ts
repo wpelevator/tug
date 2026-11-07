@@ -11,7 +11,9 @@ export function runProcess(
   { capture = false, input }: { capture?: boolean; input?: string } = {},
 ): Promise<{ status: number | null; stdout: string; stderr: string }> {
   markWorkStarted();
-  const resume = capture ? () => {} : suspendProgress();
+  // ssh and scp may prompt on the terminal even when their output is captured.
+  const mayPrompt = Boolean(process.stdin.isTTY) && (cmd === 'ssh' || cmd === 'scp');
+  const resume = capture && !mayPrompt ? () => {} : suspendProgress();
   return new Promise<{ status: number | null; stdout: string; stderr: string }>(
     (resolve, reject) => {
       const child = spawn(cmd, args, {
@@ -112,13 +114,14 @@ export async function runStep(
     stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
   });
   const lines = (stream: NodeJS.ReadableStream) => {
+    stream.setEncoding('utf8');
     let pending = '';
     const take = (line: string) => {
       const text = line.replace(ANSI, '').trimEnd().slice(0, MAX_LINE);
       if (!text) return;
       resume();
-      if (verbose) emit(text);
       if (text.startsWith(STAGE_MARKER)) return progress?.stage(text.slice(STAGE_MARKER.length));
+      if (verbose) emit(text);
       tail.push(text);
       if (tail.length > TAIL_LINES) tail.shift();
       progress?.detail?.(text);

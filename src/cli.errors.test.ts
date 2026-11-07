@@ -36,6 +36,14 @@ test('the usage footer only follows mistakes in arguments, not failures of a com
       /--name must contain only[\s\S]*Run tug <command> --help for usage\./,
       'rejected arguments should point at the help',
     );
+    const unreachable = await failure(
+      ['node', 'add', 'root@host.invalid', '--name', 'app1', '-y'],
+      dir,
+    );
+    assert.ok(
+      !unreachable.includes('--help for usage'),
+      'a failure after a command began its work (here: no credential for node add) is not a usage mistake',
+    );
     const runtime = await failure(['status'], dir);
     assert.match(runtime, /no credential/, 'a missing credential is reported');
     assert.ok(

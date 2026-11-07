@@ -130,21 +130,20 @@ export async function dockerBootstrap(): Promise<string> {
   return fs.readFile(path.join(templatesDir, 'install-docker.sh'), 'utf8');
 }
 
+/** The remote command that runs the Docker bootstrap; `TUG_MARKER` lets the script name its stage in the progress line. */
+export function bootstrapCommand(script: string, compose: boolean): string {
+  return `TUG_MARKER=${sh(STAGE_MARKER)} ${compose ? 'TUG_INSTALL_COMPOSE=1 ' : ''}sh -eu -c ${sh(script)}`;
+}
+
 /** Installs Docker over SSH; `compose` also installs the Compose plugin, which only the control host needs. */
 export async function bootstrapDocker(
   target: string,
   compose = false,
   progress?: StepProgress,
 ): Promise<void> {
-  await runStep(
-    'ssh',
-    [
-      '--',
-      target,
-      `${compose ? 'TUG_INSTALL_COMPOSE=1 ' : ''}sh -eu -c ${sh(await dockerBootstrap())}`,
-    ],
-    { progress },
-  );
+  await runStep('ssh', ['--', target, bootstrapCommand(await dockerBootstrap(), compose)], {
+    progress,
+  });
 }
 
 /** Whether the host already has the Docker Engine (and the Compose plugin when `compose`). */

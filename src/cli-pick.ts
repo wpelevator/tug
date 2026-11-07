@@ -1,6 +1,8 @@
 import readline from 'node:readline';
 import type { Readable, Writable } from 'node:stream';
 import { ask } from './cli-prompt.ts';
+import { suspendProgress } from './cli-progress.ts';
+import { clipToColumns, columnWidth, plainText as plain } from './cli-width.ts';
 
 export interface PickIO {
   input: Readable & {
@@ -28,39 +30,6 @@ const ERASE_BELOW = '\r\x1b[J';
 /** Digits typed within this time of each other form one number, so `12` reaches the twelfth entry. */
 const NUMBER_TYPING_MS = 1000;
 
-/** A label is one line of plain text: control characters would break the cursor arithmetic or inject escapes. */
-// eslint-disable-next-line no-control-regex
-const plain = (text: string): string => text.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ');
-
-const segmenter = new Intl.Segmenter();
-const WIDE = /[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹯＀-｠￠-￦\u{1f300}-\u{1faff}\u{20000}-\u{3fffd}]/u;
-
-/** Terminal columns one user-perceived character occupies: 2 for East Asian wide characters and emoji, else 1. */
-function graphemeWidth(grapheme: string): number {
-  return WIDE.test(grapheme) || /\p{Emoji_Presentation}/u.test(grapheme) ? 2 : 1;
-}
-
-/** Terminal columns `text` occupies. */
-export function columnWidth(text: string): number {
-  return [...segmenter.segment(text)].reduce((sum, part) => sum + graphemeWidth(part.segment), 0);
-}
-
-/** `text` cut to at most `columns` terminal columns, ending in an ellipsis when it was cut. */
-export function clipToColumns(text: string, columns: number): string {
-  let used = 0;
-  let out = '';
-  const graphemes = [...segmenter.segment(text)].map((part) => part.segment);
-  const total = graphemes.reduce((sum, grapheme) => sum + graphemeWidth(grapheme), 0);
-  if (total <= columns) return text;
-  for (const grapheme of graphemes) {
-    const width = graphemeWidth(grapheme);
-    if (used + width > columns - 1) break;
-    out += grapheme;
-    used += width;
-  }
-  return `${out}…`;
-}
-
 /**
  * A menu drawn in place on `output` and driven by keypresses on `input`: arrows, Ctrl-N/P or j/k move, PageUp/PageDown
  * page, digits jump to that entry, space toggles (or picks, in a single-choice menu), `a` toggles all, Enter confirms,
@@ -87,8 +56,11 @@ function pick(
   const hint = multiple ? 'space select, a all, enter done, q cancel' : 'enter select, q cancel';
   const width = () => Math.max(20, (output.columns ?? 80) - 1);
   const clip = (text: string) => clipToColumns(text, width());
-  // Title, hint, scroll footer and note must all fit above the prompt line, or the cursor arithmetic breaks.
-  const pageSize = () => Math.max(1, Math.min(entries.length, (output.rows ?? 24) - 5));
+  // On a very short terminal the hint, scroll footer and note are dropped (the note moves onto the title), because
+  // everything drawn must fit above the prompt line or the cursor arithmetic breaks.
+  const compact = () => (output.rows ?? 24) <= 6;
+  const pageSize = () =>
+    Math.max(1, Math.min(entries.length, (output.rows ?? 24) - (compact() ? 2 : 5)));
 
   const erase = () => {
     output.write(`${drawn ? `\x1b[${drawn}A` : ''}${ERASE_BELOW}`);
@@ -99,15 +71,19 @@ function pick(
     if (cursor < top) top = cursor;
     if (cursor >= top + size) top = cursor - size + 1;
     const last = Math.min(top + size, entries.length);
-    const lines = [clip(plain(question)), clip(`  (${hint})`)];
+    const lines = compact()
+      ? [clip(`${plain(question)}${note ? ` - ${note}` : ''}`)]
+      : [clip(plain(question)), clip(`  (${hint})`)];
     for (let i = top; i < last; i++)
       lines.push(
         clip(
           `${i === cursor ? '>' : ' '} ${multiple ? (chosen.has(i) ? '[x] ' : '[ ] ') : ''}${entries[i]}`,
         ),
       );
-    if (entries.length > size) lines.push(clip(`  ${top + 1}-${last} of ${entries.length}`));
-    if (note) lines.push(clip(note));
+    if (!compact()) {
+      if (entries.length > size) lines.push(clip(`  ${top + 1}-${last} of ${entries.length}`));
+      if (note) lines.push(clip(note));
+    }
     erase();
     output.write(`${lines.join('\n')}\n`);
     drawn = lines.length;
@@ -173,6 +149,7 @@ function pick(
       )
         return finish(new Error(CANCELLED));
       note = '';
+      if (!(text && /^[0-9]$/.test(text))) typed = '';
       if (name === 'up' || (key?.ctrl && name === 'p') || text === 'k')
         cursor = (cursor + entries.length - 1) % entries.length;
       else if (name === 'down' || (key?.ctrl && name === 'n') || text === 'j')
@@ -286,8 +263,19 @@ const numbered = createNumberedPicker(ask, (line) => console.error(line));
 const choosePicker = (): Picker =>
   process.env.TERM === 'dumb' ? numbered : createPicker(terminalIO());
 
+/** A menu owns the terminal while it is open, so a live progress line is lifted off the screen for the duration. */
+async function whileMenuOpen<T>(run: () => Promise<T>): Promise<T> {
+  const resume = suspendProgress();
+  try {
+    return await run();
+  } finally {
+    resume();
+  }
+}
+
 /** Resolved on use so importing this module never touches stdin. */
 export const terminalPicker: Picker = {
-  one: (question, labels, initial) => choosePicker().one(question, labels, initial),
-  many: (question, labels) => choosePicker().many(question, labels),
+  one: (question, labels, initial) =>
+    whileMenuOpen(() => choosePicker().one(question, labels, initial)),
+  many: (question, labels) => whileMenuOpen(() => choosePicker().many(question, labels)),
 };

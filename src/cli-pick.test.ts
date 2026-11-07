@@ -5,7 +5,8 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { clipToColumns, createNumberedPicker, createPicker } from './cli-pick.ts';
+import { createNumberedPicker, createPicker } from './cli-pick.ts';
+import { clipToColumns, columnWidth } from './cli-width.ts';
 
 const UP = '\x1b[A';
 const DOWN = '\x1b[B';
@@ -178,8 +179,9 @@ test('wide characters are clipped by terminal columns and a short terminal still
   const result = createPicker({ input, output }).many('Targets', ['a', 'b', 'c', 'd', 'e']);
   await new Promise((resolve) => setImmediate(resolve));
   const lines = text.split('\n').filter((line) => line && !line.includes('\x1b['));
-  assert.ok(
-    lines.length <= 5,
+  assert.equal(
+    lines.length,
+    4,
     'menu height must stay under the terminal rows so redraw can erase it',
   );
   input.write('q');
@@ -222,7 +224,9 @@ test('a terminated process shows the cursor again and still dies of the signal',
   );
   let stderr = '';
   child.stderr.on('data', (chunk) => (stderr += String(chunk)));
-  while (!stderr.includes('cancel)')) await new Promise((resolve) => setTimeout(resolve, 20));
+  for (const started = Date.now(); !stderr.includes('cancel)');)
+    if (Date.now() - started > 5000) assert.fail(`the menu never appeared: ${stderr}`);
+    else await new Promise((resolve) => setTimeout(resolve, 20));
   child.kill('SIGTERM');
   const [code, signal] = await once(child, 'close');
   assert.equal(
@@ -298,4 +302,44 @@ test('narrowing the terminal erases the rows the drawn lines now wrap onto', asy
   );
   input.write('q');
   await assert.rejects(result, /cancelled/, 'the menu still works after a resize');
+});
+
+test('zero-width, keycap and flag characters are measured as terminals draw them', () => {
+  assert.equal(columnWidth('a\u200bb'), 2, 'a zero-width space takes no column');
+  assert.equal(columnWidth('1\ufe0f\u20e3'), 2, 'a keycap emoji is two columns wide');
+  assert.equal(columnWidth('🇱🇻'), 2, 'a flag is one two-column character');
+  assert.equal(columnWidth('e\u0301'), 1, 'a combining accent adds no column');
+  assert.equal(columnWidth('abc'), 3, 'plain text is one column per character');
+});
+
+test('a very short terminal drops the hint and footer so the menu still fits', async () => {
+  const input = new PassThrough();
+  const output = Object.assign(new PassThrough(), { columns: 60, rows: 4 });
+  let text = '';
+  output.on('data', (chunk) => (text += String(chunk)));
+  const result = createPicker({ input, output }).many('Targets', ['a', 'b', 'c', 'd']);
+  await new Promise((resolve) => setImmediate(resolve));
+  const lines = text.split('\n').filter((line) => line.trim());
+  assert.ok(
+    lines.length <= 3,
+    'title plus entries must stay within the terminal rows minus the prompt line',
+  );
+  assert.ok(!text.includes('(space select'), 'the hint line is dropped when there is no room');
+  input.write('\r');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.match(text, /Targets - Select at least one/, 'the refusal note moves onto the title line');
+  input.write('q');
+  await assert.rejects(result, /cancelled/, 'q still cancels');
+});
+
+test('digits typed around another key do not join into one number', async () => {
+  const t = terminal();
+  const many = Array.from({ length: 15 }, (_, i) => `entry ${i + 1}`);
+  const result = t.picker.one('Target', many);
+  await t.keys('1\x1b[B2\r');
+  assert.equal(
+    await result,
+    1,
+    'an arrow key between digits starts a new number: 1, down, 2 selects entry 2',
+  );
 });

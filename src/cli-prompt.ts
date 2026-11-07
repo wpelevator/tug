@@ -1,5 +1,6 @@
 import readline from 'node:readline';
 import { Writable } from 'node:stream';
+import { suspendProgress } from './cli-progress.ts';
 
 /** True when both ends are a terminal and the run is not CI, so asking a question can be answered. */
 export function canPrompt(env: NodeJS.ProcessEnv = process.env): boolean {
@@ -12,6 +13,8 @@ export type Prompter = (question: string, hidden?: boolean) => Promise<string>;
 export const ask: Prompter = async (question, hidden = false) => {
   // A keyboard menu leaves stdin unreferenced so a finished menu cannot hold the process open; a question needs it held.
   process.stdin.ref?.();
+  // The question owns the line it is typed on, so a live progress line must stay off the screen meanwhile.
+  const resumeProgress = suspendProgress();
   const muted = { on: false };
   const output = new Writable({
     write(chunk, _encoding, callback) {
@@ -33,6 +36,7 @@ export const ask: Prompter = async (question, hidden = false) => {
     });
   } finally {
     rl.close();
+    resumeProgress();
   }
 };
 
