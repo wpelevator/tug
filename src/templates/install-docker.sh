@@ -8,7 +8,8 @@ trap 'status=$?; [ "$status" = 0 ] || [ -z "$stage_name" ] || echo "tug-bootstra
 retry() {
   attempts="${TUG_BOOTSTRAP_RETRIES:-5}"; delay="${TUG_BOOTSTRAP_RETRY_DELAY:-5}"; n=1
   until "$@"; do
-    [ "$n" -lt "$attempts" ] || { echo "tug-bootstrap: giving up after $n attempts: $*" >&2; return 1; }
+    rc=$?
+    [ "$n" -lt "$attempts" ] || { echo "tug-bootstrap: giving up after $n attempts: $*" >&2; return "$rc"; }
     echo "tug-bootstrap: attempt $n failed; retrying in $((n * delay))s: $*" >&2
     sleep "$((n * delay))"; n=$((n + 1))
   done
@@ -58,11 +59,12 @@ fi
 conflict() { echo "Conflicting package $1 is installed; review Docker's installation instructions before replacing it." >&2; exit 20; }
 # TUG_MARKER is set by the CLI so this stage shows in its progress; cloud-init runs without it and prints the plain text.
 echo "${TUG_MARKER:-}Installing Docker packages (this can take a few minutes)"
-# Fetch with a bounded wait so a stalled connection fails and is retried instead of hanging the boot.
-fetch() { retry curl -fsSL --connect-timeout 15 --max-time 120 "$1" -o "$2"; }
-stage 'checking for conflicting packages'
+# Fetch with a bounded wait so a stalled connection fails and is retried instead of hanging the boot. The file is
+# written beside its destination and moved into place, so a truncated download is never left where it would be trusted.
+fetch() { retry curl -fsSL --connect-timeout 15 --max-time 120 "$1" -o "$2.part" && mv -f "$2.part" "$2"; }
 if [ "$family" = apt ]; then
   [ -n "${VERSION_CODENAME:-}" ] || { echo 'OS release must declare VERSION_CODENAME.' >&2; exit 20; }
+  stage 'checking for conflicting packages'
   export DEBIAN_FRONTEND=noninteractive
   # A first boot often runs unattended upgrades that hold the dpkg lock; wait for it rather than fail.
   aptget() { retry apt-get -o Acquire::Retries=3 -o DPkg::Lock::Timeout=300 "$@"; }
@@ -94,6 +96,7 @@ REPO
     [ "$want_compose" != 1 ] || aptget install -y docker-compose-plugin >&2
   fi
 else
+  stage 'checking for conflicting packages'
   if [ "$engine_present" = false ]; then
     for package in docker docker-client docker-client-latest docker-common docker-latest docker-logrotate docker-engine moby-engine podman-docker docker-compose; do
       if rpm -q "$package" >/dev/null 2>&1; then conflict "$package"; fi

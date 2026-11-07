@@ -750,6 +750,67 @@ test('Docker bootstrap gives up after the configured attempts and says so', asyn
   );
 });
 
+test('Docker bootstrap pauses longer after each failed attempt and reports the failing command status', async () => {
+  const paused = await runBootstrapHelpers('sleep() { echo "slept $1"; }; retry false', {
+    TUG_BOOTSTRAP_RETRY_DELAY: '5',
+  });
+  assert.equal(
+    paused.out,
+    'slept 5\nslept 10\nslept 15\nslept 20',
+    'five attempts should pause 5, 10, 15 and 20 seconds between them, as the docs promise',
+  );
+  const status = await runBootstrapHelpers("retry sh -c 'exit 100'", {
+    TUG_BOOTSTRAP_RETRIES: '2',
+  });
+  assert.equal(
+    status.code,
+    100,
+    'giving up should return the failing command status, not a generic 1',
+  );
+});
+
+test('Docker bootstrap sends every network step through the retry helper', async () => {
+  const source = await fs.readFile(path.resolve('src/templates/install-docker.sh'), 'utf8');
+  const body = source.replace(/# begin helpers[\s\S]*?# end helpers\n/, '');
+  const lines = body.split('\n').filter((line) => !line.trim().startsWith('#'));
+  const bare = lines.filter(
+    (line) =>
+      (/\bapt-get\b/.test(line) && !/^\s*aptget\(\)/.test(line)) ||
+      (/\bcurl -/.test(line) && !/^\s*fetch\(\)/.test(line)) ||
+      (/\bdnf install\b/.test(line) && !/\bretry dnf install\b/.test(line)),
+  );
+  assert.deepEqual(
+    bare,
+    [],
+    'curl, apt-get and dnf install should only run through fetch, aptget or retry so a brief outage cannot fail the install',
+  );
+  for (const required of [
+    'DPkg::Lock::Timeout=',
+    'Acquire::Retries=',
+    '--connect-timeout',
+    '--max-time',
+    '"$2.part"',
+  ]) {
+    assert.ok(
+      body.includes(required),
+      `the bootstrap should keep ${required} (lock wait, bounded downloads, atomic key and repo files)`,
+    );
+  }
+  for (const name of [
+    'checking for conflicting packages',
+    'adding the Docker apt repository',
+    'adding the Docker dnf repository',
+    'installing Docker Engine',
+    'starting Docker',
+    'verifying Docker',
+  ]) {
+    assert.ok(
+      body.includes(`stage '${name}'`),
+      `the bootstrap should announce the stage '${name}'`,
+    );
+  }
+});
+
 test('Docker bootstrap names the stage that failed, and stays quiet on success and early refusals', async () => {
   const failed = await runBootstrapHelpers("stage 'installing Docker Engine'; exit 7");
   assert.equal(failed.code, 7, 'the failing stage should keep its exit status');

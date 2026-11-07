@@ -1,13 +1,18 @@
 #!/usr/bin/env node
 // Prototype: prove the cloud-init enrollment path on a real first boot, locally, with QEMU.
 //
-//   node tools/scripts/qemu-first-boot.js --image <ubuntu-cloudimg.img> [--work <dir>] [--name app1] [--keep]
+//   node tools/scripts/qemu-first-boot.js --image <cloud-image.qcow2> [--work <dir>] [--name app1] [--keep]
+//     [--ssh-user <user>] [--agent-image <tag>] [--block-docker-seconds N] [--timeout <seconds>]
 //
 // It runs a throwaway control on this machine, mints user-data with `tug node enroll --install-docker`, boots a cloud
 // image with that user-data as a NoCloud seed (a real first boot, not a `cloud-init clean` replay) and watches until the
 // node reports to control, printing a timeline. QEMU user networking reaches this machine at 10.0.2.2, so control
 // advertises https://10.0.2.2:<port> and the guest reaches it without any bridge or root privileges. The agent image is
 // pulled from the registry by the guest, so the guest needs outbound internet.
+//
+// Requirements: macOS on Apple Silicon with Homebrew `qemu` and `xorriso` (it boots arm64 guests with HVF and the
+// edk2 firmware under /opt/homebrew), an arm64 cloud image that ships cloud-init with the NoCloud datasource, and
+// the publisher's checksum file next to the image (SHA256SUMS, a *CHECKSUM file or <image>.sha256/.sha512).
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import fs from 'node:fs';
@@ -25,10 +30,17 @@ const flag = (name) => argv.includes(`--${name}`);
 const image = opt('image');
 if (!image) {
   console.error(
-    'usage: qemu-first-boot.js --image <cloud image> [--work dir] [--name node] [--keep] [--block-docker-seconds N]',
+    'usage: qemu-first-boot.js --image <cloud image> [--work dir] [--name node] [--ssh-user user] [--keep] [--block-docker-seconds N]',
   );
   process.exit(2);
 }
+// The default login of the common cloud images, from the file name; override with --ssh-user.
+const sshUser = opt(
+  'ssh-user',
+  /fedora/i.test(image) ? 'fedora' : /alpine/i.test(image) ? 'alpine' : 'ubuntu',
+);
+// sudo on most images, doas on Alpine.
+const asRoot = sshUser === 'alpine' ? 'doas' : 'sudo -n';
 const work = path.resolve(opt('work', path.join(repo, '.qemu-work')));
 const nodeName = opt('name', 'app1');
 const port = Number(opt('port', '8443'));
@@ -55,19 +67,49 @@ function cleanup() {
   for (const child of children) if (child.exitCode === null) child.kill('SIGTERM');
 }
 process.on('exit', cleanup);
-process.on('SIGINT', () => process.exit(130));
+// `exit` does not fire on signals, so a cancelled run would orphan qemu and control and hold their ports.
+for (const [signal, code] of [
+  ['SIGINT', 130],
+  ['SIGTERM', 143],
+  ['SIGHUP', 129],
+])
+  process.on(signal, () => process.exit(code));
 
-function verifyImage() {
-  const sums = path.join(path.dirname(image), 'SHA256SUMS');
-  if (!fs.existsSync(sums)) return log('no SHA256SUMS next to the image; skipping checksum');
-  const line = fs
-    .readFileSync(sums, 'utf8')
-    .split('\n')
-    .find((l) => l.endsWith(path.basename(image)));
-  if (!line) return log('image not listed in SHA256SUMS; skipping checksum');
-  const hash = createHash('sha256').update(fs.readFileSync(image)).digest('hex');
-  if (hash !== line.split(/\s+/)[0]) throw new Error('image checksum mismatch');
-  log('image checksum verified');
+/** The expected digest for the image from the publisher's checksum file beside it, in the formats these images ship. */
+function expectedDigest() {
+  const dir = path.dirname(image);
+  const name = path.basename(image);
+  for (const algorithm of ['sha256', 'sha512']) {
+    const file = path.join(dir, `${name}.${algorithm}`);
+    const hash =
+      fs.existsSync(file) && /^([0-9a-f]{64,128})\b/m.exec(fs.readFileSync(file, 'utf8'))?.[1];
+    if (hash) return { algorithm, hash };
+  }
+  for (const file of fs
+    .readdirSync(dir)
+    .filter((entry) => /(^|[-_.])(SHA256SUMS|CHECKSUM)$/.test(entry))) {
+    for (const line of fs.readFileSync(path.join(dir, file), 'utf8').split('\n')) {
+      // "<hash> *<name>" (coreutils) or "SHA256 (<name>) = <hash>" (BSD, as Fedora publishes).
+      const gnu = /^([0-9a-f]{64})\s+\*?(\S+)$/.exec(line);
+      if (gnu && gnu[2] === name) return { algorithm: 'sha256', hash: gnu[1] };
+      const bsd = /^SHA256 \((.+)\) = ([0-9a-f]{64})$/.exec(line);
+      if (bsd && bsd[1] === name) return { algorithm: 'sha256', hash: bsd[2] };
+    }
+  }
+  return undefined;
+}
+
+async function verifyImage() {
+  const expected = expectedDigest();
+  if (!expected)
+    return log('no publisher checksum found next to the image; skipping the integrity check');
+  const hash = createHash(expected.algorithm);
+  for await (const chunk of fs.createReadStream(image)) hash.update(chunk);
+  if (hash.digest('hex') !== expected.hash)
+    throw new Error(`image ${expected.algorithm} checksum mismatch`);
+  log(
+    `image ${expected.algorithm} checksum verified (integrity only: the checksum file itself is not signature-checked)`,
+  );
 }
 
 /** A cloud-init multipart document: an operator part (SSH access) beside tug's part, which is the shape users need. */
@@ -99,8 +141,10 @@ async function waitFor(label, probe, seconds) {
   throw new Error(`timed out waiting for ${label}`);
 }
 
-fs.mkdirSync(work, { recursive: true });
-verifyImage();
+// The work dir holds a root credential, a private key and a join key.
+fs.mkdirSync(work, { recursive: true, mode: 0o700 });
+fs.chmodSync(work, 0o700);
+await verifyImage();
 
 // 1. Throwaway control whose certificate names the address the guest will use.
 const dataDir = path.join(work, 'control-data');
@@ -159,8 +203,9 @@ const enrollArgs = [
 if (agentImage) enrollArgs.push('--image', agentImage);
 const tugPart = tug(enrollArgs).stdout;
 fs.writeFileSync(path.join(work, 'tug-part.yaml'), tugPart, { mode: 0o600 });
-// --block-docker-seconds N makes download.docker.com unreachable for the first N seconds (via /etc/hosts and a detached
-// sleeper), to exercise the bootstrap's retries: a short outage should recover, a long one should fail naming its stage.
+// --block-docker-seconds N makes download.docker.com unreachable until N seconds after the early-boot bootcmd (via
+// /etc/hosts and a detached sleeper), to exercise the bootstrap's retries. The bootstrap starts some 8 to 20 seconds
+// after that point, so a short outage recovers and N above the retry window (about 50 seconds) plus that forces a failure.
 let operatorPart = `#cloud-config\nssh_authorized_keys:\n  - ${fs.readFileSync(`${keyPath}.pub`, 'utf8').trim()}\n`;
 if (blockSeconds > 0) {
   operatorPart +=
@@ -200,6 +245,7 @@ run('xorriso', [
   path.join(work, 'user-data'),
   path.join(work, 'meta-data'),
 ]);
+fs.chmodSync(seed, 0o600);
 const disk = path.join(work, 'disk.qcow2');
 fs.rmSync(disk, { force: true });
 run('qemu-img', [
@@ -215,7 +261,7 @@ run('qemu-img', [
   '20G',
 ]);
 
-// 4. Boot. HVF on Apple Silicon, KVM on Linux arm64; the serial console is the failure channel a real user would have.
+// 4. Boot with HVF (Apple Silicon); the serial console is the failure channel a real user would have.
 const serial = path.join(work, 'serial.log');
 fs.rmSync(serial, { force: true });
 const share = '/opt/homebrew/share/qemu';
@@ -266,7 +312,7 @@ const ssh = (remote) =>
       'ConnectTimeout=3',
       '-o',
       'LogLevel=ERROR',
-      'ubuntu@127.0.0.1',
+      `${sshUser}@127.0.0.1`,
       remote,
     ],
     { allowFail: true },
@@ -314,7 +360,7 @@ try {
   if (sshUp) {
     console.log('--- cloud-init status / output ---');
     console.log(
-      ssh('cloud-init status --long; sudo tail -n 40 /var/log/cloud-init-output.log').stdout,
+      ssh(`cloud-init status --long; ${asRoot} tail -n 40 /var/log/cloud-init-output.log`).stdout,
     );
   }
   process.exitCode = 1;
@@ -323,10 +369,10 @@ try {
 if (sshUp) {
   console.log('--- guest ---');
   console.log(
-    ssh(
-      'docker ps --format "{{.Names}} {{.Image}} {{.Status}}"; cloud-init status; sudo grep -c . /var/log/cloud-init-output.log',
-    ).stdout,
+    ssh(`${asRoot} docker ps --format "{{.Names}} {{.Image}} {{.Status}}"; cloud-init status`)
+      .stdout,
   );
 }
 if (!flag('keep')) cleanup();
-else log(`left running (--keep): ssh -p ${sshPort} -i ${keyPath} ubuntu@127.0.0.1`);
+else
+  log(`left running until Ctrl-C (--keep): ssh -p ${sshPort} -i ${keyPath} ${sshUser}@127.0.0.1`);
