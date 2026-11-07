@@ -265,4 +265,17 @@ Before the rollback the 0.14.0 control image was tagged `tug:rollback` on vm1, a
 
 **Observations, fixed afterwards.** The refusal to open a newer database used to print a stack trace in the control's log. The control and the agent now print one `error:` line with the remedy and exit 1; Docker's restart policy still restarts the container until the operator acts, so the log holds that single line repeated. `tug node list` reported a node `online` from its stored status while `tug status` correctly said `stale`; the list now judges staleness itself, so the two agree.
 
-**Not yet run on this candidate:** the README quick start on a fresh host with its prompts, the control and workload recovery drill, workload backups to S3-compatible storage, the published image, amd64, real NAT and certificate renewal.
+### Quick start on a fresh host
+
+A third fresh Ubuntu 24.04.5 arm64 VM (no Docker, no private link, forwarded ports 9443 and 9080) followed [Deploy your first service](getting-started.md) with the 1.0.0 candidate, driving the prompts through a pseudo-terminal so they behaved as in an interactive shell. Three deviations from the text were forced by the setup, not by Tug: the candidate CLI came from the packed tarball instead of `npm install -g`, the image was built locally (`--build-local-image`, the 1.0.0 image is not published), and the VM sits behind NAT, so `--control-url https://127.0.0.1:9443` told the CLI where to connect and `--agent-control-url https://127.0.0.1:8443` told the agent.
+
+| Step | Result |
+|---|---|
+| `tug setup root@vm3` | Asked once whether to install Docker with the Compose plugin, showed the control plan (host, control URL, mTLS port, image, Docker, credential) and asked to confirm; installed Docker, built and copied the image, started control, wrote `tug.yml` and `tug.local.yml` and imported the credential |
+| `tug status` | `No projects`, no nodes |
+| `tug node add root@vm3 --name app1` | Docker already present, so no Docker question; asked for the address other nodes should use, whether the node handles ingress, then showed the node plan and asked to confirm; the node reported online |
+| `tug deploy` with the guide's nginx `compose.yaml` | `succeeded` in about 8 seconds, `web` serving; `tug logs web` worked and `curl` through the forwarded port returned HTTP 200 and the nginx welcome page |
+
+**Finding, fixed.** The address question offered `docker0` and Docker's `br-<id>` network bridge next to the real interface (`1) 10.0.2.15 (nic0, private)`, `2) 172.17.0.1 (docker0, private)`, `3) 172.18.0.1 (br-…, private)`). Those addresses only reach containers on the host, so `tug node add` now leaves out Docker and CNI bridge interfaces (`docker0`, `br-<12 hex>`, `veth*`, `cni*`) and keeps operator bridges such as `br-lan`.
+
+**Not yet run on this candidate:** the control and workload recovery drill, workload backups to S3-compatible storage, the published image, amd64, real NAT and certificate renewal.

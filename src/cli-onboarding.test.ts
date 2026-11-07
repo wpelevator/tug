@@ -199,3 +199,19 @@ test('formatNodePlan does not claim Docker is installed when the host was not pr
     'chosen install, address and ingress are shown',
   );
 });
+
+test('address candidates leave out Docker and CNI bridges, which never reach another node', () => {
+  const output = [
+    '2: enp0s1    inet 10.0.2.15/24 brd 10.0.2.255 scope global dynamic enp0s1',
+    '3: docker0    inet 172.17.0.1/16 brd 172.17.255.255 scope global docker0',
+    '4: br-973f61fe6a70    inet 172.18.0.1/16 brd 172.18.255.255 scope global br-973f61fe6a70',
+    '5: br-lan    inet 192.168.1.2/24 brd 192.168.1.255 scope global br-lan',
+    '6: veth1a2b3c    inet 172.19.0.1/16 scope global veth1a2b3c',
+    '7: cni0    inet 10.244.0.1/24 scope global cni0',
+  ].join('\n');
+  assert.deepEqual(
+    parseAddressCandidates(output).map((c) => c.interface),
+    ['enp0s1', 'br-lan'],
+    'only interfaces that can reach other hosts are offered; an operator bridge such as br-lan stays, container bridges go',
+  );
+});

@@ -42,11 +42,14 @@ export function isPrivateIPv4(address: string): boolean {
 }
 
 /** Parse `ip -o -4 addr show` output (`2: eth0    inet 10.0.0.7/24 brd ... scope global eth0`). */
+/** Interfaces Docker and CNI create on the host: their addresses reach containers, never other nodes. */
+const CONTAINER_INTERFACE = /^(docker\d+|br-[0-9a-f]{12}|veth\S*|cni\d+)$/;
+
 export function parseAddressCandidates(output: string): AddressCandidate[] {
   const candidates: AddressCandidate[] = [];
   for (const line of output.split('\n')) {
     const match = /^\d+:\s+(\S+)\s+inet\s+(\d{1,3}(?:\.\d{1,3}){3})\//.exec(line.trim());
-    if (!match || isIP(match[2]) !== 4) continue;
+    if (!match || isIP(match[2]) !== 4 || CONTAINER_INTERFACE.test(match[1])) continue;
     candidates.push({
       interface: match[1],
       address: match[2],
