@@ -87,6 +87,14 @@ function addNodeIdentityOptions(command: Command): Command {
  * The SSH-assisted flow: the node makes its own key and CSR, an admin credential authorizes the identity at this moment and
  * the certificate is installed back over SSH, so no bootstrap secret travels and the private key never leaves the node.
  */
+/**
+ * The `agent identity` arguments for each mode. Adding a node reuses the key of an agent already enrolled as that
+ * name, so re-running `node add` upgrades it in place; replacing or repairing asks for a new key on purpose.
+ */
+export function agentIdentityArgs(mode: 'create' | 'replace', name: string): string {
+  return mode === 'create' ? `identity --current ${sh(name)}` : 'identity';
+}
+
 async function installNodeIdentity(
   sshTarget: string,
   name: string,
@@ -122,7 +130,9 @@ async function installNodeIdentity(
     const agent = (command: string, interactive = false) =>
       `mkdir -p ${AGENT_STATE} && docker run --rm ${interactive ? '-i ' : ''}-v ${AGENT_STATE}:${AGENT_STATE} ${sh(image)} agent ${command}`;
     progress.stage(`Creating identity for node ${name}`);
-    const csr = await runCapture('ssh', ['--', sshTarget, agent('identity')]);
+    // Adding a node the host is already enrolled as reuses its key, so re-running `node add` upgrades the agent in place;
+    // `node replace` and `node repair` deliberately ask for a new key.
+    const csr = await runCapture('ssh', ['--', sshTarget, agent(agentIdentityArgs(mode, name))]);
     const response = await request<IdentityResponse>(
       'POST',
       `/api/v1/nodes/${encodeURIComponent(name)}/identity`,

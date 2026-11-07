@@ -269,3 +269,69 @@ test('the client version header goes to the control only, never to other origins
     app.close();
   }
 });
+
+/** An enrolled agent: the pending key was signed and installed, which removes the pending file. */
+async function enrolled(name = 'n1') {
+  const s = await setup();
+  const signed = await s.pki.signClientCsr(s.csr, identityUri('node', name), NODE_LIFETIME_MS);
+  const doc = await installIdentity(s.dir, {
+    node: { id: name, name } as IdentityResponse['node'],
+    certificate: signed.cert,
+    ca: s.pki.caPem,
+    url: 'https://control.test:8443',
+  });
+  return { ...s, doc };
+}
+
+test('identity --current on an agent enrolled as that node reuses the installed key', async () => {
+  const s = await enrolled('n1');
+  const csr = await agentIdentityCsr(s.dir, { current: 'n1' });
+  assert.equal(
+    (await verifyCsr(csr)).keyHash,
+    certKeyHash(s.doc.cert),
+    'the CSR must carry the installed key so control treats node add as an idempotent retry',
+  );
+  const signed = await s.pki.signClientCsr(csr, identityUri('node', 'n1'), NODE_LIFETIME_MS);
+  const upgraded = await installIdentity(s.dir, {
+    node: { id: 'n1', name: 'n1' } as IdentityResponse['node'],
+    certificate: signed.cert,
+    ca: s.pki.caPem,
+    url: 'https://control.test:8443',
+  });
+  assert.equal(upgraded.key, s.doc.key, 'install-cert keeps the same private key');
+  assert.notEqual(upgraded.cert, s.doc.cert, 'and installs the freshly signed certificate');
+  await assert.rejects(fs.stat(pendingFile(s.dir)), 'the pending key is removed after the install');
+});
+
+test('identity without --current on an enrolled agent generates a new key, so replace rotates it', async () => {
+  const s = await enrolled('n1');
+  assert.notEqual(
+    (await verifyCsr(await agentIdentityCsr(s.dir))).keyHash,
+    certKeyHash(s.doc.cert),
+    'node replace must be able to install a different key',
+  );
+});
+
+test('identity --current refuses an agent enrolled as another node and leaves it untouched', async () => {
+  const s = await enrolled('n1');
+  await assert.rejects(
+    agentIdentityCsr(s.dir, { current: 'n2' }),
+    /enrolled as node n1, not n2.*tug node replace n1/,
+    'two nodes must never share a key, so adding another name on an enrolled host is refused with the remedy',
+  );
+  assert.equal(
+    (await loadAgentDocument(s.dir))?.key,
+    s.doc.key,
+    'a refused request must not change the installed identity',
+  );
+});
+
+test('identity --current on a host with no installed identity behaves like a first enrollment', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-agent-fresh-'));
+  const first = await agentIdentityCsr(dir, { current: 'n1' });
+  assert.equal(
+    (await verifyCsr(await agentIdentityCsr(dir, { current: 'n1' }))).keyHash,
+    (await verifyCsr(first)).keyHash,
+    'a fresh host generates one pending key and keeps reusing it',
+  );
+});
