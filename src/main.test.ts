@@ -74,10 +74,16 @@ test('the control refuses a database from a newer Tug with one plain line and a 
     }),
     (error: { code: number; stderr: string }) => {
       assert.equal(error.code, 1, 'the container must stop with a failure status');
-      assert.match(
-        error.stderr,
-        /^error: the control database is at schema version 99, newer than the 1 this Tug supports; upgrade Tug, or restore a backup taken by this version\n$/,
-        'the container log holds the remedy and nothing else',
+      // Node 22 prints its own SQLite ExperimentalWarning (and the --trace-warnings hint) first; Node 24 does not.
+      const ours = error.stderr
+        .split('\n')
+        .filter((line) => line && !/^\(node:\d+\) |^\(Use `node --trace-warnings/.test(line));
+      assert.deepEqual(
+        ours,
+        [
+          'error: the control database is at schema version 99, newer than the 1 this Tug supports; upgrade Tug, or restore a backup taken by this version',
+        ],
+        'the container log holds the remedy as one plain line, with no stack trace',
       );
       return true;
     },
