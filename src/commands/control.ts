@@ -6,7 +6,7 @@ import { CONTROL_CONTAINER, defaultControlUrl, shellQuote as sh } from '../cli-i
 import { assertImagePublished, resolveImage } from '../image.ts';
 import { decodeCredential, fingerprintPem, writeFileDurable } from '../pki.ts';
 import { errMessage, loadTemplate } from '../util.ts';
-import { collect, loadCfg, print, request, runLocal, templatesDir } from './context.ts';
+import { collectList, loadCfg, print, request, runLocal, templatesDir } from './context.ts';
 import type { InstallOpts } from './context.ts';
 import { bootstrapDocker, hostHasDocker, preflightRemote, transferTugImage } from './host.ts';
 import { importCredential } from './init.ts';
@@ -27,8 +27,8 @@ function addSetup(parent: Command, description: string): void {
     .description(description)
     .option(
       '--extra-san <name>',
-      'additional DNS name or IP for the server certificate (repeatable)',
-      collect,
+      'additional DNS name or IP for the server certificate (repeat or comma-separate for several)',
+      collectList,
       [],
     )
     .option(

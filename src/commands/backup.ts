@@ -2,7 +2,7 @@ import { selectBackups } from './selection.ts';
 import { withProgress } from '../cli-progress.ts';
 import type { Command } from 'commander';
 import { backupCheckProblems } from '../backup-check.ts';
-import { collect, loadCfg, print, readStdin, request } from './context.ts';
+import { collectList, loadCfg, print, readStdin, request } from './context.ts';
 
 interface BackupRunRecord {
   id: string;
@@ -166,8 +166,8 @@ export function registerBackup(program: Command): void {
     )
     .option(
       '--env <name>',
-      'credential variable for the backend, such as AWS_ACCESS_KEY_ID (repeatable); each value is read from the variable of that name in your environment, else from a line on stdin',
-      collect,
+      'credential variable for the backend, such as AWS_ACCESS_KEY_ID (repeat or comma-separate for several); each value is read from the variable of that name in your environment, else from a line on stdin',
+      collectList,
       [],
     )
     .action(async (url: string, o: { env: string[] }) => {

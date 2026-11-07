@@ -2,7 +2,7 @@ import { selectMany } from '../cli-selection.ts';
 import { selectBackup, selectRestore, selectSnapshot, serviceChoices } from './selection.ts';
 import { withProgress } from '../cli-progress.ts';
 import type { Command } from 'commander';
-import { collect, loadCfg, request } from './context.ts';
+import { collectList, loadCfg, request } from './context.ts';
 
 interface RestorePlanView {
   target: string;
@@ -47,8 +47,8 @@ export function registerRestore(program: Command): void {
     )
     .option(
       '--writers <service>',
-      'service to stop during the restore, instead of discovering them (repeatable)',
-      collect,
+      'service to stop during the restore, instead of discovering them (repeat or comma-separate for several)',
+      collectList,
       [],
     )
     .option('--no-writers', 'restore without stopping any service')

@@ -87,7 +87,18 @@ export function setResolvedConfig(config: Config): void {
 export async function loadCfg(): Promise<Config> {
   return resolvedConfig!;
 }
-export const collect = (v: string, a: string[]): string[] => [...a, v];
+/**
+ * Collects a flag that takes several values: it can be repeated or given a comma-separated list, and the two mix, so
+ * `--move db --move web` and `--move db,web` are the same. Items are trimmed and empty ones dropped. Only for flags whose
+ * values never contain a comma (names, host names, variable names).
+ */
+export const collectList = (value: string, previous: string[]): string[] => [
+  ...previous,
+  ...value
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean),
+];
 export async function readStdin(): Promise<string> {
   const chunks: Buffer[] = [];
   for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
