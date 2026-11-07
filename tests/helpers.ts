@@ -116,6 +116,21 @@ globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) =>
 }) as typeof fetch;
 
 /** Writes a real credential document (own CA, operator identity) for tests that only need a valid file. */
+/**
+ * Puts a `docker` on `bin` that answers `manifest inspect` as "published" and hands every other command to the real
+ * Docker. The install commands ask the registry whether the default image exists, which is false on the commit that
+ * cuts a release (its image builds a few minutes after the commit), so a test that runs them must not depend on the
+ * registry. `bin` must be the first entry of the test's PATH.
+ */
+export async function writeStubDocker(bin: string): Promise<void> {
+  await fs.mkdir(bin, { recursive: true });
+  await fs.writeFile(
+    path.join(bin, 'docker'),
+    '#!/bin/sh\nif [ "$1" = manifest ]; then exit 0; fi\nPATH=${PATH#*:}\nexec docker "$@"\n',
+    { mode: 0o755 },
+  );
+}
+
 export async function writeCredentialFile(
   file: string,
   url = 'https://control.test:8443',
