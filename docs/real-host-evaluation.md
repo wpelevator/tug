@@ -238,8 +238,8 @@ A partial run of the [Road to 1.0.0](roadmap.md#road-to-100) gate on two fresh U
 | 0.14 CLI against the 1.0.0 control | Warns `update the CLI with: npm i -g @wpelevator/tug@1.0.0` and proceeds (the 0.14 code only warns about a newer control) |
 | `tug doctor` and `tug doctor --nodes` on the upgraded fleet | `ok: true`, no warnings |
 | Agent upgrade of both nodes | Workload containers kept running; both nodes online on the 1.0.0 image |
-| Site after the upgrade | Title and upload sentinel hash unchanged |
-| `tug deploy` with a changed environment variable, then `tug control backup` | Succeeded on the migrated database |
+| Site after the upgrade, before any redeploy | Title and upload sentinel hash unchanged |
+| `tug deploy` with a changed environment variable, then `tug control backup` | Succeeded on the migrated database. The container was recreated and the database volume persisted (the site title survived), but the upload sentinel was gone: the compose file declared no volume for `/var/www/html`, so the image's anonymous volume went with the old container. That is a flaw of this test compose file, not of the upgrade. |
 | `tug node add` on an enrolled host | **Failed with `409 node already exists`** (below); passes after the fix: same key hash before and after, node online, workload untouched |
 | `tug node add --name <other>` on an enrolled host | Refused with ``use `tug node replace app1` ``, nothing registered, no stack trace |
 | `tug node replace` | Still rotates the key (key hash changed), node back online |
@@ -248,4 +248,21 @@ A partial run of the [Road to 1.0.0](roadmap.md#road-to-100) gate on two fresh U
 
 **Observations, not fixed.** `tug node replace` rejects `-y` where `tug node add` accepts it, and cannot use `--all` unless the nodes are declared in `tug.yml`. Rebuilding `tug:local` on a host makes the running control container show an image ID instead of a name.
 
-**Not yet run on this candidate:** the control rollback lane (`--image tug:rollback`, including 1.0 agents refused by a 0.14 control and whether a 0.14 control opens a schema-1 database), the README quick start on a fresh host with its prompts, the control and workload recovery drill, workload backups to S3-compatible storage, the published image, amd64, real NAT and certificate renewal.
+### Rollback lane
+
+Before the rollback the 0.14.0 control image was tagged `tug:rollback` on vm1, as the upgrade docs recommend, and a fresh control backup was taken. Then `tug control setup root@vm1 --image tug:rollback --yes` ran with the 1.0.0 CLI, followed by `tug control setup --build-local-image` to go forward again.
+
+| Check | Result |
+|---|---|
+| Rollback command | About 11 seconds; the 0.14.0 control started on the schema-1 database without complaint. `user_version` stayed 1 and no project data was lost, because schema 1 is the schema every release from 0.8 shares and 0.14 ignores `user_version`. |
+| Writes by the 0.14 control on that database | A secret created through the 0.14 CLI persisted and was still there after going forward again |
+| 1.0.0 agents against the 0.14 control | Refused on every poll (8 times in a minute) with the control's message plus the agent's remedy: `this client (1.0.0) is newer than the control running 0.14.0 … its containers keep running, and it resumes once the control is upgraded or the agent is rolled back to the control's version` |
+| Workloads during the refusal | MariaDB and WordPress kept running and the site answered HTTP 200 |
+| Status while agents were refused | `tug status` showed both nodes `stale` after 60 seconds, but `tug node list` kept showing them `online` with an old last-seen time |
+| 1.0.0 CLI against the rolled-back control | Refused with `tug control setup <control host> --yes`, as designed; the 0.14 CLI worked |
+| Going forward again with `--build-local-image` | About 17 seconds; no migration ran (`user_version` already 1) and `tug.db.pre-v1.bak` was not rewritten (same timestamp as the first upgrade); both agents resumed within the poll interval with nothing logged and both nodes online |
+| A database from a newer Tug (`user_version` set to 2 on the stopped control) | The 1.0.0 control refused to start with ``the control database is at schema version 2, newer than the 1 this Tug supports; upgrade Tug, or restore a backup taken by this version``, left the file untouched (still version 2, same project count) and the container restarted in a loop. Setting the version back to 1 and starting it recovered everything. |
+
+**Observations, not fixed.** The refusal to open a newer database is printed with a stack trace in the control's log and the container restarts in a loop, where a plain error would be clearer. `tug node list` reports a node `online` from its stored status while `tug status` correctly says `stale`. Both predate this change.
+
+**Not yet run on this candidate:** the README quick start on a fresh host with its prompts, the control and workload recovery drill, workload backups to S3-compatible storage, the published image, amd64, real NAT and certificate renewal.
