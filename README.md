@@ -2,6 +2,8 @@
 
 Deploy Docker Compose apps to your own Linux VPS with one command, from your laptop or CI. Images, rollbacks, backups, HTTPS and secrets are built in, so one small server can run the whole stack.
 
+A typical VPS is a durable, always-on computer with enough CPU, memory and disk to host several sites or a medium-size application and its database. You do not need a cluster, a per-app platform plan or a pile of managed services to run that well, and a plain server often costs far less than renting the same capacity piece by piece. tug is the missing layer that makes self-hosting on one or a few servers safe and repeatable, so you keep the savings without giving up deploys, rollbacks, backups and HTTPS.
+
 ## What you get
 
 - **Image delivery built in, registry optional.** By default your own images are built on the control server (or on your machine with `tug deploy --build-local`) and sent to each server as an archive over connections the agents already make. If you prefer to build in CI, push to any HTTPS registry (GHCR, Docker Hub, a private one) and declare `image:`; control pins the tag to a digest before deploying. Third-party images such as `nginx` are always pulled from their registry.
