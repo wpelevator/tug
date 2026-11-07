@@ -23,6 +23,8 @@ CLI options override environment variables, which override the config files and 
 | `TUG_DATA_DIR` | `./data` | SQLite database, master key, `pki/` (CA and server certificate), image archives, build contexts and backups. |
 | `TUG_UPLOAD_DIR` | `<data dir>/uploads` | Temporary storage for uploaded source contexts and local image archives. |
 | `TUG_MAX_IMAGE_BYTES` | `5368709120` | Maximum bytes per uploaded file (source context or compressed image); expanded archives are limited to 20 GiB and 100,000 entries. |
+| `TUG_IMAGE_KEEP` | `5` | After each successful deploy, control prunes build archives beyond the newest this many deployments of each project, keeping the current deployment and any version a node still reports (the rules of `tug image prune`). `0` turns automatic pruning off. |
+| `TUG_BUILD_CACHE_KEEP` | `10GB` | After each successful deploy, control caps the Docker build cache with `docker builder prune --all --keep-storage <size>`. A size such as `5GB` or `500MB`; `0` leaves the cache alone. |
 | `TUG_LOCK_TTL_MS` | `600000` | Lease lifetime of per-project operation locks; active builds renew their lease. |
 | `TUG_STALE_SECONDS` | `60` | Seconds without an authenticated work fetch, status report or wake wait before a node is marked `stale`. |
 | `TUG_EVENT_RETENTION_DAYS` | `30` | Events older than this many days are deleted; `0` keeps events regardless of age. Pruning runs at startup and then at most once an hour while agents report events. |

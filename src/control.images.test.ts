@@ -27,6 +27,8 @@ async function server(openDatabase?: typeof openDb) {
     sizeBytes: bytes.length,
   };
   let fail = false;
+  // By default every build produces a new image; `identicalImages` makes rebuilds produce the one the project already has.
+  let identical = false;
   let buildGate: Promise<void> | undefined;
   const app = await createApp({
     identity: testIdentity,
@@ -42,7 +44,13 @@ async function server(openDatabase?: typeof openDb) {
         await fs.writeFile(file, bytes);
         return info;
       },
-      inspect: async () => imageInfo,
+      inspect: async (ref) =>
+        identical
+          ? imageInfo
+          : {
+              ...imageInfo,
+              imageId: `sha256:${createHash('sha256').update(String(ref)).digest('hex')}`,
+            },
       validate: async () => info,
       run: async (_cmd, args) => {
         calls.push(args.join(' '));
@@ -127,6 +135,9 @@ async function server(openDatabase?: typeof openDb) {
     },
     failBuild: () => {
       fail = true;
+    },
+    identicalImages: () => {
+      identical = true;
     },
     close: async () => {
       await new Promise((resolve) => srv.close(resolve));
@@ -743,4 +754,154 @@ test('image prune keeps the newest deployments, refuses rollback to pruned ones 
   } finally {
     await s.close();
   }
+});
+
+test('an unchanged rebuild reuses the existing archive instead of saving another copy', async () => {
+  const s = await server();
+  try {
+    const n1 = await s.node('n1');
+    const first = await json(await s.deploy('v1'));
+    await s.report(n1.nodeId, first.desiredState);
+    s.identicalImages();
+    const second = await json(await s.deploy('v2'));
+    const a = first.desiredState.services.app;
+    const b = second.desiredState.services.app;
+    assert.equal(
+      b.artifact.buildId,
+      a.artifact.buildId,
+      'an identical image must point at the archive already stored',
+    );
+    assert.deepEqual(
+      b.artifact,
+      a.artifact,
+      'the reused artifact must keep its original tag, image ID, checksum and size',
+    );
+    assert.equal(b.image, a.image, 'the service must run the reused image reference');
+    assert.notEqual(
+      second.desiredState.revision,
+      first.desiredState.revision,
+      'a reused archive must still create a new deployment revision',
+    );
+    assert.deepEqual(
+      await fs.readdir(path.join(s.dir, 'images')),
+      [`${a.artifact.buildId}.tar.gz`],
+      'no second archive may be written for an identical image',
+    );
+    assert.ok(
+      s.calls.includes(`image rm tug-build/app/app:${second.desiredState.revision}`),
+      'the unused per-deployment tag must be removed from the daemon',
+    );
+    const download = await fetch(`${s.base}/agent/v1/images/${b.artifact.buildId}`, {
+      headers: { 'x-tug-test-node': n1.nodeId },
+    });
+    assert.equal(download.status, 200, 'the reused archive must stay downloadable by its node');
+    const rollback = await json(await s.post('/api/v1/rollback', { project: 'app', force: true }));
+    assert.equal(
+      rollback.desiredState.services.app.artifact.buildId,
+      a.artifact.buildId,
+      'rollback must still resolve to the shared archive',
+    );
+  } finally {
+    await s.close();
+  }
+});
+
+test('a changed image is saved as a new archive even when an older one exists', async () => {
+  const s = await server();
+  try {
+    const n1 = await s.node('n1');
+    const first = await json(await s.deploy('v1'));
+    await s.report(n1.nodeId, first.desiredState);
+    const second = await json(await s.deploy('v2'));
+    assert.notEqual(
+      second.desiredState.services.app.artifact.buildId,
+      first.desiredState.services.app.artifact.buildId,
+      'a different image ID must get its own archive',
+    );
+    assert.equal(
+      (await fs.readdir(path.join(s.dir, 'images'))).length,
+      2,
+      'both archives must be retained for rollback',
+    );
+  } finally {
+    await s.close();
+  }
+});
+
+async function withEnv(values: Record<string, string>, run: () => Promise<void>): Promise<void> {
+  const before = Object.fromEntries(Object.keys(values).map((key) => [key, process.env[key]]));
+  Object.assign(process.env, values);
+  try {
+    await run();
+  } finally {
+    for (const [key, value] of Object.entries(before))
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+  }
+}
+const until = async (check: () => Promise<boolean> | boolean) => {
+  for (let i = 0; i < 100 && !(await check()); i++) await new Promise((r) => setTimeout(r, 20));
+};
+
+test('a successful deploy prunes old archives to TUG_IMAGE_KEEP and caps the build cache', async () => {
+  await withEnv({ TUG_IMAGE_KEEP: '1', TUG_BUILD_CACHE_KEEP: '2GB' }, async () => {
+    const s = await server();
+    try {
+      const n1 = await s.node('n1');
+      const builds: string[] = [];
+      for (const version of ['v1', 'v2', 'v3']) {
+        const deployed = await json(await s.deploy(version));
+        builds.push(deployed.desiredState.services.app.artifact.buildId);
+        await s.report(n1.nodeId, deployed.desiredState);
+      }
+      const archives = () => fs.readdir(path.join(s.dir, 'images'));
+      await until(async () => !(await archives()).includes(`${builds[0]}.tar.gz`));
+      // The node still reported v2 when v3 was published, so v2 is kept as a lagging version.
+      assert.deepEqual(
+        (await archives()).sort(),
+        [`${builds[1]}.tar.gz`, `${builds[2]}.tar.gz`].sort(),
+        'only the archive beyond TUG_IMAGE_KEEP that no node reports should be pruned',
+      );
+      await until(() => s.calls.some((call) => call.startsWith('builder prune')));
+      assert.ok(
+        s.calls.includes('builder prune --all --force --keep-storage 2GB'),
+        'the build cache must be capped at TUG_BUILD_CACHE_KEEP',
+      );
+    } finally {
+      await s.close();
+    }
+  });
+});
+
+test('automatic image maintenance can be turned off', async () => {
+  await withEnv({ TUG_IMAGE_KEEP: '0', TUG_BUILD_CACHE_KEEP: '0' }, async () => {
+    const s = await server();
+    try {
+      const n1 = await s.node('n1');
+      for (const version of ['v1', 'v2', 'v3'])
+        await s.report(n1.nodeId, (await json(await s.deploy(version))).desiredState);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      assert.equal(
+        (await fs.readdir(path.join(s.dir, 'images'))).length,
+        3,
+        'every archive must be kept when TUG_IMAGE_KEEP=0',
+      );
+      assert.ok(
+        !s.calls.some((call) => call.startsWith('builder prune')),
+        'the build cache must be left alone when TUG_BUILD_CACHE_KEEP=0',
+      );
+    } finally {
+      await s.close();
+    }
+  });
+});
+
+test('an invalid TUG_BUILD_CACHE_KEEP is rejected at startup', async () => {
+  await withEnv({ TUG_BUILD_CACHE_KEEP: 'plenty' }, async () => {
+    await assert.rejects(
+      server(),
+      /TUG_BUILD_CACHE_KEEP must be a size/,
+      'a malformed cache size must fail startup instead of being ignored',
+    );
+  });
 });

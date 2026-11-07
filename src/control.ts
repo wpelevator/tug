@@ -2199,16 +2199,49 @@ export async function createApp(
     }
     return { pruned, freedBytes: pruned.reduce((sum, build) => sum + build.sizeBytes, 0) };
   }
+  const IMAGE_KEEP = envCount('TUG_IMAGE_KEEP', 5);
+  const BUILD_CACHE_KEEP = (process.env.TUG_BUILD_CACHE_KEEP ?? '10GB').trim();
+  if (!/^(0|\d+(\.\d+)?\s?([kmgt]?b)?)$/i.test(BUILD_CACHE_KEEP))
+    throw new Error('TUG_BUILD_CACHE_KEEP must be a size such as 10GB, or 0 to turn it off');
+  /**
+   * Bounds growth after each successful deploy: archives beyond the newest `TUG_IMAGE_KEEP` deployments per project
+   * (the rules of `tug image prune`) and the daemon's build cache above `TUG_BUILD_CACHE_KEEP`. It queues behind the
+   * writer, so it cannot delete an archive a running deploy is reusing. Failures are logged, never raised.
+   */
+  function scheduleImageMaintenance(): void {
+    if (
+      IMAGE_KEEP === 0 &&
+      /^0/.test(BUILD_CACHE_KEEP) &&
+      Number.parseFloat(BUILD_CACHE_KEEP) === 0
+    )
+      return;
+    void withWriter(async () => {
+      if (IMAGE_KEEP > 0) await pruneArtifacts(IMAGE_KEEP, false);
+      if (Number.parseFloat(BUILD_CACHE_KEEP) > 0)
+        await images.run('docker', [
+          'builder',
+          'prune',
+          '--all',
+          '--force',
+          '--keep-storage',
+          BUILD_CACHE_KEEP.replace(/\s/g, ''),
+        ]);
+    }).catch((e) => console.error('image maintenance failed:', errMessage(e)));
+  }
   await collectArtifacts();
   await markMissingArtifacts();
   const receiveDeployment = upload.any();
   api('post', '/api/v1/deployments', null, (req, res) => {
     receiveDeployment(req, res, (error) => {
-      void withWriter(() => deployRequest(req, res, error)).catch(async (failure) => {
-        const files = Array.isArray(req.files) ? req.files : [];
-        await Promise.all(files.map((file) => fs.rm(file.path, { force: true }).catch(() => {})));
-        sendError(res, failure);
-      });
+      void withWriter(() => deployRequest(req, res, error))
+        .then((built) => {
+          if (built) scheduleImageMaintenance();
+        })
+        .catch(async (failure) => {
+          const files = Array.isArray(req.files) ? req.files : [];
+          await Promise.all(files.map((file) => fs.rm(file.path, { force: true }).catch(() => {})));
+          sendError(res, failure);
+        });
     });
   });
   /**
@@ -2230,13 +2263,19 @@ export async function createApp(
       })
       .map(([name]) => name);
   }
-  async function deployRequest(req: Request, res: Response, uploadError?: unknown): Promise<void> {
+  /** Resolves to whether the deploy was published with images built on control, the only deploys that add archives or build cache. */
+  async function deployRequest(
+    req: Request,
+    res: Response,
+    uploadError?: unknown,
+  ): Promise<boolean> {
     const files = (Array.isArray(req.files) ? req.files : []) as Express.Multer.File[];
     let responseBody: unknown;
     let responseError: unknown;
     let lock: Awaited<ReturnType<typeof acquireProjectLock>> | undefined;
     let depId: string | undefined;
     let contextDir: string | undefined;
+    let builtAndPublished = false;
     try {
       if (uploadError) throw httpError(400, errMessage(uploadError));
       let body;
@@ -2480,6 +2519,34 @@ export async function createApp(
               buildSpec: compose.services[service].build!,
               imageRef,
             });
+          // An unchanged rebuild produces the image the project already has an archive for: point at that
+          // artifact instead of saving, hashing and storing another full copy. Nodes match by image ID, so they
+          // download nothing and the running container is kept.
+          const built = await images.inspect(imageRef);
+          const prior = db.get<BuildRow>(
+            "SELECT * FROM builds WHERE project_id=? AND service=? AND image_id=? AND platform=? AND state='complete' AND artifact_path IS NOT NULL ORDER BY created_at DESC LIMIT 1",
+            project,
+            service,
+            built.imageId,
+            built.platform,
+          );
+          if (
+            prior &&
+            (await fs.stat(path.join(DATA_DIR, prior.artifact_path!)).catch(() => null))
+          ) {
+            spec.image = prior.image_ref;
+            spec.artifact = {
+              buildId: prior.id,
+              imageRef: prior.image_ref,
+              imageId: prior.image_id,
+              platform: prior.platform,
+              sha256: prior.sha256,
+              sizeBytes: prior.size_bytes,
+            };
+            db.run('DELETE FROM builds WHERE id=?', buildId);
+            await images.run('docker', ['image', 'rm', imageRef]).catch(() => {});
+            continue;
+          }
           info = await images.save(imageRef, temporary);
           await fs.rename(temporary, final);
           const artifact: ImageArtifact = { buildId, imageRef, ...info };
@@ -2596,6 +2663,7 @@ export async function createApp(
         metadata: { version },
       });
       wakeAll(project);
+      builtAndPublished = builtServices.length > 0;
       responseBody = {
         deployment: { id: depId, project, version, state: 'rolling_out', actor: req.actor!.name },
         desiredState: desired,
@@ -2630,6 +2698,7 @@ export async function createApp(
     }
     if (responseError) sendError(res, responseError);
     else res.json(responseBody);
+    return builtAndPublished;
   }
   get('/agent/v1/images/:buildId', authAgent, async (req, res) => {
     const states = retainedStates();
