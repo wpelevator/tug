@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { Command } from 'commander';
+import { writeStubDocker } from '../tests/helpers.ts';
 import { Pki, identityUri, serverNames } from './pki.ts';
 import { serverTlsOptions } from './tls-server.ts';
 import { resetVersionChecks, setResolvedConfig, waitForCommand } from './commands/context.ts';
@@ -307,6 +308,7 @@ test('long-wait commands report progress on stderr and retain their results and 
       const previousPath = process.env.PATH;
       const bin = path.join(dir, 'bin');
       await fs.mkdir(bin);
+      await writeStubDocker(bin);
       await fs.writeFile(
         path.join(bin, 'ssh'),
         '#!' +
