@@ -1,12 +1,12 @@
 import { withProgress } from '../cli-progress.ts';
-import { runProcess } from '../cli-process.ts';
+import { runProcess, runStep, STAGE_MARKER } from '../cli-process.ts';
 import type { Command } from 'commander';
 import { canPrompt, confirm } from '../cli-prompt.ts';
 import { CONTROL_CONTAINER, defaultControlUrl, shellQuote as sh } from '../cli-install.ts';
 import { assertImagePublished, resolveImage } from '../image.ts';
 import { decodeCredential, fingerprintPem, writeFileDurable } from '../pki.ts';
 import { errMessage, loadTemplate } from '../util.ts';
-import { collectList, loadCfg, print, request, runLocal, templatesDir } from './context.ts';
+import { collectList, loadCfg, print, request, templatesDir } from './context.ts';
 import type { InstallOpts } from './context.ts';
 import { bootstrapDocker, hostHasDocker, preflightRemote, transferTugImage } from './host.ts';
 import { importCredential } from './init.ts';
@@ -93,16 +93,17 @@ function addSetup(parent: Command, description: string): void {
       return withProgress(`Preparing control on ${sshTarget}`, async (progress) => {
         if (o.installDocker) {
           progress.stage(`Installing Docker on ${sshTarget}`);
-          await bootstrapDocker(sshTarget, true);
+          await bootstrapDocker(sshTarget, true, progress);
         }
         progress.stage(`Checking control host ${sshTarget}`);
         await preflightRemote(sshTarget, {
           ports: [Number(o.port)],
           minDiskMb: 2048,
           compose: true,
+          progress,
         });
         const runImage = o.buildLocalImage
-          ? await transferTugImage(sshTarget, image, progress.stage)
+          ? await transferTugImage(sshTarget, image, progress)
           : image;
         const yamlValue = (value: string) => JSON.stringify(value);
         const compose = await loadTemplate(templatesDir, 'control-compose.yml', {
@@ -113,10 +114,11 @@ function addSetup(parent: Command, description: string): void {
         });
         const remote = await loadTemplate(templatesDir, 'control-install.sh', {
           COMPOSE: compose,
+          MARKER: STAGE_MARKER,
           CONTAINER_SH: sh(CONTROL_CONTAINER),
         });
         progress.stage(`Installing control on ${sshTarget}`);
-        await runLocal('ssh', ['--', sshTarget, remote]);
+        await runStep('ssh', ['--', sshTarget, remote], { progress });
         // Upgrades never reissue root: fresh installs create it, `--recover-root` replaces its key. Output goes straight to files.
         const issue = `docker exec ${sh(CONTROL_CONTAINER)} node dist/main.js control issue-credential --name root --role admin${o.recoverRoot ? ' --replace' : ''}`;
         progress.stage(`Issuing root credential on ${sshTarget}`);

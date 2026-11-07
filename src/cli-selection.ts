@@ -1,19 +1,18 @@
-import { ask, canPrompt } from './cli-prompt.ts';
-import type { Prompter } from './cli-prompt.ts';
+import { canPrompt } from './cli-prompt.ts';
+import { terminalPicker } from './cli-pick.ts';
+import type { Picker } from './cli-pick.ts';
 
 export interface Choice {
   value: string;
   label: string;
 }
-export interface SelectionIO {
+export interface SelectionIO extends Picker {
   interactive: boolean;
-  prompt: Prompter;
-  write: (message: string) => void;
 }
 const terminal = (): SelectionIO => ({
   interactive: canPrompt(),
-  prompt: ask,
-  write: console.error,
+  one: (...args) => terminalPicker.one(...args),
+  many: (...args) => terminalPicker.many(...args),
 });
 
 /** Resolve lazily so explicit arguments never need a discovery request. */
@@ -46,22 +45,7 @@ async function selectChoices(
     );
   const options = await load();
   if (!options.length) throw new Error(`${question}: no eligible options`);
-  io.write(question);
-  options.forEach((option, index) => io.write(`  ${index + 1}) ${option.label}`));
-  for (;;) {
-    const answer = (
-      await io.prompt(
-        multiple
-          ? 'Choose numbers separated by commas (or q to cancel): '
-          : 'Choose a number (or q to cancel): ',
-      )
-    ).trim();
-    if (/^(q|quit|cancel)$/i.test(answer)) throw new Error('cancelled; nothing was changed');
-    const parts = answer.split(',').map((part) => part.trim());
-    if ((!multiple && parts.length !== 1) || parts.some((part) => !/^[1-9]\d*$/.test(part)))
-      continue;
-    const indexes = parts.map((part) => Number(part) - 1);
-    if (indexes.some((index) => index >= options.length)) continue;
-    return [...new Set(indexes)].map((index) => options[index].value);
-  }
+  const labels = options.map((option) => option.label);
+  const indexes = multiple ? await io.many(question, labels) : [await io.one(question, labels)];
+  return indexes.map((index) => options[index].value);
 }

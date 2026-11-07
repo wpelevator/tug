@@ -41,6 +41,8 @@ else
   engine_present=false
 fi
 conflict() { echo "Conflicting package $1 is installed; review Docker's installation instructions before replacing it." >&2; exit 20; }
+# TUG_MARKER is set by the CLI so this stage shows in its progress; cloud-init runs without it and prints the plain text.
+echo "${TUG_MARKER:-}Installing Docker packages (this can take a few minutes)"
 if [ "$family" = apt ]; then
   [ -n "${VERSION_CODENAME:-}" ] || { echo 'OS release must declare VERSION_CODENAME.' >&2; exit 20; }
   export DEBIAN_FRONTEND=noninteractive

@@ -1,5 +1,6 @@
 import readline from 'node:readline';
 import { Writable } from 'node:stream';
+import { suspendProgress } from './cli-progress.ts';
 
 /** True when both ends are a terminal and the run is not CI, so asking a question can be answered. */
 export function canPrompt(env: NodeJS.ProcessEnv = process.env): boolean {
@@ -10,6 +11,10 @@ export type Prompter = (question: string, hidden?: boolean) => Promise<string>;
 
 /** Ask a line of text on the terminal; with `hidden` the typed characters are not echoed. */
 export const ask: Prompter = async (question, hidden = false) => {
+  // A keyboard menu leaves stdin unreferenced so a finished menu cannot hold the process open; a question needs it held.
+  process.stdin.ref?.();
+  // The question owns the line it is typed on, so a live progress line must stay off the screen meanwhile.
+  const resumeProgress = suspendProgress();
   const muted = { on: false };
   const output = new Writable({
     write(chunk, _encoding, callback) {
@@ -31,6 +36,7 @@ export const ask: Prompter = async (question, hidden = false) => {
     });
   } finally {
     rl.close();
+    resumeProgress();
   }
 };
 
@@ -47,22 +53,5 @@ export async function confirm(
     if (answer === '') return fallback;
     if (answer === 'y' || answer === 'yes') return true;
     if (answer === 'n' || answer === 'no') return false;
-  }
-}
-
-/** Pick one of `options` by number; an empty answer takes the option at `fallback`. */
-export async function choose(
-  question: string,
-  options: readonly string[],
-  fallback = 0,
-  prompt: Prompter = ask,
-): Promise<number> {
-  console.error(question);
-  options.forEach((option, index) => console.error(`  ${index + 1}) ${option}`));
-  for (;;) {
-    const answer = (await prompt(`Choose 1-${options.length} (${fallback + 1}): `)).trim();
-    if (answer === '') return fallback;
-    const index = Number(answer) - 1;
-    if (Number.isInteger(index) && index >= 0 && index < options.length) return index;
   }
 }

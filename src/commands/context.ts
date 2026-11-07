@@ -1,4 +1,5 @@
 import { canPrompt } from '../cli-prompt.ts';
+import { markWorkStarted } from '../cli-usage.ts';
 import { selectOne } from '../cli-selection.ts';
 import type { ServiceChoice } from './selection.ts';
 import { withProgress } from '../cli-progress.ts';
@@ -12,6 +13,7 @@ import {
   majorMinor,
   skewRefusalMessage,
 } from '../protocol.ts';
+import { findConfigInParents } from '../cli-config.ts';
 import type { ResolvedCliConfig } from '../cli-config.ts';
 import { createTransport } from '../agent-credential.ts';
 import { createCliLiveTransport } from '../cli-live-transport.ts';
@@ -238,12 +240,21 @@ export function missingRouteHint(
  */
 export type SkewGuard = 'probe' | 'stamp';
 
+/** Says how to get a credential, and when the working directory has no config but a parent does, where it is. */
+async function noCredentialMessage(c: Config): Promise<string> {
+  const message =
+    'no credential: run `tug init <credential-file>`, set TUG_CREDENTIAL_FILE or pass --credential';
+  if (c.fileExists) return message;
+  const parent = await findConfigInParents(path.dirname(c.file));
+  return parent
+    ? `${message}\nNo config in ${path.dirname(c.file)}, but ${parent} exists: run tug from ${path.dirname(parent)} or pass --config ${parent}`
+    : message;
+}
+
 /** The pinned mTLS transport for the resolved credential; an address override only changes the connect target. */
 export async function transportFor(c: Config, guard: SkewGuard) {
-  if (!c.credential)
-    throw new Error(
-      'no credential: run `tug init <credential-file>`, set TUG_CREDENTIAL_FILE or pass --credential',
-    );
+  markWorkStarted();
+  if (!c.credential) throw new Error(await noCredentialMessage(c));
   if (guard === 'probe') await preflightVersion(c);
   return createTransport(c.credential, c.controlUrl);
 }
@@ -254,11 +265,9 @@ export async function request<T = any>(
   body?: unknown,
   multipart = false,
 ): Promise<T> {
+  markWorkStarted();
   const c = await loadCfg();
-  if (!c.credential)
-    throw new Error(
-      'no credential: run `tug init <credential-file>`, set TUG_CREDENTIAL_FILE or pass --credential',
-    );
+  if (!c.credential) throw new Error(await noCredentialMessage(c));
   const key = versionKey(c);
   const unseen = !!key && !versionChecked.has(key);
   // The skew check rides on ordinary traffic: a read's response carries the control's `x-tug-version` stamp and is

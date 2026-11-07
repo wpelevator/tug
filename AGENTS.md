@@ -8,3 +8,4 @@
 - Use Node.js for all scripting and tooling needs since that is available on the host machine.
 - Never hard-wrap Markdown. Keep each paragraph, list item and table row on a single line and let the editor soft-wrap it, so editing a sentence doesn't reflow the whole paragraph into an unreadable diff.
 - Every user-facing change needs a changeset (`npm run changeset`); see docs/releases.md. Choose the bump by the compatibility rule in docs/releases.md#choosing-the-bump, not by size: a breaking wire change is `major` (`minor` before 1.0), an additive feature is `minor`, anything that leaves the control/CLI/agent protocol alone is `patch`.
+- Check which shell the host runs (`echo $SHELL`) before composing commands or scripts: zsh does not word-split an unquoted `$VAR` and errors on an unmatched glob, so put anything beyond a one-liner in a `#!/bin/bash` script or Node.js.

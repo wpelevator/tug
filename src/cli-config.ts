@@ -229,6 +229,25 @@ async function discoverConfigFile(cwd: string): Promise<string> {
   return path.join(cwd, found[0] ?? CONFIG_NAMES[0]);
 }
 
+/** The nearest config file in a parent of `dir`. Lookup stays in the working directory, so this only explains an empty result. */
+export async function findConfigInParents(dir: string): Promise<string | undefined> {
+  for (
+    let parent = path.dirname(dir);
+    parent !== path.dirname(parent);
+    parent = path.dirname(parent)
+  )
+    for (const name of CONFIG_NAMES) {
+      const file = path.join(parent, name);
+      try {
+        await fs.stat(file);
+        return file;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+    }
+  return undefined;
+}
+
 function parseText(file: string, content: string): unknown {
   return path.extname(file) === '.json' ? JSON.parse(content) : yaml.load(content);
 }

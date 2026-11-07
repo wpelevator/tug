@@ -5,7 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import * as tar from 'tar';
-import { immutableLocalTag, transferTugImage } from './host.ts';
+import { bootstrapCommand, dockerBootstrap, immutableLocalTag, transferTugImage } from './host.ts';
+import { STAGE_MARKER } from '../cli-process.ts';
 
 test('runtime image transfer reports build, export, copy and load in order and cleans temporary archives', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-transfer-progress-'));
@@ -107,5 +108,22 @@ test('the local image tag names the image ID, whatever the requested tag', () =>
     immutableLocalTag('mine:dev', 'a17ed756592c0000'),
     'mine:dev-a17ed756592c',
     'an explicit --image keeps its own name and an ID without the sha256 prefix works',
+  );
+});
+
+test("the Docker bootstrap command hands the script this run's stage marker", async () => {
+  const command = bootstrapCommand('echo hi', true);
+  assert.ok(
+    command.startsWith(`TUG_MARKER='${STAGE_MARKER}' TUG_INSTALL_COMPOSE=1 sh -eu -c `),
+    'the marker and compose switch should be set for the script, quoted for the remote shell',
+  );
+  assert.ok(
+    !bootstrapCommand('echo hi', false).includes('TUG_INSTALL_COMPOSE'),
+    'a node install does not ask for Compose',
+  );
+  assert.match(
+    await dockerBootstrap(),
+    /echo "\$\{TUG_MARKER:-\}Installing Docker packages/,
+    'the script names its stage with the marker the command provides, and works without one (cloud-init)',
   );
 });

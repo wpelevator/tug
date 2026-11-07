@@ -8,6 +8,8 @@ import {
   resolveCliConfig,
 } from './cli-config.ts';
 import { CliLiveError } from './cli-live.ts';
+import { setVerbose } from './cli-process.ts';
+import { isUsageError } from './cli-usage.ts';
 import { CREDENTIAL_NAME_PATTERN, PROJECT_NAME_PATTERN } from './credentials.ts';
 import { packageVersion } from './image.ts';
 import { errMessage } from './util.ts';
@@ -27,6 +29,8 @@ import { registerSecret } from './commands/secret.ts';
 import { registerService } from './commands/service.ts';
 import { registerVolume } from './commands/volume.ts';
 
+const VERBOSE_HELP =
+  'show the output of quiet steps, such as Docker pulls and installers on a remote host (also TUG_VERBOSE=1)';
 const program = new Command();
 program
   .name('tug')
@@ -42,7 +46,8 @@ program
     '--credential <file>',
     'credential file (overrides TUG_CREDENTIAL, TUG_CREDENTIAL_FILE and config)',
   )
-  .option('--project <name>', 'project (overrides TUG_PROJECT and config; default: site)');
+  .option('--project <name>', 'project (overrides TUG_PROJECT and config; default: site)')
+  .option('--verbose', VERBOSE_HELP);
 
 registerInit(program);
 registerControl(program);
@@ -95,6 +100,7 @@ program.hook('preAction', async (_root, command) => {
   if (options.name && !/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(options.name))
     throw new Error('--name must contain only letters, numbers, dots, underscores or hyphens');
   const connection = command.optsWithGlobals();
+  if (connection.verbose) setVerbose(true);
   if (path === 'credential create') {
     // --project is repeatable here and scopes the new credential, so it must not also select the connection project.
     if (!CREDENTIAL_NAME_PATTERN.test(command.args[0]))
@@ -151,6 +157,8 @@ function addConnectionOptions(command: Command): void {
       '--credential <file>',
       'credential file (overrides TUG_CREDENTIAL, TUG_CREDENTIAL_FILE and config)',
     );
+  // exec and run forward everything after the service to a remote command, which may take its own --verbose.
+  if (!['exec', 'run'].includes(command.name())) command.option('--verbose', VERBOSE_HELP);
   if (!command.options.some((option) => option.long === '--project'))
     command.option('--project <name>', 'project (overrides TUG_PROJECT and config; default: site)');
 }
@@ -162,6 +170,10 @@ for (const command of program.commands) addConnectionOptions(command);
 forbidExtraArguments(program);
 program.showHelpAfterError();
 program.parseAsync().catch((e: unknown) => {
-  console.error(`${errMessage(e)}\nRun tug <command> --help for usage.`);
+  console.error(
+    isUsageError(errMessage(e))
+      ? `${errMessage(e)}\nRun tug <command> --help for usage.`
+      : errMessage(e),
+  );
   process.exitCode = e instanceof CliLiveError ? e.exitCode : 1;
 });

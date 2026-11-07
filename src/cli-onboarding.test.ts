@@ -14,7 +14,7 @@ import {
   parseAddressCandidates,
   sortCandidates,
 } from './cli-onboarding.ts';
-import { choose, confirm, type Prompter } from './cli-prompt.ts';
+import { confirm, type Prompter } from './cli-prompt.ts';
 import { commandPath } from './cli-config.ts';
 import { formatNodes } from './cli-status.ts';
 
@@ -74,26 +74,6 @@ test('confirm takes the default on an empty answer and retries on nonsense', asy
   assert.equal(await confirm('ok?', false, answers('')), false, 'empty takes the no default');
   assert.equal(await confirm('ok?', false, answers('maybe', 'YES')), true, 'invalid input re-asks');
   assert.equal(await confirm('ok?', true, answers('n')), false, 'n declines');
-});
-
-test('choose returns the picked index, the default on empty and re-asks on out of range', async () => {
-  const original = console.error;
-  console.error = () => {};
-  try {
-    assert.equal(await choose('which?', ['a', 'b'], 1, answers('')), 1, 'empty takes the default');
-    assert.equal(
-      await choose('which?', ['a', 'b'], 0, answers('2')),
-      1,
-      'a number picks the option',
-    );
-    assert.equal(
-      await choose('which?', ['a', 'b'], 0, answers('9', 'x', '1')),
-      0,
-      'bad input re-asks',
-    );
-  } finally {
-    console.error = original;
-  }
 });
 
 test('commandPath joins group names and resolves the setup shortcut', () => {
