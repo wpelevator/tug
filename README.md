@@ -209,6 +209,7 @@ Start with the [single-VPS tutorial](docs/getting-started.md), then choose the t
   - [Terminology](docs/terminology.md)
   - [Standalone binary (prototype)](docs/standalone-binary.md)
   - [Docker Swarm comparison](docs/swarm-comparison.md)
+  - [Podman and other container engines (proposal)](docs/container-engines.md)
 
 ## Development
 

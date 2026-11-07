@@ -157,6 +157,7 @@ Proposed, after 1.0, and additive, so every step is a minor. The `root` credenti
 - A minimal read-only web dashboard over `/api/v1/status` and `/api/v1/events`.
 - Load-balanced service names and multiple routes per service, wildcard certificates.
 - Managed DNS convenience domain for ingress, similar to uncloud's `*.uncloud.run`.
+- **Podman and other container engines**: rootful Podman through its Docker-compatible API socket, with the engine detected and reported, the remaining `docker` CLI shell-outs moved onto the Engine API, and a Podman integration tier. containerd is out of scope because it has no Engine API. Starts with a spike on a real Podman host; the findings, decisions and checklist are in [Container engines](container-engines.md).
 - Proposals evaluated and not started, kept as local working files until one is accepted: a Swarm-backed Tug (`plan-swarm-backend.md`), an SSH hub-and-spoke controller instead of outbound agents (`plan-ssh-architecture.md`), file-mounted workload secrets (`plan-file-secrets.md`), staging as a project per environment rather than new deploy machinery (`plan-staging.md`), and removing container recreation on topology changes with cross-project service names (`plan-service-dns.md`, `plan-project-exports.md`). Each needs a demonstrated need and a comparison against the contracts frozen at 1.0 before it moves out of this list.
 
 ## Product decisions and reasoning
