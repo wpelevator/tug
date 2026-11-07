@@ -163,5 +163,5 @@ jobs:
 
 - A `deploy` credential can run any image or Compose configuration on the nodes of its projects, execute commands in those containers, and read their logs and Docker inspection data. Treat it as access to those nodes: inspection redacts environment values, but `exec` and deployed code can read them, and logs can contain whatever the application prints. Scope credentials to the projects they need and expire short-lived ones.
 - Control-wide state (nodes, backups, diagnostics, credentials, secrets and volume deletion) is admin only. There is no per-project secret management role.
-- Roles and project scopes are fixed at creation; to change them, create a new credential and revoke the old one.
+- Roles and project scopes are fixed at creation; to change them, create a new credential and revoke the old one. A proposal for finer grants, short-lived delegated sessions and approvals is in [Capabilities](capabilities.md); none of it exists yet.
 - A `deploy` event is written when a deployment is published. A build that fails before publishing appears only in its deployment record (with its `actor`), not as an event.
