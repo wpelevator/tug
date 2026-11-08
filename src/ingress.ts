@@ -4,9 +4,10 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { ingressHostList, loopbackIngressServices, publishedPort } from './compose.ts';
-import { ensureDir, errMessage } from './util.ts';
-import { isPort } from './status-report.ts';
+import { ingressHostList, loopbackIngressServices, publishedPort } from './compose/compose.ts';
+import { errMessage } from './errors.ts';
+import { ensureDir } from './files.ts';
+import { isPort } from './node-address.ts';
 import type {
   DesiredState,
   IngressRoute,

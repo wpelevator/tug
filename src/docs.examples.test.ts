@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import * as yaml from 'js-yaml';
-import { buildDesiredState, validateCompose } from './compose.ts';
+import { buildDesiredState, validateCompose } from './compose/compose.ts';
 import type { ComposeFile } from './protocol.ts';
-import { unescapeDollars } from './normalize.ts';
+import { unescapeDollars } from './compose/normalize.ts';
 import { normalized } from '../tests/fake-docker.ts';
 
 function yamlBlocks(file: string): string[] {

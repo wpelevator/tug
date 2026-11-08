@@ -1,0 +1,459 @@
+import test from 'node:test';
+import { normalized } from '../../tests/fake-docker.ts';
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { createApp } from './control.ts';
+import { json, testImageResolver, testControlUrl, testIdentity } from '../../tests/helpers.ts';
+import type { Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
+
+async function makeServer() {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-place-'));
+  process.env.TUG_DATA_DIR = dir;
+  const app = await createApp({
+    identity: testIdentity,
+    controlUrl: testControlUrl,
+    images: { resolve: testImageResolver },
+  });
+  const srv = await new Promise<Server>((resolve) => {
+    const s = app.listen(0, () => resolve(s));
+  });
+  return {
+    base: `http://127.0.0.1:${(srv.address() as AddressInfo).port}`,
+    close: () => new Promise((resolve) => srv.close(resolve)),
+  };
+}
+const op = { 'x-tug-test-operator': 'operator', 'content-type': 'application/json' };
+async function post(base: string, route: string, body: unknown) {
+  const res = await fetch(`${base}${route}`, {
+    method: 'POST',
+    headers: op,
+    body: JSON.stringify(body),
+  });
+  const text = await res.text();
+  assert.equal(res.status, 200, text);
+  return JSON.parse(text);
+}
+
+test('label placement spreads replicas, scale resizes them', async () => {
+  const s = await makeServer();
+  try {
+    await post(s.base, '/api/v1/nodes/register', { name: 'app1', labels: ['app'] });
+    await post(s.base, '/api/v1/nodes/register', { name: 'app2', labels: ['app'] });
+    const nodes = (await (await fetch(`${s.base}/api/v1/nodes`, { headers: op })).json()) as {
+      nodes: Array<{ name: string; labels: string[] }>;
+    };
+    assert.deepEqual(
+      nodes.nodes.find((n) => n.name === 'app1')?.labels,
+      ['app'],
+      'registered labels should be listed on the node',
+    );
+    const compose = {
+      services: {
+        web: {
+          image: 'nginx',
+          'x-tug': { placement: { labels: ['app'] }, replicas: 1 },
+        },
+      },
+    };
+    const dep = await post(s.base, '/api/v1/deployments', {
+      project: 'site',
+      version: 'v1',
+      compose: normalized(compose),
+    });
+    const svcs = dep.desiredState.services;
+    assert.deepEqual(
+      svcs.web.placement.nodes,
+      ['app1'],
+      'replicas: 1 should pick one node among the label matches',
+    );
+    const scaled = await post(s.base, '/api/v1/scale', {
+      project: 'site',
+      service: 'web',
+      replicas: 2,
+    });
+    assert.deepEqual(
+      scaled.nodes,
+      ['app1', 'app2'],
+      'scaling up should spread across matching nodes',
+    );
+    const down = await post(s.base, '/api/v1/scale', {
+      project: 'site',
+      service: 'web',
+      replicas: 1,
+    });
+    assert.equal(down.replicas, 1, 'scaling down should reduce replicas');
+  } finally {
+    await s.close();
+  }
+});
+
+test('stale nodes are skipped by label placement and scale, and scale never falls back to non-matching nodes', async () => {
+  process.env.TUG_STALE_SECONDS = '1';
+  const s = await makeServer();
+  try {
+    const live = await post(s.base, '/api/v1/nodes/register', { name: 'live', labels: ['app'] });
+    const dead = await post(s.base, '/api/v1/nodes/register', { name: 'dead', labels: ['app'] });
+    await post(s.base, '/api/v1/nodes/register', { name: 'other', labels: ['db'] });
+    for (const node of [live, dead])
+      await fetch(`${s.base}/agent/v1/status`, {
+        method: 'POST',
+        headers: { 'x-tug-test-node': node.nodeId, 'content-type': 'application/json' },
+        body: JSON.stringify({ projects: [] }),
+      });
+    await new Promise((resolve) => setTimeout(resolve, 1300));
+    await fetch(`${s.base}/agent/v1/status`, {
+      method: 'POST',
+      headers: { 'x-tug-test-node': live.nodeId, 'content-type': 'application/json' },
+      body: JSON.stringify({ projects: [] }),
+    });
+    const compose = {
+      services: {
+        web: { image: 'nginx', 'x-tug': { global: true, placement: { labels: ['app'] } } },
+      },
+    };
+    const dep = await post(s.base, '/api/v1/deployments', {
+      project: 'site',
+      version: 'v1',
+      compose,
+    });
+    assert.deepEqual(
+      dep.desiredState.services.web.placement.nodes,
+      ['live'],
+      'a node not seen within the stale window should not receive new replicas',
+    );
+    const scaled = await post(s.base, '/api/v1/scale', {
+      project: 'site',
+      service: 'web',
+      replicas: 3,
+    });
+    assert.deepEqual(
+      scaled.nodes,
+      ['live'],
+      'scale should stay within healthy nodes carrying the labels',
+    );
+  } finally {
+    delete process.env.TUG_STALE_SECONDS;
+    await s.close();
+  }
+});
+
+test('node-remove deletes a retired node but refuses placed or still-reporting nodes unless forced', async () => {
+  process.env.TUG_STALE_SECONDS = '1';
+  const s = await makeServer();
+  const del = (name: string, query = '') =>
+    fetch(`${s.base}/api/v1/nodes/${name}${query}`, { method: 'DELETE', headers: op });
+  try {
+    const keep = await post(s.base, '/api/v1/nodes/register', { name: 'keep' });
+    const old = await post(s.base, '/api/v1/nodes/register', { name: 'old' });
+    await post(s.base, '/api/v1/nodes/register', { name: 'idle' });
+    const first = await post(s.base, '/api/v1/deployments', {
+      project: 'site',
+      version: 'v1',
+      compose: {
+        services: {
+          web: { image: 'nginx', 'x-tug': { placement: { nodes: ['old'] } } },
+          api: { image: 'nginx', 'x-tug': { placement: { nodes: ['keep'] } } },
+        },
+      },
+    });
+    for (const node of [keep, old])
+      await fetch(`${s.base}/agent/v1/status`, {
+        method: 'POST',
+        headers: { 'x-tug-test-node': node.nodeId, 'content-type': 'application/json' },
+        body: JSON.stringify({ projects: [] }),
+      });
+    assert.equal((await del('ghost')).status, 404, 'removing an unknown node should be 404');
+    const placed = await del('old');
+    assert.equal(
+      placed.status,
+      409,
+      'a node a current deployment places services on should not be removable',
+    );
+    assert.match(
+      ((await placed.json()) as { error: string }).error,
+      /site\/web/,
+      'the refusal should name the service placed on the node',
+    );
+    assert.equal((await del('keep')).status, 409, 'a placed node must stay');
+    assert.equal(
+      (await del('idle')).status,
+      200,
+      'a never-seen node with no placement should be removable',
+    );
+    await post(s.base, `/api/v1/deployments/${first.deployment?.id || first.id}/cancel`, {});
+    await post(s.base, '/api/v1/deployments', {
+      project: 'site',
+      version: 'v2',
+      compose: {
+        services: { api: { image: 'nginx', 'x-tug': { placement: { nodes: ['keep'] } } } },
+      },
+    });
+    assert.equal(
+      (await del('old')).status,
+      409,
+      'a node whose agent is still reporting should need force',
+    );
+    assert.equal(
+      (await del('old', '?force=true')).status,
+      200,
+      'force should remove a node that is still reporting',
+    );
+    const nodes = (await (await fetch(`${s.base}/api/v1/nodes`, { headers: op })).json()) as {
+      nodes: Array<{ name: string }>;
+    };
+    assert.deepEqual(
+      nodes.nodes.map((n) => n.name),
+      ['keep'],
+      'removed nodes should disappear from the node list',
+    );
+  } finally {
+    delete process.env.TUG_STALE_SECONDS;
+    await s.close();
+  }
+});
+
+test('explicit placement is refused on disabled or unknown nodes', async () => {
+  const s = await makeServer();
+  try {
+    await post(s.base, '/api/v1/nodes/register', { name: 'n1' });
+    await post(s.base, '/api/v1/nodes/register', { name: 'n2' });
+    await post(s.base, '/api/v1/nodes/n1/disable', {});
+    const deploy = (node: string) =>
+      fetch(`${s.base}/api/v1/deployments`, {
+        method: 'POST',
+        headers: op,
+        body: JSON.stringify({
+          project: 'site',
+          version: node,
+          compose: {
+            services: { web: { image: 'nginx', 'x-tug': { placement: { nodes: [node] } } } },
+          },
+        }),
+      });
+    assert.equal((await deploy('n1')).status, 400, 'a disabled node cannot receive new placement');
+    assert.equal((await deploy('ghost')).status, 400, 'an unregistered node is refused');
+    assert.equal((await deploy('n2')).status, 200, 'an enabled node still accepts placement');
+  } finally {
+    await s.close();
+  }
+});
+
+test('node addresses cannot carry configuration syntax', async () => {
+  const s = await makeServer();
+  try {
+    const register = (body: object) =>
+      fetch(`${s.base}/api/v1/nodes/register`, {
+        method: 'POST',
+        headers: op,
+        body: JSON.stringify(body),
+      });
+    for (const address of ['10.0.0.9 {\n\theader_down X injected\n\t#', 'host:80', 'a b', '[::1]'])
+      assert.equal(
+        (await register({ name: 'bad', address })).status,
+        400,
+        `address ${JSON.stringify(address)} must be rejected`,
+      );
+    assert.equal(
+      (await register({ name: 'ok', address: '10.0.0.9' })).status,
+      200,
+      'a plain node address should be accepted',
+    );
+  } finally {
+    await s.close();
+  }
+});
+
+test('scale stays within explicit placement.nodes when the service has no labels', async () => {
+  const s = await makeServer();
+  try {
+    await post(s.base, '/api/v1/nodes/register', { name: 'web-1' });
+    await post(s.base, '/api/v1/nodes/register', { name: 'storage' });
+    await post(s.base, '/api/v1/deployments', {
+      project: 'site',
+      version: 'v1',
+      compose: normalized({
+        services: { php: { image: 'php', 'x-tug': { placement: { nodes: ['web-1'] } } } },
+      }),
+    });
+    const scaled = await post(s.base, '/api/v1/scale', {
+      project: 'site',
+      service: 'php',
+      replicas: 2,
+    });
+    assert.deepEqual(
+      scaled.nodes,
+      ['web-1'],
+      'scale should not place replicas outside the pinned placement.nodes',
+    );
+  } finally {
+    await s.close();
+  }
+});
+
+test('moving a service with data to another node needs --move and holds its writers', async () => {
+  const s = await makeServer();
+  try {
+    const nodeA = await post(s.base, '/api/v1/nodes/register', { name: 'a' });
+    await post(s.base, '/api/v1/nodes/register', { name: 'b' });
+    const compose = (dbNode: string) =>
+      normalized({
+        services: {
+          db: {
+            image: 'mariadb',
+            volumes: [{ type: 'volume', source: 'data', target: '/var/lib/mysql' }],
+            'x-tug': { placement: { nodes: [dbNode] } },
+          },
+          web: {
+            image: 'wordpress',
+            environment: { WORDPRESS_DB_HOST: 'db' },
+            'x-tug': { placement: { nodes: ['a'] } },
+          },
+        },
+        volumes: { data: {} },
+      });
+    const deploy = (version: string, dbNode: string, moves?: string[]) =>
+      fetch(`${s.base}/api/v1/deployments`, {
+        method: 'POST',
+        headers: op,
+        body: JSON.stringify({ project: 'site', version, compose: compose(dbNode), moves }),
+      });
+    const first = await deploy('v1', 'a');
+    assert.equal(first.status, 200, 'the first deployment places db on a');
+    const desired = (await json(first)).desiredState;
+    await fetch(`${s.base}/agent/v1/status`, {
+      method: 'POST',
+      headers: { ...op, 'x-tug-test-node': nodeA.nodeId },
+      body: JSON.stringify({
+        projects: [
+          {
+            project: 'site',
+            observedVersion: desired.version,
+            observedRevision: desired.revision,
+            health: 'serving',
+          },
+        ],
+      }),
+    });
+    const refused = await deploy('v2', 'b');
+    assert.equal(refused.status, 409, 'moving db to another node without --move should be refused');
+    assert.match((await json(refused)).error, /would start empty.*--move db/);
+    assert.equal((await deploy('v2', 'b', ['db'])).status, 200, 'an acknowledged move deploys');
+    const work = await json(
+      await fetch(`${s.base}/agent/v1/work`, {
+        headers: { ...op, 'x-tug-test-node': nodeA.nodeId },
+      }),
+    );
+    assert.deepEqual(work.holds, { site: ['web'] }, 'the writer of the moved service is held');
+    const released = await post(s.base, '/api/v1/holds/release', { project: 'site' });
+    assert.deepEqual(released.released, ['web'], 'hold release starts the held writer again');
+  } finally {
+    await s.close();
+  }
+});
+
+test('a writer that moves together with its database is held until the data is restored', async () => {
+  const s = await makeServer();
+  try {
+    const nodeA = await post(s.base, '/api/v1/nodes/register', { name: 'a' });
+    await post(s.base, '/api/v1/nodes/register', { name: 'b' });
+    // A WordPress-shaped project: web keeps files in a volume, so moving the project to another node moves both
+    // services, and the refusal asks for both to be acknowledged.
+    const compose = (node: string) =>
+      normalized({
+        services: {
+          db: {
+            image: 'mariadb',
+            volumes: [{ type: 'volume', source: 'data', target: '/var/lib/mysql' }],
+            'x-tug': { placement: { nodes: [node] } },
+          },
+          web: {
+            image: 'wordpress',
+            depends_on: ['db'],
+            environment: { WORDPRESS_DB_HOST: 'db' },
+            volumes: [{ type: 'volume', source: 'content', target: '/var/www/html/wp-content' }],
+            'x-tug': { placement: { nodes: [node] } },
+          },
+        },
+        volumes: { data: {}, content: {} },
+      });
+    const deploy = (version: string, node: string, moves?: string[]) =>
+      fetch(`${s.base}/api/v1/deployments`, {
+        method: 'POST',
+        headers: op,
+        body: JSON.stringify({ project: 'site', version, compose: compose(node), moves }),
+      });
+    const first = await deploy('v1', 'a');
+    assert.equal(first.status, 200, 'the first deployment places both services on a');
+    const desired = (await json(first)).desiredState;
+    await fetch(`${s.base}/agent/v1/status`, {
+      method: 'POST',
+      headers: { ...op, 'x-tug-test-node': nodeA.nodeId },
+      body: JSON.stringify({
+        projects: [
+          {
+            project: 'site',
+            observedVersion: desired.version,
+            observedRevision: desired.revision,
+            health: 'serving',
+          },
+        ],
+      }),
+    });
+    const refused = await deploy('v2', 'b');
+    assert.equal(refused.status, 409, 'moving both services without --move should be refused');
+    assert.match(
+      (await json(refused)).error,
+      /db, web would start empty.*--move db --move web/,
+      'the refusal asks for both moves to be acknowledged',
+    );
+    assert.equal(
+      (await deploy('v2', 'b', ['db', 'web'])).status,
+      200,
+      'acknowledging both moves deploys',
+    );
+    const work = await json(
+      await fetch(`${s.base}/agent/v1/work`, {
+        headers: { ...op, 'x-tug-test-node': nodeA.nodeId },
+      }),
+    );
+    assert.deepEqual(
+      work.holds,
+      { site: ['web'] },
+      'web is held although it moved too, so it cannot serve against the empty database',
+    );
+  } finally {
+    await s.close();
+  }
+});
+
+test('a deploy refused because another is rolling out names the command that cancels it', async () => {
+  const s = await makeServer();
+  try {
+    await post(s.base, '/api/v1/nodes/register', { name: 'a' });
+    const deploy = (version: string) =>
+      fetch(`${s.base}/api/v1/deployments`, {
+        method: 'POST',
+        headers: op,
+        body: JSON.stringify({
+          project: 'site',
+          version,
+          compose: normalized({
+            services: { web: { image: 'nginx', 'x-tug': { placement: { nodes: ['a'] } } } },
+          }),
+        }),
+      });
+    const first = await json(await deploy('v1'));
+    const second = await deploy('v2');
+    assert.equal(second.status, 409, 'a second deploy while one is rolling out is refused');
+    assert.match(
+      (await json(second)).error,
+      new RegExp(`tug deploy cancel ${first.deployment.id}`),
+      'the refusal should name the stuck deployment and how to cancel it',
+    );
+  } finally {
+    await s.close();
+  }
+});

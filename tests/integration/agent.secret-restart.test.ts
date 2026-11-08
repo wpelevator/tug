@@ -6,7 +6,7 @@ import path from 'node:path';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { spawnSync } from 'node:child_process';
-import { buildDesiredState } from '../../src/compose.ts';
+import { buildDesiredState } from '../../src/compose/compose.ts';
 import { normalized } from '../fake-docker.ts';
 
 function dockerInspect(name: string) {
@@ -56,7 +56,7 @@ test(
     const port = (server.address() as AddressInfo).port;
 
     // The fake control speaks plain HTTP, so the context supplies its own `http` instead of an mTLS transport.
-    const { reconcile } = await import('../../src/agent.ts');
+    const { reconcile } = await import('../../src/agent/agent.ts');
     const { DockerEngine } = await import('../../src/docker-api.ts');
     const ctx = {
       docker: new DockerEngine(),

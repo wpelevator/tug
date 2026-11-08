@@ -1,12 +1,12 @@
 // Turns the desired state for one node into Engine API container definitions. Pure: no Docker, no
 // filesystem. The config hash decides whether a running container already matches its definition.
 import crypto from 'node:crypto';
-import { bindPorts, crossNodeHosts } from './compose.ts';
-import { sentinelNames, substituteSentinels } from './normalize.ts';
+import { bindPorts, crossNodeHosts } from './compose/compose.ts';
+import { sentinelNames, substituteSentinels } from './compose/normalize.ts';
 import type { CreateContainerBody } from './docker-api.ts';
 import type { VolumeInspect } from './docker-api.ts';
 import type { ComposeService, DesiredState, ServiceEndpoint } from './protocol.ts';
-import type { PortBind } from './compose.ts';
+import type { PortBind } from './compose/compose.ts';
 
 export const LABEL_PROJECT = 'tug.project';
 /** Labels helper containers (backup jobs, one-off runs) so a restarted agent can clean up after them. */

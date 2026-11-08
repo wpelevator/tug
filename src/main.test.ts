@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 
-import { agentIdentityCsr, installIdentity } from './agent-credential.ts';
+import { agentIdentityCsr, installIdentity } from './agent/credential.ts';
 import { NODE_LIFETIME_MS, Pki, identityUri } from './pki.ts';
 import type { IdentityResponse } from './protocol.ts';
 

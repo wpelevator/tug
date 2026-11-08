@@ -5,9 +5,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import * as yaml from 'js-yaml';
-import { normalizeCompose } from '../../src/normalize.ts';
-import { validateCompose } from '../../src/compose.ts';
-import { resolveBackups } from '../../src/backup-config.ts';
+import { normalizeCompose } from '../../src/compose/normalize.ts';
+import { validateCompose } from '../../src/compose/compose.ts';
+import { resolveBackups } from '../../src/backup/config.ts';
 
 const root = path.resolve(import.meta.dirname, '../..');
 const password = 'test-password';

@@ -26,7 +26,7 @@ import {
   verifyCsr,
   writeFileDurable,
 } from './pki.ts';
-import { serverTlsOptions } from './tls-server.ts';
+import { serverTlsOptions } from './control/tls-server.ts';
 
 async function tmp() {
   return fs.mkdtemp(path.join(os.tmpdir(), 'tug-pki-'));

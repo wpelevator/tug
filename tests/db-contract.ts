@@ -4,8 +4,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { DbError, isUniqueViolation } from '../src/db-driver.ts';
-import type { ConnectDb, Db, SqlValue } from '../src/db-driver.ts';
+import { DbError, isUniqueViolation } from '../src/db/driver.ts';
+import type { ConnectDb, Db, SqlValue } from '../src/db/driver.ts';
 
 /** Run unchanged against any future SQLite runtime adapter. */
 export function databaseContract(name: string, connect: ConnectDb) {

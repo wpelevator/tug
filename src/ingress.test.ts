@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { buildDesiredState } from './compose.ts';
+import { buildDesiredState } from './compose/compose.ts';
 import {
   CADDY_CONTAINER,
   buildIngressWork,

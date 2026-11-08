@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { DockerEngine } from '../../src/docker-api.ts';
-import { startOneOff } from '../../src/live.ts';
+import { startOneOff } from '../../src/agent/live.ts';
 
 const dockerUp = spawnSync('docker', ['version'], { stdio: 'ignore' }).status === 0;
 const docker = (...args: string[]) => spawnSync('docker', args, { encoding: 'utf8' });

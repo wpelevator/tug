@@ -20,7 +20,7 @@ Tug trusts semver, and the control, CLI and agents enforce it (see [Upgrading th
 - `minor`: new features. Additive wire changes (a new route, an optional field, a new agent command) are minor: older peers keep working, and a newer CLI against an older control reports the missing route.
 - `major`: anything that breaks an older peer: removing or renaming a route, header or field, adding a required one, narrowing accepted values, or changing the meaning of an existing message. A major also moves the `/api/v1` and `/agent/v1` roots to the new major only when old and new must be served side by side; otherwise the root keeps its name.
 
-A schema change appends a migration step in `src/db.ts` (never edit a released step) and adds a previous-release fixture under `tests/fixtures/db/`; a database change that a step cannot make safely, such as dropping data an older release still reads, is a `major`.
+A schema change appends a migration step in `src/db/db.ts` (never edit a released step) and adds a previous-release fixture under `tests/fixtures/db/`; a database change that a step cannot make safely, such as dropping data an older release still reads, is a `major`.
 
 Before 1.0 semver gives no guarantees, so the whole `0.minor` is the compatibility key: any minor bump is a skew boundary and the control, CLI and agents upgrade together, so keep `minor` for wire changes and use `patch` for the rest.
 

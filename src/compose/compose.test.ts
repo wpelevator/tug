@@ -1,0 +1,729 @@
+import test, { describe } from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  domainProblem,
+  publishesHostPort,
+  buildDesiredState,
+  composeErrors,
+  crossNodeHosts,
+  publishedPort,
+  serviceSecretNames,
+  serviceSecretVersions,
+  validateCompose,
+} from './compose.ts';
+import { containerSpecs } from '../container-spec.ts';
+import { normalized } from '../../tests/fake-docker.ts';
+import type { ComposeFile } from '../protocol.ts';
+
+test('builds per-node desired compose preserving service names', () => {
+  const compose = {
+    services: {
+      web: {
+        build: './web',
+        environment: { A: 'B' },
+        volumes: ['web-data:/data'],
+        'x-tug': { placement: { nodes: ['n1'] } },
+      },
+      db: {
+        image: 'postgres:16',
+        volumes: ['db-data:/data'],
+        'x-tug': { placement: { nodes: ['n2'] } },
+      },
+    },
+    volumes: {
+      'web-data': { 'x-tug': { placement: { nodes: ['n1'] } } },
+      'db-data': { 'x-tug': { placement: { nodes: ['n2'] } } },
+    },
+  };
+  const ds = buildDesiredState({
+    project: 'site',
+    version: 'git-abc',
+    compose: normalized(compose),
+  });
+  assert.equal(ds.services.web.image, 'tug-build/site/web:git-abc');
+  const plan = containerSpecs(ds, 'n1');
+  assert.deepEqual(Object.keys(plan.specs), ['web']);
+  assert.equal(
+    plan.specs.web.body.Image,
+    'tug-build/site/web:git-abc',
+    'a built service runs the image reference control assigned',
+  );
+  assert.deepEqual(
+    plan.volumes.map((v) => v.name),
+    ['tug_v4_site_web-data'],
+    'only the volumes this node uses are created',
+  );
+});
+
+test('rejects ambiguous multi-node services', () => {
+  assert.throws(
+    () => validateCompose({ services: { web: { image: 'nginx' } } }, ['n1', 'n2']),
+    /placement/,
+  );
+});
+
+const ingressSvc = (ingress: unknown, ports: string[] = ['8080:80']) =>
+  ({
+    image: 'x',
+    ports,
+    'x-tug': { placement: { nodes: ['n1'] }, ingress },
+  }) as ComposeFile['services'][string];
+const validateComposeErrors = (compose: ComposeFile) => {
+  try {
+    validateCompose(compose);
+    return '';
+  } catch (e) {
+    return (e as Error).message;
+  }
+};
+const errorsFor = (svc: ComposeFile['services'][string]) => {
+  try {
+    validateCompose({ services: { web: svc } });
+    return '';
+  } catch (e) {
+    return (e as Error).message;
+  }
+};
+
+test('validateCompose accepts a boolean ingress.maintenance and rejects anything else', () => {
+  assert.equal(
+    errorsFor(ingressSvc({ host: 'app.example.com', port: 80, maintenance: true })),
+    '',
+    'maintenance true is valid',
+  );
+  assert.match(
+    errorsFor(ingressSvc({ host: 'app.example.com', port: 80, maintenance: 'yes' })),
+    /ingress\.maintenance must be true or false/,
+    'a string is not a boolean',
+  );
+});
+
+test('publishedPort resolves container ports to host ports across Compose port syntaxes', () => {
+  assert.equal(publishedPort({ ports: ['8080:80'] }, 80), 8080, 'short syntax, container port');
+  assert.equal(publishedPort({ ports: ['8080:80'] }, 8080), 8080, 'short syntax, host port');
+  assert.equal(
+    publishedPort({ ports: ['127.0.0.1:9000:90/tcp'] }, 90),
+    9000,
+    'host IP and protocol are ignored',
+  );
+  assert.equal(
+    publishedPort({ ports: [{ target: 3000, published: 13000 }] }, 3000),
+    13000,
+    'long syntax',
+  );
+  assert.equal(publishedPort({ ports: ['80'] }, 80), null, 'unpublished container port');
+  assert.equal(publishedPort({}, 80), null, 'no ports');
+});
+
+test('validateCompose checks the x-tug.ingress annotation', () => {
+  assert.equal(
+    errorsFor(ingressSvc({ host: 'app.example.com', port: 80 })),
+    '',
+    'minimal valid route',
+  );
+  assert.equal(
+    errorsFor(ingressSvc({ host: 'app.example.com', port: 80, tls: 'off' })),
+    '',
+    'tls off is valid',
+  );
+  assert.equal(
+    errorsFor(
+      ingressSvc({ host: 'app.example.com', port: 80, tls: 'custom', cert: 'C', key: 'K' }),
+    ),
+    '',
+    'custom with secrets is valid',
+  );
+  assert.match(
+    errorsFor(ingressSvc({ port: 80 })),
+    /ingress\.host must be a fully qualified hostname/,
+    'host is required',
+  );
+  assert.match(
+    errorsFor(ingressSvc({ host: 'localhost', port: 80 })),
+    /fully qualified/,
+    'single-label hosts are rejected',
+  );
+  assert.match(
+    errorsFor(ingressSvc({ host: 'app.example.com' })),
+    /ingress\.port must be a port number/,
+    'port is required',
+  );
+  assert.match(
+    errorsFor(ingressSvc({ host: 'app.example.com', port: 99999 })),
+    /port number/,
+    'port range is checked',
+  );
+  assert.match(
+    errorsFor(ingressSvc({ host: 'app.example.com', port: 80 }, [])),
+    /must be published in ports/,
+    'the port must be published for the edge to reach it',
+  );
+  assert.match(
+    errorsFor(ingressSvc({ host: 'app.example.com', port: 80, tls: 'magic' })),
+    /tls must be auto, custom or off/,
+    'tls is an enum',
+  );
+  assert.match(
+    errorsFor(ingressSvc({ host: 'app.example.com', port: 80, tls: 'custom' })),
+    /requires cert and key/,
+    'custom needs secret names',
+  );
+  assert.throws(
+    () =>
+      validateCompose({
+        services: {
+          a: ingressSvc({ host: 'x.example.com', port: 80 }),
+          b: ingressSvc({ host: 'X.example.com', port: 80 }),
+        },
+      }),
+    /already used by a/,
+    'a host maps to one service',
+  );
+});
+
+test('containerSpecs injects cross-node names as extra hosts without touching local siblings', () => {
+  const compose: ComposeFile = {
+    services: {
+      web: {
+        image: 'w',
+        extra_hosts: { legacy: '10.9.9.9' },
+        'x-tug': { placement: { nodes: ['n1'] } },
+      },
+      cache: { image: 'c', 'x-tug': { placement: { nodes: ['n1'] } } },
+      db: { image: 'd', 'x-tug': { placement: { nodes: ['n2', 'n3'] } } },
+    },
+  };
+  const ds = buildDesiredState({ project: 'blog', version: 'v1', compose });
+  const endpoints = {
+    db: [
+      { node: 'n2', address: '10.210.0.2' },
+      { node: 'n3', address: '10.210.0.3' },
+    ],
+    cache: [{ node: 'n1', address: '10.210.0.1' }],
+  };
+  const hosts = (plan: ReturnType<typeof containerSpecs>, service: string) =>
+    plan.specs[service].body.HostConfig?.ExtraHosts as string[] | undefined;
+  const plan = containerSpecs(ds, 'n1', { endpoints });
+  assert.deepEqual(
+    hosts(plan, 'web'),
+    [
+      'legacy:10.9.9.9',
+      'db:10.210.0.2',
+      'db.blog.tug:10.210.0.2',
+      'db:10.210.0.3',
+      'db.blog.tug:10.210.0.3',
+    ],
+    'every serving replica gets a record, user entries are kept',
+  );
+  assert.deepEqual(
+    hosts(plan, 'cache'),
+    hosts(plan, 'web')!.slice(1),
+    'local services resolve through the network alias, so cache is not mapped',
+  );
+  assert.deepEqual(
+    hosts(containerSpecs(ds, 'n1'), 'web'),
+    ['legacy:10.9.9.9'],
+    'without endpoints only the declared hosts remain',
+  );
+  assert.deepEqual(crossNodeHosts('blog', {}, new Set()), [], 'no endpoints, no hosts');
+  assert.equal(
+    hosts(
+      containerSpecs(ds, 'n2', {
+        endpoints: { ...endpoints, web: [{ node: 'n1', address: '10.210.0.1' }] },
+      }),
+      'db',
+    )?.includes('web:10.210.0.1'),
+    true,
+    'the other direction resolves too',
+  );
+});
+
+test('validateCompose accepts label and global placement without explicit nodes', () => {
+  const nodes = ['n1', 'n2'];
+  assert.equal(
+    validateCompose(
+      { services: { web: { image: 'nginx', 'x-tug': { placement: { labels: ['app'] } } } } },
+      nodes,
+    ),
+    undefined,
+    'label placement should be valid',
+  );
+  assert.equal(
+    validateCompose({ services: { web: { image: 'nginx', 'x-tug': { global: true } } } }, nodes),
+    undefined,
+    'global mode should be valid',
+  );
+});
+
+test('validateCompose rejects x-tug.placement.global so global has exactly one location', () => {
+  assert.throws(
+    () =>
+      validateCompose(
+        {
+          services: { web: { image: 'nginx', 'x-tug': { placement: { global: true } as never } } },
+        },
+        ['n1', 'n2'],
+      ),
+    /web: x-tug\.placement\.global is not supported; use x-tug\.global/,
+    'the removed alternative location should fail with the supported spelling',
+  );
+});
+
+test('buildDesiredState resolves label placement when nodes are provided', () => {
+  const compose = {
+    services: { web: { image: 'nginx', 'x-tug': { placement: { labels: ['app'] }, replicas: 1 } } },
+  };
+  const ds = buildDesiredState({
+    project: 'site',
+    version: 'v1',
+    compose,
+
+    nodes: [
+      { name: 'n1', labels: ['app'] },
+      { name: 'n2', labels: ['db'] },
+    ],
+  });
+  assert.deepEqual(
+    ds.services.web.placement.nodes,
+    ['n1'],
+    'only matching nodes should be selected',
+  );
+});
+
+test('buildDesiredState global mode selects every matching node', () => {
+  const compose = {
+    services: {
+      web: { image: 'nginx', 'x-tug': { placement: { labels: ['app'] }, global: true } },
+    },
+  };
+  const ds = buildDesiredState({
+    project: 'site',
+    version: 'v1',
+    compose,
+
+    nodes: [
+      { name: 'n1', labels: ['app'] },
+      { name: 'n2', labels: ['app'] },
+    ],
+  });
+  assert.deepEqual(
+    ds.services.web.placement.nodes,
+    ['n1', 'n2'],
+    'global mode should select all matching nodes',
+  );
+});
+
+test('a volume with user-supplied NFS driver_opts is passed through to every node using it', () => {
+  const opts = { type: 'nfs', o: 'addr=10.0.0.1,rw', device: ':/srv/uploads' };
+  const compose = normalized({
+    services: {
+      web: {
+        image: 'nginx',
+        volumes: ['shared:/data'],
+        'x-tug': { placement: { nodes: ['n1', 'n2'] } },
+      },
+    },
+    volumes: { shared: { driver: 'local', driver_opts: opts } },
+  });
+  const ds = buildDesiredState({ project: 'site', version: 'v1', compose });
+  for (const node of ['n1', 'n2'])
+    assert.deepEqual(
+      containerSpecs(ds, node).volumes[0].opts,
+      opts,
+      `node ${node} should receive the operator's driver_opts unchanged`,
+    );
+});
+
+// ---- supported subset ----------------------------------------------------------------------------
+
+const subset = (svc: Record<string, unknown>, extra: Partial<ComposeFile> = {}) => {
+  try {
+    validateCompose({ services: { web: { image: 'x', ...svc } }, ...extra } as ComposeFile);
+    return '';
+  } catch (e) {
+    return (e as Error).message;
+  }
+};
+
+test('validateCompose accepts what docker compose config emits for the supported keys', () => {
+  const emitted = {
+    name: 'blog',
+    networks: { default: { name: 'blog_default', ipam: {} } },
+    volumes: { data: { name: 'blog_data', driver: 'local' } },
+    'x-shared': { anchors: 'are fine' },
+    services: {
+      web: {
+        image: 'nginx',
+        networks: { default: null },
+        command: ['nginx', '-g', 'daemon off;'],
+        environment: { A: '1' },
+        ports: [{ mode: 'ingress', target: 80, published: '8080', protocol: 'tcp' }],
+        volumes: [
+          { type: 'volume', source: 'data', target: '/data', volume: {} },
+          {
+            type: 'bind',
+            source: '/srv/assets',
+            target: '/assets',
+            bind: { create_host_path: true },
+          },
+          { type: 'tmpfs', target: '/run' },
+        ],
+        depends_on: { db: { condition: 'service_healthy', required: true } },
+        healthcheck: { test: ['CMD', 'true'], interval: '10s' },
+        restart: 'unless-stopped',
+        mem_limit: '134217728',
+        cpus: 0.5,
+        ulimits: { nofile: { soft: 1024, hard: 2048 } },
+        logging: { driver: 'json-file' },
+        pull_policy: 'always',
+        'x-tug': { placement: { nodes: ['n1'] } },
+      },
+      db: { image: 'postgres', networks: { default: null } },
+    },
+  };
+  assert.doesNotThrow(
+    () => validateCompose(emitted as unknown as ComposeFile),
+    'the default name, default-only networks, pull_policy and every supported key pass',
+  );
+});
+
+test('validateCompose rejects unsupported keys and names the key', () => {
+  for (const key of [
+    'network_mode',
+    'privileged',
+    'devices',
+    'pid',
+    'ipc',
+    'security_opt',
+    'sysctls',
+    'secrets',
+    'configs',
+    'env_file',
+    'links',
+    'dns',
+    'container_name',
+  ])
+    assert.match(
+      subset({ [key]: key === 'privileged' ? true : ['x'] }),
+      new RegExp(`web: ${key} is not supported`),
+      `${key} is rejected by name`,
+    );
+  assert.match(subset({ deploy: { replicas: 2 } }), /deploy \(swarm\) is not supported/);
+});
+
+test('validateCompose rejects custom networks, unnamed volumes, relative binds and odd dependencies', () => {
+  assert.match(
+    subset({ networks: { backend: null } }),
+    /networks other than the default network are not supported/,
+  );
+  assert.match(
+    subset({ network_mode: 'host' }),
+    /network_mode is not supported/,
+    'host networking is not available until a use case needs it',
+  );
+  assert.match(
+    subset({}, { networks: { backend: {} } } as Partial<ComposeFile>),
+    /networks\.backend: custom networks are not supported/,
+  );
+  assert.match(
+    subset({ volumes: [{ type: 'bind', source: './data', target: '/d' }] }),
+    /bind mount source "\.\/data" must be an absolute path/,
+  );
+  assert.match(
+    subset({ volumes: [{ type: 'volume', target: '/d' }] }),
+    /anonymous volumes are not supported/,
+  );
+  assert.match(
+    subset({ volumes: [{ type: 'volume', source: 'ghost', target: '/d' }] }),
+    /volume ghost is not defined/,
+  );
+  assert.match(
+    subset({ volumes: ['data:/d'] }),
+    /must be normalized by docker compose config/,
+    'short syntax means the file did not go through the CLI',
+  );
+  assert.match(
+    subset({ depends_on: { db: { condition: 'service_completed_successfully' } } }),
+    /depends_on db is not a service/,
+  );
+  assert.match(subset({ image: undefined, build: undefined }), /image or build is required/);
+  assert.match(
+    subset({}, { secrets: { s: {} } } as Partial<ComposeFile>),
+    /secrets is not supported at the top level/,
+  );
+  assert.match(
+    subset({}, { volumes: { data: { external: true, bogus: 1 } } } as Partial<ComposeFile>),
+    /volumes\.data: bogus is not supported/,
+  );
+});
+
+test('secrets are the sentinels a service references', () => {
+  const compose = {
+    services: {
+      web: {
+        image: 'x',
+        environment: { A: '@@tug:secret:API_KEY@@', B: 'x@@tug:secret:DB_PASS@@y' },
+      },
+      worker: { image: 'x', environment: { C: 'plain' } },
+    },
+  } as unknown as ComposeFile;
+  assert.deepEqual([...serviceSecretNames(compose, ['web'])].sort(), ['API_KEY', 'DB_PASS']);
+  assert.deepEqual(serviceSecretVersions(compose, ['web', 'worker'], { API_KEY: 3, OTHER: 9 }), {
+    web: { API_KEY: 3 },
+    worker: {},
+  });
+});
+
+/** The x-tug schema checks that lint reports rejoin the errors deploy throws. */
+describe('x-tug schema checks', () => {
+  const errorsFor = (compose: Partial<ComposeFile>, nodes: string[] = []) => {
+    try {
+      validateCompose(compose as ComposeFile, nodes);
+      return '';
+    } catch (e) {
+      return (e as Error).message;
+    }
+  };
+  const service = (xtug: unknown) =>
+    errorsFor({
+      services: {
+        web: { image: 'x', 'x-tug': xtug } as ComposeFile['services'][string],
+      },
+    });
+  const volume = (xtug: unknown) =>
+    errorsFor({
+      services: { web: { image: 'x' } },
+      volumes: { data: { 'x-tug': xtug } as Record<string, unknown> },
+    } as unknown as ComposeFile);
+
+  test('x-tug checks its own keys, so a typo cannot deploy silently ignored', () => {
+    assert.equal(service({ placement: { nodes: ['n1'] } }), '', 'a plain placement is valid');
+    assert.match(
+      service({ ingresss: { host: 'app.example.com', port: 80 } }),
+      /web: x-tug\.ingresss is not supported \(supported: placement, replicas, global, health, ingress, rollout, backup\)/,
+      'an unknown key names its location and the accepted ones',
+    );
+    assert.match(service('nginx'), /web: x-tug must be an object/, 'a scalar x-tug is rejected');
+    assert.match(
+      service({ replicas: 0 }),
+      /web: x-tug\.replicas must be a whole number of 1 or more/,
+    );
+    assert.match(service({ replicas: 'three' }), /x-tug\.replicas must be a whole number/);
+    assert.equal(service({ replicas: 1, placement: { nodes: ['n1'] } }), '', 'valid replicas pass');
+    assert.match(service({ global: 'yes' }), /web: x-tug\.global must be true or false/);
+    assert.equal(service({ global: true }), '', 'global is a boolean flag');
+  });
+
+  test('x-tug.placement takes nodes and labels as lists of names', () => {
+    assert.match(service({ placement: ['n1'] }), /web: x-tug\.placement must be an object/);
+    assert.match(
+      service({ placement: { nodes: 'n1' } }),
+      /placement\.nodes must be a list of names/,
+    );
+    assert.match(
+      service({ placement: { labels: { team: 'a' } } }),
+      /placement\.labels must be a list of names/,
+    );
+    assert.match(
+      service({ placement: { nodes: [''], region: ['eu'] } }),
+      /list of names|is not supported/,
+      'an empty name and an unknown key are both findings',
+    );
+    assert.match(
+      service({ placement: { global: true } }),
+      /x-tug\.placement\.global is not supported; use x-tug\.global/,
+      'global has exactly one location',
+    );
+    assert.equal(
+      service({ placement: { nodes: ['n1'], labels: ['edge'] } }),
+      '',
+      'nodes and labels combine',
+    );
+  });
+
+  test('x-tug.health validates type, port, path and timing', () => {
+    assert.equal(service({ health: { type: 'tcp', port: 3306 } }), '', 'a tcp probe is valid');
+    assert.equal(
+      service({ health: { type: 'http', port: 80, path: '/healthz' } }),
+      '',
+      'an http probe is valid',
+    );
+    assert.equal(service({ health: { type: 'docker' } }), '', 'docker waits for HEALTHCHECK');
+    assert.match(service({ health: 'docker' }), /x-tug\.health must be an object/);
+    assert.match(
+      service({ health: { port: 80 } }),
+      /web: x-tug\.health needs type: docker, tcp or http/,
+      'type is what makes a probe a probe',
+    );
+    assert.match(
+      service({ health: { type: 'htp' } }),
+      /web: x-tug\.health\.type must be docker, tcp or http/,
+      'an unknown type would silently pass as healthy on the agent',
+    );
+    assert.match(
+      service({ health: { type: 'tcp' } }),
+      /port is required when type is tcp/,
+      'tcp dials a port the operator chose',
+    );
+    assert.match(
+      service({ health: { type: 'tcp', port: '80!tcp' } }),
+      /port number/,
+      'the port must be a port',
+    );
+    assert.match(service({ health: { type: 'tcp', port: 70000 } }), /port number/);
+    assert.match(
+      service({ health: { type: 'http', path: 'healthz' } }),
+      /absolute path/,
+      'the agent appends nothing to a relative path',
+    );
+    assert.match(
+      service({ health: { type: 'tcp', port: 80, interval: 'soon' } }),
+      /interval must be a duration/,
+      'interval is checked as a duration like deploy would parse it',
+    );
+    assert.match(
+      service({ health: { type: 'tcp', port: 80, timeout: {} } }),
+      /timeout must be a duration/,
+    );
+    assert.match(
+      service({ health: { type: 'tcp', port: 80, retries: 0 } }),
+      /retries must be a whole number of 1 or more/,
+    );
+    assert.equal(
+      service({ health: { type: 'http', interval: 500, timeout: '2s', retries: '10' } }),
+      '',
+      'millisecond numbers and string integers are accepted',
+    );
+  });
+
+  test('volume x-tug takes type, driver, persistent, placement and backup', () => {
+    assert.equal(
+      volume({ type: 'local', persistent: true, placement: { nodes: ['n1'] } }),
+      '',
+      'the documented form is valid',
+    );
+    assert.match(volume({ persistant: true }), /volumes\.data: x-tug\.persistant is not supported/);
+    assert.match(volume({ type: 5 }), /x-tug\.type must be a driver type name/);
+    assert.match(volume({ driver: 5 }), /x-tug\.driver must be a volume driver name/);
+    assert.match(volume({ persistent: 'yes' }), /x-tug\.persistent must be true or false/);
+    assert.match(volume({ placement: 'n1' }), /volumes\.data: x-tug\.placement must be an object/);
+  });
+});
+
+test('composeErrors reports the findings lint shows without throwing', () => {
+  const compose = {
+    services: {
+      web: {
+        image: 'nginx',
+        volumes: ['data:/data'],
+        'x-tug': { health: { type: 'htp' } },
+      },
+    },
+    volumes: { data: {} },
+  } as unknown as ComposeFile;
+  assert.deepEqual(
+    composeErrors(compose, [], { normalized: false }),
+    ['web: x-tug.health.type must be docker, tcp or http'],
+    'the file as written is the deploy file before normalization; short syntax stays valid',
+  );
+  assert.match(
+    validatedThrowsWith(compose, []),
+    /volumes must be normalized by docker compose config/,
+    'and a canonical check keeps deploy strict',
+  );
+  assert.match(validatedThrowsWith(compose, []), /x-tug\.health\.type must be docker, tcp or http/);
+});
+
+/** validateCompose still throws the joined findings; composeErrors is its non-throwing core. */
+function validatedThrowsWith(compose: Partial<ComposeFile>, nodes: string[]): string {
+  try {
+    validateCompose(compose as ComposeFile, nodes);
+    return '';
+  } catch (e) {
+    return (e as Error).message;
+  }
+}
+
+test('composeErrors reports a file without services and validateCompose throws the same rule', () => {
+  assert.deepEqual(composeErrors(undefined as unknown as ComposeFile), [
+    'compose file must define services',
+  ]);
+});
+
+test('publishesHostPort sees a host port through every port syntax', () => {
+  const publishes = (ports: unknown[], port: number) => publishesHostPort({ ports } as never, port);
+  assert.ok(publishes(['2021:80'], 2021), 'short syntax');
+  assert.ok(publishes(['127.0.0.1:2021:80/tcp'], 2021), 'host IP and protocol');
+  assert.ok(publishes(['[::1]:2021:80'], 2021), 'bracketed IPv6 host IP');
+  assert.ok(publishes([{ target: 80, published: 2021 }], 2021), 'long syntax');
+  assert.ok(publishes(['2000-2030:8000-8030'], 2021), 'a host port range that covers the port');
+  assert.ok(!publishes(['8080:2021'], 2021), 'a container port is not a host port');
+  assert.ok(!publishes(['2021'], 2021), 'a container-only port publishes nothing fixed');
+  assert.ok(!publishes([2021], 2021), 'a bare number is a container port');
+  assert.ok(!publishes([], 2021), 'no ports');
+});
+
+test('domainProblem accepts public names and zones and refuses addresses and over-long names', () => {
+  for (const ok of [
+    'example.org',
+    'shop.other.net',
+    '*.network.example.com',
+    'xn--bcher-kva.example',
+  ])
+    assert.equal(domainProblem(ok), null, `${ok} is a valid mapped domain`);
+  for (const [bad, why] of [
+    ['10.0.0.5', 'an IP address'],
+    ['localhost', 'a single label'],
+    ['not a host', 'spaces'],
+    ['a'.repeat(64) + '.example.org', 'a label over 63 characters'],
+    ['a.'.repeat(130) + 'org', 'a name over 253 characters'],
+  ] as const)
+    assert.ok(domainProblem(bad), `${why} is refused`);
+});
+
+test('x-tug.ingress.host takes one hostname or a list, and every name is validated and unique', () => {
+  const ok = (host: unknown, ports = ['8080:80']) =>
+    errorsFor(ingressSvc({ host, port: 80 }, ports));
+  assert.equal(ok('app.example.com'), '', 'a single hostname still works');
+  assert.equal(
+    ok(['app.example.com', 'example.org', '*.network.example.com']),
+    '',
+    'a list of names, with a wildcard, is valid',
+  );
+  assert.match(
+    ok([]),
+    /ingress\.host must name at least one hostname/,
+    'an empty list names nothing',
+  );
+  assert.match(
+    ok(['app.example.com', 'not a host']),
+    /fully qualified hostname/,
+    'every name must be a hostname',
+  );
+  assert.match(
+    ok(['a.example.com', 'A.example.com']),
+    /lists a\.example\.com twice/,
+    'a name listed twice, case aside',
+  );
+  assert.match(
+    ok(['a.example.com', 7]),
+    /fully qualified hostname/,
+    'a non-string entry is refused',
+  );
+  assert.match(
+    ok({ x: 1 }),
+    /fully qualified hostname/,
+    'an object is neither a hostname nor a list',
+  );
+  const twoServices = validateComposeErrors({
+    services: {
+      a: ingressSvc({ host: ['one.example.com', 'shared.example.com'], port: 80 }),
+      b: ingressSvc({ host: ['shared.example.com'], port: 80 }),
+    },
+  });
+  assert.match(
+    twoServices,
+    /ingress\.host shared\.example\.com is already used by a/,
+    'a name in a list cannot be reused by another service',
+  );
+});

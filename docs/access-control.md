@@ -35,7 +35,7 @@ Project scope limits API access to project records; it does not isolate hosts or
 
 ## Endpoint table
 
-This table is the contract. It mirrors `ROUTE_ROLES` in `src/credentials.ts`, `createApp` refuses to register a `/api/v1` route that is not listed there, and a test compares the table with the live router and with this page, so a new route cannot ship without a declared role.
+This table is the contract. It mirrors `ROUTE_ROLES` in `src/control/credentials.ts`, `createApp` refuses to register a `/api/v1` route that is not listed there, and a test compares the table with the live router and with this page, so a new route cannot ship without a declared role.
 
 The project column says how a scoped credential's allowed projects are checked: the project comes from the request body, the query string (default `site`), the path, or the stored record for the given ID. Admin-only routes are control-wide.
 
