@@ -46,6 +46,21 @@ export function publishedPort(svc: ComposeService, port: number): number | null 
   return null;
 }
 
+/** True when the service publishes host `port` on any address, through a number, a range or the long syntax. */
+export function publishesHostPort(svc: ComposeService, port: number): boolean {
+  return (svc.ports || []).some((entry) => {
+    if (typeof entry === 'number') return false;
+    if (typeof entry === 'object') return Number(entry.published) === port;
+    const parts = String(entry)
+      .split('/')[0]
+      .replace(/^\[[^\]]*\]:/, '')
+      .split(':');
+    if (parts.length < 2) return false;
+    const [low, high = low] = parts[parts.length - 2].split('-').map(Number);
+    return low <= port && port <= high;
+  });
+}
+
 /** True when a `ports` entry names its host IP: `127.0.0.1:8080:80`, `[::1]:8080:80`, `0.0.0.0::80` or long-syntax `host_ip`. */
 export function hasHostIp(entry: PortEntry): boolean {
   if (typeof entry === 'number') return false;
@@ -137,6 +152,26 @@ export function addressBoundServices(
 
 const HOSTNAME_RE = /^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i;
 
+/** True for a lowercase-insensitive fully qualified hostname or a one-label `*.zone` wildcard, as `x-tug.ingress.host` takes. */
+export const isIngressHostname = (host: string): boolean => HOSTNAME_RE.test(host);
+
+/**
+ * Why a name cannot be mapped as a domain, or null. Stricter than `x-tug.ingress.host`, which also takes IP literals
+ * for plain-HTTP development: a mapped domain is meant for public issuance, so an address or an over-long name is a
+ * mistake. A wildcard zone that is a public suffix (`*.co.uk`) cannot be recognised without a suffix list and is the
+ * operator's responsibility.
+ */
+export function domainProblem(host: string): string | null {
+  if (!isIngressHostname(host))
+    return 'host must be a fully qualified hostname, or *.zone for a wildcard';
+  const name = host.replace(/^\*\./, '');
+  if (name.length > 253 || name.split('.').some((label) => label.length > 63))
+    return 'host is too long: a name is at most 253 characters and a label 63';
+  const last = name.split('.').pop() ?? '';
+  if (/^\d+$/.test(last)) return 'host must be a name, not an IP address';
+  return null;
+}
+
 function validateIngress(
   name: string,
   svc: ComposeService,
@@ -149,12 +184,22 @@ function validateIngress(
     errors.push(`${name}: x-tug.ingress must be an object`);
     return;
   }
-  const host = typeof ingress.host === 'string' ? ingress.host.toLowerCase() : '';
-  if (!HOSTNAME_RE.test(host))
-    errors.push(`${name}: ingress.host must be a fully qualified hostname`);
-  else if (seen.has(host))
-    errors.push(`${name}: ingress.host ${host} is already used by ${seen.get(host)}`);
-  else seen.set(host, name);
+  const rawHosts: unknown[] = Array.isArray(ingress.host) ? ingress.host : [ingress.host];
+  if (Array.isArray(ingress.host) && !ingress.host.length)
+    errors.push(`${name}: ingress.host must name at least one hostname`);
+  const listed = new Set<string>();
+  for (const raw of rawHosts) {
+    const host = typeof raw === 'string' ? raw.toLowerCase() : '';
+    if (!HOSTNAME_RE.test(host))
+      errors.push(`${name}: ingress.host must be a fully qualified hostname`);
+    else if (listed.has(host)) errors.push(`${name}: ingress.host lists ${host} twice`);
+    else if (seen.has(host))
+      errors.push(`${name}: ingress.host ${host} is already used by ${seen.get(host)}`);
+    else {
+      seen.set(host, name);
+      listed.add(host);
+    }
+  }
   const port = Number(ingress.port);
   if (!Number.isInteger(port) || port < 1 || port > 65535)
     errors.push(`${name}: ingress.port must be a port number`);
@@ -477,12 +522,18 @@ function validateTopLevel(compose: ComposeFile, errors: string[]): void {
   }
 }
 
+/** The lower-cased names of `x-tug.ingress.host`, a hostname or a list of them; the first is the primary. */
+export function ingressHostList(ingress: { host?: unknown }): string[] {
+  const list = Array.isArray(ingress.host) ? ingress.host : [ingress.host];
+  return list.filter((h): h is string => typeof h === 'string').map((h) => h.toLowerCase());
+}
+
 /** Lower-cased ingress hostnames a Compose definition claims, by `service` name. */
 export function ingressHostsOf(compose: ComposeFile): Map<string, string> {
   const hosts = new Map<string, string>();
   for (const [name, svc] of Object.entries(compose.services || {})) {
-    const host = svc['x-tug']?.ingress?.host;
-    if (typeof host === 'string') hosts.set(host.toLowerCase(), name);
+    const ingress = svc['x-tug']?.ingress;
+    if (ingress) for (const host of ingressHostList(ingress)) hosts.set(host, name);
   }
   return hosts;
 }

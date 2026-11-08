@@ -86,9 +86,12 @@ const ingress = (): JsonSchema => ({
   type: 'object',
   properties: {
     host: {
-      type: 'string',
+      oneOf: [
+        { type: 'string' },
+        { type: 'array', items: { type: 'string' }, minItems: 1, uniqueItems: true },
+      ],
       description:
-        'A fully qualified hostname, unique across the file; point its DNS at the ingress node.',
+        'A fully qualified hostname, or a list of them, unique across the file; point their DNS at the ingress node. Every name shares the route and its TLS mode (with tls custom, one certificate must cover all of them); the first is the primary. A `*.zone` wildcard is allowed.',
     },
     port: {
       type: 'integer',
@@ -98,7 +101,8 @@ const ingress = (): JsonSchema => ({
     },
     tls: {
       enum: ['auto', 'custom', 'off'],
-      description: '`auto` is ACME (default); `custom` needs cert and key; `off` is plain HTTP.',
+      description:
+        '`auto` is ACME (default; a wildcard host is issued per name on demand); `custom` needs cert and key; `off` is plain HTTP.',
     },
     cert: {
       type: 'string',

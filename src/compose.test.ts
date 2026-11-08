@@ -1,6 +1,8 @@
 import test, { describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  domainProblem,
+  publishesHostPort,
   buildDesiredState,
   composeErrors,
   crossNodeHosts,
@@ -66,6 +68,14 @@ const ingressSvc = (ingress: unknown, ports: string[] = ['8080:80']) =>
     ports,
     'x-tug': { placement: { nodes: ['n1'] }, ingress },
   }) as ComposeFile['services'][string];
+const validateComposeErrors = (compose: ComposeFile) => {
+  try {
+    validateCompose(compose);
+    return '';
+  } catch (e) {
+    return (e as Error).message;
+  }
+};
 const errorsFor = (svc: ComposeFile['services'][string]) => {
   try {
     validateCompose({ services: { web: svc } });
@@ -638,4 +648,82 @@ test('composeErrors reports a file without services and validateCompose throws t
   assert.deepEqual(composeErrors(undefined as unknown as ComposeFile), [
     'compose file must define services',
   ]);
+});
+
+test('publishesHostPort sees a host port through every port syntax', () => {
+  const publishes = (ports: unknown[], port: number) => publishesHostPort({ ports } as never, port);
+  assert.ok(publishes(['2021:80'], 2021), 'short syntax');
+  assert.ok(publishes(['127.0.0.1:2021:80/tcp'], 2021), 'host IP and protocol');
+  assert.ok(publishes(['[::1]:2021:80'], 2021), 'bracketed IPv6 host IP');
+  assert.ok(publishes([{ target: 80, published: 2021 }], 2021), 'long syntax');
+  assert.ok(publishes(['2000-2030:8000-8030'], 2021), 'a host port range that covers the port');
+  assert.ok(!publishes(['8080:2021'], 2021), 'a container port is not a host port');
+  assert.ok(!publishes(['2021'], 2021), 'a container-only port publishes nothing fixed');
+  assert.ok(!publishes([2021], 2021), 'a bare number is a container port');
+  assert.ok(!publishes([], 2021), 'no ports');
+});
+
+test('domainProblem accepts public names and zones and refuses addresses and over-long names', () => {
+  for (const ok of [
+    'example.org',
+    'shop.other.net',
+    '*.network.example.com',
+    'xn--bcher-kva.example',
+  ])
+    assert.equal(domainProblem(ok), null, `${ok} is a valid mapped domain`);
+  for (const [bad, why] of [
+    ['10.0.0.5', 'an IP address'],
+    ['localhost', 'a single label'],
+    ['not a host', 'spaces'],
+    ['a'.repeat(64) + '.example.org', 'a label over 63 characters'],
+    ['a.'.repeat(130) + 'org', 'a name over 253 characters'],
+  ] as const)
+    assert.ok(domainProblem(bad), `${why} is refused`);
+});
+
+test('x-tug.ingress.host takes one hostname or a list, and every name is validated and unique', () => {
+  const ok = (host: unknown, ports = ['8080:80']) =>
+    errorsFor(ingressSvc({ host, port: 80 }, ports));
+  assert.equal(ok('app.example.com'), '', 'a single hostname still works');
+  assert.equal(
+    ok(['app.example.com', 'example.org', '*.network.example.com']),
+    '',
+    'a list of names, with a wildcard, is valid',
+  );
+  assert.match(
+    ok([]),
+    /ingress\.host must name at least one hostname/,
+    'an empty list names nothing',
+  );
+  assert.match(
+    ok(['app.example.com', 'not a host']),
+    /fully qualified hostname/,
+    'every name must be a hostname',
+  );
+  assert.match(
+    ok(['a.example.com', 'A.example.com']),
+    /lists a\.example\.com twice/,
+    'a name listed twice, case aside',
+  );
+  assert.match(
+    ok(['a.example.com', 7]),
+    /fully qualified hostname/,
+    'a non-string entry is refused',
+  );
+  assert.match(
+    ok({ x: 1 }),
+    /fully qualified hostname/,
+    'an object is neither a hostname nor a list',
+  );
+  const twoServices = validateComposeErrors({
+    services: {
+      a: ingressSvc({ host: ['one.example.com', 'shared.example.com'], port: 80 }),
+      b: ingressSvc({ host: ['shared.example.com'], port: 80 }),
+    },
+  });
+  assert.match(
+    twoServices,
+    /ingress\.host shared\.example\.com is already used by a/,
+    'a name in a list cannot be reused by another service',
+  );
 });

@@ -44,6 +44,8 @@ import {
   buildDesiredState,
   ingressHostsOf,
   ingressHostsOverlap,
+  domainProblem,
+  publishesHostPort,
   loopbackIngressServices,
   serviceSecretNames,
   validateCompose,
@@ -67,7 +69,13 @@ import {
 import { EXPIRY_WARN_DAYS, certificateExpiry, diagnoseNode, nodeStatus } from './diagnostics.ts';
 import { serverTlsOptions } from './tls-server.ts';
 import { isNodeHost } from './node-address.ts';
-import { buildIngressWork, ingressConfigHash, resolveServiceEndpoints } from './ingress.ts';
+import {
+  ASK_PORT,
+  CADDY_ADMIN_PORT,
+  buildIngressWork,
+  ingressConfigHash,
+  resolveServiceEndpoints,
+} from './ingress.ts';
 import { parseStatusReport } from './status-report.ts';
 import { advance, advanceWhere, statesSql } from './lifecycle.ts';
 import { buildLifecycle, commandLifecycle, deploymentLifecycle } from './lifecycles.ts';
@@ -1021,9 +1029,46 @@ export async function createApp(
    * Ingress hostnames belong to the first project that publishes them: another project's current deployment
    * that already routes a host blocks any project from taking it, on deploy and on rollback alike.
    */
+  /**
+   * The managed Caddy listens on the loopback of every ingress node (its admin endpoint and the ask site), so a
+   * service that publishes one of those host ports there would make every site's reload fail.
+   */
+  function assertNoReservedIngressPorts(compose: ComposeFile): void {
+    const ingressNodes = db
+      .all<{ name: string }>('SELECT name FROM nodes WHERE ingress=1')
+      .map((n) => n.name);
+    if (!ingressNodes.length) return;
+    for (const [name, svc] of Object.entries(compose.services || {})) {
+      const explicit = svc['x-tug']?.placement?.nodes;
+      // Without a named node list the service may land on any node, including an ingress node.
+      const nodes = explicit?.length
+        ? ingressNodes.filter((n) => explicit.includes(n))
+        : ingressNodes;
+      if (!nodes.length) continue;
+      for (const port of [ASK_PORT, CADDY_ADMIN_PORT])
+        if (publishesHostPort(svc, port))
+          throw httpError(
+            400,
+            `${name}: host port ${port} is reserved for the managed Caddy on ingress node ${nodes[0]}; publish another port`,
+          );
+    }
+  }
   function assertIngressHostsFree(project: string, compose: ComposeFile): void {
     const wanted = ingressHostsOf(compose);
     if (!wanted.size) return;
+    for (const domain of db.all<{ project_id: string; service: string; host: string }>(
+      'SELECT project_id,service,host FROM project_domains',
+    ))
+      for (const [wantedHost, mine] of wanted)
+        if (
+          domain.project_id !== project
+            ? ingressHostsOverlap(wantedHost, domain.host)
+            : wantedHost === domain.host && mine !== domain.service
+        )
+          throw httpError(
+            409,
+            `${mine}: ingress.host ${wantedHost} ${wantedHost === domain.host ? 'is' : `overlaps ${domain.host},`} already mapped as a domain of ${domain.project_id}/${domain.service}`,
+          );
     for (const other of currentDesiredStates()) {
       if (other.project === project) continue;
       for (const [host, service] of ingressHostsOf(other.compose))
@@ -2032,6 +2077,113 @@ export async function createApp(
           ),
         }),
   );
+  api('get', '/api/v1/domains', queryProject, async (req, res) =>
+    isReservedProject(String(req.query.project || 'site'))
+      ? res.status(400).json({ error: 'project names starting with _ are reserved' })
+      : res.json({
+          domains: db.all(
+            'SELECT project_id,service,host,created_at,created_by FROM project_domains WHERE project_id=? ORDER BY host',
+            String(req.query.project || 'site'),
+          ),
+        }),
+  );
+  /**
+   * Mapped domains are control state, not part of a deployment: a WordPress network adds sites at any time, and
+   * each one is served on a service's ingress route from the next agent poll. They obey the same ownership rule as
+   * declared hosts, so a name can belong to one project only.
+   */
+  api('post', '/api/v1/domains', bodyProject, async (req, res) => {
+    const { project = 'site' } = req.body;
+    const host = String(req.body.host ?? '')
+      .trim()
+      .toLowerCase();
+    const service = String(req.body.service ?? '');
+    if (isReservedProject(String(project)))
+      return res.status(400).json({ error: 'project names starting with _ are reserved' });
+    const problem = domainProblem(host);
+    if (problem) return res.status(400).json({ error: problem });
+    if (!service) return res.status(400).json({ error: 'service required' });
+    let lock;
+    try {
+      lock = acquireProjectLock(project, 'domain.add');
+      const state = currentDesiredStates().find((s) => s.project === project);
+      if (!state)
+        throw httpError(409, `project ${project} has no current deployment to attach a domain to`);
+      const ingress = state.compose.services?.[service]?.['x-tug']?.ingress;
+      if (!ingress)
+        throw httpError(409, `service ${service} has no x-tug.ingress route to serve ${host} on`);
+      for (const other of currentDesiredStates())
+        for (const [declared, name] of ingressHostsOf(other.compose))
+          if (other.project === project ? declared === host : ingressHostsOverlap(host, declared))
+            throw httpError(
+              409,
+              `${host} ${declared === host ? 'is' : `overlaps ${declared},`} already the ingress.host of ${other.project}/${name}`,
+            );
+      const existing = db.get<{ project_id: string; service: string }>(
+        'SELECT project_id,service FROM project_domains WHERE host=?',
+        host,
+      );
+      if (existing && existing.project_id === project && existing.service === service)
+        return res.json({ ok: true, project, service, host, unchanged: true });
+      for (const row of db.all<{ project_id: string; service: string; host: string }>(
+        'SELECT project_id,service,host FROM project_domains WHERE host<>? AND project_id<>?',
+        host,
+        project,
+      ))
+        if (ingressHostsOverlap(host, row.host))
+          throw httpError(
+            409,
+            `${host} overlaps ${row.host}, already mapped by project ${row.project_id}`,
+          );
+      if (existing)
+        throw httpError(
+          409,
+          `${host} is already mapped to ${existing.project_id}/${existing.service}`,
+        );
+      db.run(
+        'INSERT INTO project_domains(id,project_id,service,host,created_at,created_by) VALUES(?,?,?,?,?,?)',
+        id('dom'),
+        project,
+        service,
+        host,
+        now(),
+        req.actor!.name,
+      );
+      wakeAll();
+      audit(req.actor!, {
+        type: 'domain.added',
+        project,
+        message: `domain ${host} mapped to ${service} by ${req.actor!.name}`,
+        metadata: { host, service },
+      });
+      res.json({ ok: true, project, service, host });
+    } catch (e) {
+      sendError(res, e);
+    } finally {
+      releaseLock(lock);
+    }
+  });
+  api('delete', '/api/v1/domains/:host', queryProject, async (req, res) => {
+    const project = String(req.query.project || 'site');
+    if (isReservedProject(project))
+      return res.status(400).json({ error: 'project names starting with _ are reserved' });
+    const host = String(req.params.host).toLowerCase();
+    const removed = db.run(
+      'DELETE FROM project_domains WHERE project_id=? AND host=?',
+      project,
+      host,
+    );
+    if (!removed.changes)
+      return res.status(404).json({ error: `domain ${host} is not mapped in project ${project}` });
+    wakeAll();
+    audit(req.actor!, {
+      type: 'domain.removed',
+      project,
+      message: `domain ${host} removed by ${req.actor!.name}`,
+      metadata: { host },
+    });
+    res.json({ ok: true, host });
+  });
   api('delete', '/api/v1/secrets/:name', queryProject, async (req, res) => {
     const project = String(req.query.project || 'site');
     if (isReservedProject(project))
@@ -2362,6 +2514,7 @@ export async function createApp(
         throw httpError(400, errMessage(e));
       }
       assertIngressHostsFree(project, compose);
+      assertNoReservedIngressPorts(compose);
       const acknowledgedMoves: string[] = Array.isArray(body.moves) ? body.moves.map(String) : [];
       const unacknowledged = movedServices(project, compose).filter(
         (name) => !acknowledgedMoves.includes(name),
@@ -2610,6 +2763,10 @@ export async function createApp(
         );
         if (!owned || !pending)
           throw httpError(409, 'deployment was cancelled or its build lease was lost');
+        // The first check ran before the build and image resolution, which can take minutes: another project may
+        // have been published, or mapped a domain, since. Publication is the one serialized point where a hostname is
+        // actually claimed, so the claim is checked again here.
+        assertIngressHostsFree(project, desired.compose);
         immediateTransaction(db, () => {
           const published = advance(
             db,
@@ -3422,6 +3579,9 @@ export async function createApp(
       secrets,
       acmeEmail: ACME_EMAIL,
       accessLog: INGRESS_ACCESS_LOG,
+      domains: db.all<{ project: string; service: string; host: string }>(
+        'SELECT project_id AS project, service, host FROM project_domains ORDER BY host',
+      ),
     });
   }
 

@@ -298,6 +298,16 @@ const LEGACY_NODE_COLUMNS: readonly [string, string][] = [
  */
 const CONTROL_MIGRATIONS: readonly Migration[] = [
   { version: 1, name: 'baseline', up: baselineControl },
+  {
+    version: 2,
+    name: 'project-domains',
+    // Mapped domains are control state like secrets: a WordPress network's sites change without a deployment.
+    up: (db) =>
+      db.exec(`
+CREATE TABLE IF NOT EXISTS project_domains(id TEXT PRIMARY KEY, project_id TEXT NOT NULL, service TEXT NOT NULL, host TEXT NOT NULL UNIQUE, created_at TEXT, created_by TEXT);
+CREATE INDEX IF NOT EXISTS project_domains_project ON project_domains(project_id);
+`),
+  },
 ];
 
 function baselineControl(db: Db): void {

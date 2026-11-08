@@ -576,3 +576,277 @@ test('metrics are always rendered and access logs only when asked for', () => {
     'control renders the access log when it is switched on',
   );
 });
+
+const wildRoute = (
+  host: string,
+  tls: 'auto' | 'off' | 'custom',
+  aliases: string[] = [],
+  upstreams = ['10.0.0.1:80'],
+) => ({ project: 'p', service: 's', host, tls, upstreams, aliases });
+
+test('a wildcard host with automatic HTTPS is issued on demand, approved only for one label under its zone', () => {
+  const out = renderCaddyfile([
+    wildRoute('*.network.example.com', 'auto'),
+    wildRoute('*.other.example.org', 'auto'),
+  ]);
+  assert.match(
+    out,
+    /on_demand_tls \{\n\t\task http:\/\/127\.0\.0\.1:2021\/ask\n\t\}/,
+    'on-demand issuance is gated by the loopback ask endpoint',
+  );
+  assert.match(
+    out,
+    /\*\.network\.example\.com \{\n\ttls \{\n\t\ton_demand\n\t\}/,
+    'the zone site issues on demand',
+  );
+  assert.match(
+    out,
+    /http:\/\/127\.0\.0\.1:2021 \{\n\tbind 127\.0\.0\.1\n/,
+    'the ask site listens on loopback only',
+  );
+  assert.ok(
+    out.includes(
+      "{query.domain}.matches('^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\\\.network\\\\.example\\\\.com$')",
+    ),
+    'the ask expression accepts exactly one valid DNS label (no leading or trailing hyphen, at most 63 characters) under the zone, with its dots escaped',
+  );
+  assert.match(
+    out,
+    /respond @zone1 200\n\t\trespond 403/,
+    'every zone is approved, anything else is refused',
+  );
+});
+
+test('on-demand issuance is rendered only for wildcard hosts with automatic HTTPS', () => {
+  for (const [label, route] of [
+    ['an ordinary host', wildRoute('app.example.com', 'auto')],
+    ['a wildcard with a custom certificate', wildRoute('*.example.com', 'custom')],
+    ['a wildcard served over plain HTTP', wildRoute('*.example.com', 'off')],
+  ] as const) {
+    const out = renderCaddyfile([route]);
+    assert.doesNotMatch(out, /on_demand/, `${label} needs no on-demand issuance`);
+    assert.doesNotMatch(out, /127\.0\.0\.1:2021/, `${label} needs no ask site`);
+  }
+});
+
+test('mapped domains share the route block, and a custom certificate does not cover them', () => {
+  const auto = renderCaddyfile([wildRoute('app.example.com', 'auto', ['a.org', 'b.net'])]);
+  assert.match(
+    auto,
+    /\napp\.example\.com, a\.org, b\.net \{\n/,
+    'automatic HTTPS names share one block and one upstream list',
+  );
+  const off = renderCaddyfile([wildRoute('app.example.com', 'off', ['a.org'])]);
+  assert.match(
+    off,
+    /http:\/\/app\.example\.com, http:\/\/a\.org \{/,
+    'plain HTTP applies to every name',
+  );
+  const custom = renderCaddyfile([wildRoute('app.example.com', 'custom', ['a.org'])]);
+  assert.match(
+    custom,
+    /\napp\.example\.com \{\n\ttls \/etc\/caddy\/certs\//,
+    'the declared host keeps its certificate',
+  );
+  assert.match(
+    custom,
+    /\na\.org \{\n\treverse_proxy/,
+    'a mapped domain gets its own automatic HTTPS block, which a custom certificate cannot serve',
+  );
+});
+
+test('mixed mapped names keep wildcard zones on-demand and explicit names out of it', () => {
+  const out = renderCaddyfile([
+    wildRoute('app.example.com', 'auto', ['*.network.example.com', 'a.org']),
+  ]);
+  assert.match(
+    out,
+    /\napp\.example\.com, a\.org \{\n\treverse_proxy/,
+    'explicit names are ordinary automatic HTTPS',
+  );
+  assert.match(
+    out,
+    /\*\.network\.example\.com \{\n\ttls \{\n\t\ton_demand/,
+    'only the wildcard issues on demand',
+  );
+});
+
+test('a wildcard host with characters outside a hostname never reaches a Caddy expression', () => {
+  assert.throws(
+    () => renderCaddyfile([wildRoute("*.a'b.example.com", 'auto')]),
+    /not a wildcard host/,
+    'the zone is validated before it is interpolated into the ask expression',
+  );
+});
+
+test('mapped domains become aliases of their service route and follow its state', () => {
+  const input = {
+    states: [state()],
+    endpoints: {},
+    node: 'edge',
+    secrets: new Map<string, string>(),
+  };
+  const domains = [
+    { project: 'blog', service: 'web', host: 'A.Example.org' },
+    { project: 'blog', service: 'web', host: 'app.example.com' },
+    { project: 'blog', service: 'gone', host: 'orphan.example.org' },
+    { project: 'other', service: 'web', host: 'other.example.org' },
+  ];
+  const work = buildIngressWork({ ...input, domains });
+  assert.deepEqual(
+    work.routes[0].aliases,
+    ['a.example.org'],
+    "only this service's domains are aliases, lowercased, and the route's own host is not repeated",
+  );
+  assert.match(
+    work.caddyfile,
+    /app\.example\.com, a\.example\.org \{[\s\S]*respond "[^"]*" 503/,
+    'a domain follows its route, including the 503 answer while no upstream serves',
+  );
+  assert.match(
+    work.warnings.join('\n'),
+    /blog\/gone: domain orphan\.example\.org is not served because the service has no served ingress route/,
+    'a domain whose service has no route is reported',
+  );
+  assert.match(
+    work.warnings.join('\n'),
+    /other\/web: domain other\.example\.org is not served/,
+    'a domain of a project that has no routes is reported too, not silently attached elsewhere',
+  );
+});
+
+const listState = (ingress: Record<string, unknown>): DesiredState =>
+  state({
+    services: {
+      web: {
+        image: 'nginx',
+        ports: ['8080:80'],
+        'x-tug': { placement: { nodes: ['app1'] }, ingress: { port: 80, ...ingress } },
+      },
+    },
+  } as unknown as ComposeFile);
+
+test('every name in x-tug.ingress.host is served by one route, the first being the primary', () => {
+  const work = buildIngressWork({
+    states: [listState({ host: ['App.Example.com', 'example.org', 'shop.other.net'] })],
+    endpoints: { blog: { web: [{ node: 'app1', address: '10.0.0.5' }] } },
+    node: 'edge',
+    secrets: new Map(),
+  });
+  assert.equal(work.routes[0].host, 'app.example.com', 'the first name is the primary, lowercased');
+  assert.deepEqual(
+    work.routes[0].hosts,
+    ['example.org', 'shop.other.net'],
+    'the other declared names ride on the route',
+  );
+  assert.match(
+    work.caddyfile,
+    /\napp\.example\.com, example\.org, shop\.other\.net \{\n[\s\S]*reverse_proxy 10\.0\.0\.5:8080/,
+    'one site block serves every name from the same upstream',
+  );
+});
+
+test('declared names share a custom certificate, while mapped domains still use automatic HTTPS', () => {
+  const route = {
+    project: 'p',
+    service: 's',
+    host: 'app.example.com',
+    hosts: ['www.example.com', '*.example.com'],
+    aliases: ['mapped.example.org'],
+    tls: 'custom' as const,
+    upstreams: ['10.0.0.1:80'],
+  };
+  const out = renderCaddyfile([route]);
+  assert.match(
+    out,
+    /\napp\.example\.com, www\.example\.com, \*\.example\.com \{\n\ttls \/etc\/caddy\/certs\/app\.example\.com\.crt/,
+    'every declared name, wildcard included, is served with the one custom certificate',
+  );
+  assert.match(
+    out,
+    /\nmapped\.example\.org \{\n\treverse_proxy/,
+    'a mapped domain is not covered by it and gets automatic HTTPS',
+  );
+  assert.doesNotMatch(out, /on_demand/, 'a custom wildcard is not issued on demand');
+});
+
+test('a declared wildcard with automatic HTTPS is issued on demand next to explicit names', () => {
+  const out = renderCaddyfile([
+    {
+      project: 'p',
+      service: 's',
+      host: 'app.example.com',
+      hosts: ['*.network.example.com'],
+      tls: 'auto',
+      upstreams: ['10.0.0.1:80'],
+    },
+  ]);
+  assert.match(
+    out,
+    /\napp\.example\.com \{\n\treverse_proxy/,
+    'the explicit name is ordinary automatic HTTPS',
+  );
+  assert.match(
+    out,
+    /\*\.network\.example\.com \{\n\ttls \{\n\t\ton_demand/,
+    'the declared wildcard is issued on demand',
+  );
+});
+
+test('a declared name another route already serves is skipped alone, and a taken primary skips the route', () => {
+  const taken = state(
+    {
+      services: {
+        web: {
+          image: 'nginx',
+          ports: ['8080:80'],
+          'x-tug': {
+            placement: { nodes: ['app1'] },
+            ingress: { host: ['aaa.example.com', 'shared.example.org'], port: 80 },
+          },
+        },
+      },
+    } as unknown as ComposeFile,
+    'alpha',
+  );
+  const work = buildIngressWork({
+    states: [taken, listState({ host: ['blog.example.com', 'shared.example.org'] })],
+    endpoints: {},
+    node: 'edge',
+    secrets: new Map(),
+  });
+  assert.deepEqual(
+    work.routes.map((r) => [r.project, r.host, r.hosts ?? []]),
+    [
+      ['alpha', 'aaa.example.com', ['shared.example.org']],
+      ['blog', 'blog.example.com', []],
+    ],
+    'the first claim keeps the shared name and the second route keeps its other name',
+  );
+  assert.match(
+    work.warnings.join('\n'),
+    /blog\/web: host shared\.example\.org is already routed by alpha\/web; skipped/,
+    'the skipped name is reported',
+  );
+});
+
+test('mapped domains from the CLI still join a route that declares a list of names', () => {
+  const work = buildIngressWork({
+    states: [listState({ host: ['app.example.com', 'example.org'] })],
+    endpoints: {},
+    node: 'edge',
+    secrets: new Map(),
+    domains: [{ project: 'blog', service: 'web', host: 'mapped.example.net' }],
+  });
+  assert.deepEqual(work.routes[0].hosts, ['example.org'], 'the declared list is kept');
+  assert.deepEqual(
+    work.routes[0].aliases,
+    ['mapped.example.net'],
+    'the mapped domain is added beside it',
+  );
+  assert.match(
+    work.caddyfile,
+    /\napp\.example\.com, example\.org, mapped\.example\.net \{/,
+    'with automatic HTTPS all three names are one block',
+  );
+});

@@ -26,7 +26,12 @@ export type IngressTls = 'auto' | 'custom' | 'off';
 
 /** `x-tug.ingress`: publish a service on a hostname through the managed Caddy edge. */
 export interface IngressSpec {
-  host: string;
+  /**
+   * The hostname, or a list of them: every name shares the route's upstreams and TLS mode (with `tls: custom` one
+   * certificate must cover all of them). The first name is the route's primary, used in messages and to name the
+   * custom certificate file.
+   */
+  host: string | string[];
   /** Container port (or the host port) of the service; must be published in the service's `ports`. */
   port: number;
   /** `auto` (ACME, default), `custom` (cert/key from project secrets) or `off` (plain HTTP). */
@@ -442,6 +447,10 @@ export interface IngressRoute {
    * host has no serving upstream or is in maintenance: the edge then answers 503 itself.
    */
   upstreams: string[];
+  /** Further declared names of `x-tug.ingress.host` (a list), served with `host` under the route's TLS mode. */
+  hosts?: string[];
+  /** Mapped domains (`tug domain add`) served on this route's upstreams; always automatic HTTPS. */
+  aliases?: string[];
   /** The host is in `x-tug.ingress.maintenance`: an empty `upstreams` is then intended, not an outage. */
   maintenance?: boolean;
 }

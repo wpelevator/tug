@@ -1,0 +1,5 @@
+---
+'@wpelevator/tug': minor
+---
+
+Map extra hostnames onto a service's ingress route without a deployment, for WordPress multisite domain mapping: `tug domain add <host> --service <service>`, `tug domain list` and `tug domain remove <host>`, backed by `GET`/`POST /api/v1/domains` and `DELETE /api/v1/domains/:host` (the `deploy` role, scoped to the project). Mapped domains share the route's upstreams and TLS handling, survive redeploys and rollbacks, and obey the same cross-project ownership rule as declared hosts, which `deploy` and `rollback` now also enforce against mapped domains. Domains are stored in a new control database table (schema version 2); the previous schema is upgraded in place, and the pre-upgrade copy is kept as `<file>.pre-v2.bak`. A control at 1.1.0 or older refuses the upgraded database, so rolling back means restoring that copy or an earlier control backup, which discards deployments and domains made since. Control also rejects a deployment that publishes host port 2019 or 2021 on an ingress node (the managed Caddy's loopback ports), and the on-demand wildcard approval now accepts only valid DNS labels.

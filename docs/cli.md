@@ -8,6 +8,7 @@ Run `tug --help` to list commands and `tug <command> --help` for command options
 | `control` | `setup`, `backup`, `restore` |
 | `node` | `add`, `list` (`ls`), `replace`, `repair`, `remove`, `disable`, `ingress`, `address`, `register`, `enroll` |
 | `secret` | `set`, `list`, `remove` |
+| `domain` | `add`, `list` (`ls`), `remove` |
 | `backup` | `run`, `list`, `password`, `destination set`, `destination show`, `destination remove` |
 | `restore` | `run`, `list`, `resume`, `release` |
 | `credential` | `create`, `list`, `revoke` |
@@ -124,6 +125,7 @@ Every control URL, including overrides, must be `https://`. Agents can dial out 
 - `tug secret set <name> [--value <value>]` sets a secret, reading stdin if `--value` is omitted. After you enter the value and press Enter, it prints the result and exits without requiring EOF (Ctrl-D).
 - `tug secret list` lists names and versions, without values.
 - `tug secret remove [name]` deletes a secret.
+- `tug domain add <host> --service <service>` serves an extra hostname (or a `*.zone` wildcard) on a service's `x-tug.ingress` route without a deployment, `tug domain list` shows the mapped domains of the project and `tug domain remove <host>` stops serving one. The service must already have an ingress route, and a name belongs to one project only. The edge applies the change from its next poll and Caddy requests the certificate in the background; see [Networking](networking.md#mapped-domains-and-wildcard-zones). Needs the `deploy` role for the project.
 
 ## Backups
 

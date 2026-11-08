@@ -4,7 +4,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { loopbackIngressServices, publishedPort } from './compose.ts';
+import { ingressHostList, loopbackIngressServices, publishedPort } from './compose.ts';
 import { ensureDir, errMessage } from './util.ts';
 import { isPort } from './status-report.ts';
 import type {
@@ -94,6 +94,8 @@ export interface IngressInput {
   acmeEmail?: string;
   /** Write a JSON access log per site to the container's stdout. Off unless `true`. */
   accessLog?: boolean;
+  /** Mapped domains (`tug domain add`): extra hostnames served on a service's ingress route. */
+  domains?: { project: string; service: string; host: string }[];
 }
 
 const certFile = (host: string, ext: 'crt' | 'key') =>
@@ -113,6 +115,7 @@ export function buildIngressWork({
   secrets,
   acmeEmail,
   accessLog,
+  domains = [],
 }: IngressInput): IngressWork {
   const routes: IngressRoute[] = [];
   const files: Record<string, string> = {};
@@ -142,7 +145,7 @@ export function buildIngressWork({
   tagged.sort((a, b) => `${a.project}/${a.service}`.localeCompare(`${b.project}/${b.service}`));
   for (const { project, service, ingress, port, loopback } of tagged) {
     const label = `${project}/${service}`;
-    const host = ingress.host.toLowerCase();
+    const [host, ...furtherHosts] = ingressHostList(ingress);
     const tls: IngressTls = ingress.tls || 'auto';
     if (seenHosts.has(host)) {
       warnings.push(`${label}: host ${host} is already routed by ${seenHosts.get(host)}; skipped`);
@@ -178,15 +181,51 @@ export function buildIngressWork({
       warnings.push(`${label}: no serving upstream for ${host}; answering 503`);
     }
     seenHosts.set(host, label);
+    // Further declared names belong to this route unless another route already serves them.
+    const hosts: string[] = [];
+    for (const extra of furtherHosts) {
+      if (seenHosts.has(extra)) {
+        if (seenHosts.get(extra) !== label)
+          warnings.push(
+            `${label}: host ${extra} is already routed by ${seenHosts.get(extra)}; skipped`,
+          );
+        continue;
+      }
+      seenHosts.set(extra, label);
+      hosts.push(extra);
+    }
+    const aliases: string[] = [];
+    for (const domain of domains) {
+      if (domain.project !== project || domain.service !== service) continue;
+      const alias = domain.host.toLowerCase();
+      if (seenHosts.has(alias)) {
+        // The same name twice is harmless; a different owner is a conflict the first claim wins.
+        if (seenHosts.get(alias) !== label)
+          warnings.push(
+            `${label}: domain ${alias} is already routed by ${seenHosts.get(alias)}; skipped`,
+          );
+        continue;
+      }
+      seenHosts.set(alias, label);
+      aliases.push(alias);
+    }
     routes.push({
       project,
       service,
       host,
       tls,
       upstreams,
+      ...(hosts.length && { hosts }),
+      ...(aliases.length && { aliases }),
       ...(ingress.maintenance === true && { maintenance: true }),
     });
   }
+  const served = new Set(routes.map((r) => `${r.project}/${r.service}`));
+  for (const domain of domains)
+    if (!served.has(`${domain.project}/${domain.service}`))
+      warnings.push(
+        `${domain.project}/${domain.service}: domain ${domain.host} is not served because the service has no served ingress route (no ingress block, an unpublished port or missing certificate secrets)`,
+      );
   return {
     caddyfile: renderCaddyfile(routes, { acmeEmail, accessLog: accessLog === true }),
     files,
@@ -233,36 +272,116 @@ export interface RenderOptions {
   accessLog?: boolean;
 }
 
+/**
+ * Loopback port of the site that approves on-demand certificates. Caddy asks it `?domain=<name>` before issuing one
+ * and issues only on a 2xx, so the wildcard zones control rendered are the whole authorization: no project code,
+ * no network call and no cross-project guessing is involved.
+ */
+export const ASK_PORT = 2021;
+/** Caddy's admin endpoint (`caddy reload`, metrics), also on the node's loopback. */
+export const CADDY_ADMIN_PORT = 2019;
+
+const isWildcard = (host: string) => host.startsWith('*.');
+/** The wildcard zone `example.com` of `*.example.com`; only host-name characters ever reach a Caddy expression. */
+const zoneOf = (host: string): string => {
+  const zone = host.slice(2);
+  if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(zone))
+    throw new Error(`not a wildcard host: ${host}`);
+  return zone;
+};
+
+type SiteTls = 'off' | 'custom' | 'auto' | 'on-demand';
+interface Site {
+  addresses: string[];
+  tls: SiteTls;
+}
+
+/**
+ * The Caddy site blocks one route needs. The declared names (`host`, then `hosts`) all take the route's TLS mode, so
+ * with a custom certificate they share one block and the certificate must cover them. Mapped domains
+ * (`aliases`, added at runtime) are names no certificate of yours can be known to cover, so they always use
+ * automatic HTTPS. Plain HTTP and automatic HTTPS names share a block. A wildcard with automatic HTTPS cannot use
+ * the HTTP or TLS-ALPN challenge (only DNS-01 issues wildcard certificates, and stock Caddy has no DNS module), so
+ * each name under the zone is issued on demand, approved by the ask site; it needs a block of its own because
+ * every name in an on-demand block would otherwise have to be approved.
+ */
+function sitesOf(route: IngressRoute): Site[] {
+  const declared = [route.host, ...(route.hosts ?? [])];
+  const mapped = route.aliases ?? [];
+  if (route.tls === 'off') return [{ addresses: [...declared, ...mapped], tls: 'off' }];
+  const sites: Site[] = [];
+  if (route.tls === 'custom') sites.push({ addresses: declared, tls: 'custom' });
+  const automatic = route.tls === 'custom' ? mapped : [...declared, ...mapped];
+  const plain = automatic.filter((n) => !isWildcard(n));
+  if (plain.length) sites.push({ addresses: plain, tls: 'auto' });
+  for (const wildcard of automatic.filter(isWildcard))
+    sites.push({ addresses: [wildcard], tls: 'on-demand' });
+  return sites;
+}
+
+/** The global ask block and the loopback site that answers it: 200 for exactly one label under a rendered zone. */
+function askSite(zones: string[]): string[] {
+  const expression = (zone: string) =>
+    `{query.domain}.matches('^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\\\.${zone.split('.').join('\\\\.')}$')`;
+  return [
+    `http://127.0.0.1:${ASK_PORT} {`,
+    '\tbind 127.0.0.1',
+    ...zones.map((zone, i) => `\t@zone${i} expression \`${expression(zone)}\``),
+    '\thandle /ask {',
+    ...zones.map((_, i) => `\t\trespond @zone${i} 200`),
+    '\t\trespond 403',
+    '\t}',
+    '\trespond 403',
+    '}',
+    '',
+  ];
+}
+
 export function renderCaddyfile(routes: IngressRoute[], opts: RenderOptions = {}): string {
   if (!routes.length) return '# no ingress routes\n';
+  const sites = routes.map((route) => ({ route, sites: sitesOf(route) }));
+  const zones = [
+    ...new Set(
+      sites.flatMap((r) =>
+        r.sites.filter((x) => x.tls === 'on-demand').map((x) => zoneOf(x.addresses[0])),
+      ),
+    ),
+  ].sort();
   // `metrics` serves Prometheus metrics, labelled per host, on Caddy's admin endpoint (localhost:2019 in the
   // container, which shares the node's network), never on a public port.
   const out: string[] = ['{'];
   if (opts.acmeEmail) out.push(`\temail ${opts.acmeEmail}`);
+  if (zones.length)
+    out.push('\ton_demand_tls {', `\t\task http://127.0.0.1:${ASK_PORT}/ask`, '\t}');
   out.push('\tmetrics {', '\t\tper_host', '\t}', '}', '');
-  for (const route of routes) {
-    // An explicit http:// address turns off automatic HTTPS for that site.
-    out.push(`${route.tls === 'off' ? 'http://' : ''}${route.host} {`);
-    if (route.tls === 'custom')
-      out.push(
-        `\ttls ${CADDY_ETC}/${certFile(route.host, 'crt')} ${CADDY_ETC}/${certFile(route.host, 'key')}`,
-      );
-    if (opts.accessLog) out.push('\tlog {', '\t\toutput stdout', '\t\tformat json', '\t}');
-    if (route.upstreams.length)
-      out.push(
-        `\treverse_proxy ${route.upstreams.join(' ')} {`,
-        '\t\tlb_policy round_robin',
-        ...proxyResilience(),
-        '\t}',
-      );
-    else
-      out.push(
-        `\theader Retry-After ${UNAVAILABLE_RETRY_AFTER}`,
-        '\theader Cache-Control no-store',
-        '\theader Content-Type "text/plain; charset=utf-8"',
-        `\trespond "${UNAVAILABLE_BODY}" 503`,
-      );
-    out.push('}', '');
+  if (zones.length) out.push(...askSite(zones));
+  for (const { route, sites: routeSites } of sites) {
+    for (const site of routeSites) {
+      // An explicit http:// address turns off automatic HTTPS for that site.
+      const prefix = site.tls === 'off' ? 'http://' : '';
+      out.push(`${site.addresses.map((a) => prefix + a).join(', ')} {`);
+      if (site.tls === 'custom')
+        out.push(
+          `\ttls ${CADDY_ETC}/${certFile(route.host, 'crt')} ${CADDY_ETC}/${certFile(route.host, 'key')}`,
+        );
+      if (site.tls === 'on-demand') out.push('\ttls {', '\t\ton_demand', '\t}');
+      if (opts.accessLog) out.push('\tlog {', '\t\toutput stdout', '\t\tformat json', '\t}');
+      if (route.upstreams.length)
+        out.push(
+          `\treverse_proxy ${route.upstreams.join(' ')} {`,
+          '\t\tlb_policy round_robin',
+          ...proxyResilience(),
+          '\t}',
+        );
+      else
+        out.push(
+          `\theader Retry-After ${UNAVAILABLE_RETRY_AFTER}`,
+          '\theader Cache-Control no-store',
+          '\theader Content-Type "text/plain; charset=utf-8"',
+          `\trespond "${UNAVAILABLE_BODY}" 503`,
+        );
+      out.push('}', '');
+    }
   }
   return out.join('\n');
 }
