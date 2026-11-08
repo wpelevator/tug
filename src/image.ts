@@ -15,8 +15,17 @@ const packageJsonPath = path.join(
   'package.json',
 );
 
+let pinnedVersion: string | undefined;
+/** Test seam: pins the version every caller sees, so tests never depend on the package's real version. */
+export function pinPackageVersion(version: string | undefined): void {
+  pinnedVersion = version;
+}
+
 export function packageVersion(): string {
-  return (JSON.parse(fs.readFileSync(packageJsonPath, 'utf8')) as { version: string }).version;
+  return (
+    pinnedVersion ??
+    (JSON.parse(fs.readFileSync(packageJsonPath, 'utf8')) as { version: string }).version
+  );
 }
 
 /** The published image matching this CLI's version, so the CLI and the agents it installs stay in step. */
