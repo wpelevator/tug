@@ -148,6 +148,7 @@ export type HttpClient = (url: string, init?: RequestInit) => Promise<Response>;
  * connection goes; the server name is still verified against the credential's public host. Redirects are refused.
  */
 export function createTransport(credential: Credential, connectUrl?: string) {
+  if ('Bun' in globalThis) return createBunTransport(credential, connectUrl);
   const dispatcher = new Agent({ connect: clientTlsOptions(credential) as never });
   const base = new URL(connectUrl ?? credential.url).origin;
   const http: HttpClient = (url, init) => {
@@ -173,6 +174,35 @@ export function createTransport(credential: Credential, connectUrl?: string) {
     } as never) as unknown as Promise<Response>;
   };
   return { http, base, dispatcher, close: () => dispatcher.close() };
+}
+
+const TLS_1_3 = 0x0304;
+
+/**
+ * Bun substitutes its own shim for the undici package: its `Agent` has no `close()` and ignores `connect`, which
+ * would silently drop the client certificate and CA pin. Bun's `fetch` takes the same TLS options as `tls`.
+ */
+function createBunTransport(credential: Credential, connectUrl?: string) {
+  // Bun takes `minVersion` as the numeric protocol code (0x0304 is TLS 1.3) and rejects the string Node accepts.
+  const tlsOptions = { ...clientTlsOptions(credential), minVersion: TLS_1_3 as never };
+  const base = new URL(connectUrl ?? credential.url).origin;
+  const http: HttpClient = (url, init) => {
+    const headers = new Headers(init?.headers);
+    if (!headers.has(CLIENT_VERSION_HEADER) && new URL(url).origin === base)
+      headers.set(CLIENT_VERSION_HEADER, packageVersion());
+    // Bun's fetch follows HTTPS_PROXY / HTTP_PROXY / ALL_PROXY, which the Node path never does; a client that must
+    // reach the control directly (and verify its certificate) opts out for this call only. The variable is read when
+    // the request starts, and child processes such as docker and ssh never see it.
+    const previous = process.env.NO_PROXY;
+    process.env.NO_PROXY = '*';
+    try {
+      return fetch(url, { ...init, headers, redirect: 'error', tls: tlsOptions } as RequestInit);
+    } finally {
+      if (previous === undefined) delete process.env.NO_PROXY;
+      else process.env.NO_PROXY = previous;
+    }
+  };
+  return { http, base, dispatcher: undefined, close: () => Promise.resolve() };
 }
 
 export function certificateWindow(certPem: string): { notBefore: number; notAfter: number } {

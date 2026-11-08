@@ -1,6 +1,6 @@
 # Standalone binary
 
-Status: prototyped, not implemented. A throwaway prototype showed the client half works under Bun; its code is not merged, and the build script, CI smoke test, release job and Homebrew tap do not exist. Sections below describe the prototype as findings and the code changes as the design to implement. This document is the design and the record of what the prototype found for shipping the `tug` CLI as a self-contained executable, so it can be installed with Homebrew without a Node.js dependency. When it ships, this page becomes the canonical description of the binary build and [Releases](releases.md#native-binary) links to it.
+Status: prototyped on the `prototype-bun-binary` branch, not released. The client builds and runs under Bun with templates and version embedded (`src/embedded.ts`, `tools/binary/entry.ts`, `tools/scripts/build-binary.js`, `npm run build:binary`) and has a smoke test (`npm run test:smoke:binary`); the CI job, release job and Homebrew tap do not exist. Sections below describe the prototype as findings and the code changes as the design to implement. This document is the design and the record of what the prototype found for shipping the `tug` CLI as a self-contained executable, so it can be installed with Homebrew without a Node.js dependency. When it ships, this page becomes the canonical description of the binary build and [Releases](releases.md#native-binary) links to it.
 
 ## Scope
 
@@ -10,7 +10,7 @@ The control plane and agent use SQLite metadata and server-only packages (`expre
 
 ## Prototype findings
 
-Built and run with Bun 1.4.4 on macOS arm64. Bun is a build-time tool only; the prototype installed it from npm into a scratch directory. File names below (`src/embedded.ts`, `tools/binary/entry.ts`) are the prototype's and do not exist in the repository yet.
+Built and run with Bun 1.4.4 on macOS arm64. Bun is a build-time tool only; the prototype installed it from npm into a scratch directory. 
 
 ### One binary or two
 
@@ -82,6 +82,21 @@ Windows is out of scope: Tug drives hosts over SSH and shell scripts, and the pr
 
 Node SEA is the fallback if a Bun runtime difference cannot be worked around. It needs a native runner per target and macOS signing, so it is more CI work for the same result.
 
+## Review findings and fixes
+
+A review of the prototype against the client's security goals found defects that the Node build does not have. Each is fixed and pinned by a test in `src/cli.binary.test.ts`, which runs when `TUG_BINARY` names a built executable.
+
+| Finding | Fix |
+|---|---|
+| A compiled Bun executable loads `bunfig.toml` (including `preload`, which runs code) and `.env` from the working directory, so running `tug` in a cloned repository could execute code or repoint `TUG_CONTROL_URL` | `build-binary.js` passes `--no-compile-autoload-bunfig`, `--no-compile-autoload-dotenv`, `--no-compile-autoload-tsconfig` and `--no-compile-autoload-package-json` |
+| Bun rejects the string `minVersion: 'TLSv1.3'`; dropping it let a TLS 1.2-only control with a CA-signed certificate be accepted | The Bun transport passes the numeric `0x0304` |
+| Bun's `fetch` follows `HTTPS_PROXY`, `HTTP_PROXY` and `ALL_PROXY`, which the Node path never does, so mTLS requests and loopback `--control-url` traffic went to the proxy | The Bun transport sets `NO_PROXY=*` for the duration of each request only, so `docker` and `ssh` children keep their proxy settings |
+| `tug doctor` reported a missing local `node` | The check is skipped when the process is embedded |
+| A template added to `src/templates/` but not to the entry would fail at runtime | `src/embedded.test.ts` compares the directory with the entry's registry |
+| The build used whatever `bun` was on PATH, and `ws` and `undici` are Bun's own implementations | `build-binary.js` refuses any Bun other than the pinned `BUN_VERSION` |
+
+Still unverified from the review: the `bun-linux-x64` target needs AVX2 and glibc (`-baseline` and `-musl` targets may be needed), SIGINT and exit codes during interactive `exec`, and cosmetic differences such as colored numbers in `console.log` on a terminal. The `isEmbedded()` guards in `control.ts` and `agent.ts` matter only if a multi-call entry is added; the CLI entry never loads those files.
+
 ## mTLS dependencies
 
 Control accepts only client-certificate connections, so the binary must be able to present a CA-signed client certificate, pin the credential's CA, verify the generated control name while connecting to a different address (a tunnel, a moved host), and generate a P-256 key and certificate request. Four things carry that: `fetch` through an `undici` `Agent` with `connect` TLS options (`createTransport` in `src/agent-credential.ts`), a `ws` WebSocket with the same TLS options (`src/cli-live-transport.ts`), `node:crypto` WebCrypto and `X509Certificate`, and `@peculiar/x509`.
@@ -135,8 +150,8 @@ Proven in the prototype, to be implemented in the repository:
 
 Still to do:
 
-- [ ] `tools/scripts/build-binary.js` and `npm run build:binary`
-- [ ] Smoke test against the native binary, including the mTLS checks above and rendering every template
+- [x] `tools/scripts/build-binary.js` and `npm run build:binary` (host and cross targets build; non-host targets not run)
+- [ ] Smoke test against the native binary in CI, and extend it with the remaining mTLS checks (expired certificate, redirect, offline) and rendering every template (`src/cli.binary.test.ts` covers version, working-directory hardening, proxy, TLS 1.3 floor and `doctor`)
 - [ ] Verify (and, only if needed, adapt) the `ws` TLS options and the Docker, SSH, upload and `tar` paths under Bun
 - [ ] Keep `tug runtime` out of the release entry unless the control listener moves to the raw `tls.createServer` shape ([Peer certificate under Bun](#peer-certificate-under-bun))
 - [ ] `binaries` job in `release.yml` uploading assets and checksums

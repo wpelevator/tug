@@ -12,6 +12,7 @@ import {
 import type { AddressCandidate } from '../cli-onboarding.ts';
 import { runStep, STAGE_MARKER } from '../cli-process.ts';
 import type { StepProgress } from '../cli-process.ts';
+import { readTemplate } from '../embedded.ts';
 import { runCapture, templatesDir } from './context.ts';
 
 export async function preflightRemote(
@@ -127,7 +128,7 @@ export async function transferTugImage(
 }
 
 export async function dockerBootstrap(): Promise<string> {
-  return fs.readFile(path.join(templatesDir, 'install-docker.sh'), 'utf8');
+  return readTemplate(templatesDir, 'install-docker.sh');
 }
 
 /** The remote command that runs the Docker bootstrap; `TUG_MARKER` lets the script name its stage in the progress line. */

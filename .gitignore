@@ -10,6 +10,7 @@ tug.local.json
 .DS_Store
 plan-*.md
 dist/
+dist-bin/
 
 # Local QEMU first-boot harness state (credentials, keys, user-data)
 .qemu-work/

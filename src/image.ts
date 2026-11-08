@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { embeddedVersion } from './embedded.ts';
 
 /** Registry repository the release workflow publishes the Tug image to. */
 export const IMAGE_REPOSITORY = 'ghcr.io/wpelevator/tug';
@@ -16,6 +17,8 @@ const packageJsonPath = path.join(
 );
 
 export function packageVersion(): string {
+  const embedded = embeddedVersion();
+  if (embedded) return embedded;
   return (JSON.parse(fs.readFileSync(packageJsonPath, 'utf8')) as { version: string }).version;
 }
 
