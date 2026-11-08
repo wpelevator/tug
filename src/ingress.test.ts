@@ -676,3 +676,39 @@ test('a wildcard host with characters outside a hostname never reaches a Caddy e
     'the zone is validated before it is interpolated into the ask expression',
   );
 });
+
+test('mapped domains become aliases of their service route and follow its state', () => {
+  const input = {
+    states: [state()],
+    endpoints: {},
+    node: 'edge',
+    secrets: new Map<string, string>(),
+  };
+  const domains = [
+    { project: 'blog', service: 'web', host: 'A.Example.org' },
+    { project: 'blog', service: 'web', host: 'app.example.com' },
+    { project: 'blog', service: 'gone', host: 'orphan.example.org' },
+    { project: 'other', service: 'web', host: 'other.example.org' },
+  ];
+  const work = buildIngressWork({ ...input, domains });
+  assert.deepEqual(
+    work.routes[0].aliases,
+    ['a.example.org'],
+    "only this service's domains are aliases, lowercased, and the route's own host is not repeated",
+  );
+  assert.match(
+    work.caddyfile,
+    /app\.example\.com, a\.example\.org \{[\s\S]*respond "[^"]*" 503/,
+    'a domain follows its route, including the 503 answer while no upstream serves',
+  );
+  assert.match(
+    work.warnings.join('\n'),
+    /blog\/gone: domain orphan\.example\.org is not served because the service has no ingress route/,
+    'a domain whose service has no route is reported',
+  );
+  assert.match(
+    work.warnings.join('\n'),
+    /other\/web: domain other\.example\.org is not served/,
+    'a domain of a project that has no routes is reported too, not silently attached elsewhere',
+  );
+});

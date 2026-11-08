@@ -53,11 +53,14 @@ The project column says how a scoped credential's allowed projects are checked: 
 | `GET /api/v1/deployments/:id` | `read` | Deployment's project |
 | `GET /api/v1/volumes` | `read` | Query; includes node name, persistence and referencing services |
 | `GET /api/v1/secrets` | `read` | Query (names and versions only) |
+| `GET /api/v1/domains` | `read` | Query; mapped domains of the project |
 | `POST /api/v1/projects` | `deploy` | Body `name` |
 | `POST /api/v1/deployments` | `deploy` | Body or upload payload `project` |
 | `POST /api/v1/deployments/:id/cancel` | `deploy` | Deployment's project |
 | `POST /api/v1/rollback` | `deploy` | Body |
 | `POST /api/v1/scale` | `deploy` | Body |
+| `POST /api/v1/domains` | `deploy` | Body; maps a hostname to one of the project's ingress services |
+| `DELETE /api/v1/domains/:host` | `deploy` | Query |
 | `POST /api/v1/restart` | `deploy` | Body |
 | `POST /api/v1/logs` | `deploy` | Body |
 | `GET /api/v1/live` | `deploy` | First WebSocket frame |

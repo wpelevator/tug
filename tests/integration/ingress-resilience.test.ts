@@ -330,3 +330,44 @@ test(
       assert.equal(ask(domain), expected, `${domain}: ${why}`);
   },
 );
+
+test(
+  'a mapped domain is served from the same upstream as the route it is attached to',
+  { skip: !HAVE_DOCKER && 'Docker is not available', timeout: 60000 },
+  async (t) => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-resilience-'));
+    const upstreamPort = await freePort();
+    const upstream = http.createServer((req, res) => res.end(`upstream saw ${req.headers.host}`));
+    await new Promise<void>((r) => upstream.listen(upstreamPort, '0.0.0.0', r));
+    const edge = await startCaddy(
+      dir,
+      renderCaddyfile([
+        {
+          project: 'p',
+          service: 's',
+          host: HOST,
+          tls: 'off',
+          upstreams: [`host.docker.internal:${upstreamPort}`],
+          aliases: ['mapped.example.org'],
+        },
+      ]),
+    );
+    t.after(async () => {
+      edge.stop();
+      upstream.closeAllConnections();
+      upstream.close();
+      await fs.rm(dir, { recursive: true, force: true });
+    });
+    for (const host of [HOST, 'mapped.example.org'])
+      assert.equal(
+        (await get(edge.port, '/', host)).body,
+        `upstream saw ${host}`,
+        `${host} reaches the route's upstream with its own Host header`,
+      );
+    assert.notEqual(
+      (await get(edge.port, '/', 'unmapped.example.org')).body,
+      'upstream saw unmapped.example.org',
+      'a name that is not mapped does not reach the upstream',
+    );
+  },
+);

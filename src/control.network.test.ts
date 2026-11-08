@@ -454,3 +454,217 @@ test('node address updates validate input and reach agent work', async () => {
     await s.close();
   }
 });
+
+async function domainsServer() {
+  const s = await server();
+  const edge = await s.register('edge', { address: '192.168.1.2' });
+  const app = await s.register('app', { address: '192.168.1.5' });
+  await s.register('dbn', { address: '192.168.1.6' });
+  await s.post('/api/v1/nodes/edge/ingress', { enabled: true });
+  const op = s.agent('op-net-token');
+  const call = async (method: string, route: string, body?: unknown) => {
+    const res = await fetch(`${s.base}${route}`, {
+      method,
+      headers: op,
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+    return { status: res.status, body: (await res.json().catch(() => ({}))) as any };
+  };
+  const deploy = (project: string, compose: unknown, version = 'v1') =>
+    s.post('/api/v1/deployments', { project, version, compose });
+  /** A deployment stays rolling_out until its nodes report, and blocks the next one; cancel it to deploy again. */
+  const supersede = async (first: Response) => {
+    const { deployment } = await json(first);
+    return s.post(`/api/v1/deployments/${deployment.id}/cancel`, {});
+  };
+  const edgeWork = async () => (await s.work(edge.nodeId)).ingress;
+  return { ...s, edge, app, call, deploy, supersede, edgeWork };
+}
+
+test('a mapped domain is served on its service route from the next poll, without a deployment, and can be removed', async () => {
+  const s = await domainsServer();
+  try {
+    const first = await s.deploy('blog', stack);
+    const added = await s.call('POST', '/api/v1/domains', {
+      project: 'blog',
+      service: 'web',
+      host: 'Mapped.Example.org',
+    });
+    assert.equal(added.status, 200, `adding a domain succeeds: ${JSON.stringify(added.body)}`);
+    assert.equal(added.body.host, 'mapped.example.org', 'the host is stored lowercase');
+    let ingress = await s.edgeWork();
+    assert.deepEqual(
+      ingress.routes[0].aliases,
+      ['mapped.example.org'],
+      'the domain becomes an alias of the service route with no new deployment',
+    );
+    assert.match(
+      ingress.caddyfile,
+      /app\.example\.com, mapped\.example\.org \{/,
+      'the Caddyfile serves both names from one block',
+    );
+    const again = await s.call('POST', '/api/v1/domains', {
+      project: 'blog',
+      service: 'web',
+      host: 'mapped.example.org',
+    });
+    assert.equal(again.body.unchanged, true, 'adding the same mapping again is idempotent');
+    assert.deepEqual(
+      (await s.call('GET', '/api/v1/domains?project=blog')).body.domains.map(
+        (d: { host: string; service: string }) => [d.host, d.service],
+      ),
+      [['mapped.example.org', 'web']],
+      'the list shows the mapping',
+    );
+    await s.supersede(first);
+    assert.equal(
+      (await s.deploy('blog', { ...stack, services: { ...stack.services } }, 'v2')).status,
+      200,
+      `the redeploy is accepted`,
+    );
+    assert.deepEqual(
+      (await s.edgeWork()).routes[0].aliases,
+      ['mapped.example.org'],
+      'a redeploy keeps the mapped domains',
+    );
+    assert.equal(
+      (await s.call('DELETE', '/api/v1/domains/mapped.example.org?project=blog')).status,
+      200,
+      'removing a domain succeeds',
+    );
+    ingress = await s.edgeWork();
+    assert.equal(ingress.routes[0].aliases, undefined, 'the domain is no longer served');
+    assert.equal(
+      (await s.call('DELETE', '/api/v1/domains/mapped.example.org?project=blog')).status,
+      404,
+      'removing an unknown domain says so',
+    );
+    const events = await json(
+      await fetch(`${s.base}/api/v1/events?project=blog`, { headers: s.agent('op-net-token') }),
+    );
+    assert.deepEqual(
+      events.events
+        .map((e: { type: string }) => e.type)
+        .filter((t: string) => t.startsWith('domain.'))
+        .sort(),
+      ['domain.added', 'domain.removed'],
+      'adding and removing a domain are audited',
+    );
+  } finally {
+    await s.close();
+  }
+});
+
+test('a domain is refused unless the project can serve it and no other project owns the name', async () => {
+  const s = await domainsServer();
+  try {
+    const add = (body: Record<string, unknown>) =>
+      s.call('POST', '/api/v1/domains', { project: 'blog', service: 'web', ...body });
+    assert.equal(
+      (await add({ host: 'a.example.org' })).status,
+      409,
+      'a project with no deployment has nothing to serve the domain on',
+    );
+    await s.deploy('blog', stack);
+    const shop = {
+      services: {
+        web: {
+          image: 'nginx',
+          ports: ['9090:80'],
+          'x-tug': {
+            placement: { nodes: ['app'] },
+            ingress: { host: 'shop.example.net', port: 80 },
+          },
+        },
+      },
+    };
+    await s.deploy('shop', shop);
+    for (const [body, status, why] of [
+      [{ host: 'not a host' }, 400, 'a malformed hostname'],
+      [{ host: 'a.example.org', service: 'db' }, 409, 'a service without an ingress route'],
+      [{ host: 'a.example.org', service: 'nope' }, 409, 'a service that does not exist'],
+      [{ host: 'app.example.com' }, 409, "the service's own declared host"],
+      [{ host: 'shop.example.net' }, 409, "another project's declared host"],
+      [{ host: 'x.shop.example.net' }, 200, 'a name under another project host is not an overlap'],
+    ] as const)
+      assert.equal((await add(body)).status, status, `${JSON.stringify(body)}: ${why}`);
+    assert.equal(
+      (
+        await s.call('POST', '/api/v1/domains', {
+          project: 'shop',
+          service: 'web',
+          host: 'x.shop.example.net',
+        })
+      ).status,
+      409,
+      "another project's mapped domain",
+    );
+    assert.equal(
+      (
+        await s.call('POST', '/api/v1/domains', {
+          project: 'shop',
+          service: 'web',
+          host: '*.shop.example.net',
+        })
+      ).status,
+      409,
+      'a wildcard that would cover a name another project already maps',
+    );
+    const rejected = await s.deploy('shop', {
+      services: {
+        web: {
+          ...shop.services.web,
+          'x-tug': {
+            placement: { nodes: ['app'] },
+            ingress: { host: 'x.shop.example.net', port: 80 },
+          },
+        },
+      },
+    });
+    assert.equal(
+      rejected.status,
+      409,
+      'a deployment cannot declare a host another project has mapped as a domain',
+    );
+  } finally {
+    await s.close();
+  }
+});
+
+test('a domain whose service lost its ingress route is kept but not served, with a warning', async () => {
+  const s = await domainsServer();
+  try {
+    const first = await s.deploy('blog', stack);
+    await s.call('POST', '/api/v1/domains', {
+      project: 'blog',
+      service: 'web',
+      host: 'm.example.org',
+    });
+    const noIngress = {
+      services: {
+        ...stack.services,
+        web: { ...stack.services.web, 'x-tug': { placement: { nodes: ['app'] } } },
+      },
+    };
+    await s.supersede(first);
+    assert.equal(
+      (await s.deploy('blog', noIngress, 'v2')).status,
+      200,
+      'the deployment without the route is accepted',
+    );
+    const ingress = await s.edgeWork();
+    assert.equal(ingress.routes.length, 0, 'nothing is served without an ingress route');
+    assert.match(
+      ingress.warnings.join('\n'),
+      /domain m\.example\.org is not served because the service has no ingress route/,
+      'the operator is told why the domain is not served',
+    );
+    assert.equal(
+      (await s.call('GET', '/api/v1/domains?project=blog')).body.domains.length,
+      1,
+      'the mapping is kept, so a rollback or a new route restores it',
+    );
+  } finally {
+    await s.close();
+  }
+});

@@ -137,6 +137,9 @@ export function addressBoundServices(
 
 const HOSTNAME_RE = /^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i;
 
+/** True for a lowercase-insensitive fully qualified hostname or a one-label `*.zone` wildcard, as `x-tug.ingress.host` takes. */
+export const isIngressHostname = (host: string): boolean => HOSTNAME_RE.test(host);
+
 function validateIngress(
   name: string,
   svc: ComposeService,

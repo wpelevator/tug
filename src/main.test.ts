@@ -81,7 +81,7 @@ test('the control refuses a database from a newer Tug with one plain line and a 
       assert.deepEqual(
         ours,
         [
-          'error: the control database is at schema version 99, newer than the 1 this Tug supports; upgrade Tug, or restore a backup taken by this version',
+          'error: the control database is at schema version 99, newer than the 2 this Tug supports; upgrade Tug, or restore a backup taken by this version',
         ],
         'the container log holds the remedy as one plain line, with no stack trace',
       );

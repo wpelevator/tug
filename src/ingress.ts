@@ -94,6 +94,8 @@ export interface IngressInput {
   acmeEmail?: string;
   /** Write a JSON access log per site to the container's stdout. Off unless `true`. */
   accessLog?: boolean;
+  /** Mapped domains (`tug domain add`): extra hostnames served on a service's ingress route. */
+  domains?: { project: string; service: string; host: string }[];
 }
 
 const certFile = (host: string, ext: 'crt' | 'key') =>
@@ -113,6 +115,7 @@ export function buildIngressWork({
   secrets,
   acmeEmail,
   accessLog,
+  domains = [],
 }: IngressInput): IngressWork {
   const routes: IngressRoute[] = [];
   const files: Record<string, string> = {};
@@ -178,15 +181,37 @@ export function buildIngressWork({
       warnings.push(`${label}: no serving upstream for ${host}; answering 503`);
     }
     seenHosts.set(host, label);
+    const aliases: string[] = [];
+    for (const domain of domains) {
+      if (domain.project !== project || domain.service !== service) continue;
+      const alias = domain.host.toLowerCase();
+      if (seenHosts.has(alias)) {
+        // The same name twice is harmless; a different owner is a conflict the first claim wins.
+        if (seenHosts.get(alias) !== label)
+          warnings.push(
+            `${label}: domain ${alias} is already routed by ${seenHosts.get(alias)}; skipped`,
+          );
+        continue;
+      }
+      seenHosts.set(alias, label);
+      aliases.push(alias);
+    }
     routes.push({
       project,
       service,
       host,
       tls,
       upstreams,
+      ...(aliases.length && { aliases }),
       ...(ingress.maintenance === true && { maintenance: true }),
     });
   }
+  const routed = new Set(tagged.map((t) => `${t.project}/${t.service}`));
+  for (const domain of domains)
+    if (!routed.has(`${domain.project}/${domain.service}`))
+      warnings.push(
+        `${domain.project}/${domain.service}: domain ${domain.host} is not served because the service has no ingress route`,
+      );
   return {
     caddyfile: renderCaddyfile(routes, { acmeEmail, accessLog: accessLog === true }),
     files,
