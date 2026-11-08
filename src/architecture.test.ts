@@ -83,14 +83,14 @@ test('cli, control and agent never import one another, and domain modules import
   );
 });
 
-test('entry points import only their own role: cli.ts never reaches control or agent, main.ts never reaches cli', () => {
-  const forbidden: Record<string, string> = { 'cli.ts': 'cli', 'main.ts': 'cli' };
+test('cli.ts imports no control or agent code, and main.ts imports no CLI code', () => {
   const violations = importEdges()
-    .filter((edge) => ENTRY_POINTS.includes(edge.from))
     .filter((edge) => {
       const target = roleOf(edge.to);
       if (!target) return false;
-      return edge.from === 'cli.ts' ? target !== 'cli' : target === forbidden['main.ts'];
+      if (edge.from === 'cli.ts') return target !== 'cli';
+      if (edge.from === 'main.ts') return target === 'cli';
+      return false;
     })
     .map((edge) => `${edge.from} -> ${edge.to}`);
   assert.deepEqual(
