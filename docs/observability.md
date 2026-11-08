@@ -18,7 +18,7 @@ Verified against the code on `main`.
 | Reachability | Control has no unauthenticated route, not even a health check: every request needs a client certificate. Monitor TCP reachability of the mTLS port for liveness, and use an authenticated read (`tug doctor`, `tug status`) for readiness. | A TCP check proves the listener accepts connections, not that the database works |
 | Process logs | Control and agent write plain `console.log` and `console.error` text. | No timestamps, levels, structure or request ids |
 
-What does not exist: a `/metrics` endpoint, CPU, memory, disk or restart data, request, build or poll metrics, structured or leveled logs, alerting, outbound webhooks (M8, unchecked) and a dashboard (M8, unchecked). The managed Caddy ingress does not enable Caddy's metrics: the generated Caddyfile has no global options beyond the optional ACME email.
+What does not exist: a `/metrics` endpoint, CPU, memory, disk or restart data, request, build or poll metrics, structured or leveled logs, alerting, outbound webhooks (M8, unchecked) and a dashboard (M8, unchecked). The managed Caddy ingress enables Caddy's own metrics on the ingress node's loopback admin endpoint, but nothing collects them yet ([Ingress metrics](#ingress-metrics)).
 
 ### Events
 
@@ -108,9 +108,9 @@ Control has no unauthenticated route (there is no `/healthz`), so liveness is TC
 
 ### Ingress metrics
 
-Status: proposed, with open questions.
+Status: Caddy's metrics are enabled on the ingress node's loopback admin endpoint; the status-report and control re-export below are proposed, with open questions.
 
-The managed Caddy would enable its metrics with the global option `servers { metrics }` in the generated Caddyfile (see `renderCaddyfile` in `src/ingress.ts`), served by Caddy's admin endpoint, which listens on `localhost:2019` inside the container by default. That gives request counts by status class and request duration histograms. To reach the same scrape target, the agent on the ingress node would read the admin metrics and include a filtered subset (request counts, status classes, latency buckets, certificate expiry per host) in its status report, and control would re-export it as `tug_ingress_*` series labelled by `node` and `host`.
+The managed Caddy enables its metrics with the global option `metrics { per_host }` in the generated Caddyfile (see `renderCaddyfile` in `src/ingress.ts`). They are served at `/metrics` on Caddy's admin endpoint, which listens on `localhost:2019` and, because the container uses host networking, is reachable on the ingress node's loopback only (`curl http://127.0.0.1:2019/metrics` there, or a local exporter or agent). A request-count series carries a `host` label, so cardinality is bounded by the number of routes. That gives request counts by status class and request duration histograms. To reach the same scrape target, the agent on the ingress node would read the admin metrics and include a filtered subset (request counts, status classes, latency buckets, certificate expiry per host) in its status report, and control would re-export it as `tug_ingress_*` series labelled by `node` and `host`.
 
 Open questions:
 

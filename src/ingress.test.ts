@@ -10,6 +10,9 @@ import {
   ingressConfigHash,
   reconcileIngress,
   removeIngress,
+  PROXY_STREAM_CLOSE_DELAY,
+  PROXY_TRY_DURATION,
+  PROXY_TRY_INTERVAL,
   renderCaddyfile,
   resolveServiceEndpoints,
 } from './ingress.ts';
@@ -170,9 +173,9 @@ test('ingress dials local and remote services on their bound node addresses', ()
     ],
     'web runs on two nodes, so its port is bound to the node address and the local upstream uses it too; container port 80 resolves to published 8080',
   );
-  assert.equal(
+  assert.match(
     work.caddyfile,
-    `app.example.com {\n\treverse_proxy 192.168.1.4:8080 192.168.1.5:8080 {\n\t\tlb_policy round_robin\n\t}\n}\n`,
+    /\napp\.example\.com \{\n(?:\t.*\n|\t\t.*\n)*?\treverse_proxy 192\.168\.1\.4:8080 192\.168\.1\.5:8080 \{\n\t\tlb_policy round_robin\n/,
     'the Caddyfile lists the same upstreams',
   );
   assert.deepEqual(work.warnings, []);
@@ -230,16 +233,30 @@ test('ingress dials 127.0.0.1 for a service whose ingress port listens on loopba
   );
 });
 
-test('routes without serving upstreams are withheld with a warning', () => {
+test('a host without a serving upstream is answered with a 503 and a warning', () => {
   const work = buildIngressWork({
     states: [state()],
     endpoints: {},
     node: 'edge',
     secrets: new Map(),
   });
-  assert.deepEqual(work.routes, []);
-  assert.match(work.warnings[0], /blog\/web: no serving upstream/);
-  assert.equal(work.caddyfile, '# no ingress routes\n', 'an empty config is still valid Caddyfile');
+  assert.deepEqual(
+    work.routes.map((r) => [r.host, r.upstreams]),
+    [['app.example.com', []]],
+    'the host keeps its site block so clients see a 503 instead of a TLS failure',
+  );
+  assert.match(work.warnings[0], /blog\/web: no serving upstream.*answering 503/);
+  assert.match(
+    work.caddyfile,
+    /app\.example\.com \{[\s\S]*header Retry-After 5[\s\S]*respond ".*" 503\n\}/,
+    'the block answers 503 with Retry-After',
+  );
+  assert.doesNotMatch(work.caddyfile, /reverse_proxy/, 'nothing is proxied without an upstream');
+  assert.equal(
+    renderCaddyfile([]),
+    '# no ingress routes\n',
+    'an empty config is still valid Caddyfile',
+  );
 });
 
 test('tls modes render the right Caddy site blocks', () => {
@@ -258,7 +275,11 @@ test('tls modes render the right Caddy site blocks', () => {
     ],
     { acmeEmail: 'ops@example.com' },
   );
-  assert.match(out, /^\{\n\temail ops@example\.com\n\}/, 'ACME email goes in the global block');
+  assert.match(
+    out,
+    /^\{\n\temail ops@example\.com\n\tmetrics \{/,
+    'ACME email goes in the global block',
+  );
   assert.match(
     out,
     /\na\.example\.com \{\n\treverse_proxy/,
@@ -457,5 +478,101 @@ test('removeIngress deletes the container but keeps ACME volumes, and is a no-op
     docker.calls,
     [`rm ${CADDY_CONTAINER}`],
     'only the container is removed; no volume is touched',
+  );
+});
+
+test('every route keeps requests and streams alive across upstream churn and reloads', () => {
+  const route = (host: string, upstreams: string[]) => ({
+    project: 'p',
+    service: 's',
+    host,
+    tls: 'off' as const,
+    upstreams,
+  });
+  const out = renderCaddyfile([
+    route('one.example.com', ['10.0.0.1:80']),
+    route('many.example.com', ['10.0.0.1:80', '10.0.0.2:80']),
+  ]);
+  const blockOf = (host: string) =>
+    out.split('\n\n').find((b) => b.startsWith(`http://${host} {`)) ?? '';
+  for (const host of ['one.example.com', 'many.example.com']) {
+    const block = blockOf(host);
+    assert.match(
+      block,
+      new RegExp(`lb_try_duration ${PROXY_TRY_DURATION}\\n`),
+      `${host}: requests retry for a window instead of failing at the first dial error`,
+    );
+    assert.match(
+      block,
+      new RegExp(`lb_try_interval ${PROXY_TRY_INTERVAL}\\n`),
+      `${host}: retries are paced`,
+    );
+    assert.match(
+      block,
+      new RegExp(`stream_close_delay ${PROXY_STREAM_CLOSE_DELAY}\\n`),
+      `${host}: a reload does not cut live WebSockets`,
+    );
+    assert.match(block, /lb_policy round_robin/, `${host}: round_robin stays the default policy`);
+    assert.doesNotMatch(
+      block,
+      /fail_duration|max_fails/,
+      `${host}: no passive health, which would mark every replica down together after a shared blip; the endpoint list is already health-aware`,
+    );
+  }
+});
+
+test('maintenance mode answers 503 without proxying even when upstreams serve', () => {
+  const s = state();
+  (s.compose.services.web['x-tug'] as { ingress: { maintenance?: boolean } }).ingress.maintenance =
+    true;
+  const work = buildIngressWork({
+    states: [s],
+    endpoints: { blog: { web: [{ node: 'app1', address: '10.0.0.5' }] } },
+    node: 'edge',
+    secrets: new Map(),
+  });
+  assert.deepEqual(work.routes[0].upstreams, [], 'a host in maintenance has no upstreams');
+  assert.equal(
+    work.routes[0].maintenance,
+    true,
+    'the route says the empty upstream list is intended, so a rollout is not held waiting for one',
+  );
+  assert.doesNotMatch(work.caddyfile, /reverse_proxy/, 'traffic never reaches the service');
+  assert.match(work.warnings[0], /app\.example\.com is in maintenance/, 'the operator is told');
+});
+
+test('metrics are always rendered and access logs only when asked for', () => {
+  const route = {
+    project: 'p',
+    service: 's',
+    host: 'a.example.com',
+    tls: 'auto' as const,
+    upstreams: ['10.0.0.1:80'],
+  };
+  const on = renderCaddyfile([route], { accessLog: true });
+  assert.match(
+    on,
+    /a\.example\.com \{\n\tlog \{\n\t\toutput stdout\n\t\tformat json\n\t\}/,
+    'each site writes a JSON access log to stdout',
+  );
+  assert.match(on, /metrics \{\n\t\tper_host\n\t\}/, 'metrics are labelled per host');
+  const off = renderCaddyfile([route]);
+  assert.doesNotMatch(off, /\blog\b/, 'access logging is off by default');
+  assert.match(off, /metrics/, 'metrics do not depend on access logging');
+  const input = {
+    states: [state()],
+    endpoints: {},
+    node: 'edge',
+    secrets: new Map<string, string>(),
+  };
+  assert.doesNotMatch(
+    buildIngressWork(input).caddyfile,
+    /\blog\b/,
+    'control renders no access log unless it is switched on',
+  );
+  assert.match(
+    buildIngressWork({ ...input, accessLog: true }).caddyfile,
+    /\blog \{/,
+    'control renders the access log when it is switched on',
   );
 });

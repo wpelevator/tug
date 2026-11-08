@@ -92,6 +92,8 @@ export interface IngressInput {
   /** Decrypted project secrets for custom TLS, keyed `<project>/<secret name>`. */
   secrets: Map<string, string>;
   acmeEmail?: string;
+  /** Write a JSON access log per site to the container's stdout. Off unless `true`. */
+  accessLog?: boolean;
 }
 
 const certFile = (host: string, ext: 'crt' | 'key') =>
@@ -110,6 +112,7 @@ export function buildIngressWork({
   ingressNodes = [node],
   secrets,
   acmeEmail,
+  accessLog,
 }: IngressInput): IngressWork {
   const routes: IngressRoute[] = [];
   const files: Record<string, string> = {};
@@ -149,14 +152,14 @@ export function buildIngressWork({
       warnings.push(`${label}: ingress.port ${ingress.port} is not published; skipped`);
       continue;
     }
-    const upstreams = (endpoints[project]?.[service] || []).map(
+    const serving = (endpoints[project]?.[service] || []).map(
       (e) =>
         `${e.node === node && loopback ? '127.0.0.1' : upstreamHost(e.address)}:${e.port ?? port}`,
     );
-    if (!upstreams.length) {
-      warnings.push(`${label}: no serving upstream for ${host}; route withheld`);
-      continue;
-    }
+    // A host without a serving upstream, or in maintenance, still gets a site block that answers 503: a
+    // client sees a clear error rather than a TLS failure, and the host can obtain its certificate before
+    // its first successful deploy.
+    const upstreams = ingress.maintenance === true ? [] : serving;
     if (tls === 'custom') {
       const cert = secrets.get(`${project}/${ingress.cert}`);
       const key = secrets.get(`${project}/${ingress.key}`);
@@ -169,19 +172,74 @@ export function buildIngressWork({
       files[certFile(host, 'crt')] = cert.endsWith('\n') ? cert : `${cert}\n`;
       files[certFile(host, 'key')] = key.endsWith('\n') ? key : `${key}\n`;
     }
+    if (ingress.maintenance === true) {
+      warnings.push(`${label}: ${host} is in maintenance; answering 503`);
+    } else if (!serving.length) {
+      warnings.push(`${label}: no serving upstream for ${host}; answering 503`);
+    }
     seenHosts.set(host, label);
-    routes.push({ project, service, host, tls, upstreams });
+    routes.push({
+      project,
+      service,
+      host,
+      tls,
+      upstreams,
+      ...(ingress.maintenance === true && { maintenance: true }),
+    });
   }
-  return { caddyfile: renderCaddyfile(routes, { acmeEmail }), files, routes, warnings };
+  return {
+    caddyfile: renderCaddyfile(routes, { acmeEmail, accessLog: accessLog === true }),
+    files,
+    routes,
+    warnings,
+  };
 }
 
 /** IPv6 upstream addresses need brackets before the port. */
 const upstreamHost = (address: string) =>
   address.includes(':') && !address.startsWith('[') ? `[${address}]` : address;
 
-export function renderCaddyfile(routes: IngressRoute[], opts: { acmeEmail?: string } = {}): string {
-  const out: string[] = [];
-  if (opts.acmeEmail) out.push('{', `\temail ${opts.acmeEmail}`, '}', '');
+/**
+ * How long a request keeps looking for a usable upstream before it fails. Caddy's default is 0, which
+ * turns a dial failure into an immediate 502; this window covers the gap between an upstream dying and the
+ * next agent poll withdrawing it, and a `recreate` restart. A refused connection is always retryable, but
+ * after a successful connect only GET is, so a POST is never replayed.
+ */
+export const PROXY_TRY_DURATION = '5s';
+export const PROXY_TRY_INTERVAL = '250ms';
+/**
+ * Caddy closes WebSockets and other streams when its config is reloaded. One Caddy serves every project on
+ * the node, so without a delay a deploy to one site would cut live streams on all of them.
+ */
+export const PROXY_STREAM_CLOSE_DELAY = '5m';
+
+/** The `reverse_proxy` subdirectives that keep requests and streams alive across upstream churn and reloads. */
+function proxyResilience(): string[] {
+  return [
+    `\t\tlb_try_duration ${PROXY_TRY_DURATION}`,
+    `\t\tlb_try_interval ${PROXY_TRY_INTERVAL}`,
+    `\t\tstream_close_delay ${PROXY_STREAM_CLOSE_DELAY}`,
+  ];
+}
+
+/** What a client of a host with no serving upstream, or in maintenance, is told. Fixed text, never a path. */
+const UNAVAILABLE_BODY = 'This site is temporarily unavailable. Please try again shortly.';
+/** Seconds clients are told to wait; the agent polls and reloads within about this long when an upstream returns. */
+const UNAVAILABLE_RETRY_AFTER = 5;
+
+export interface RenderOptions {
+  acmeEmail?: string;
+  /** One JSON access log per site on stdout. Caddy redacts cookies and Authorization headers by default. */
+  accessLog?: boolean;
+}
+
+export function renderCaddyfile(routes: IngressRoute[], opts: RenderOptions = {}): string {
+  if (!routes.length) return '# no ingress routes\n';
+  // `metrics` serves Prometheus metrics, labelled per host, on Caddy's admin endpoint (localhost:2019 in the
+  // container, which shares the node's network), never on a public port.
+  const out: string[] = ['{'];
+  if (opts.acmeEmail) out.push(`\temail ${opts.acmeEmail}`);
+  out.push('\tmetrics {', '\t\tper_host', '\t}', '}', '');
   for (const route of routes) {
     // An explicit http:// address turns off automatic HTTPS for that site.
     out.push(`${route.tls === 'off' ? 'http://' : ''}${route.host} {`);
@@ -189,15 +247,24 @@ export function renderCaddyfile(routes: IngressRoute[], opts: { acmeEmail?: stri
       out.push(
         `\ttls ${CADDY_ETC}/${certFile(route.host, 'crt')} ${CADDY_ETC}/${certFile(route.host, 'key')}`,
       );
-    out.push(
-      `\treverse_proxy ${route.upstreams.join(' ')} {`,
-      '\t\tlb_policy round_robin',
-      '\t}',
-      '}',
-      '',
-    );
+    if (opts.accessLog) out.push('\tlog {', '\t\toutput stdout', '\t\tformat json', '\t}');
+    if (route.upstreams.length)
+      out.push(
+        `\treverse_proxy ${route.upstreams.join(' ')} {`,
+        '\t\tlb_policy round_robin',
+        ...proxyResilience(),
+        '\t}',
+      );
+    else
+      out.push(
+        `\theader Retry-After ${UNAVAILABLE_RETRY_AFTER}`,
+        '\theader Cache-Control no-store',
+        '\theader Content-Type "text/plain; charset=utf-8"',
+        `\trespond "${UNAVAILABLE_BODY}" 503`,
+      );
+    out.push('}', '');
   }
-  return out.length ? out.join('\n') : '# no ingress routes\n';
+  return out.join('\n');
 }
 
 // ---- Agent: managed Caddy container ------------------------------------------------------------
@@ -287,6 +354,8 @@ export async function reconcileIngress(
         HostConfig: {
           NetworkMode: 'host',
           RestartPolicy: { Name: 'unless-stopped' },
+          // Access logs go to stdout, so cap what Docker keeps; the default driver never rotates.
+          LogConfig: { Type: 'json-file', Config: { 'max-size': '10m', 'max-file': '3' } },
           Binds: ['tug-caddy-data:/data', 'tug-caddy-config:/config', `tug-caddy-etc:${CADDY_ETC}`],
         },
       });

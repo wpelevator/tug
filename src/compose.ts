@@ -165,6 +165,8 @@ function validateIngress(
   const tls = ingress.tls ?? 'auto';
   if (!['auto', 'custom', 'off'].includes(tls))
     errors.push(`${name}: ingress.tls must be auto, custom or off`);
+  if (ingress.maintenance !== undefined && typeof ingress.maintenance !== 'boolean')
+    errors.push(`${name}: ingress.maintenance must be true or false`);
   if (tls === 'custom' && (!ingress.cert || !ingress.key))
     errors.push(
       `${name}: ingress.tls custom requires cert and key (names of project secrets holding the PEM certificate and private key)`,

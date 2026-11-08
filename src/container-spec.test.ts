@@ -116,3 +116,29 @@ test('startOrder puts dependencies first and rejects cycles; parsers handle unit
   assert.equal(sizeBytes('64m'), 64 * 1024 * 1024);
   assert.equal(sizeBytes('1g'), 1024 ** 3);
 });
+
+test('toggling ingress.maintenance does not change the container hash, so it never restarts the service', () => {
+  const hashWith = (maintenance: boolean) => {
+    const compose = {
+      services: {
+        web: {
+          image: `x@sha256:${'a'.repeat(64)}`,
+          ports: ['8080:80'],
+          'x-tug': {
+            placement: { nodes: ['n1'] },
+            ingress: { host: 'a.example.com', port: 80, maintenance },
+          },
+        },
+      },
+    } as ComposeFile;
+    return containerSpecs(
+      buildDesiredState({ project: 'p', version: 'v1', compose: normalized(compose) }),
+      'n1',
+    ).specs.web.hash;
+  };
+  assert.equal(
+    hashWith(true),
+    hashWith(false),
+    'maintenance mode is an edge setting and must not recreate the container',
+  );
+});

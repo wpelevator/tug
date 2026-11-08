@@ -34,6 +34,8 @@ export interface IngressSpec {
   /** Names of project secrets holding the PEM certificate chain and private key; required for `tls: custom`. */
   cert?: string;
   key?: string;
+  /** Answer 503 for this host without reaching the service, for planned work. */
+  maintenance?: boolean;
 }
 
 /** What a backup captures: the output of a command run in a service, or the files of a volume. */
@@ -435,8 +437,13 @@ export interface IngressRoute {
   service: string;
   host: string;
   tls: IngressTls;
-  /** `host:port` upstreams, one per serving node (`127.0.0.1` for the ingress node itself). */
+  /**
+   * `host:port` upstreams, one per serving node (`127.0.0.1` for the ingress node itself). Empty when the
+   * host has no serving upstream or is in maintenance: the edge then answers 503 itself.
+   */
   upstreams: string[];
+  /** The host is in `x-tug.ingress.maintenance`: an empty `upstreams` is then intended, not an outage. */
+  maintenance?: boolean;
 }
 
 /** Edge config rendered by control for one ingress node. */
