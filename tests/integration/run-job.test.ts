@@ -7,6 +7,23 @@ import { startOneOff } from '../../src/agent/live.ts';
 const dockerUp = spawnSync('docker', ['version'], { stdio: 'ignore' }).status === 0;
 const docker = (...args: string[]) => spawnSync('docker', args, { encoding: 'utf8' });
 
+/** Container ids from `docker ps` with the given filter; `all` includes stopped containers. */
+const containers = (filter: string, all = false) =>
+  docker('ps', all ? '-aq' : '-q', '--filter', filter)
+    .stdout.trim()
+    .split('\n')
+    .filter(Boolean);
+
+/** Polls until `check` holds or `timeoutMs` passes, so a slow runner cannot turn a fixed sleep into a failure. */
+async function waitFor(check: () => boolean, timeoutMs = 15_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (check()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  return check();
+}
+
 function finish(proc: Awaited<ReturnType<typeof startOneOff>>) {
   const out: Buffer[] = [];
   proc.stdout!.on('data', (chunk: Buffer) => out.push(chunk));
@@ -69,28 +86,20 @@ test(
 
       // While running, a one-off must not look like a service container to reconciliation.
       const long = await startOneOff(engine, 'tug-runtest', ['sleep', '30']);
-      await new Promise((resolve) => setTimeout(resolve, 500));
       assert.equal(
-        docker('ps', '-q', '--filter', 'label=tug.job=run')
-          .stdout.trim()
-          .split('\n')
-          .filter(Boolean).length,
-        1,
+        await waitFor(() => containers('label=tug.job=run').length === 1),
+        true,
         'the one-off container is running',
       );
       assert.equal(
-        docker('ps', '-q', '--filter', 'label=tug.project=runtest')
-          .stdout.trim()
-          .split('\n')
-          .filter(Boolean).length,
+        containers('label=tug.project=runtest').length,
         1,
         'only the service container carries the project label, so reconciliation ignores the one-off',
       );
       long.kill();
-      await new Promise((resolve) => setTimeout(resolve, 1000));
       assert.equal(
-        docker('ps', '-aq', '--filter', 'label=tug.job=run').stdout.trim(),
-        '',
+        await waitFor(() => containers('label=tug.job=run', true).length === 0),
+        true,
         'cancelling removes it',
       );
     } finally {
