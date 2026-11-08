@@ -75,6 +75,19 @@ const errorsFor = (svc: ComposeFile['services'][string]) => {
   }
 };
 
+test('validateCompose accepts a boolean ingress.maintenance and rejects anything else', () => {
+  assert.equal(
+    errorsFor(ingressSvc({ host: 'app.example.com', port: 80, maintenance: true })),
+    '',
+    'maintenance true is valid',
+  );
+  assert.match(
+    errorsFor(ingressSvc({ host: 'app.example.com', port: 80, maintenance: 'yes' })),
+    /ingress\.maintenance must be true or false/,
+    'a string is not a boolean',
+  );
+});
+
 test('publishedPort resolves container ports to host ports across Compose port syntaxes', () => {
   assert.equal(publishedPort({ ports: ['8080:80'] }, 80), 8080, 'short syntax, container port');
   assert.equal(publishedPort({ ports: ['8080:80'] }, 8080), 8080, 'short syntax, host port');

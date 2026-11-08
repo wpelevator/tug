@@ -265,15 +265,19 @@ test('only ingress nodes get an edge config, built from all projects and serving
 
     assert.equal((await s.post('/api/v1/nodes/edge/ingress', { enabled: true })).status, 200);
     let w = await s.work(edge.nodeId);
-    assert.equal(w.ingress.routes.length, 0, 'no route until an upstream serves');
-    assert.match(w.ingress.warnings[0], /no serving upstream/);
+    assert.deepEqual(
+      w.ingress.routes.map((r: { upstreams: string[] }) => r.upstreams),
+      [[]],
+      'the host is routed with no upstream until one serves, so the edge answers 503',
+    );
+    assert.match(w.ingress.warnings[0], /no serving upstream.*answering 503/);
 
     await s.report(app.nodeId, 'app', 'blog', ['web']);
     w = await s.work(edge.nodeId);
     assert.match(
       w.ingress.caddyfile,
       new RegExp(
-        `email ops@example\\.com[\\s\\S]*app\\.example\\.com \\{\\n\\treverse_proxy 192.168.1.5:8080`,
+        `email ops@example\\.com[\\s\\S]*app\\.example\\.com \\{\\n[\\s\\S]*?\\treverse_proxy 192.168.1.5:8080`,
       ),
       'upstream should be the app node address on the published port',
     );

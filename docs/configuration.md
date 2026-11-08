@@ -33,6 +33,7 @@ CLI options override environment variables, which override the config files and 
 | `TUG_CONTROL_RESTORE_DIR` | `<data dir>/control-restore` | Scratch directory for restores. |
 | `TUG_SERVICE_NAMES` | `true` | Publish health-aware `serviceEndpoints` so agents inject cross-node `extra_hosts` using each node's `address`. Set `false` to opt out. See [Networking](networking.md#layer-a-cross-node-service-names). |
 | `TUG_ACME_EMAIL` | unset | Email for ACME registration in rendered Caddy configs. |
+| `TUG_INGRESS_ACCESS_LOG` | `true` | Each ingress site writes a JSON access log line per request to the `tug-caddy` container's output (`docker logs tug-caddy` on the ingress node). Caddy redacts cookies and `Authorization` headers, but URLs and client IPs are logged. Set `false` to switch it off. |
 
 ## Agent
 

@@ -26,22 +26,30 @@ async function freePort(): Promise<number> {
   });
 }
 
-function caddyfile(upstreamPort: number, mutate: (text: string) => string = (t) => t): string {
+function caddyfile(
+  upstreamPort: number | null,
+  mutate: (text: string) => string = (t) => t,
+  accessLog = false,
+): string {
   return mutate(
-    renderCaddyfile([
-      {
-        project: 'p',
-        service: 's',
-        host: HOST,
-        tls: 'off',
-        upstreams: [`host.docker.internal:${upstreamPort}`],
-      },
-    ]),
+    renderCaddyfile(
+      [
+        {
+          project: 'p',
+          service: 's',
+          host: HOST,
+          tls: 'off',
+          upstreams: upstreamPort === null ? [] : [`host.docker.internal:${upstreamPort}`],
+        },
+      ],
+      { accessLog },
+    ),
   );
 }
 
 interface Edge {
   port: number;
+  name: string;
   reload(text: string): Promise<void>;
   stop(): void;
 }
@@ -72,6 +80,7 @@ async function startCaddy(dir: string, text: string): Promise<Edge> {
   }
   return {
     port,
+    name,
     async reload(next) {
       // Same container, new file: Caddy swaps to a fresh config exactly as the agent's reload does.
       await fs.writeFile(path.join(dir, 'Caddyfile'), next);
@@ -89,12 +98,17 @@ function get(
   port: number,
   url: string,
   host = HOST,
-): Promise<{ status?: number; body: string; error?: string }> {
+): Promise<{
+  status?: number;
+  body: string;
+  error?: string;
+  headers?: http.IncomingHttpHeaders;
+}> {
   return new Promise((resolve) => {
     const req = http.request({ host: '127.0.0.1', port, path: url, headers: { host } }, (res) => {
       let body = '';
       res.on('data', (c) => (body += c));
-      res.on('end', () => resolve({ status: res.statusCode, body }));
+      res.on('end', () => resolve({ status: res.statusCode, body, headers: res.headers }));
       res.on('aborted', () => resolve({ status: res.statusCode, body, error: 'aborted' }));
       res.on('error', (e) => resolve({ status: res.statusCode, body, error: e.message }));
     });
@@ -215,6 +229,49 @@ test(
       cut,
       /done\n$/,
       'without stream_close_delay the reload cuts the WebSocket, which is the problem the directive solves',
+    );
+  },
+);
+
+test(
+  'a host without an upstream answers 503 with Retry-After, logs JSON access lines and serves per-host metrics',
+  { skip: !HAVE_DOCKER && 'Docker is not available', timeout: 60000 },
+  async (t) => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-resilience-'));
+    const edge = await startCaddy(
+      dir,
+      caddyfile(null, (text) => text, true),
+    );
+    t.after(async () => {
+      edge.stop();
+      await fs.rm(dir, { recursive: true, force: true });
+    });
+
+    const res = await get(edge.port, '/anything?token=secret');
+    assert.equal(
+      res.status,
+      503,
+      'a host with no serving upstream answers 503, not a connection failure',
+    );
+    assert.equal(res.headers?.['retry-after'], '5', 'clients are told when to retry');
+    assert.equal(res.headers?.['cache-control'], 'no-store', 'a CDN does not cache the outage');
+    assert.match(res.body, /temporarily unavailable/, 'the body is the fixed unavailable text');
+
+    const logs = docker('logs', edge.name);
+    const access = (logs.stdout + logs.stderr)
+      .split('\n')
+      .filter((l) => l.startsWith('{') && l.includes('http.log.access'))
+      .map((l) => JSON.parse(l));
+    const line = access.find((l) => l.request?.host === HOST);
+    assert.ok(line, 'the request produced a JSON access log line on the container output');
+    assert.equal(line.status, 503, 'the access log records the response status');
+
+    const metrics = docker('exec', edge.name, 'wget', '-qO-', 'http://127.0.0.1:2019/metrics');
+    assert.equal(metrics.status, 0, `the admin endpoint serves metrics: ${metrics.stderr}`);
+    assert.match(
+      metrics.stdout,
+      new RegExp(`caddy_http_requests_total\\{[^}]*host="${HOST.replace('.', '\\.')}"`),
+      'request metrics carry a host label',
     );
   },
 );

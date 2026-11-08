@@ -611,6 +611,7 @@ export async function createApp(
   const masterKeyFile = path.join(DATA_DIR, 'master.key');
   const SERVICE_DNS = process.env.TUG_SERVICE_NAMES !== 'false';
   const ACME_EMAIL = process.env.TUG_ACME_EMAIL || undefined;
+  const INGRESS_ACCESS_LOG = process.env.TUG_INGRESS_ACCESS_LOG !== 'false';
 
   const db = await (options.openDatabase || openDb)(dbFile);
   const wakeHub = new WakeHub();
@@ -3417,6 +3418,7 @@ export async function createApp(
       ...nodeTopology(),
       secrets,
       acmeEmail: ACME_EMAIL,
+      accessLog: INGRESS_ACCESS_LOG,
     });
   }
 

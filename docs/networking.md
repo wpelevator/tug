@@ -66,7 +66,8 @@ Caddy dials each upstream where its port is bound ([Published ports](#published-
 Control aggregates the `ingress` blocks of every project's current deployment, and for each ingress node renders:
 
 - one site block per host with `reverse_proxy` to every serving endpoint, using `127.0.0.1` for loopback-bound services on the ingress node and the node `address` for the rest;
-- no route at all for a host without a serving upstream (reported in `ingress.warnings` rather than serving errors), and only the first project for a host claimed twice;
+- for a host without a serving upstream, or with `x-tug.ingress.maintenance: true`, a site block that answers `503` with `Retry-After` and a short fixed text instead of proxying (reported in `ingress.warnings`), and only the first project for a host claimed twice;
+- unless `TUG_INGRESS_ACCESS_LOG=false`, a JSON access log per site on the container's output, and always Caddy's Prometheus metrics, labelled per host, on its admin endpoint (`127.0.0.1:2019/metrics` on the ingress node, never a public port);
 - with `TUG_ACME_EMAIL`, a global `email` for ACME registration.
 
 TLS modes:
@@ -83,9 +84,9 @@ Caddy's automatic HTTPS protects the client-to-ingress connection. It does not e
 
 ### Edge features: what the ingress does not do yet
 
-The generated Caddyfile is deliberately small: per host one `reverse_proxy` with `lb_policy round_robin` and the resilience settings below, the TLS mode and the optional ACME email. It has no compression, response headers, timeouts, body limit, access log, metrics or error page. This subsection records what the proxy does to survive upstream churn, the remaining limits, how the surrounding tools compare and the direction; the phased checklist is in `plan-ingress-edge-features.md` and the remaining proposal is listed under [Later](roadmap.md#later--only-if-needed).
+The generated Caddyfile is deliberately small: per host one `reverse_proxy` with `lb_policy round_robin` and the resilience settings below, the TLS mode and the optional ACME email. It has no compression, response headers, timeouts or body limit. This subsection records what the proxy does to survive upstream churn, the remaining limits, how the surrounding tools compare and the direction; the phased checklist is in `plan-ingress-edge-features.md` and the remaining proposal is listed under [Later](roadmap.md#later--only-if-needed).
 
-Every route's `reverse_proxy` is generated with:
+Every route that has an upstream is generated with a `reverse_proxy` that has:
 
 - `lb_try_duration 5s` and `lb_try_interval 250ms`: a request that finds no usable upstream keeps trying for five seconds instead of failing at once with a 502. This covers the gap between an upstream dying and the next agent poll withdrawing its endpoint, and a `recreate` restart. A refused connection is always retried; after a successful connect only `GET` is, so a `POST` is never replayed.
 - `fail_duration 10s` and `max_fails 1`, only for a route with several upstreams: a failed upstream is skipped for ten seconds. A route with one upstream gets neither, because marking its only upstream unhealthy would turn a blip into an outage.
@@ -94,7 +95,7 @@ Every route's `reverse_proxy` is generated with:
 Current limits worth knowing:
 
 - **A WebSocket outlives a reload for five minutes at most.** After that Caddy closes it, so a long-lived connection on a site is still cut once every five minutes of reload churn at worst, and always when its upstream is removed. Plain HTTP requests in flight finish.
-- **A route without a serving upstream is withheld.** The host then has no site block, so a client gets a TLS or connection error rather than a 503, and a host whose first deploy fails never obtains a certificate.
+- **The 503 page is fixed text.** A host without a serving upstream, or in maintenance, answers a plain-text 503; a branded page would have to be a file the project controls, which is unsafe next to the other projects' keys in `/etc/caddy`.
 - **Retries are bounded at five seconds.** A longer outage, such as a slow `recreate` restart, still returns a 502 once the window ends.
 - **A wildcard host with `tls: auto` cannot get a certificate.** Wildcards need the DNS-01 challenge, which stock `caddy:2-alpine` does not provide. Use `tls: custom` with a wildcard certificate.
 - **`/etc/caddy` is shared by every project on the node,** including the keys of every `tls: custom` route. This is why ingress options are typed `x-tug.ingress` fields that control validates, not a raw Caddyfile fragment supplied by a project.
@@ -119,7 +120,7 @@ Tug's strengths for an edge are that control renders and validates the whole Cad
 The direction, in order:
 
 1. Done: resilience defaults with no new key (retries, passive health for multi-upstream routes, `stream_close_delay`), described above and exercised against a real Caddy by `tests/integration/ingress-resilience.test.ts`.
-2. JSON access logs, Caddy metrics through the [ingress metrics](observability.md#ingress-metrics) proposal, and a 503 or maintenance response for a host with no serving upstream.
+2. Done: JSON access logs, per-host Caddy metrics on the admin endpoint, and a 503 (or `maintenance: true`) response for a host with no serving upstream. Still proposed: reading those metrics into the status report and re-exporting them from control ([ingress metrics](observability.md#ingress-metrics)).
 3. Optional per-route `x-tug.ingress` keys, each a minor release: response timeout, body limit, compression (stock Caddy `encode` offers gzip and zstd, not brotli), alias redirects, load-balancing policy, basic auth (the hash delivered as a secret file like a custom certificate) and an IP allowlist.
 4. Per-node settings under `tug node ingress`: trusted proxies behind a CDN, ACME CA and fallback issuer. Wildcards stay `tls: custom` unless a real need justifies on-demand TLS or a DNS-01 Caddy build.
 

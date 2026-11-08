@@ -108,6 +108,11 @@ const ingress = (): JsonSchema => ({
       type: 'string',
       description: 'tls custom: the project secret holding the PEM private key.',
     },
+    maintenance: {
+      type: 'boolean',
+      description:
+        'Answer 503 with a short page for this host instead of reaching the service, for planned work. Default false.',
+    },
   },
   required: ['host', 'port'],
   additionalProperties: false,
