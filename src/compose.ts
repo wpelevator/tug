@@ -46,6 +46,21 @@ export function publishedPort(svc: ComposeService, port: number): number | null 
   return null;
 }
 
+/** True when the service publishes host `port` on any address, through a number, a range or the long syntax. */
+export function publishesHostPort(svc: ComposeService, port: number): boolean {
+  return (svc.ports || []).some((entry) => {
+    if (typeof entry === 'number') return false;
+    if (typeof entry === 'object') return Number(entry.published) === port;
+    const parts = String(entry)
+      .split('/')[0]
+      .replace(/^\[[^\]]*\]:/, '')
+      .split(':');
+    if (parts.length < 2) return false;
+    const [low, high = low] = parts[parts.length - 2].split('-').map(Number);
+    return low <= port && port <= high;
+  });
+}
+
 /** True when a `ports` entry names its host IP: `127.0.0.1:8080:80`, `[::1]:8080:80`, `0.0.0.0::80` or long-syntax `host_ip`. */
 export function hasHostIp(entry: PortEntry): boolean {
   if (typeof entry === 'number') return false;
@@ -139,6 +154,23 @@ const HOSTNAME_RE = /^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*
 
 /** True for a lowercase-insensitive fully qualified hostname or a one-label `*.zone` wildcard, as `x-tug.ingress.host` takes. */
 export const isIngressHostname = (host: string): boolean => HOSTNAME_RE.test(host);
+
+/**
+ * Why a name cannot be mapped as a domain, or null. Stricter than `x-tug.ingress.host`, which also takes IP literals
+ * for plain-HTTP development: a mapped domain is meant for public issuance, so an address or an over-long name is a
+ * mistake. A wildcard zone that is a public suffix (`*.co.uk`) cannot be recognised without a suffix list and is the
+ * operator's responsibility.
+ */
+export function domainProblem(host: string): string | null {
+  if (!isIngressHostname(host))
+    return 'host must be a fully qualified hostname, or *.zone for a wildcard';
+  const name = host.replace(/^\*\./, '');
+  if (name.length > 253 || name.split('.').some((label) => label.length > 63))
+    return 'host is too long: a name is at most 253 characters and a label 63';
+  const last = name.split('.').pop() ?? '';
+  if (/^\d+$/.test(last)) return 'host must be a name, not an IP address';
+  return null;
+}
 
 function validateIngress(
   name: string,

@@ -44,7 +44,8 @@ import {
   buildDesiredState,
   ingressHostsOf,
   ingressHostsOverlap,
-  isIngressHostname,
+  domainProblem,
+  publishesHostPort,
   loopbackIngressServices,
   serviceSecretNames,
   validateCompose,
@@ -68,7 +69,13 @@ import {
 import { EXPIRY_WARN_DAYS, certificateExpiry, diagnoseNode, nodeStatus } from './diagnostics.ts';
 import { serverTlsOptions } from './tls-server.ts';
 import { isNodeHost } from './node-address.ts';
-import { buildIngressWork, ingressConfigHash, resolveServiceEndpoints } from './ingress.ts';
+import {
+  ASK_PORT,
+  CADDY_ADMIN_PORT,
+  buildIngressWork,
+  ingressConfigHash,
+  resolveServiceEndpoints,
+} from './ingress.ts';
 import { parseStatusReport } from './status-report.ts';
 import { advance, advanceWhere, statesSql } from './lifecycle.ts';
 import { buildLifecycle, commandLifecycle, deploymentLifecycle } from './lifecycles.ts';
@@ -1022,6 +1029,30 @@ export async function createApp(
    * Ingress hostnames belong to the first project that publishes them: another project's current deployment
    * that already routes a host blocks any project from taking it, on deploy and on rollback alike.
    */
+  /**
+   * The managed Caddy listens on the loopback of every ingress node (its admin endpoint and the ask site), so a
+   * service that publishes one of those host ports there would make every site's reload fail.
+   */
+  function assertNoReservedIngressPorts(compose: ComposeFile): void {
+    const ingressNodes = db
+      .all<{ name: string }>('SELECT name FROM nodes WHERE ingress=1')
+      .map((n) => n.name);
+    if (!ingressNodes.length) return;
+    for (const [name, svc] of Object.entries(compose.services || {})) {
+      const explicit = svc['x-tug']?.placement?.nodes;
+      // Without a named node list the service may land on any node, including an ingress node.
+      const nodes = explicit?.length
+        ? ingressNodes.filter((n) => explicit.includes(n))
+        : ingressNodes;
+      if (!nodes.length) continue;
+      for (const port of [ASK_PORT, CADDY_ADMIN_PORT])
+        if (publishesHostPort(svc, port))
+          throw httpError(
+            400,
+            `${name}: host port ${port} is reserved for the managed Caddy on ingress node ${nodes[0]}; publish another port`,
+          );
+    }
+  }
   function assertIngressHostsFree(project: string, compose: ComposeFile): void {
     const wanted = ingressHostsOf(compose);
     if (!wanted.size) return;
@@ -2069,10 +2100,8 @@ export async function createApp(
     const service = String(req.body.service ?? '');
     if (isReservedProject(String(project)))
       return res.status(400).json({ error: 'project names starting with _ are reserved' });
-    if (!isIngressHostname(host))
-      return res
-        .status(400)
-        .json({ error: 'host must be a fully qualified hostname, or *.zone for a wildcard' });
+    const problem = domainProblem(host);
+    if (problem) return res.status(400).json({ error: problem });
     if (!service) return res.status(400).json({ error: 'service required' });
     let lock;
     try {
@@ -2485,6 +2514,7 @@ export async function createApp(
         throw httpError(400, errMessage(e));
       }
       assertIngressHostsFree(project, compose);
+      assertNoReservedIngressPorts(compose);
       const acknowledgedMoves: string[] = Array.isArray(body.moves) ? body.moves.map(String) : [];
       const unacknowledged = movedServices(project, compose).filter(
         (name) => !acknowledgedMoves.includes(name),
@@ -2733,6 +2763,10 @@ export async function createApp(
         );
         if (!owned || !pending)
           throw httpError(409, 'deployment was cancelled or its build lease was lost');
+        // The first check ran before the build and image resolution, which can take minutes: another project may
+        // have been published, or mapped a domain, since. Publication is the one serialized point where a hostname is
+        // actually claimed, so the claim is checked again here.
+        assertIngressHostsFree(project, desired.compose);
         immediateTransaction(db, () => {
           const published = advance(
             db,

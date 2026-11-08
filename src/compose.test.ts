@@ -1,6 +1,8 @@
 import test, { describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  domainProblem,
+  publishesHostPort,
   buildDesiredState,
   composeErrors,
   crossNodeHosts,
@@ -638,4 +640,35 @@ test('composeErrors reports a file without services and validateCompose throws t
   assert.deepEqual(composeErrors(undefined as unknown as ComposeFile), [
     'compose file must define services',
   ]);
+});
+
+test('publishesHostPort sees a host port through every port syntax', () => {
+  const publishes = (ports: unknown[], port: number) => publishesHostPort({ ports } as never, port);
+  assert.ok(publishes(['2021:80'], 2021), 'short syntax');
+  assert.ok(publishes(['127.0.0.1:2021:80/tcp'], 2021), 'host IP and protocol');
+  assert.ok(publishes(['[::1]:2021:80'], 2021), 'bracketed IPv6 host IP');
+  assert.ok(publishes([{ target: 80, published: 2021 }], 2021), 'long syntax');
+  assert.ok(publishes(['2000-2030:8000-8030'], 2021), 'a host port range that covers the port');
+  assert.ok(!publishes(['8080:2021'], 2021), 'a container port is not a host port');
+  assert.ok(!publishes(['2021'], 2021), 'a container-only port publishes nothing fixed');
+  assert.ok(!publishes([2021], 2021), 'a bare number is a container port');
+  assert.ok(!publishes([], 2021), 'no ports');
+});
+
+test('domainProblem accepts public names and zones and refuses addresses and over-long names', () => {
+  for (const ok of [
+    'example.org',
+    'shop.other.net',
+    '*.network.example.com',
+    'xn--bcher-kva.example',
+  ])
+    assert.equal(domainProblem(ok), null, `${ok} is a valid mapped domain`);
+  for (const [bad, why] of [
+    ['10.0.0.5', 'an IP address'],
+    ['localhost', 'a single label'],
+    ['not a host', 'spaces'],
+    ['a'.repeat(64) + '.example.org', 'a label over 63 characters'],
+    ['a.'.repeat(130) + 'org', 'a name over 253 characters'],
+  ] as const)
+    assert.ok(domainProblem(bad), `${why} is refused`);
 });

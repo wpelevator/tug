@@ -206,11 +206,11 @@ export function buildIngressWork({
       ...(ingress.maintenance === true && { maintenance: true }),
     });
   }
-  const routed = new Set(tagged.map((t) => `${t.project}/${t.service}`));
+  const served = new Set(routes.map((r) => `${r.project}/${r.service}`));
   for (const domain of domains)
-    if (!routed.has(`${domain.project}/${domain.service}`))
+    if (!served.has(`${domain.project}/${domain.service}`))
       warnings.push(
-        `${domain.project}/${domain.service}: domain ${domain.host} is not served because the service has no ingress route`,
+        `${domain.project}/${domain.service}: domain ${domain.host} is not served because the service has no served ingress route (no ingress block, an unpublished port or missing certificate secrets)`,
       );
   return {
     caddyfile: renderCaddyfile(routes, { acmeEmail, accessLog: accessLog === true }),
@@ -264,6 +264,8 @@ export interface RenderOptions {
  * no network call and no cross-project guessing is involved.
  */
 export const ASK_PORT = 2021;
+/** Caddy's admin endpoint (`caddy reload`, metrics), also on the node's loopback. */
+export const CADDY_ADMIN_PORT = 2019;
 
 const isWildcard = (host: string) => host.startsWith('*.');
 /** The wildcard zone `example.com` of `*.example.com`; only host-name characters ever reach a Caddy expression. */
@@ -303,7 +305,7 @@ function sitesOf(route: IngressRoute): Site[] {
 /** The global ask block and the loopback site that answers it: 200 for exactly one label under a rendered zone. */
 function askSite(zones: string[]): string[] {
   const expression = (zone: string) =>
-    `{query.domain}.matches('^[a-z0-9-]+\\\\.${zone.split('.').join('\\\\.')}$')`;
+    `{query.domain}.matches('^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\\\.${zone.split('.').join('\\\\.')}$')`;
   return [
     `http://127.0.0.1:${ASK_PORT} {`,
     '\tbind 127.0.0.1',

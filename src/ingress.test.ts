@@ -605,8 +605,10 @@ test('a wildcard host with automatic HTTPS is issued on demand, approved only fo
     'the ask site listens on loopback only',
   );
   assert.ok(
-    out.includes("{query.domain}.matches('^[a-z0-9-]+\\\\.network\\\\.example\\\\.com$')"),
-    'the ask expression accepts exactly one label under the zone with its dots escaped',
+    out.includes(
+      "{query.domain}.matches('^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\\\.network\\\\.example\\\\.com$')",
+    ),
+    'the ask expression accepts exactly one valid DNS label (no leading or trailing hyphen, at most 63 characters) under the zone, with its dots escaped',
   );
   assert.match(
     out,
@@ -703,7 +705,7 @@ test('mapped domains become aliases of their service route and follow its state'
   );
   assert.match(
     work.warnings.join('\n'),
-    /blog\/gone: domain orphan\.example\.org is not served because the service has no ingress route/,
+    /blog\/gone: domain orphan\.example\.org is not served because the service has no served ingress route/,
     'a domain whose service has no route is reported',
   );
   assert.match(

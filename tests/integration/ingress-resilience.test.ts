@@ -297,6 +297,11 @@ test(
         aliases: ['mapped.example.org'],
       },
     ]).replace(/^\{\n/, '{\n\tlocal_certs\n\tskip_install_trust\n');
+    assert.match(
+      text,
+      /^\{\n\tlocal_certs\n/,
+      'the test config uses the internal CA, so a changed Caddyfile layout can never send these names to a public ACME server',
+    );
     const edge = await startCaddy(dir, text);
     t.after(async () => {
       edge.stop();
@@ -321,6 +326,10 @@ test(
       ['evil.com', '403', 'an unrelated domain is refused'],
       ['site1.network.example.com.evil.com', '403', 'a suffix trick is refused'],
       ['xnetwork.example.com', '403', 'the dot before the zone is not optional'],
+      ['-bad.network.example.com', '403', 'a label cannot start with a hyphen'],
+      ['bad-.network.example.com', '403', 'a label cannot end with a hyphen'],
+      [`${'a'.repeat(64)}.network.example.com`, '403', 'a label is at most 63 characters'],
+      [`${'a'.repeat(63)}.network.example.com`, '200', 'a 63-character label is valid'],
       [
         'mapped.example.org',
         '403',

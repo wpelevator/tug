@@ -12,7 +12,10 @@ import { json } from '../tests/helpers.ts';
 
 const NETWORK_ENV = ['TUG_SERVICE_NAMES', 'TUG_ACME_EMAIL'];
 
-async function server(env: Record<string, string> = {}) {
+async function server(
+  env: Record<string, string> = {},
+  resolve: (image: string) => Promise<string> = testImageResolver,
+) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-net-'));
   for (const key of NETWORK_ENV) delete process.env[key];
   Object.assign(
@@ -25,7 +28,7 @@ async function server(env: Record<string, string> = {}) {
   const app = await createApp({
     identity: testIdentity,
     controlUrl: testControlUrl,
-    images: { resolve: testImageResolver },
+    images: { resolve },
   });
   const srv = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));
@@ -455,8 +458,8 @@ test('node address updates validate input and reach agent work', async () => {
   }
 });
 
-async function domainsServer() {
-  const s = await server();
+async function domainsServer(resolve?: (image: string) => Promise<string>) {
+  const s = await server({}, resolve);
   const edge = await s.register('edge', { address: '192.168.1.2' });
   const app = await s.register('app', { address: '192.168.1.5' });
   await s.register('dbn', { address: '192.168.1.6' });
@@ -656,13 +659,119 @@ test('a domain whose service lost its ingress route is kept but not served, with
     assert.equal(ingress.routes.length, 0, 'nothing is served without an ingress route');
     assert.match(
       ingress.warnings.join('\n'),
-      /domain m\.example\.org is not served because the service has no ingress route/,
+      /domain m\.example\.org is not served because the service has no served ingress route/,
       'the operator is told why the domain is not served',
     );
     assert.equal(
       (await s.call('GET', '/api/v1/domains?project=blog')).body.domains.length,
       1,
       'the mapping is kept, so a rollback or a new route restores it',
+    );
+  } finally {
+    await s.close();
+  }
+});
+
+test('a service on an ingress node cannot publish the ports the managed Caddy listens on', async () => {
+  const s = await domainsServer();
+  try {
+    const web = (ports: string[], nodes = ['edge']) => ({
+      services: {
+        web: { image: 'nginx', ports, 'x-tug': { placement: { nodes } } },
+      },
+    });
+    for (const [ports, nodes, status, why] of [
+      [['2021:80'], ['edge'], 400, "the ask site's port on the ingress node"],
+      [
+        ['127.0.0.1:2019:80'],
+        ['edge'],
+        400,
+        'the admin port on the ingress node, even on loopback',
+      ],
+      [['2000-2030:80'], ['edge'], 400, 'a range that covers a reserved port'],
+      [['2021:80'], ['app'], 200, 'the same port on a node that is not an ingress node'],
+      [['8080:80'], ['edge'], 200, 'any other port on the ingress node'],
+    ] as const) {
+      const res = await s.deploy('ports', web([...ports], [...nodes]), `v-${status}-${ports[0]}`);
+      assert.equal(res.status, status, `${ports[0]} on ${nodes[0]}: ${why}`);
+      if (res.status === 200) await s.supersede(res);
+    }
+  } finally {
+    await s.close();
+  }
+});
+
+test('a name claimed by a domain while another project was still building is refused at publication', async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  const s = await domainsServer(async (image) => {
+    if (image === 'slow') await gate;
+    return image;
+  });
+  try {
+    await s.deploy('blog', stack);
+    const shop = {
+      services: {
+        web: {
+          image: 'slow',
+          ports: ['9090:80'],
+          'x-tug': {
+            placement: { nodes: ['app'] },
+            ingress: { host: 'claimed.example.org', port: 80 },
+          },
+        },
+      },
+    };
+    const building = s.deploy('shop', shop);
+    // The shop deployment passed the first ownership check and is waiting for its image.
+    await new Promise((r) => setTimeout(r, 100));
+    const added = await s.call('POST', '/api/v1/domains', {
+      project: 'blog',
+      service: 'web',
+      host: 'claimed.example.org',
+    });
+    assert.equal(added.status, 200, 'the name is free while the shop deployment is only building');
+    release();
+    const result = await building;
+    assert.equal(
+      result.status,
+      409,
+      'publishing re-checks ownership, so two projects never both own the name',
+    );
+    assert.match(
+      await result.text(),
+      /already mapped as a domain of blog\/web/,
+      'the reason names the owner',
+    );
+  } finally {
+    release();
+    await s.close();
+  }
+});
+
+test('a mapped domain must be a plausible public name, and a wildcard domain round-trips', async () => {
+  const s = await domainsServer();
+  try {
+    await s.deploy('blog', stack);
+    const add = (host: string) =>
+      s.call('POST', '/api/v1/domains', { project: 'blog', service: 'web', host });
+    for (const [host, why] of [
+      ['10.0.0.5', 'an IP address'],
+      ['256.256.256.256', 'a dotted number'],
+      [`${'a'.repeat(64)}.example.org`, 'a label over 63 characters'],
+      [`${'a.'.repeat(130)}org`, 'a name over 253 characters'],
+    ] as const)
+      assert.equal((await add(host)).status, 400, `${why} is refused`);
+    assert.equal((await add('*.network.example.org')).status, 200, 'a wildcard zone is accepted');
+    assert.deepEqual(
+      (await s.edgeWork()).routes[0].aliases,
+      ['*.network.example.org'],
+      'the zone is served on the route',
+    );
+    assert.equal(
+      (await s.call('DELETE', '/api/v1/domains/*.network.example.org?project=blog')).status,
+      200,
+      'a wildcard host in the path is removable',
     );
   } finally {
     await s.close();
