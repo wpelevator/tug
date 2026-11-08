@@ -50,7 +50,7 @@ Nothing is released by hand: do not run `npm publish` or create tags yourself. P
 
 ## Native binary
 
-A self-contained `tug` client built with `bun build --compile` is prototyped but not part of the release flow yet: no release job builds it and there is no Homebrew formula. When it ships it will be a `binaries` job after step 3 that attaches per-target tarballs and checksums to the GitHub Release. The prototype results, the one-binary-or-two decision (ship the client only; control stays on Node in the image) and the remaining checklist are in [Standalone binary](standalone-binary.md).
+A self-contained `tug` client built with `bun build --compile` is prototyped but not part of the release flow yet: no release job builds it and there is no Homebrew formula. It is built with a pinned Bun and with the autoload of `bunfig.toml` and `.env` disabled. When it ships it will be a `binaries` job after step 3 that attaches per-target tarballs and checksums to the GitHub Release. The prototype results, the one-binary-or-two decision (ship the client only; control stays on Node in the image) and the remaining checklist are in [Standalone binary](standalone-binary.md).
 
 ## npm trusted publishing
 

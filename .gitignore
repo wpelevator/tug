@@ -10,3 +10,4 @@ tug.local.json
 .DS_Store
 plan-*.md
 dist/
+dist-bin/

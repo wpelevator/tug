@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { isIP } from 'node:net';
+import { readTemplate } from './embedded.ts';
 
 export const now = () => new Date().toISOString();
 export const id = (prefix: string) => `${prefix}_${crypto.randomBytes(8).toString('hex')}`;
@@ -43,7 +44,7 @@ export async function loadTemplate(
   name: string,
   vars: Record<string, string>,
 ): Promise<string> {
-  return renderTemplate(await fs.readFile(path.join(templatesDir, name), 'utf8'), vars);
+  return renderTemplate(readTemplate(templatesDir, name), vars);
 }
 export const errMessage = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 

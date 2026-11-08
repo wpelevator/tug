@@ -12,6 +12,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
+import { isEmbedded } from './embedded.ts';
 import { packageVersion } from './image.ts';
 import { saveImageArchive, inspectImage, validateImageArchive, hashArchive } from './artifacts.ts';
 import type { ArchiveInfo } from './artifacts.ts';
@@ -3872,4 +3873,5 @@ export async function listen(app: express.Express, port = PORT): Promise<https.S
   );
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) createApp().then((app) => listen(app));
+if (!isEmbedded() && import.meta.url === `file://${process.argv[1]}`)
+  createApp().then((app) => listen(app));

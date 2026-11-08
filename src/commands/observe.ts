@@ -4,6 +4,7 @@ import { errMessage } from '../util.ts';
 import { caTrustCode, describeCaMismatch, probeServerCertificate } from '../pki.ts';
 import { formatStatus } from '../cli-status.ts';
 import type { StatusResponse } from '../cli-status.ts';
+import { isEmbedded } from '../embedded.ts';
 import { loadCfg, print, request, runCapture, waitForCommand } from './context.ts';
 import type { CommonOpts } from './context.ts';
 
@@ -46,8 +47,9 @@ export function registerObserve(program: Command): void {
       if (o.node === true) o.node = await selectNode();
       const cfg = await loadCfg();
       const local: { name: string; ok: boolean; output?: string; error?: string }[] = [];
+      // The native binary carries its own runtime, so a missing `node` on PATH is not a finding there.
       for (const [name, cmd, args] of [
-        ['node', 'node', ['--version']],
+        ...(isEmbedded() ? [] : [['node', 'node', ['--version']]]),
         ['docker', 'docker', ['version', '--format', '{{.Server.Version}}']],
         ['docker_compose', 'docker', ['compose', 'version']],
       ] as [string, string, string[]][]) {

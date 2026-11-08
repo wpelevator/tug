@@ -41,6 +41,7 @@ import {
   CLIENT_VERSION_HEADER,
   skewRefusalMessage,
 } from './protocol.ts';
+import { isEmbedded } from './embedded.ts';
 import { packageVersion } from './image.ts';
 import type {
   AgentLiveCommand,
@@ -1549,4 +1550,4 @@ export async function main(): Promise<void> {
     }
   }
 }
-if (import.meta.url === `file://${process.argv[1]}`) main();
+if (!isEmbedded() && import.meta.url === `file://${process.argv[1]}`) main();
