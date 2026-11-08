@@ -442,6 +442,8 @@ export interface IngressRoute {
    * host has no serving upstream or is in maintenance: the edge then answers 503 itself.
    */
   upstreams: string[];
+  /** Mapped domains served on this route's upstreams besides `host`; see `project_domains`. */
+  aliases?: string[];
   /** The host is in `x-tug.ingress.maintenance`: an empty `upstreams` is then intended, not an outage. */
   maintenance?: boolean;
 }

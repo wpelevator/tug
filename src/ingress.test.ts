@@ -576,3 +576,103 @@ test('metrics are always rendered and access logs only when asked for', () => {
     'control renders the access log when it is switched on',
   );
 });
+
+const wildRoute = (
+  host: string,
+  tls: 'auto' | 'off' | 'custom',
+  aliases: string[] = [],
+  upstreams = ['10.0.0.1:80'],
+) => ({ project: 'p', service: 's', host, tls, upstreams, aliases });
+
+test('a wildcard host with automatic HTTPS is issued on demand, approved only for one label under its zone', () => {
+  const out = renderCaddyfile([
+    wildRoute('*.network.example.com', 'auto'),
+    wildRoute('*.other.example.org', 'auto'),
+  ]);
+  assert.match(
+    out,
+    /on_demand_tls \{\n\t\task http:\/\/127\.0\.0\.1:2021\/ask\n\t\}/,
+    'on-demand issuance is gated by the loopback ask endpoint',
+  );
+  assert.match(
+    out,
+    /\*\.network\.example\.com \{\n\ttls \{\n\t\ton_demand\n\t\}/,
+    'the zone site issues on demand',
+  );
+  assert.match(
+    out,
+    /http:\/\/127\.0\.0\.1:2021 \{\n\tbind 127\.0\.0\.1\n/,
+    'the ask site listens on loopback only',
+  );
+  assert.ok(
+    out.includes("{query.domain}.matches('^[a-z0-9-]+\\\\.network\\\\.example\\\\.com$')"),
+    'the ask expression accepts exactly one label under the zone with its dots escaped',
+  );
+  assert.match(
+    out,
+    /respond @zone1 200\n\t\trespond 403/,
+    'every zone is approved, anything else is refused',
+  );
+});
+
+test('on-demand issuance is rendered only for wildcard hosts with automatic HTTPS', () => {
+  for (const [label, route] of [
+    ['an ordinary host', wildRoute('app.example.com', 'auto')],
+    ['a wildcard with a custom certificate', wildRoute('*.example.com', 'custom')],
+    ['a wildcard served over plain HTTP', wildRoute('*.example.com', 'off')],
+  ] as const) {
+    const out = renderCaddyfile([route]);
+    assert.doesNotMatch(out, /on_demand/, `${label} needs no on-demand issuance`);
+    assert.doesNotMatch(out, /127\.0\.0\.1:2021/, `${label} needs no ask site`);
+  }
+});
+
+test('mapped domains share the route block, and a custom certificate does not cover them', () => {
+  const auto = renderCaddyfile([wildRoute('app.example.com', 'auto', ['a.org', 'b.net'])]);
+  assert.match(
+    auto,
+    /\napp\.example\.com, a\.org, b\.net \{\n/,
+    'automatic HTTPS names share one block and one upstream list',
+  );
+  const off = renderCaddyfile([wildRoute('app.example.com', 'off', ['a.org'])]);
+  assert.match(
+    off,
+    /http:\/\/app\.example\.com, http:\/\/a\.org \{/,
+    'plain HTTP applies to every name',
+  );
+  const custom = renderCaddyfile([wildRoute('app.example.com', 'custom', ['a.org'])]);
+  assert.match(
+    custom,
+    /\napp\.example\.com \{\n\ttls \/etc\/caddy\/certs\//,
+    'the declared host keeps its certificate',
+  );
+  assert.match(
+    custom,
+    /\na\.org \{\n\treverse_proxy/,
+    'a mapped domain gets its own automatic HTTPS block, which a custom certificate cannot serve',
+  );
+});
+
+test('mixed mapped names keep wildcard zones on-demand and explicit names out of it', () => {
+  const out = renderCaddyfile([
+    wildRoute('app.example.com', 'auto', ['*.network.example.com', 'a.org']),
+  ]);
+  assert.match(
+    out,
+    /\napp\.example\.com, a\.org \{\n\treverse_proxy/,
+    'explicit names are ordinary automatic HTTPS',
+  );
+  assert.match(
+    out,
+    /\*\.network\.example\.com \{\n\ttls \{\n\t\ton_demand/,
+    'only the wildcard issues on demand',
+  );
+});
+
+test('a wildcard host with characters outside a hostname never reaches a Caddy expression', () => {
+  assert.throws(
+    () => renderCaddyfile([wildRoute("*.a'b.example.com", 'auto')]),
+    /not a wildcard host/,
+    'the zone is validated before it is interpolated into the ask expression',
+  );
+});

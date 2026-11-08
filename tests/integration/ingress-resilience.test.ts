@@ -280,3 +280,53 @@ test(
     );
   },
 );
+
+test(
+  'the ask endpoint approves exactly one label under a wildcard zone and nothing else',
+  { skip: !HAVE_DOCKER && 'Docker is not available', timeout: 60000 },
+  async (t) => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-resilience-'));
+    // Internal CA only: the test must never ask a public ACME server to validate these names.
+    const text = renderCaddyfile([
+      {
+        project: 'p',
+        service: 's',
+        host: '*.network.example.com',
+        tls: 'auto',
+        upstreams: ['host.docker.internal:9'],
+        aliases: ['mapped.example.org'],
+      },
+    ]).replace(/^\{\n/, '{\n\tlocal_certs\n\tskip_install_trust\n');
+    const edge = await startCaddy(dir, text);
+    t.after(async () => {
+      edge.stop();
+      await fs.rm(dir, { recursive: true, force: true });
+    });
+    const ask = (domain: string) => {
+      const r = docker(
+        'exec',
+        edge.name,
+        'wget',
+        '-S',
+        '-qO-',
+        `http://127.0.0.1:2021/ask?domain=${domain}`,
+      );
+      return /HTTP\/1\.1 (\d+)/.exec(r.stderr)?.[1];
+    };
+    for (const [domain, expected, why] of [
+      ['site1.network.example.com', '200', 'one label under the zone is approved'],
+      ['a-b-2.network.example.com', '200', 'hyphens and digits are valid labels'],
+      ['a.b.network.example.com', '403', 'a deeper name is not covered by a single-label wildcard'],
+      ['network.example.com', '403', 'the bare zone is not approved'],
+      ['evil.com', '403', 'an unrelated domain is refused'],
+      ['site1.network.example.com.evil.com', '403', 'a suffix trick is refused'],
+      ['xnetwork.example.com', '403', 'the dot before the zone is not optional'],
+      [
+        'mapped.example.org',
+        '403',
+        'a mapped domain is an explicit site and never needs the ask endpoint',
+      ],
+    ] as const)
+      assert.equal(ask(domain), expected, `${domain}: ${why}`);
+  },
+);

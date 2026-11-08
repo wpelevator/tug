@@ -98,7 +98,8 @@ const ingress = (): JsonSchema => ({
     },
     tls: {
       enum: ['auto', 'custom', 'off'],
-      description: '`auto` is ACME (default); `custom` needs cert and key; `off` is plain HTTP.',
+      description:
+        '`auto` is ACME (default; a wildcard host is issued per name on demand); `custom` needs cert and key; `off` is plain HTTP.',
     },
     cert: {
       type: 'string',

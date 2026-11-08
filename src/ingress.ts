@@ -233,36 +233,111 @@ export interface RenderOptions {
   accessLog?: boolean;
 }
 
+/**
+ * Loopback port of the site that approves on-demand certificates. Caddy asks it `?domain=<name>` before issuing one
+ * and issues only on a 2xx, so the wildcard zones control rendered are the whole authorization: no project code,
+ * no network call and no cross-project guessing is involved.
+ */
+export const ASK_PORT = 2021;
+
+const isWildcard = (host: string) => host.startsWith('*.');
+/** The wildcard zone `example.com` of `*.example.com`; only host-name characters ever reach a Caddy expression. */
+const zoneOf = (host: string): string => {
+  const zone = host.slice(2);
+  if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(zone))
+    throw new Error(`not a wildcard host: ${host}`);
+  return zone;
+};
+
+type SiteTls = 'off' | 'custom' | 'auto' | 'on-demand';
+interface Site {
+  addresses: string[];
+  tls: SiteTls;
+}
+
+/**
+ * The Caddy site blocks one route needs. Plain HTTP and automatic HTTPS names share a block. A custom certificate
+ * covers only the route's own host, so mapped domains get their own automatic-HTTPS block. A wildcard host with
+ * automatic HTTPS cannot use the HTTP or TLS-ALPN challenge (only DNS-01 issues wildcard certificates, and stock
+ * Caddy has no DNS module), so each name under the zone is issued on demand, approved by the ask site; it needs a
+ * block of its own because every name in an on-demand block would otherwise have to be approved.
+ */
+function sitesOf(route: IngressRoute): Site[] {
+  const names = [route.host, ...(route.aliases ?? [])];
+  if (route.tls === 'off') return [{ addresses: names, tls: 'off' }];
+  const sites: Site[] = [];
+  const rest = route.tls === 'custom' ? names.slice(1) : names;
+  if (route.tls === 'custom') sites.push({ addresses: [route.host], tls: 'custom' });
+  const plain = rest.filter((n) => !isWildcard(n));
+  if (plain.length) sites.push({ addresses: plain, tls: 'auto' });
+  for (const wildcard of rest.filter(isWildcard))
+    sites.push({ addresses: [wildcard], tls: 'on-demand' });
+  return sites;
+}
+
+/** The global ask block and the loopback site that answers it: 200 for exactly one label under a rendered zone. */
+function askSite(zones: string[]): string[] {
+  const expression = (zone: string) =>
+    `{query.domain}.matches('^[a-z0-9-]+\\\\.${zone.split('.').join('\\\\.')}$')`;
+  return [
+    `http://127.0.0.1:${ASK_PORT} {`,
+    '\tbind 127.0.0.1',
+    ...zones.map((zone, i) => `\t@zone${i} expression \`${expression(zone)}\``),
+    '\thandle /ask {',
+    ...zones.map((_, i) => `\t\trespond @zone${i} 200`),
+    '\t\trespond 403',
+    '\t}',
+    '\trespond 403',
+    '}',
+    '',
+  ];
+}
+
 export function renderCaddyfile(routes: IngressRoute[], opts: RenderOptions = {}): string {
   if (!routes.length) return '# no ingress routes\n';
+  const sites = routes.map((route) => ({ route, sites: sitesOf(route) }));
+  const zones = [
+    ...new Set(
+      sites.flatMap((r) =>
+        r.sites.filter((x) => x.tls === 'on-demand').map((x) => zoneOf(x.addresses[0])),
+      ),
+    ),
+  ].sort();
   // `metrics` serves Prometheus metrics, labelled per host, on Caddy's admin endpoint (localhost:2019 in the
   // container, which shares the node's network), never on a public port.
   const out: string[] = ['{'];
   if (opts.acmeEmail) out.push(`\temail ${opts.acmeEmail}`);
+  if (zones.length)
+    out.push('\ton_demand_tls {', `\t\task http://127.0.0.1:${ASK_PORT}/ask`, '\t}');
   out.push('\tmetrics {', '\t\tper_host', '\t}', '}', '');
-  for (const route of routes) {
-    // An explicit http:// address turns off automatic HTTPS for that site.
-    out.push(`${route.tls === 'off' ? 'http://' : ''}${route.host} {`);
-    if (route.tls === 'custom')
-      out.push(
-        `\ttls ${CADDY_ETC}/${certFile(route.host, 'crt')} ${CADDY_ETC}/${certFile(route.host, 'key')}`,
-      );
-    if (opts.accessLog) out.push('\tlog {', '\t\toutput stdout', '\t\tformat json', '\t}');
-    if (route.upstreams.length)
-      out.push(
-        `\treverse_proxy ${route.upstreams.join(' ')} {`,
-        '\t\tlb_policy round_robin',
-        ...proxyResilience(),
-        '\t}',
-      );
-    else
-      out.push(
-        `\theader Retry-After ${UNAVAILABLE_RETRY_AFTER}`,
-        '\theader Cache-Control no-store',
-        '\theader Content-Type "text/plain; charset=utf-8"',
-        `\trespond "${UNAVAILABLE_BODY}" 503`,
-      );
-    out.push('}', '');
+  if (zones.length) out.push(...askSite(zones));
+  for (const { route, sites: routeSites } of sites) {
+    for (const site of routeSites) {
+      // An explicit http:// address turns off automatic HTTPS for that site.
+      const prefix = site.tls === 'off' ? 'http://' : '';
+      out.push(`${site.addresses.map((a) => prefix + a).join(', ')} {`);
+      if (site.tls === 'custom')
+        out.push(
+          `\ttls ${CADDY_ETC}/${certFile(route.host, 'crt')} ${CADDY_ETC}/${certFile(route.host, 'key')}`,
+        );
+      if (site.tls === 'on-demand') out.push('\ttls {', '\t\ton_demand', '\t}');
+      if (opts.accessLog) out.push('\tlog {', '\t\toutput stdout', '\t\tformat json', '\t}');
+      if (route.upstreams.length)
+        out.push(
+          `\treverse_proxy ${route.upstreams.join(' ')} {`,
+          '\t\tlb_policy round_robin',
+          ...proxyResilience(),
+          '\t}',
+        );
+      else
+        out.push(
+          `\theader Retry-After ${UNAVAILABLE_RETRY_AFTER}`,
+          '\theader Cache-Control no-store',
+          '\theader Content-Type "text/plain; charset=utf-8"',
+          `\trespond "${UNAVAILABLE_BODY}" 503`,
+        );
+      out.push('}', '');
+    }
   }
   return out.join('\n');
 }
