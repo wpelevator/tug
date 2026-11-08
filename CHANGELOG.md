@@ -1,5 +1,13 @@
 # @wpelevator/tug
 
+## 1.2.0
+
+### Minor Changes
+
+- 003e730: `x-tug.ingress.host` accepts a list of hostnames as well as one: every name shares the route's upstreams and TLS mode (with `tls: custom` one certificate must cover them all), the first is the primary, and each name is checked for uniqueness and cross-project ownership like a single host. A single string behaves exactly as before, and domains added with `tug domain add` still join the route beside the declared names, always with automatic HTTPS.
+- 003e730: Map extra hostnames onto a service's ingress route without a deployment, for WordPress multisite domain mapping: `tug domain add <host> --service <service>`, `tug domain list` and `tug domain remove <host>`, backed by `GET`/`POST /api/v1/domains` and `DELETE /api/v1/domains/:host` (the `deploy` role, scoped to the project). Mapped domains share the route's upstreams and TLS handling, survive redeploys and rollbacks, and obey the same cross-project ownership rule as declared hosts, which `deploy` and `rollback` now also enforce against mapped domains. Domains are stored in a new control database table (schema version 2); the previous schema is upgraded in place, and the pre-upgrade copy is kept as `<file>.pre-v2.bak`. A control at 1.1.0 or older refuses the upgraded database, so rolling back means restoring that copy or an earlier control backup, which discards deployments and domains made since. Control also rejects a deployment that publishes host port 2019 or 2021 on an ingress node (the managed Caddy's loopback ports), and the on-demand wildcard approval now accepts only valid DNS labels.
+- 003e730: A wildcard `x-tug.ingress.host` with `tls: auto` now works: Caddy issues a certificate for each name under the zone on the first connection (on-demand TLS), approved by a loopback-only endpoint that control renders from the wildcard hosts it routes and that accepts exactly one label under the zone. Before, such a host could never obtain a certificate. Let's Encrypt limits certificates per registered domain, so a network with many subdomains should use `tls: custom` with a wildcard certificate.
+
 ## 1.1.0
 
 ### Minor Changes
