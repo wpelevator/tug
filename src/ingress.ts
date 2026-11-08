@@ -4,7 +4,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { loopbackIngressServices, publishedPort } from './compose.ts';
+import { ingressHostList, loopbackIngressServices, publishedPort } from './compose.ts';
 import { ensureDir, errMessage } from './util.ts';
 import { isPort } from './status-report.ts';
 import type {
@@ -145,7 +145,7 @@ export function buildIngressWork({
   tagged.sort((a, b) => `${a.project}/${a.service}`.localeCompare(`${b.project}/${b.service}`));
   for (const { project, service, ingress, port, loopback } of tagged) {
     const label = `${project}/${service}`;
-    const host = ingress.host.toLowerCase();
+    const [host, ...furtherHosts] = ingressHostList(ingress);
     const tls: IngressTls = ingress.tls || 'auto';
     if (seenHosts.has(host)) {
       warnings.push(`${label}: host ${host} is already routed by ${seenHosts.get(host)}; skipped`);
@@ -181,6 +181,19 @@ export function buildIngressWork({
       warnings.push(`${label}: no serving upstream for ${host}; answering 503`);
     }
     seenHosts.set(host, label);
+    // Further declared names belong to this route unless another route already serves them.
+    const hosts: string[] = [];
+    for (const extra of furtherHosts) {
+      if (seenHosts.has(extra)) {
+        if (seenHosts.get(extra) !== label)
+          warnings.push(
+            `${label}: host ${extra} is already routed by ${seenHosts.get(extra)}; skipped`,
+          );
+        continue;
+      }
+      seenHosts.set(extra, label);
+      hosts.push(extra);
+    }
     const aliases: string[] = [];
     for (const domain of domains) {
       if (domain.project !== project || domain.service !== service) continue;
@@ -202,6 +215,7 @@ export function buildIngressWork({
       host,
       tls,
       upstreams,
+      ...(hosts.length && { hosts }),
       ...(aliases.length && { aliases }),
       ...(ingress.maintenance === true && { maintenance: true }),
     });
@@ -283,21 +297,24 @@ interface Site {
 }
 
 /**
- * The Caddy site blocks one route needs. Plain HTTP and automatic HTTPS names share a block. A custom certificate
- * covers only the route's own host, so mapped domains get their own automatic-HTTPS block. A wildcard host with
- * automatic HTTPS cannot use the HTTP or TLS-ALPN challenge (only DNS-01 issues wildcard certificates, and stock
- * Caddy has no DNS module), so each name under the zone is issued on demand, approved by the ask site; it needs a
- * block of its own because every name in an on-demand block would otherwise have to be approved.
+ * The Caddy site blocks one route needs. The declared names (`host`, then `hosts`) all take the route's TLS mode, so
+ * with a custom certificate they share one block and the certificate must cover them. Mapped domains
+ * (`aliases`, added at runtime) are names no certificate of yours can be known to cover, so they always use
+ * automatic HTTPS. Plain HTTP and automatic HTTPS names share a block. A wildcard with automatic HTTPS cannot use
+ * the HTTP or TLS-ALPN challenge (only DNS-01 issues wildcard certificates, and stock Caddy has no DNS module), so
+ * each name under the zone is issued on demand, approved by the ask site; it needs a block of its own because
+ * every name in an on-demand block would otherwise have to be approved.
  */
 function sitesOf(route: IngressRoute): Site[] {
-  const names = [route.host, ...(route.aliases ?? [])];
-  if (route.tls === 'off') return [{ addresses: names, tls: 'off' }];
+  const declared = [route.host, ...(route.hosts ?? [])];
+  const mapped = route.aliases ?? [];
+  if (route.tls === 'off') return [{ addresses: [...declared, ...mapped], tls: 'off' }];
   const sites: Site[] = [];
-  const rest = route.tls === 'custom' ? names.slice(1) : names;
-  if (route.tls === 'custom') sites.push({ addresses: [route.host], tls: 'custom' });
-  const plain = rest.filter((n) => !isWildcard(n));
+  if (route.tls === 'custom') sites.push({ addresses: declared, tls: 'custom' });
+  const automatic = route.tls === 'custom' ? mapped : [...declared, ...mapped];
+  const plain = automatic.filter((n) => !isWildcard(n));
   if (plain.length) sites.push({ addresses: plain, tls: 'auto' });
-  for (const wildcard of rest.filter(isWildcard))
+  for (const wildcard of automatic.filter(isWildcard))
     sites.push({ addresses: [wildcard], tls: 'on-demand' });
   return sites;
 }

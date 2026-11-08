@@ -184,12 +184,22 @@ function validateIngress(
     errors.push(`${name}: x-tug.ingress must be an object`);
     return;
   }
-  const host = typeof ingress.host === 'string' ? ingress.host.toLowerCase() : '';
-  if (!HOSTNAME_RE.test(host))
-    errors.push(`${name}: ingress.host must be a fully qualified hostname`);
-  else if (seen.has(host))
-    errors.push(`${name}: ingress.host ${host} is already used by ${seen.get(host)}`);
-  else seen.set(host, name);
+  const rawHosts: unknown[] = Array.isArray(ingress.host) ? ingress.host : [ingress.host];
+  if (Array.isArray(ingress.host) && !ingress.host.length)
+    errors.push(`${name}: ingress.host must name at least one hostname`);
+  const listed = new Set<string>();
+  for (const raw of rawHosts) {
+    const host = typeof raw === 'string' ? raw.toLowerCase() : '';
+    if (!HOSTNAME_RE.test(host))
+      errors.push(`${name}: ingress.host must be a fully qualified hostname`);
+    else if (listed.has(host)) errors.push(`${name}: ingress.host lists ${host} twice`);
+    else if (seen.has(host))
+      errors.push(`${name}: ingress.host ${host} is already used by ${seen.get(host)}`);
+    else {
+      seen.set(host, name);
+      listed.add(host);
+    }
+  }
   const port = Number(ingress.port);
   if (!Number.isInteger(port) || port < 1 || port > 65535)
     errors.push(`${name}: ingress.port must be a port number`);
@@ -512,12 +522,18 @@ function validateTopLevel(compose: ComposeFile, errors: string[]): void {
   }
 }
 
+/** The lower-cased names of `x-tug.ingress.host`, a hostname or a list of them; the first is the primary. */
+export function ingressHostList(ingress: { host?: unknown }): string[] {
+  const list = Array.isArray(ingress.host) ? ingress.host : [ingress.host];
+  return list.filter((h): h is string => typeof h === 'string').map((h) => h.toLowerCase());
+}
+
 /** Lower-cased ingress hostnames a Compose definition claims, by `service` name. */
 export function ingressHostsOf(compose: ComposeFile): Map<string, string> {
   const hosts = new Map<string, string>();
   for (const [name, svc] of Object.entries(compose.services || {})) {
-    const host = svc['x-tug']?.ingress?.host;
-    if (typeof host === 'string') hosts.set(host.toLowerCase(), name);
+    const ingress = svc['x-tug']?.ingress;
+    if (ingress) for (const host of ingressHostList(ingress)) hosts.set(host, name);
   }
   return hosts;
 }

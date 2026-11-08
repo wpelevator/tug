@@ -714,3 +714,139 @@ test('mapped domains become aliases of their service route and follow its state'
     'a domain of a project that has no routes is reported too, not silently attached elsewhere',
   );
 });
+
+const listState = (ingress: Record<string, unknown>): DesiredState =>
+  state({
+    services: {
+      web: {
+        image: 'nginx',
+        ports: ['8080:80'],
+        'x-tug': { placement: { nodes: ['app1'] }, ingress: { port: 80, ...ingress } },
+      },
+    },
+  } as unknown as ComposeFile);
+
+test('every name in x-tug.ingress.host is served by one route, the first being the primary', () => {
+  const work = buildIngressWork({
+    states: [listState({ host: ['App.Example.com', 'example.org', 'shop.other.net'] })],
+    endpoints: { blog: { web: [{ node: 'app1', address: '10.0.0.5' }] } },
+    node: 'edge',
+    secrets: new Map(),
+  });
+  assert.equal(work.routes[0].host, 'app.example.com', 'the first name is the primary, lowercased');
+  assert.deepEqual(
+    work.routes[0].hosts,
+    ['example.org', 'shop.other.net'],
+    'the other declared names ride on the route',
+  );
+  assert.match(
+    work.caddyfile,
+    /\napp\.example\.com, example\.org, shop\.other\.net \{\n[\s\S]*reverse_proxy 10\.0\.0\.5:8080/,
+    'one site block serves every name from the same upstream',
+  );
+});
+
+test('declared names share a custom certificate, while mapped domains still use automatic HTTPS', () => {
+  const route = {
+    project: 'p',
+    service: 's',
+    host: 'app.example.com',
+    hosts: ['www.example.com', '*.example.com'],
+    aliases: ['mapped.example.org'],
+    tls: 'custom' as const,
+    upstreams: ['10.0.0.1:80'],
+  };
+  const out = renderCaddyfile([route]);
+  assert.match(
+    out,
+    /\napp\.example\.com, www\.example\.com, \*\.example\.com \{\n\ttls \/etc\/caddy\/certs\/app\.example\.com\.crt/,
+    'every declared name, wildcard included, is served with the one custom certificate',
+  );
+  assert.match(
+    out,
+    /\nmapped\.example\.org \{\n\treverse_proxy/,
+    'a mapped domain is not covered by it and gets automatic HTTPS',
+  );
+  assert.doesNotMatch(out, /on_demand/, 'a custom wildcard is not issued on demand');
+});
+
+test('a declared wildcard with automatic HTTPS is issued on demand next to explicit names', () => {
+  const out = renderCaddyfile([
+    {
+      project: 'p',
+      service: 's',
+      host: 'app.example.com',
+      hosts: ['*.network.example.com'],
+      tls: 'auto',
+      upstreams: ['10.0.0.1:80'],
+    },
+  ]);
+  assert.match(
+    out,
+    /\napp\.example\.com \{\n\treverse_proxy/,
+    'the explicit name is ordinary automatic HTTPS',
+  );
+  assert.match(
+    out,
+    /\*\.network\.example\.com \{\n\ttls \{\n\t\ton_demand/,
+    'the declared wildcard is issued on demand',
+  );
+});
+
+test('a declared name another route already serves is skipped alone, and a taken primary skips the route', () => {
+  const taken = state(
+    {
+      services: {
+        web: {
+          image: 'nginx',
+          ports: ['8080:80'],
+          'x-tug': {
+            placement: { nodes: ['app1'] },
+            ingress: { host: ['aaa.example.com', 'shared.example.org'], port: 80 },
+          },
+        },
+      },
+    } as unknown as ComposeFile,
+    'alpha',
+  );
+  const work = buildIngressWork({
+    states: [taken, listState({ host: ['blog.example.com', 'shared.example.org'] })],
+    endpoints: {},
+    node: 'edge',
+    secrets: new Map(),
+  });
+  assert.deepEqual(
+    work.routes.map((r) => [r.project, r.host, r.hosts ?? []]),
+    [
+      ['alpha', 'aaa.example.com', ['shared.example.org']],
+      ['blog', 'blog.example.com', []],
+    ],
+    'the first claim keeps the shared name and the second route keeps its other name',
+  );
+  assert.match(
+    work.warnings.join('\n'),
+    /blog\/web: host shared\.example\.org is already routed by alpha\/web; skipped/,
+    'the skipped name is reported',
+  );
+});
+
+test('mapped domains from the CLI still join a route that declares a list of names', () => {
+  const work = buildIngressWork({
+    states: [listState({ host: ['app.example.com', 'example.org'] })],
+    endpoints: {},
+    node: 'edge',
+    secrets: new Map(),
+    domains: [{ project: 'blog', service: 'web', host: 'mapped.example.net' }],
+  });
+  assert.deepEqual(work.routes[0].hosts, ['example.org'], 'the declared list is kept');
+  assert.deepEqual(
+    work.routes[0].aliases,
+    ['mapped.example.net'],
+    'the mapped domain is added beside it',
+  );
+  assert.match(
+    work.caddyfile,
+    /\napp\.example\.com, example\.org, mapped\.example\.net \{/,
+    'with automatic HTTPS all three names are one block',
+  );
+});

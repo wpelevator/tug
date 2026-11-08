@@ -341,7 +341,7 @@ test(
 );
 
 test(
-  'a mapped domain is served from the same upstream as the route it is attached to',
+  'declared hosts and mapped domains are served from the same upstream as the route',
   { skip: !HAVE_DOCKER && 'Docker is not available', timeout: 60000 },
   async (t) => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-resilience-'));
@@ -357,6 +357,7 @@ test(
           host: HOST,
           tls: 'off',
           upstreams: [`host.docker.internal:${upstreamPort}`],
+          hosts: ['declared.example.org'],
           aliases: ['mapped.example.org'],
         },
       ]),
@@ -367,7 +368,7 @@ test(
       upstream.close();
       await fs.rm(dir, { recursive: true, force: true });
     });
-    for (const host of [HOST, 'mapped.example.org'])
+    for (const host of [HOST, 'declared.example.org', 'mapped.example.org'])
       assert.equal(
         (await get(edge.port, '/', host)).body,
         `upstream saw ${host}`,

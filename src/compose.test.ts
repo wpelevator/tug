@@ -68,6 +68,14 @@ const ingressSvc = (ingress: unknown, ports: string[] = ['8080:80']) =>
     ports,
     'x-tug': { placement: { nodes: ['n1'] }, ingress },
   }) as ComposeFile['services'][string];
+const validateComposeErrors = (compose: ComposeFile) => {
+  try {
+    validateCompose(compose);
+    return '';
+  } catch (e) {
+    return (e as Error).message;
+  }
+};
 const errorsFor = (svc: ComposeFile['services'][string]) => {
   try {
     validateCompose({ services: { web: svc } });
@@ -671,4 +679,51 @@ test('domainProblem accepts public names and zones and refuses addresses and ove
     ['a.'.repeat(130) + 'org', 'a name over 253 characters'],
   ] as const)
     assert.ok(domainProblem(bad), `${why} is refused`);
+});
+
+test('x-tug.ingress.host takes one hostname or a list, and every name is validated and unique', () => {
+  const ok = (host: unknown, ports = ['8080:80']) =>
+    errorsFor(ingressSvc({ host, port: 80 }, ports));
+  assert.equal(ok('app.example.com'), '', 'a single hostname still works');
+  assert.equal(
+    ok(['app.example.com', 'example.org', '*.network.example.com']),
+    '',
+    'a list of names, with a wildcard, is valid',
+  );
+  assert.match(
+    ok([]),
+    /ingress\.host must name at least one hostname/,
+    'an empty list names nothing',
+  );
+  assert.match(
+    ok(['app.example.com', 'not a host']),
+    /fully qualified hostname/,
+    'every name must be a hostname',
+  );
+  assert.match(
+    ok(['a.example.com', 'A.example.com']),
+    /lists a\.example\.com twice/,
+    'a name listed twice, case aside',
+  );
+  assert.match(
+    ok(['a.example.com', 7]),
+    /fully qualified hostname/,
+    'a non-string entry is refused',
+  );
+  assert.match(
+    ok({ x: 1 }),
+    /fully qualified hostname/,
+    'an object is neither a hostname nor a list',
+  );
+  const twoServices = validateComposeErrors({
+    services: {
+      a: ingressSvc({ host: ['one.example.com', 'shared.example.com'], port: 80 }),
+      b: ingressSvc({ host: ['shared.example.com'], port: 80 }),
+    },
+  });
+  assert.match(
+    twoServices,
+    /ingress\.host shared\.example\.com is already used by a/,
+    'a name in a list cannot be reused by another service',
+  );
 });

@@ -777,3 +777,70 @@ test('a mapped domain must be a plausible public name, and a wildcard domain rou
     await s.close();
   }
 });
+
+test('a list of declared hosts is served and owned like single hosts, beside CLI-mapped domains', async () => {
+  const s = await domainsServer();
+  try {
+    const listed = {
+      services: {
+        web: {
+          image: 'nginx',
+          ports: ['8080:80'],
+          'x-tug': {
+            placement: { nodes: ['app'] },
+            ingress: { host: ['app.example.com', 'example.org'], port: 80 },
+          },
+        },
+      },
+    };
+    const first = await s.deploy('blog', listed);
+    assert.equal(first.status, 200, 'a deployment with a list of hosts is accepted');
+    const added = await s.call('POST', '/api/v1/domains', {
+      project: 'blog',
+      service: 'web',
+      host: 'mapped.example.net',
+    });
+    assert.equal(added.status, 200, 'a manually mapped domain is still accepted on such a route');
+    const ingress = await s.edgeWork();
+    assert.deepEqual(
+      [ingress.routes[0].host, ingress.routes[0].hosts, ingress.routes[0].aliases],
+      ['app.example.com', ['example.org'], ['mapped.example.net']],
+      'declared names and CLI-mapped domains are both served on the route',
+    );
+    assert.match(
+      ingress.caddyfile,
+      /app\.example\.com, example\.org, mapped\.example\.net \{/,
+      'one block serves all three',
+    );
+    for (const host of ['example.org', 'app.example.com'])
+      assert.equal(
+        (await s.call('POST', '/api/v1/domains', { project: 'blog', service: 'web', host })).status,
+        409,
+        `${host} is already declared in the list, so it cannot also be mapped`,
+      );
+    const other = await s.deploy('shop', {
+      services: {
+        web: {
+          image: 'nginx',
+          ports: ['9090:80'],
+          'x-tug': {
+            placement: { nodes: ['app'] },
+            ingress: { host: ['shop.example.net', 'example.org'], port: 80 },
+          },
+        },
+      },
+    });
+    assert.equal(
+      other.status,
+      409,
+      "a second name in another project's list is refused when another project owns it",
+    );
+    assert.match(
+      await other.text(),
+      /example\.org .*already routed by project blog/,
+      'the owner is named',
+    );
+  } finally {
+    await s.close();
+  }
+});
