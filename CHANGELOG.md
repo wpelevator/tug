@@ -1,5 +1,18 @@
 # @wpelevator/tug
 
+## 1.1.0
+
+### Minor Changes
+
+- 1ec548f: The managed ingress keeps requests and WebSockets alive across upstream churn and tells clients what is happening. A request retries for up to five seconds when no upstream is available instead of returning a 502 at once, and open WebSockets keep running for up to five minutes after a config reload instead of being cut on every site whenever any site deploys. A host with no serving upstream now answers `503` with `Retry-After` instead of failing the TLS handshake, and the new `x-tug.ingress.maintenance: true` does the same on purpose without restarting the service. Because the 503 host keeps its site block, Caddy now also requests a certificate for it; use `tls: off` while DNS is not ready. Caddy's per-host Prometheus metrics are available on the ingress node's loopback admin endpoint, and `TUG_INGRESS_ACCESS_LOG=true` turns on a JSON access log per site (off by default, since URLs and client IPs are logged). The new directives need a current Caddy 2 image: an ingress node that cached an older `caddy:2-alpine` must pull a newer one or set `TUG_CADDY_IMAGE`. The ingress docs also list the proxy's remaining limits and compare it with kamal-proxy, Uncloud, Traefik and Dokku.
+- 92d85eb: Quieter, keyboard-driven terminal output. Remote install steps (Docker, preflight, image transfer, control and agent install) no longer stream Docker's per-layer pull lines; they show named stages, a live status line in a terminal and the last output lines only on failure, and the new `--verbose` flag (or `TUG_VERBOSE=1`) streams everything. Selection menus use arrow keys and space to toggle instead of numbers. Errors from a command that already ran no longer end with the usage hint, and a missing credential names a parent directory's config file.
+
+### Patch Changes
+
+- dfd926b: Document the editor schema header in every Compose YAML example in the README and docs.
+- ba72019: Retry network steps in the Docker bootstrap and name the stage that failed, so an unattended cloud-init install survives a briefly unreachable mirror or a first-boot package lock and a failed one shows where it stopped.
+- 136d352: Move the integration-test Compose files out of the repository root into `tests/integration/compose/` and write their lists in block style.
+
 ## 1.0.0
 
 ### Major Changes
