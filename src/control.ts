@@ -611,7 +611,7 @@ export async function createApp(
   const masterKeyFile = path.join(DATA_DIR, 'master.key');
   const SERVICE_DNS = process.env.TUG_SERVICE_NAMES !== 'false';
   const ACME_EMAIL = process.env.TUG_ACME_EMAIL || undefined;
-  const INGRESS_ACCESS_LOG = process.env.TUG_INGRESS_ACCESS_LOG !== 'false';
+  const INGRESS_ACCESS_LOG = process.env.TUG_INGRESS_ACCESS_LOG === 'true';
 
   const db = await (options.openDatabase || openDb)(dbFile);
   const wakeHub = new WakeHub();
@@ -958,7 +958,10 @@ export async function createApp(
           !ingressServices.every((service) =>
             work.routes.some(
               (route) =>
-                route.project === projectId && route.service === service && route.upstreams.length,
+                route.project === projectId &&
+                route.service === service &&
+                // A host in maintenance is routed on purpose with no upstream, so it does not gate the rollout.
+                (route.upstreams.length > 0 || route.maintenance === true),
             ),
           )
         )

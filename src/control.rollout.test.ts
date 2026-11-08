@@ -645,3 +645,30 @@ test('deploy validates rollout and rollback options', async () => {
     await s.close();
   }
 });
+
+test('a deployment with ingress.maintenance succeeds once the edge acknowledges the 503 route', async () => {
+  const s = await server();
+  try {
+    const edge = await s.register('edge');
+    const app = await s.register('app', { address: '192.168.1.5' });
+    await s.post('/api/v1/nodes/edge/ingress', { enabled: true });
+    const compose = stack('web:1');
+    delete (compose.services.web['x-tug'] as Record<string, unknown>).rollout;
+    compose.services.web['x-tug']!.ingress!.maintenance = true;
+    const v1 = await s.deploy(compose, 'v1');
+    await s.report(app.nodeId, 'app', 'serving', serving());
+    assert.equal(
+      (await s.deployment(v1.deployment.id)).state,
+      'rolling_out',
+      'the edge must still acknowledge the maintenance configuration',
+    );
+    await s.reportIngress(edge.nodeId, 'edge');
+    assert.equal(
+      (await s.deployment(v1.deployment.id)).state,
+      'succeeded',
+      'a host answering 503 on purpose has no upstream, and must not hold the deployment in rolling_out',
+    );
+  } finally {
+    await s.close();
+  }
+});

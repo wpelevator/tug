@@ -10,7 +10,6 @@ import {
   ingressConfigHash,
   reconcileIngress,
   removeIngress,
-  PROXY_FAIL_DURATION,
   PROXY_STREAM_CLOSE_DELAY,
   PROXY_TRY_DURATION,
   PROXY_TRY_INTERVAL,
@@ -496,39 +495,30 @@ test('every route keeps requests and streams alive across upstream churn and rel
   ]);
   const blockOf = (host: string) =>
     out.split('\n\n').find((b) => b.startsWith(`http://${host} {`)) ?? '';
-  const one = blockOf('one.example.com');
-  const many = blockOf('many.example.com');
-  for (const [label, block] of [
-    ['single upstream', one],
-    ['several upstreams', many],
-  ]) {
+  for (const host of ['one.example.com', 'many.example.com']) {
+    const block = blockOf(host);
     assert.match(
       block,
       new RegExp(`lb_try_duration ${PROXY_TRY_DURATION}\\n`),
-      `${label}: requests retry for a window instead of failing at the first dial error`,
+      `${host}: requests retry for a window instead of failing at the first dial error`,
     );
     assert.match(
       block,
       new RegExp(`lb_try_interval ${PROXY_TRY_INTERVAL}\\n`),
-      `${label}: retries are paced`,
+      `${host}: retries are paced`,
     );
     assert.match(
       block,
       new RegExp(`stream_close_delay ${PROXY_STREAM_CLOSE_DELAY}\\n`),
-      `${label}: a reload does not cut live WebSockets`,
+      `${host}: a reload does not cut live WebSockets`,
     );
-    assert.match(block, /lb_policy round_robin/, `${label}: round_robin stays the default policy`);
+    assert.match(block, /lb_policy round_robin/, `${host}: round_robin stays the default policy`);
+    assert.doesNotMatch(
+      block,
+      /fail_duration|max_fails/,
+      `${host}: no passive health, which would mark every replica down together after a shared blip; the endpoint list is already health-aware`,
+    );
   }
-  assert.doesNotMatch(
-    one,
-    /fail_duration|max_fails/,
-    'a single upstream is never marked unhealthy, since that would turn a blip into an outage',
-  );
-  assert.match(
-    many,
-    new RegExp(`fail_duration ${PROXY_FAIL_DURATION}\\n\\t\\tmax_fails 1\\n`),
-    'with several upstreams a failed one is skipped until the agent withdraws it',
-  );
 });
 
 test('maintenance mode answers 503 without proxying even when upstreams serve', () => {
@@ -542,11 +532,16 @@ test('maintenance mode answers 503 without proxying even when upstreams serve', 
     secrets: new Map(),
   });
   assert.deepEqual(work.routes[0].upstreams, [], 'a host in maintenance has no upstreams');
+  assert.equal(
+    work.routes[0].maintenance,
+    true,
+    'the route says the empty upstream list is intended, so a rollout is not held waiting for one',
+  );
   assert.doesNotMatch(work.caddyfile, /reverse_proxy/, 'traffic never reaches the service');
   assert.match(work.warnings[0], /app\.example\.com is in maintenance/, 'the operator is told');
 });
 
-test('access logs and metrics are rendered unless access logging is switched off', () => {
+test('metrics are always rendered and access logs only when asked for', () => {
   const route = {
     project: 'p',
     service: 's',
@@ -561,7 +556,23 @@ test('access logs and metrics are rendered unless access logging is switched off
     'each site writes a JSON access log to stdout',
   );
   assert.match(on, /metrics \{\n\t\tper_host\n\t\}/, 'metrics are labelled per host');
-  const off = renderCaddyfile([route], { accessLog: false });
-  assert.doesNotMatch(off, /\blog\b/, 'access logging can be disabled');
+  const off = renderCaddyfile([route]);
+  assert.doesNotMatch(off, /\blog\b/, 'access logging is off by default');
   assert.match(off, /metrics/, 'metrics do not depend on access logging');
+  const input = {
+    states: [state()],
+    endpoints: {},
+    node: 'edge',
+    secrets: new Map<string, string>(),
+  };
+  assert.doesNotMatch(
+    buildIngressWork(input).caddyfile,
+    /\blog\b/,
+    'control renders no access log unless it is switched on',
+  );
+  assert.match(
+    buildIngressWork({ ...input, accessLog: true }).caddyfile,
+    /\blog \{/,
+    'control renders the access log when it is switched on',
+  );
 });

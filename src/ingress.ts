@@ -92,7 +92,7 @@ export interface IngressInput {
   /** Decrypted project secrets for custom TLS, keyed `<project>/<secret name>`. */
   secrets: Map<string, string>;
   acmeEmail?: string;
-  /** Write a JSON access log per site to the container's stdout. On unless explicitly `false`. */
+  /** Write a JSON access log per site to the container's stdout. Off unless `true`. */
   accessLog?: boolean;
 }
 
@@ -178,10 +178,17 @@ export function buildIngressWork({
       warnings.push(`${label}: no serving upstream for ${host}; answering 503`);
     }
     seenHosts.set(host, label);
-    routes.push({ project, service, host, tls, upstreams });
+    routes.push({
+      project,
+      service,
+      host,
+      tls,
+      upstreams,
+      ...(ingress.maintenance === true && { maintenance: true }),
+    });
   }
   return {
-    caddyfile: renderCaddyfile(routes, { acmeEmail, accessLog: accessLog !== false }),
+    caddyfile: renderCaddyfile(routes, { acmeEmail, accessLog: accessLog === true }),
     files,
     routes,
     warnings,
@@ -201,23 +208,16 @@ const upstreamHost = (address: string) =>
 export const PROXY_TRY_DURATION = '5s';
 export const PROXY_TRY_INTERVAL = '250ms';
 /**
- * How long a failed upstream is skipped when a route has several. Short on purpose: it only has to cover
- * the polls between a failure and the endpoint being withdrawn.
- */
-export const PROXY_FAIL_DURATION = '10s';
-/**
  * Caddy closes WebSockets and other streams when its config is reloaded. One Caddy serves every project on
  * the node, so without a delay a deploy to one site would cut live streams on all of them.
  */
 export const PROXY_STREAM_CLOSE_DELAY = '5m';
 
 /** The `reverse_proxy` subdirectives that keep requests and streams alive across upstream churn and reloads. */
-function proxyResilience(upstreamCount: number): string[] {
+function proxyResilience(): string[] {
   return [
     `\t\tlb_try_duration ${PROXY_TRY_DURATION}`,
     `\t\tlb_try_interval ${PROXY_TRY_INTERVAL}`,
-    // With one upstream, marking it unhealthy only turns a blip into an outage; the retry window is enough.
-    ...(upstreamCount > 1 ? [`\t\tfail_duration ${PROXY_FAIL_DURATION}`, '\t\tmax_fails 1'] : []),
     `\t\tstream_close_delay ${PROXY_STREAM_CLOSE_DELAY}`,
   ];
 }
@@ -252,7 +252,7 @@ export function renderCaddyfile(routes: IngressRoute[], opts: RenderOptions = {}
       out.push(
         `\treverse_proxy ${route.upstreams.join(' ')} {`,
         '\t\tlb_policy round_robin',
-        ...proxyResilience(route.upstreams.length),
+        ...proxyResilience(),
         '\t}',
       );
     else

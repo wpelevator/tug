@@ -442,6 +442,8 @@ export interface IngressRoute {
    * host has no serving upstream or is in maintenance: the edge then answers 503 itself.
    */
   upstreams: string[];
+  /** The host is in `x-tug.ingress.maintenance`: an empty `upstreams` is then intended, not an outage. */
+  maintenance?: boolean;
 }
 
 /** Edge config rendered by control for one ingress node. */

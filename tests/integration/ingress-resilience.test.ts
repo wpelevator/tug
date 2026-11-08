@@ -142,11 +142,15 @@ test(
     );
     assert.equal(res.body, 'hello', 'the retried request reaches the upstream that came back');
 
+    const noRetryDir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-resilience-'));
     const noRetry = await startCaddy(
-      await fs.mkdtemp(path.join(os.tmpdir(), 'tug-resilience-')),
+      noRetryDir,
       caddyfile(await freePort(), (text) => text.replace(/\t\tlb_try_duration .*\n/, '')),
     );
-    t.after(() => noRetry.stop());
+    t.after(async () => {
+      noRetry.stop();
+      await fs.rm(noRetryDir, { recursive: true, force: true });
+    });
     const failed = await get(noRetry.port, '/');
     assert.equal(
       failed.status,
@@ -225,6 +229,7 @@ test(
     const cut = await websocketAcrossReload((text) =>
       text.replace(/\t\tstream_close_delay .*\n/, ''),
     );
+    assert.match(cut, /chunk1\n/, 'the control connection did open and stream before the reload');
     assert.doesNotMatch(
       cut,
       /done\n$/,

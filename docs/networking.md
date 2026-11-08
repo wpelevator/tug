@@ -66,8 +66,8 @@ Caddy dials each upstream where its port is bound ([Published ports](#published-
 Control aggregates the `ingress` blocks of every project's current deployment, and for each ingress node renders:
 
 - one site block per host with `reverse_proxy` to every serving endpoint, using `127.0.0.1` for loopback-bound services on the ingress node and the node `address` for the rest;
-- for a host without a serving upstream, or with `x-tug.ingress.maintenance: true`, a site block that answers `503` with `Retry-After` and a short fixed text instead of proxying (reported in `ingress.warnings`), and only the first project for a host claimed twice;
-- unless `TUG_INGRESS_ACCESS_LOG=false`, a JSON access log per site on the container's output, and always Caddy's Prometheus metrics, labelled per host, on its admin endpoint (`127.0.0.1:2019/metrics` on the ingress node, never a public port);
+- for a host without a serving upstream, or with `x-tug.ingress.maintenance: true`, a site block that answers `503` with `Retry-After` and a short fixed text instead of proxying (listed in the work response's `ingress.warnings`, which no command shows yet), and only the first project for a host claimed twice;
+- with `TUG_INGRESS_ACCESS_LOG=true`, a JSON access log per site on the container's output (off by default, because URLs and client IPs are personal data), and, whenever there is a route, Caddy's Prometheus metrics labelled per host on its admin endpoint (`127.0.0.1:2019/metrics` on the ingress node, never a public port; see the admin API limit below);
 - with `TUG_ACME_EMAIL`, a global `email` for ACME registration.
 
 TLS modes:
@@ -76,27 +76,29 @@ TLS modes:
 - `custom`: `cert` and `key` name two project secrets holding the PEM certificate chain and private key (`tug secret set WEB_CERT --project blog --value "$(cat fullchain.pem)"`). Deploy fails if either secret is missing. Control decrypts them only for the ingress node, which receives them as files in the work response; they never reach the nodes running the service, and they never appear in the Caddyfile.
 - `off`: plain HTTP on port 80, for development.
 
-The agent on an ingress node creates the `tug-caddy` container with host networking and three named volumes (`/data` for ACME accounts and certificates, `/config`, `/etc/caddy`), so certificates survive container recreation and image updates. Config is uploaded with the Engine API archive endpoint (which works whether the agent runs on the host or in a container) and applied with `caddy reload`, which swaps config gracefully without restarting the container or dropping in-flight HTTP requests (WebSockets are held open for a while after a reload, see [Edge features](#edge-features-what-the-ingress-does-not-do-yet)). If Caddy rejects the config the agent restores the last applied files, reports `failed` with Caddy's error in the node's ingress status, and retries on the next poll; `tug doctor` flags ingress nodes that are not `serving`. Removing the ingress role removes the container but keeps the volumes. The Caddy image is `caddy:2-alpine` (override with `TUG_CADDY_IMAGE` on the agent).
+The agent on an ingress node creates the `tug-caddy` container with host networking and three named volumes (`/data` for ACME accounts and certificates, `/config`, `/etc/caddy`), so certificates survive container recreation and image updates. Config is uploaded with the Engine API archive endpoint (which works whether the agent runs on the host or in a container) and applied with `caddy reload`, which swaps config gracefully without restarting the container or dropping in-flight HTTP requests (WebSockets are held open for a while after a reload, see [Edge features](#edge-features)). If Caddy rejects the config the agent restores the last applied files, reports `failed` with Caddy's error in the node's ingress status, and retries on the next poll; `tug doctor` flags ingress nodes that are not `serving`. Removing the ingress role removes the container but keeps the volumes. The Caddy image is `caddy:2-alpine` (override with `TUG_CADDY_IMAGE` on the agent).
 
 For services with `x-tug.rollout.strategy: rolling`, the upstream port is the one the serving revision reports instead of the declared published port (see below).
 
 Caddy's automatic HTTPS protects the client-to-ingress connection. It does not encrypt the subsequent HTTP connection from Caddy to a service on another node; that upstream connection uses the operator's network.
 
-### Edge features: what the ingress does not do yet
+### Edge features
 
-The generated Caddyfile is deliberately small: per host one `reverse_proxy` with `lb_policy round_robin` and the resilience settings below, the TLS mode and the optional ACME email. It has no compression, response headers, timeouts or body limit. This subsection records what the proxy does to survive upstream churn, the remaining limits, how the surrounding tools compare and the direction; the phased checklist is in `plan-ingress-edge-features.md` and the remaining proposal is listed under [Later](roadmap.md#later--only-if-needed).
+The generated Caddyfile is deliberately small: per host one `reverse_proxy` with `lb_policy round_robin` and the resilience settings below, the TLS mode and the optional ACME email. It has no compression, response headers, timeouts or body limit. This subsection records what the proxy does to survive upstream churn, the remaining limits, how the surrounding tools compare and the direction; the remaining proposal is listed under [Later](roadmap.md#later--only-if-needed). It needs a current Caddy 2 image: the directives below were tested against 2.11.7, and a node that cached an older `caddy:2-alpine` is never re-pulled, so Caddy rejects the config, the ingress reports `failed` and deployments for routed projects wait for it. Pull a newer image on that node, or set `TUG_CADDY_IMAGE` to a pinned tag, and recreate the container.
 
 Every route that has an upstream is generated with a `reverse_proxy` that has:
 
-- `lb_try_duration 5s` and `lb_try_interval 250ms`: a request that finds no usable upstream keeps trying for five seconds instead of failing at once with a 502. This covers the gap between an upstream dying and the next agent poll withdrawing its endpoint, and a `recreate` restart. A refused connection is always retried; after a successful connect only `GET` is, so a `POST` is never replayed.
-- `fail_duration 10s` and `max_fails 1`, only for a route with several upstreams: a failed upstream is skipped for ten seconds. A route with one upstream gets neither, because marking its only upstream unhealthy would turn a blip into an outage.
-- `stream_close_delay 5m`: Caddy closes WebSockets when its config is reloaded, and one Caddy serves every project on the node, so a deploy to one site would otherwise cut live WebSockets on all of them. Open WebSockets now keep running for up to five minutes after a reload that replaced their config, then close; clients are expected to reconnect, as they must for any deploy that removes the old revision.
+- `lb_try_duration 5s` and `lb_try_interval 250ms`: a request that finds no usable upstream keeps trying for five seconds instead of failing at once with a 502. This covers the gap between an upstream dying and the next agent poll withdrawing its endpoint, and a `recreate` restart. A refused connection is always retried; after a successful connect only `GET` is, so a `POST` is never replayed, but a `GET` that crashes the service is replayed for the whole window. There is deliberately no passive health check (`fail_duration`): after a shared blip it would mark every replica down together and stall requests for its whole duration, and the endpoint list is already health-aware.
+- `stream_close_delay 5m`: Caddy closes WebSockets when its config is reloaded, and one Caddy serves every project on the node, so a deploy to one site would otherwise cut live WebSockets on all of them. Open WebSockets now keep running for up to five minutes after a reload that replaced their config, then close; clients are expected to reconnect, as they must for any deploy that removes the old revision. Each reload keeps the previous config generation alive while any of its streams is open, so frequent deploys with many open sockets hold memory and file descriptors in proportion.
 
 Current limits worth knowing:
 
 - **A WebSocket outlives a reload for five minutes at most.** After that Caddy closes it, so a long-lived connection on a site is still cut once every five minutes of reload churn at worst, and always when its upstream is removed. Plain HTTP requests in flight finish.
 - **The 503 page is fixed text.** A host without a serving upstream, or in maintenance, answers a plain-text 503; a branded page would have to be a file the project controls, which is unsafe next to the other projects' keys in `/etc/caddy`.
 - **Retries are bounded at five seconds.** A longer outage, such as a slow `recreate` restart, still returns a 502 once the window ends.
+- **A host answering 503 still requests a certificate.** A `tls: auto` host with no serving upstream, or in maintenance, keeps its site block, so Caddy tries ACME for it and a first deploy that fails (or DNS that points elsewhere) produces failed validations, which Let's Encrypt rate limits per host and per registered domain and which then fall back to ZeroSSL. The benefit is a clear 503 and a certificate ready for the first success; the cost is that a typo in `host` or DNS that is not yet pointed at the node is no longer silent. Use `tls: off` while DNS is not ready.
+- **The admin API is unauthenticated.** Caddy's admin endpoint on `127.0.0.1:2019`, which `caddy reload` and the metrics use, is reachable by any process on the node and by any container with host networking, and it accepts configuration, including one that serves `/etc/caddy`. This predates the metrics and is a reason to run only trusted workloads on an ingress node.
+- **Access log size is capped only on new containers.** The `max-size 10m`, `max-file 3` log options apply when the agent creates `tug-caddy`; an ingress node that already has the container keeps Docker's unbounded default until it is recreated (`docker rm -f tug-caddy`; the next poll recreates it and keeps certificates). Do this before enabling `TUG_INGRESS_ACCESS_LOG`.
 - **A wildcard host with `tls: auto` cannot get a certificate.** Wildcards need the DNS-01 challenge, which stock `caddy:2-alpine` does not provide. Use `tls: custom` with a wildcard certificate.
 - **`/etc/caddy` is shared by every project on the node,** including the keys of every `tls: custom` route. This is why ingress options are typed `x-tug.ingress` fields that control validates, not a raw Caddyfile fragment supplied by a project.
 
@@ -108,19 +110,19 @@ How the managed ingress compares, from each project's documentation (a blank mea
 | Health-gated cutover and drain | yes, for `rolling` services | yes | yes | no mechanism of its own | |
 | Custom certificate from encrypted secrets | yes | yes | partial | partial | |
 | Response timeout, max request body | no | yes | no | via middleware | yes |
-| Access logs, metrics | no | yes | logs | yes | logs |
+| Access logs, metrics | yes (opt-in logs, metrics on loopback) | yes | logs | yes | logs |
 | Compression, basic auth, redirects | no | no | via raw Caddy | yes | |
-| Maintenance or error page | no | no | partial | yes | yes |
+| Maintenance or error page | fixed 503 text, `maintenance: true` | no | partial | yes | yes |
 | Rate limit, IP allowlist | no | no | no | yes | |
 | HTTP/3 | yes (Caddy default, needs UDP 443 open) | | yes | yes | |
 | On-demand TLS, DNS-01 wildcards | no | on-demand yes | partial | DNS-01 yes | |
 
-Tug's strengths for an edge are that control renders and validates the whole Caddyfile (hostname and wildcard overlaps across projects are rejected before anything reaches Caddy), the endpoint list is already health-aware before Caddy sees it, secrets reach only the ingress node as files, and a reload is graceful, hash-gated and rolled back when Caddy rejects it. Caddy's own passive health checks and retries are a second layer on top of that, not a replacement; its active health checks would duplicate `x-tug.health`.
+Tug's strengths for an edge are that control renders and validates the whole Caddyfile (hostname and wildcard overlaps across projects are rejected before anything reaches Caddy), the endpoint list is already health-aware before Caddy sees it, secrets reach only the ingress node as files, and a reload is graceful, hash-gated and rolled back when Caddy rejects it. Caddy's retries are a second layer on top of that, not a replacement; its active health checks would duplicate `x-tug.health`.
 
 The direction, in order:
 
-1. Done: resilience defaults with no new key (retries, passive health for multi-upstream routes, `stream_close_delay`), described above and exercised against a real Caddy by `tests/integration/ingress-resilience.test.ts`.
-2. Done: JSON access logs, per-host Caddy metrics on the admin endpoint, and a 503 (or `maintenance: true`) response for a host with no serving upstream. Still proposed: reading those metrics into the status report and re-exporting them from control ([ingress metrics](observability.md#ingress-metrics)).
+1. Done: resilience defaults with no new key (retries, `stream_close_delay`), described above and exercised against a real Caddy by `tests/integration/ingress-resilience.test.ts`.
+2. Done: opt-in JSON access logs, per-host Caddy metrics on the admin endpoint, and a 503 (or `maintenance: true`) response for a host with no serving upstream. Still proposed: reading those metrics into the status report and re-exporting them from control ([ingress metrics](observability.md#ingress-metrics)).
 3. Optional per-route `x-tug.ingress` keys, each a minor release: response timeout, body limit, compression (stock Caddy `encode` offers gzip and zstd, not brotli), alias redirects, load-balancing policy, basic auth (the hash delivered as a secret file like a custom certificate) and an IP allowlist.
 4. Per-node settings under `tug node ingress`: trusted proxies behind a CDN, ACME CA and fallback issuer. Wildcards stay `tls: custom` unless a real need justifies on-demand TLS or a DNS-01 Caddy build.
 
