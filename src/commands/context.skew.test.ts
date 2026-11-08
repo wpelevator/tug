@@ -5,12 +5,11 @@ import { createServer } from 'node:https';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import { Pki, serverNames, identityUri } from '../pki.ts';
 import type { Credential } from '../pki.ts';
 import { serverTlsOptions } from '../tls-server.ts';
-import { packageVersion } from '../image.ts';
-import { compareCompat, majorMinor } from '../protocol.ts';
+import { pinPackageVersion } from '../image.ts';
 import { resetVersionChecks, request, setResolvedConfig } from './context.ts';
 import type { ResolvedCliConfig } from '../cli-config.ts';
 
@@ -112,37 +111,22 @@ const unmutatedWarning = console.error;
 const speak = (): void => {
   console.error = unmutatedWarning;
 };
+// Fixed versions, independent of the package's real one: the verdicts depend only on how these relate under the
+// skew rule (a different major is breaking from 1.0; an older minor or patch of the same major is compatible).
+const CLI_VERSION = '1.4.2';
+const OLDER_MAJOR = '0.9.0';
+const NEWER_PATCH = '1.4.3';
+pinPackageVersion(CLI_VERSION);
+after(() => pinPackageVersion(undefined));
+
 const quiet = (): void => {
   console.error = (message?: unknown) => {
     warnings.push(String(message));
   };
 };
 
-/**
- * A version the current CLI must treat as an older, incompatible control. Only a different compatibility key is
- * breaking (the major from 1.0, `0.minor` before it), so a stale stamp is the previous major once the package is 1.x:
- * an older minor of the same major is compatible and would not be refused.
- */
-const staleVersion = (): string => {
-  const [major, minor] = packageVersion().split('.').map(Number);
-  if (major > 0) return `${major - 1}.0.0`;
-  if (minor > 0) return `0.${minor - 1}.0`;
-  throw new Error('no older compatibility key exists below 0.0');
-};
-
-test('the stale version used by these tests is older than the current CLI under the skew rule', () => {
-  const stale = majorMinor(staleVersion());
-  const current = majorMinor(packageVersion());
-  assert.ok(stale && current, 'both versions parse');
-  assert.equal(
-    compareCompat(stale, current),
-    -1,
-    'the helper stays incompatible across minor and patch releases, so the refusal tests keep testing a refusal',
-  );
-});
-
 test('a read-first command gets its skew judged off the response stamp, with no extra probe', async () => {
-  const f = await startFixture({ stamp: packageVersion() });
+  const f = await startFixture({ stamp: CLI_VERSION });
   await configure(f);
   quiet();
   try {
@@ -154,7 +138,7 @@ test('a read-first command gets its skew judged off the response stamp, with no 
     );
     assert.deepEqual(
       f.hits.map((h) => h.clientVersion),
-      [packageVersion()],
+      [CLI_VERSION],
       'every request declares the calling CLI version for the control-side guard',
     );
     assert.deepEqual(warnings, [], 'matching versions stay silent');
@@ -173,7 +157,7 @@ test('a read-first command gets its skew judged off the response stamp, with no 
 });
 
 test('a stale stamp or stampless control refuses the read-first command with the upgrade command', async () => {
-  for (const stamp of [undefined, staleVersion()]) {
+  for (const stamp of [undefined, OLDER_MAJOR]) {
     const label = stamp === undefined ? 'a stampless control' : `a stale stamp (${stamp})`;
     const f = await startFixture({ stamp });
     await configure(f);
@@ -196,8 +180,7 @@ test('a stale stamp or stampless control refuses the read-first command with the
 });
 
 test('a control on a newer patch is compatible and stays silent', async () => {
-  const [major, minor, patch] = packageVersion().split('.').map(Number);
-  const f = await startFixture({ stamp: `${major}.${minor}.${(patch || 0) + 1}` });
+  const f = await startFixture({ stamp: NEWER_PATCH });
   await configure(f);
   quiet();
   try {
@@ -214,8 +197,8 @@ test('a control on a newer patch is compatible and stays silent', async () => {
 test('a mutating first request is probed against the version route before it is sent', async () => {
   // Equal: probe then deploy succeeds. Stale and stampless: probe refuses, the deployment route never sees the POST.
   for (const scenario of [
-    { stamp: packageVersion(), expected: ['/api/v1/version', '/api/v1/deployments'] },
-    { stamp: staleVersion(), expected: ['/api/v1/version'] },
+    { stamp: CLI_VERSION, expected: ['/api/v1/version', '/api/v1/deployments'] },
+    { stamp: OLDER_MAJOR, expected: ['/api/v1/version'] },
     { stamp: undefined, noDeploymentRoute: true, expected: ['/api/v1/version'] },
   ]) {
     const f = await startFixture(scenario);
@@ -249,7 +232,7 @@ test("the control's own skew refusal is surfaced verbatim, on read and mutation 
   // the refusal first must carry the control's wording to the operator, not replace it with a synthesized one.
   const controlError = 'this client (test) is newer than the control running own: fix it now';
   const refusal = await (async () => {
-    const f = await startFixture({ stamp: packageVersion(), refuseAll: controlError });
+    const f = await startFixture({ stamp: CLI_VERSION, refuseAll: controlError });
     await configure(f);
     try {
       return await request('GET', '/api/v1/status').then(
@@ -262,7 +245,7 @@ test("the control's own skew refusal is surfaced verbatim, on read and mutation 
     }
   })();
   const mutationRefusal = await (async () => {
-    const f = await startFixture({ stamp: packageVersion(), refuseAll: controlError });
+    const f = await startFixture({ stamp: CLI_VERSION, refuseAll: controlError });
     await configure(f);
     try {
       return await request('POST', '/api/v1/deployments', { project: 'site' }).then(
@@ -287,7 +270,7 @@ test("the control's own skew refusal is surfaced verbatim, on read and mutation 
 });
 
 test('a refused control is judged again on the next request, never waved through', async () => {
-  const f = await startFixture({ stamp: staleVersion() });
+  const f = await startFixture({ stamp: OLDER_MAJOR });
   await configure(f);
   try {
     for (const attempt of [1, 2])
