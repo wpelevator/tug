@@ -1,6 +1,6 @@
 # Agent instructions
 
-- Until 1.0.0 is tagged this is a greenfield project: refactor in place and prefer a clean design over earlier implementation choices. From 1.0.0 the contracts in docs/releases.md#what-10-freezes bind: a schema change appends a migration step in src/db.ts with a previous-release fixture (never edit a released step), and a breaking change to the CLI, `x-tug`, the wire protocol or a persisted format needs a major.
+- Until 1.0.0 is tagged this is a greenfield project: refactor in place and prefer a clean design over earlier implementation choices. From 1.0.0 the contracts in docs/releases.md#what-10-freezes bind: a schema change appends a migration step in src/db/db.ts with a previous-release fixture (never edit a released step), and a breaking change to the CLI, `x-tug`, the wire protocol or a persisted format needs a major.
 - Use plan-{task-name}.md to outline the task and a checklist to ensure that all are completed. A plan file is shared working memory across agent sessions; when its work is fully implemented, fold the lasting decisions into README.md/docs and delete the plan file.
 - Keep documentation canonical and organized by concern: update the relevant document in place when a decision changes, rather than creating a parallel review or summary file for the same thing.
 - After completing tasks, ensure README.md and documentation is up to date and matches the codebase.

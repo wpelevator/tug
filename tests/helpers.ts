@@ -1,6 +1,6 @@
 import { X509Certificate } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
-import type { Db } from '../src/db.ts';
+import type { Db } from '../src/db/db.ts';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -151,9 +151,9 @@ export async function startMtlsControl(
   options: { eventPruneIntervalMs?: number } = {},
 ) {
   process.env.TUG_DATA_DIR = dir;
-  const { createApp, listen } = await import('../src/control.ts');
-  const { issueHostCredential } = await import('../src/control-credential.ts');
-  const { createTransport } = await import('../src/agent-credential.ts');
+  const { createApp, listen } = await import('../src/control/control.ts');
+  const { issueHostCredential } = await import('../src/control/credential-issue.ts');
+  const { createTransport } = await import('../src/transport.ts');
   const controlUrl = 'https://localhost:8443';
   const app = await createApp({ images: { resolve: testImageResolver }, controlUrl, ...options });
   const server = await listen(app, 0);

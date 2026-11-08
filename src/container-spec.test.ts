@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildDesiredState } from './compose.ts';
+import { buildDesiredState } from './compose/compose.ts';
 import {
   composeDurationMs,
   containerSpecs,

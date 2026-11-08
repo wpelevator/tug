@@ -1,0 +1,1556 @@
+#!/usr/bin/env node
+import fs from 'node:fs/promises';
+import { imageLocation } from '../images/registry.ts';
+import { createReadStream, createWriteStream, existsSync, readFileSync } from 'node:fs';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
+import { validateImageArchive, verifyDownload } from '../images/artifacts.ts';
+import path from 'node:path';
+import net from 'node:net';
+import dns from 'node:dns/promises';
+import { WebSocket } from 'ws';
+import {
+  agentIdentityCsr,
+  describeMissingIdentity,
+  installIdentity,
+  loadAgentDocument,
+  renewCertificate,
+  renewalTime,
+} from './credential.ts';
+import { createTransport } from '../transport.ts';
+import type { AgentDocument } from './credential.ts';
+import { clientTlsOptions, parseCredential } from '../pki.ts';
+import type { Credential } from '../pki.ts';
+import { createHash } from 'node:crypto';
+import { addressBoundServices, isRolling, serviceSecretVersions } from '../compose/compose.ts';
+import {
+  LABEL_PROJECT,
+  LABEL_SERVICE,
+  assertVolumeOwnership,
+  containerSpecs,
+  networkName,
+  volumeName,
+} from '../container-spec.ts';
+import { API_VERSION, DockerEngine, isNotFound } from '../docker-api.ts';
+import type { ContainerSummary, DockerApi } from '../docker-api.ts';
+import type { PortBind } from '../compose/compose.ts';
+import { JobRunner } from './jobs.ts';
+import {
+  LIVE_MAX_FRAME_BYTES,
+  LIVE_START_TIMEOUT_MS,
+  CLIENT_VERSION_HEADER,
+  skewRefusalMessage,
+} from '../protocol.ts';
+import { packageVersion } from '../images/image.ts';
+import type {
+  AgentLiveCommand,
+  AgentLiveFrame,
+  LiveRequest as ProtocolLiveRequest,
+} from '../protocol.ts';
+import { LiveOperationEngine } from './live.ts';
+import type { LiveEngineOptions } from './live.ts';
+import {
+  activeRollingStates,
+  clearRolloutState,
+  ensureProjectResources,
+  loadRolloutState,
+  projectContainers,
+  reconcileRecreate,
+  reconcileRolling,
+  sweepOrphans,
+} from './reconciler.ts';
+import { isPublicAddress } from '../node-address.ts';
+import { parseDuration } from '../duration.ts';
+import { errMessage } from '../errors.ts';
+import { now } from '../db/row.ts';
+import { ensureDir } from '../files.ts';
+import { openAgentDb } from '../db/db.ts';
+import type { AppliedStateRow, Db, EventStateRow } from '../db/db.ts';
+import type { HttpClient } from './runners.ts';
+import { CADDY_CONTAINER, reconcileIngress, removeIngress } from '../ingress.ts';
+import type {
+  Command,
+  CommandResult,
+  DesiredState,
+  DiagnosticCheck,
+  EnrollRequest,
+  EnrollResponse,
+  HealthCheck,
+  IngressStatus,
+  BackupCredentialsResponse,
+  JoinKey,
+  ProjectStatus,
+  ImageArtifact,
+  PortBinding,
+  SecretsResponse,
+  ServiceEndpoint,
+  ServiceState,
+  StatusReport,
+  WakeResponse,
+  WorkResponse,
+} from '../protocol.ts';
+
+// Connect-only override (for example an SSH tunnel); the certificate is still verified against the credential's public URL.
+const CONTROL_URL_OVERRIDE = process.env.TUG_CONTROL_URL;
+let NODE_NAME = process.env.TUG_NODE_NAME || process.env.HOSTNAME || 'node1';
+const STATE_DIR = process.env.TUG_STATE_DIR || '/var/lib/tug';
+const APPLY = process.env.TUG_APPLY !== 'false';
+const INTERVAL = Number(process.env.TUG_POLL_INTERVAL_MS || 5000);
+
+// Everything the reconcile/command logic needs from the outside world. Production wiring is
+// `defaultContext()`; tests pass a fake `docker` runner / `http` client and temp dirs.
+export interface AgentContext {
+  docker: DockerApi;
+  http: HttpClient;
+  nodeName: string;
+  stateDir: string;
+  apply: boolean;
+  controlUrl: string;
+  /** The node credential presented to control; absent only in tests with a fake `http`. */
+  credential?: Credential;
+  caddyImage?: string;
+  /** Host port range (`LOW-HIGH`) for rolling-rollout revisions; default 20000-20999. */
+  rolloutPorts?: string;
+}
+
+let activeDocument: AgentDocument | undefined;
+export function defaultContext(doc: AgentDocument | undefined = activeDocument): AgentContext {
+  if (!doc) throw new Error(describeMissingIdentity());
+  const transport = createTransport(doc, CONTROL_URL_OVERRIDE);
+  return {
+    docker: new DockerEngine(),
+    http: transport.http as HttpClient,
+    nodeName: doc.nodeName,
+    stateDir: STATE_DIR,
+    apply: APPLY,
+    controlUrl: transport.base,
+    credential: doc,
+    caddyImage: process.env.TUG_CADDY_IMAGE,
+    rolloutPorts: process.env.TUG_ROLLOUT_PORTS,
+  };
+}
+
+const jobRunners = new Map<string, JobRunner>();
+/** One job runner per state directory, so a background backup outlives the polls that started it. */
+function jobRunnerFor(ctx: AgentContext): JobRunner {
+  let runner = jobRunners.get(ctx.stateDir);
+  if (!runner) {
+    runner = new JobRunner({
+      docker: ctx.docker,
+      stateDir: ctx.stateDir,
+      concurrency: Number(process.env.TUG_BACKUP_CONCURRENCY) || 1,
+      fetchCredentials: (commandId) =>
+        api<BackupCredentialsResponse>(
+          ctx,
+          `/agent/v1/backup/credentials?command=${encodeURIComponent(commandId)}`,
+        ),
+    });
+    jobRunners.set(ctx.stateDir, runner);
+    // Clear helper containers a previous agent process left behind, before any live session can start one.
+    void runner.warm();
+  }
+  return runner;
+}
+
+const dbsByStateDir = new Map<string, Db>();
+async function agentDb(stateDir: string): Promise<Db> {
+  let db = dbsByStateDir.get(stateDir);
+  if (!db) {
+    await ensureDir(stateDir);
+    db = await openAgentDb(path.join(stateDir, 'agent.db'));
+    dbsByStateDir.set(stateDir, db);
+  }
+  return db;
+}
+
+async function api<T = unknown>(
+  ctx: AgentContext,
+  route: string,
+  opts: RequestInit = {},
+): Promise<T> {
+  const res = await ctx.http(`${ctx.controlUrl}${route}`, {
+    ...opts,
+    headers: (opts.headers as Record<string, string> | undefined) || {},
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    // An agent ahead of its control is refused before any handler runs: say what to do instead of echoing the JSON.
+    const skew = skewRefusalMessage(text);
+    throw new Error(
+      skew
+        ? `${skew} (agent ${packageVersion()}; its containers keep running, and it resumes once the control is upgraded or the agent is rolled back to the control's version)`
+        : `${opts.method || 'GET'} ${route}: ${res.status} ${text}`,
+    );
+  }
+  return res.json() as Promise<T>;
+}
+
+export type AgentLiveControlFrame = AgentLiveCommand;
+export type AgentLiveOutputFrame = AgentLiveFrame;
+type LiveAgentRequest = ProtocolLiveRequest & { sessionId: string };
+interface LiveChannelHandlers {
+  onLive?: (frame: AgentLiveControlFrame) => void | Promise<void>;
+  onDisconnect?: () => void;
+}
+
+type WebSocketFactory = (url: string, credential: Credential | undefined) => WebSocket;
+
+/** Keeps one outbound stream open and falls back to a bounded HTTP wait when an intermediary rejects WebSockets. */
+export class AgentWakeChannel {
+  private readonly ctx: AgentContext;
+  private readonly createSocket: WebSocketFactory;
+  private socket?: WebSocket;
+  private cursor = 0;
+  private pending = false;
+  private waiter?: () => void;
+  private readonly handlers: LiveChannelHandlers;
+
+  constructor(
+    ctx: AgentContext,
+    createSocket: WebSocketFactory = (url, credential) => {
+      if (!credential) throw new Error('agent credential required');
+      return new WebSocket(url, {
+        ...(clientTlsOptions(credential) as object),
+        // Upgrade handling does not gate on this header (express middleware does not run on upgrades); it carries the
+        // agent's version the way every HTTP request from this process does.
+        headers: { [CLIENT_VERSION_HEADER]: packageVersion() },
+        maxPayload: LIVE_MAX_FRAME_BYTES,
+        followRedirects: false,
+      });
+    },
+    handlers: LiveChannelHandlers = {},
+  ) {
+    this.ctx = ctx;
+    this.createSocket = createSocket;
+    this.handlers = handlers;
+  }
+
+  private notify(): void {
+    this.pending = true;
+    this.waiter?.();
+  }
+
+  private async connect(): Promise<boolean> {
+    if (this.socket?.readyState === WebSocket.OPEN) return true;
+    const url = new URL('/agent/v1/stream', this.ctx.controlUrl);
+    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+    return new Promise((resolve) => {
+      let settled = false;
+      const socket = this.createSocket(url.toString(), this.ctx.credential);
+      this.socket = socket;
+      const finish = (connected: boolean) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(connected);
+      };
+      const timer = setTimeout(() => {
+        socket.terminate();
+        finish(false);
+      }, 1500);
+      socket.on('open', () => finish(true));
+      socket.on('message', (data) => {
+        if (this.socket !== socket) return;
+        let message: unknown;
+        const json = data.toString();
+        if (Buffer.byteLength(json) > LIVE_MAX_FRAME_BYTES) {
+          this.close();
+          return;
+        }
+        try {
+          message = JSON.parse(json);
+        } catch {
+          return;
+        }
+        if (!message || typeof message !== 'object') return;
+        const frame = message as Record<string, unknown>;
+        if (typeof frame.type === 'string' && frame.type.startsWith('live.')) {
+          if (frame.v === 1)
+            void Promise.resolve(this.handlers.onLive?.(message as AgentLiveControlFrame)).catch(
+              (error) => console.error('agent live frame failed:', errMessage(error)),
+            );
+          return;
+        }
+        if (
+          (frame.type !== 'ready' && frame.type !== 'work-available') ||
+          !Number.isSafeInteger(frame.cursor) ||
+          Number(frame.cursor) < 0
+        )
+          return;
+        this.cursor = Math.max(this.cursor, Number(frame.cursor));
+        if (frame.type === 'work-available') this.notify();
+      });
+      socket.on('close', () => {
+        if (this.socket === socket) {
+          this.socket = undefined;
+          this.handlers.onDisconnect?.();
+        }
+        if (settled) this.waiter?.();
+        else finish(false);
+      });
+      socket.on('error', () => {
+        if (this.socket === socket) {
+          this.socket = undefined;
+          this.handlers.onDisconnect?.();
+        }
+        socket.terminate();
+        this.waiter?.();
+        finish(false);
+      });
+    });
+  }
+
+  private async waitOnSocket(timeoutMs: number): Promise<void> {
+    if (this.pending) {
+      this.pending = false;
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      const done = () => {
+        clearTimeout(timer);
+        if (this.waiter === done) this.waiter = undefined;
+        resolve();
+      };
+      this.waiter = done;
+      const timer = setTimeout(done, timeoutMs);
+    });
+    this.pending = false;
+  }
+
+  private async longPoll(timeoutMs: number): Promise<void> {
+    const wake = await api<WakeResponse>(
+      this.ctx,
+      `/agent/v1/wake?after=${this.cursor}&timeout=${Math.min(timeoutMs, 30_000)}`,
+    );
+    this.cursor = Math.max(this.cursor, wake.cursor);
+  }
+
+  async wait(timeoutMs: number): Promise<void> {
+    if (await this.connect()) return this.waitOnSocket(timeoutMs);
+    await this.longPoll(timeoutMs);
+  }
+
+  send(frame: AgentLiveOutputFrame): boolean {
+    const socket = this.socket;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+    if (socket.bufferedAmount > 1048576) {
+      this.close();
+      socket.terminate();
+      return false;
+    }
+    try {
+      socket.send(JSON.stringify(frame));
+      return true;
+    } catch {
+      this.close();
+      return false;
+    }
+  }
+
+  close(): void {
+    const socket = this.socket;
+    this.socket = undefined;
+    this.handlers.onDisconnect?.();
+    socket?.close();
+    this.waiter?.();
+  }
+}
+interface PendingLiveSession {
+  ready: Promise<void>;
+  queuedBytes: number;
+}
+
+/** Resolves a service once before starting a process so rollouts cannot silently retarget an open session. */
+export async function resolveLiveContainer(
+  ctx: AgentContext,
+  request: { project: string; service?: string },
+): Promise<string> {
+  const name = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/;
+  if (
+    !name.test(request.project) ||
+    request.project === '..' ||
+    !request.service ||
+    !name.test(request.service)
+  )
+    throw new Error('A valid project and service are required');
+  const state = await loadRolloutState(path.join(ctx.stateDir, 'projects', request.project));
+  const rolling = state.services[request.service];
+  if (rolling && !rolling.active) throw new Error('Rolling service has no active revision');
+  const containers = await projectContainers(ctx.docker, request.project, request.service);
+  // A rolling service has the draining revision beside the serving one; only the serving one is addressed.
+  const candidates = rolling?.active
+    ? containers.filter((c) => c.Names.includes(`/${rolling.active!.container}`))
+    : containers;
+  if (candidates.length !== 1)
+    throw new Error(
+      candidates.length
+        ? 'Service has multiple containers; select an unambiguous service'
+        : 'Service has no container on this node',
+    );
+  if (!/^[a-f0-9]{12,64}$/.test(candidates[0].Id))
+    throw new Error('Docker returned an invalid container ID');
+  return candidates[0].Id;
+}
+
+export class AgentLiveOperations {
+  private readonly ctx: AgentContext;
+  private readonly emit: (frame: AgentLiveOutputFrame) => void;
+  private readonly engine: LiveOperationEngine;
+  private readonly sessions = new Map<string, PendingLiveSession>();
+  constructor(
+    ctx: AgentContext,
+    emit: (frame: AgentLiveOutputFrame) => void,
+    options: Omit<LiveEngineOptions, 'emit' | 'docker'> = {},
+  ) {
+    this.ctx = ctx;
+    this.emit = emit;
+    this.engine = new LiveOperationEngine({
+      docker: ctx.docker,
+      ...options,
+      emit: (event) => {
+        if (!this.sessions.has(event.sessionId)) return;
+        if (event.type === 'exit') this.sessions.delete(event.sessionId);
+        if (event.type === 'output')
+          this.emit({
+            v: 1,
+            type: 'live.output',
+            sessionId: event.sessionId,
+            stream: event.stream,
+            data: event.data,
+          });
+        else if (event.type === 'result')
+          this.emit({
+            v: 1,
+            type: 'live.result',
+            sessionId: event.sessionId,
+            result: event.result,
+          });
+        else this.emit({ ...event, v: 1, type: 'live.exit' });
+      },
+    });
+  }
+  async handle(frame: AgentLiveControlFrame): Promise<void> {
+    if (
+      frame.v !== 1 ||
+      typeof frame.sessionId !== 'string' ||
+      !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,255}$/.test(frame.sessionId)
+    )
+      return;
+    if (frame.type === 'live.open') {
+      // An existing open belongs to its original request; replaying it must not start another process.
+      if (this.sessions.has(frame.sessionId)) return;
+      const entry: PendingLiveSession = { ready: Promise.resolve(), queuedBytes: 0 };
+      this.sessions.set(frame.sessionId, entry);
+      entry.ready = this.open({ ...frame.request, sessionId: frame.sessionId }, entry);
+      await entry.ready;
+      return;
+    }
+    const entry = this.sessions.get(frame.sessionId);
+    if (!entry) return;
+    if (frame.type === 'live.cancel') {
+      this.engine.cancel(frame.sessionId);
+      if (this.sessions.delete(frame.sessionId))
+        this.emit({
+          v: 1,
+          type: 'live.exit',
+          sessionId: frame.sessionId,
+          code: null,
+          signal: null,
+          cancelled: true,
+        });
+      return;
+    }
+    let queued = 0;
+    try {
+      let input: Buffer | undefined;
+      if (frame.type === 'live.stdin') {
+        if (typeof frame.data !== 'string' || frame.data.length > 87384)
+          throw new Error('Invalid stdin frame');
+        input = Buffer.from(frame.data, 'base64');
+        if (input.toString('base64') !== frame.data || input.length > 65536)
+          throw new Error('Invalid base64 stdin');
+        queued = input.length;
+        entry.queuedBytes += queued;
+        if (entry.queuedBytes > 262144) throw new Error('Live stdin queue exceeds size limit');
+      }
+      await entry.ready;
+      if (this.sessions.get(frame.sessionId) !== entry) return;
+      if (frame.type === 'live.stdin' && input) this.engine.stdin(frame.sessionId, input);
+      else if (frame.type === 'live.stdin-end') this.engine.endStdin(frame.sessionId);
+      else if (frame.type === 'live.resize')
+        this.engine.resize(frame.sessionId, frame.columns, frame.rows);
+    } catch (error) {
+      this.fail(frame.sessionId, entry, error);
+    } finally {
+      entry.queuedBytes -= queued;
+    }
+  }
+  dispose(): void {
+    const ids = [...this.sessions.keys()];
+    this.engine.dispose();
+    for (const id of ids)
+      if (this.sessions.delete(id))
+        this.emit({
+          v: 1,
+          type: 'live.exit',
+          sessionId: id,
+          code: null,
+          signal: null,
+          cancelled: true,
+        });
+  }
+  private fail(id: string, entry: PendingLiveSession, error: unknown): void {
+    if (this.sessions.get(id) !== entry) return;
+    this.sessions.delete(id);
+    this.emit({
+      v: 1,
+      type: 'live.exit',
+      sessionId: id,
+      code: null,
+      signal: null,
+      cancelled: false,
+      error: errMessage(error),
+    });
+    this.engine.cancel(id);
+  }
+  private async open(request: LiveAgentRequest, entry: PendingLiveSession): Promise<void> {
+    const current = () => this.sessions.get(request.sessionId) === entry;
+    const started = () => this.emit({ v: 1, type: 'live.started', sessionId: request.sessionId });
+    try {
+      if (this.sessions.size > 16) throw new Error('Live session limit reached');
+      if (!this.ctx.apply) throw new Error('Live operations require an applying agent');
+      if (request.node && request.node !== this.ctx.nodeName)
+        throw new Error('Live request selected a different node');
+      if (
+        typeof request.project !== 'string' ||
+        !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(request.project)
+      )
+        throw new Error('Invalid project');
+      if (request.operation === 'ps') {
+        // A query's result and exit follow `started` immediately, so announce it first.
+        started();
+        await this.engine.start({
+          operation: 'ps',
+          sessionId: request.sessionId,
+          projects: [request.project],
+        });
+        return;
+      }
+      if (!['exec', 'logs', 'inspect'].includes(request.operation))
+        throw new Error('Invalid live operation');
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let container: string;
+      try {
+        container = await Promise.race([
+          resolveLiveContainer(this.ctx, request),
+          new Promise<never>((_resolve, reject) => {
+            timer = setTimeout(
+              () => reject(new Error('Live container resolution timed out')),
+              LIVE_START_TIMEOUT_MS,
+            );
+            timer.unref();
+          }),
+        ]);
+      } finally {
+        clearTimeout(timer);
+      }
+      if (!current()) return;
+      if (request.operation === 'inspect') {
+        started();
+        await this.engine.start({ operation: 'inspect', sessionId: request.sessionId, container });
+        return;
+      }
+      if (request.operation === 'exec')
+        await this.engine.start({
+          operation: 'exec',
+          sessionId: request.sessionId,
+          container,
+          command: request.command,
+          interactive: request.interactive,
+          oneOff: (request as { oneOff?: boolean }).oneOff,
+          tty: request.tty,
+          columns: request.columns,
+          rows: request.rows,
+        });
+      else
+        await this.engine.start({
+          operation: 'logs',
+          sessionId: request.sessionId,
+          container,
+          tail: request.tail,
+        });
+      if (current()) started();
+      else this.engine.cancel(request.sessionId);
+    } catch (error) {
+      this.fail(request.sessionId, entry, error);
+    }
+  }
+}
+
+/** The container's address on the project network, which health checks dial. */
+export async function containerIp(
+  ctx: AgentContext,
+  project: string,
+  container: string,
+): Promise<string> {
+  const networks = (await ctx.docker.inspectContainer(container)).NetworkSettings?.Networks || {};
+  const net = networks[networkName(project)] ?? Object.values(networks)[0];
+  return net?.IPAddress || net?.GlobalIPv6Address || '127.0.0.1';
+}
+
+function tcpCheck(host: string, port: number | string, timeoutMs = 2000): Promise<boolean> {
+  return new Promise((resolve, reject) => {
+    const s = net.createConnection({ host, port: Number(port), timeout: timeoutMs }, () => {
+      s.destroy();
+      resolve(true);
+    });
+    s.on('timeout', () => {
+      s.destroy();
+      reject(new Error(`tcp timeout ${host}:${port}`));
+    });
+    s.on('error', reject);
+  });
+}
+
+let containerized: boolean | undefined;
+/** True when this process runs inside a container: Docker, containerd, Podman or Kubernetes. */
+export function runsInContainer(): boolean {
+  containerized ??= (() => {
+    if (process.env.container || existsSync('/.dockerenv')) return true;
+    try {
+      return /docker|containerd|kubepods|libpod/.test(readFileSync('/proc/1/cgroup', 'utf8'));
+    } catch {
+      return false;
+    }
+  })();
+  return containerized;
+}
+
+/**
+ * Health checks dial the container's address on the project network. An agent that runs as a plain host process
+ * cannot reach it on a lifecycle where Docker lives in a VM (macOS, Windows), and the bare timeout does not say why.
+ */
+export function outsideContainerHint(health: HealthCheck, inContainer = runsInContainer()): string {
+  if (inContainer || health.type === 'docker') return '';
+  return '; this agent is not running in a container, so it may be unable to reach container addresses (a host process on macOS cannot); run it with `docker run` as `tug node add` does';
+}
+
+export async function waitForHealth(
+  ctx: AgentContext,
+  project: string,
+  container: string,
+  service: string,
+  health: HealthCheck | null | undefined,
+): Promise<void> {
+  if (!ctx.apply || !health) return;
+  const retries = Number(health.retries || 10);
+  const intervalMs = parseDuration(health.interval || '2s');
+  let last: unknown;
+  for (let i = 0; i < retries; i++) {
+    try {
+      if (health.type === 'docker') {
+        const state = (await ctx.docker.inspectContainer(container)).State;
+        if (!state?.Running) throw new Error(`${service}: not running`);
+        if (state.Health && state.Health.Status !== 'healthy')
+          throw new Error(`${service}: docker health ${state.Health.Status}`);
+      } else if (health.type === 'tcp') {
+        await assertRunning(ctx, container, service);
+        await tcpCheck(
+          await containerIp(ctx, project, container),
+          health.port as number | string,
+          parseDuration(health.timeout || '2s'),
+        );
+      } else if (health.type === 'http') {
+        await assertRunning(ctx, container, service);
+        const ip = await containerIp(ctx, project, container);
+        const res = await ctx.http(`http://${ip}:${health.port || 80}${health.path || '/'}`, {
+          signal: AbortSignal.timeout(parseDuration(health.timeout || '2s')),
+        });
+        if (!res.ok) throw new Error(`${service}: http ${res.status}`);
+      }
+      return;
+    } catch (e) {
+      last = e;
+      await new Promise((r) => setTimeout(r, intervalMs));
+    }
+  }
+  throw new Error(
+    `${service}: ${describeHealthCheck(health)} failed after ${retries} attempt${retries === 1 ? '' : 's'}: ${describeError(last)}${outsideContainerHint(health)}`,
+  );
+}
+
+/** Fails fast with the exit code and last log lines when the container is gone, instead of dialing a dead address. */
+async function assertRunning(ctx: AgentContext, container: string, service: string): Promise<void> {
+  const state = (await ctx.docker.inspectContainer(container)).State;
+  if (!state || state.Running) return;
+  const tail = await lastLogLines(ctx, container);
+  throw new Error(
+    `${service}: container exited with code ${state.ExitCode ?? '?'}${tail ? `; last log: ${tail}` : ''}`,
+  );
+}
+
+async function lastLogLines(ctx: AgentContext, container: string, lines = 3): Promise<string> {
+  try {
+    const proc = await ctx.docker.logs(container, { follow: false, tail: lines });
+    let out = '';
+    const collect = (chunk: Buffer) => void (out += chunk.toString());
+    proc.stdout.on('data', collect);
+    proc.stderr.on('data', collect);
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, 2000);
+      proc.stdout.once('close', () => (clearTimeout(timer), resolve()));
+      proc.stdout.once('end', () => (clearTimeout(timer), resolve()));
+    });
+    proc.kill();
+    return out.trim().split('\n').slice(-lines).join(' | ').slice(0, 400);
+  } catch {
+    return '';
+  }
+}
+
+/** Node's fetch reports every network failure as "fetch failed"; the system error that explains it is on `cause`. */
+function describeError(error: unknown): string {
+  const e = error as { message?: string; cause?: { code?: string; message?: string } } | undefined;
+  const cause = e?.cause?.code || e?.cause?.message;
+  return cause ? `${e?.message ?? 'error'} (${cause})` : (e?.message ?? 'no response');
+}
+function describeHealthCheck(health: HealthCheck): string {
+  if (health.type === 'http')
+    return `http health check on port ${health.port || 80}${health.path || '/'}`;
+  if (health.type === 'tcp') return `tcp health check on port ${health.port}`;
+  return 'docker health check';
+}
+
+export { parseDuration };
+
+export interface PublicListener {
+  project: string;
+  container: string;
+  listen: string;
+}
+
+/** Containers of Tug projects (`projects`) that publish a port on all interfaces or on a public IP. */
+export function publicListeners(
+  containers: ContainerSummary[],
+  projects: readonly string[],
+): PublicListener[] {
+  const out: PublicListener[] = [];
+  for (const c of containers) {
+    const project = c.Labels?.['tug.project'];
+    if (!project || !projects.includes(project)) continue;
+    for (const p of c.Ports || []) {
+      if (!p.PublicPort || !p.IP || !isPublicAddress(p.IP)) continue;
+      const host = p.IP.includes(':') ? `[${p.IP}]` : p.IP;
+      out.push({
+        project,
+        container: (c.Names?.[0] || c.Id).replace(/^\//, ''),
+        listen: `${host}:${p.PublicPort}->${p.PrivatePort}/${p.Type}`,
+      });
+    }
+  }
+  return out;
+}
+
+/** `ports.public` diagnostic: a warning, not a failure, since an operator may publish on purpose with an explicit host IP. */
+async function publicPortsCheck(ctx: AgentContext): Promise<DiagnosticCheck> {
+  try {
+    const projects = await fs
+      .readdir(path.join(ctx.stateDir, 'projects'))
+      .catch(() => [] as string[]);
+    const containers = await ctx.docker.listContainers({ label: ['tug.project'] }, false);
+    const listeners = publicListeners(containers, projects);
+    const stdout = listeners.map((l) => `${l.project}\t${l.container}\t${l.listen}`).join('\n');
+    return listeners.length
+      ? {
+          name: 'ports.public',
+          ok: true,
+          stdout: stdout.slice(-4000),
+          warning: `${listeners.length} published port${listeners.length === 1 ? ' of Tug projects listens' : 's of Tug projects listen'} on a public address; bind them to 127.0.0.1 or a private node address unless that is intended`,
+        }
+      : {
+          name: 'ports.public',
+          ok: true,
+          stdout: 'no Tug project container listens on a public address',
+        };
+  } catch (e) {
+    return { name: 'ports.public', ok: false, error: errMessage(e).slice(-4000) };
+  }
+}
+
+const MIN_API_VERSION = API_VERSION.replace(/^v/, '');
+/** The minor number of an Engine API version such as `1.41`; 0 when unparseable. */
+const apiMinor = (version: string | undefined): number => Number(version?.split('.')[1]) || 0;
+
+export async function executeCommand(
+  command: Command,
+  ctx: AgentContext = defaultContext(),
+): Promise<CommandResult> {
+  const payload: { project: string; service: string; tail?: number | string; volume: string } =
+    typeof command.payload_json === 'string'
+      ? JSON.parse(command.payload_json || '{}')
+      : command.payload || {};
+  if (command.type === 'diagnostics.run') {
+    const checks: DiagnosticCheck[] = [];
+    const daemon: [string, () => Promise<string>][] = [
+      ['docker.info', async () => JSON.stringify(await ctx.docker.info(), null, 2)],
+      [
+        'docker.version',
+        async () => {
+          const version = await ctx.docker.version();
+          if (apiMinor(version.ApiVersion) < apiMinor(MIN_API_VERSION))
+            throw new Error(
+              `Docker Engine API ${version.ApiVersion} is older than the ${MIN_API_VERSION} the agent needs (Docker 20.10+)`,
+            );
+          return JSON.stringify(version, null, 2);
+        },
+      ],
+    ];
+    for (const [name, fn] of daemon) {
+      try {
+        checks.push({ name, ok: true, stdout: (await fn()).slice(-4000), stderr: '' });
+      } catch (e) {
+        checks.push({ name, ok: false, error: errMessage(e).slice(-4000) });
+      }
+    }
+    const extra: [string, () => Promise<{ out: string; err: string }>][] = [];
+    if (
+      await fs.stat(path.join(ctx.stateDir, 'ingress')).then(
+        () => true,
+        () => false,
+      )
+    ) {
+      extra.push([
+        'ingress.caddy',
+        async () => ({
+          out: String((await ctx.docker.inspectContainer(CADDY_CONTAINER)).State?.Status),
+          err: '',
+        }),
+      ]);
+    }
+    for (const [name, fn] of extra) {
+      try {
+        const result = await fn();
+        checks.push({
+          name,
+          ok: true,
+          stdout: result.out.slice(-4000),
+          stderr: result.err.slice(-4000),
+        });
+      } catch (e) {
+        checks.push({ name, ok: false, error: errMessage(e).slice(-4000) });
+      }
+    }
+    checks.push(await publicPortsCheck(ctx));
+    return {
+      commandId: command.id,
+      state: checks.every((c) => c.ok) ? 'succeeded' : 'failed',
+      result: { checks, node: ctx.nodeName },
+    };
+  }
+  if (command.type === 'service.restart') {
+    const { project, service } = payload;
+    await ctx.docker.restartContainer(await resolveLiveContainer(ctx, { project, service }));
+    return {
+      commandId: command.id,
+      state: 'succeeded',
+      result: { project, service, restarted: true },
+    };
+  }
+  if (command.type === 'logs.fetch') {
+    const { project, service } = payload;
+    const id = await resolveLiveContainer(ctx, { project, service });
+    const logs = await ctx.docker.logs(id, { follow: false, tail: Number(payload.tail || 200) });
+    const out: Buffer[] = [];
+    const err: Buffer[] = [];
+    logs.stdout.on('data', (d: Buffer) => out.push(d));
+    logs.stderr.on('data', (d: Buffer) => err.push(d));
+    await new Promise<void>((resolve, reject) => {
+      logs.on('error', reject);
+      logs.on('close', () => resolve());
+    });
+    return {
+      commandId: command.id,
+      state: 'succeeded',
+      result: {
+        stdout: Buffer.concat(out).toString('utf8'),
+        stderr: Buffer.concat(err).toString('utf8'),
+      },
+    };
+  }
+  if (command.type === 'volume.delete') {
+    const { project, volume } = payload;
+    // Volumes are never removed by reconciliation; this explicit command is the only way one goes away.
+    const name = volumeName(project, volume);
+    const existing = await ctx.docker.inspectVolume(name);
+    if (existing) assertVolumeOwnership(existing, project, volume);
+    if (existing)
+      await ctx.docker.removeVolume(name).catch((e) => {
+        if (!isNotFound(e)) throw e;
+      });
+    return {
+      commandId: command.id,
+      state: 'succeeded',
+      result: { project, volume, deleted: true },
+    };
+  }
+  return {
+    commandId: command.id,
+    state: 'failed',
+    result: { error: `unsupported command ${command.type}` },
+  };
+}
+
+async function managedImageFile(ctx: AgentContext): Promise<string> {
+  await ensureDir(ctx.stateDir);
+  return path.join(ctx.stateDir, 'managed-images.json');
+}
+async function managedImages(ctx: AgentContext): Promise<string[]> {
+  try {
+    const refs = JSON.parse(await fs.readFile(await managedImageFile(ctx), 'utf8'));
+    return Array.isArray(refs)
+      ? refs.filter((ref: unknown) => typeof ref === 'string' && ref.startsWith('tug-build/'))
+      : [];
+  } catch {
+    return [];
+  }
+}
+export async function ensureArtifact(ctx: AgentContext, artifact: ImageArtifact): Promise<void> {
+  const identityFile = path.join(ctx.stateDir, 'image-identities.json');
+  let identities: Record<string, { daemonId: string; artifactId: string; sha256: string }> = {};
+  try {
+    identities = JSON.parse(await fs.readFile(identityFile, 'utf8'));
+  } catch {}
+  const remember = async (daemonId: string) => {
+    identities[artifact.imageRef] = {
+      daemonId,
+      artifactId: artifact.imageId,
+      sha256: artifact.sha256,
+    };
+    await fs.writeFile(identityFile, JSON.stringify(identities), { mode: 0o600 });
+    const refs = await managedImages(ctx);
+    if (!refs.includes(artifact.imageRef))
+      await fs.writeFile(
+        await managedImageFile(ctx),
+        JSON.stringify([...refs, artifact.imageRef]),
+        { mode: 0o600 },
+      );
+  };
+  const inspect = () => ctx.docker.inspectImage(artifact.imageRef);
+  try {
+    const image = await inspect();
+    if (
+      image &&
+      (image?.Id === artifact.imageId ||
+        (identities[artifact.imageRef]?.daemonId === image?.Id &&
+          identities[artifact.imageRef]?.artifactId === artifact.imageId &&
+          identities[artifact.imageRef]?.sha256 === artifact.sha256)) &&
+      `${image.Os}/${image.Architecture}` === artifact.platform
+    ) {
+      await remember(image.Id);
+      return;
+    }
+  } catch {}
+  const host = await ctx.docker.info();
+  const arch = host.Architecture
+    ? ({ x86_64: 'amd64', aarch64: 'arm64' } as Record<string, string>)[host.Architecture] ||
+      host.Architecture
+    : undefined;
+  if (host.OSType && arch && `${host.OSType}/${arch}` !== artifact.platform)
+    throw new Error(
+      `image platform ${artifact.platform} does not match node ${host.OSType}/${arch}; build for the target platform`,
+    );
+  const downloadDir = await fs.mkdtemp(path.join(ctx.stateDir, 'image-download-'));
+  const file = path.join(downloadDir, 'image.tar.gz');
+  try {
+    const response = await ctx.http(
+      `${ctx.controlUrl}/agent/v1/images/${encodeURIComponent(artifact.buildId)}`,
+      { redirect: 'error', signal: AbortSignal.timeout(10 * 60 * 1000) },
+    );
+    if (!response.ok || !response.body)
+      throw new Error(`image download failed: HTTP ${response.status}`);
+    await pipeline(
+      Readable.fromWeb(response.body as import('node:stream/web').ReadableStream),
+      verifyDownload(artifact),
+      createWriteStream(file, { mode: 0o600 }),
+    );
+    const archive = await validateImageArchive(file, artifact.imageRef);
+    if (archive.imageId !== artifact.imageId || archive.platform !== artifact.platform)
+      throw new Error('downloaded archive image metadata differs from desired artifact');
+    await ctx.docker.loadImage(createReadStream(file));
+    const image = await inspect();
+    if (!image?.Id || `${image.Os}/${image.Architecture}` !== artifact.platform)
+      throw new Error('loaded image identity or platform does not match desired artifact');
+    await remember(image.Id);
+  } finally {
+    await fs.rm(downloadDir, { recursive: true, force: true });
+  }
+}
+export async function pruneManagedImages(ctx: AgentContext, retained: string[]): Promise<void> {
+  if (!ctx.apply) return;
+  const keep = new Set(retained);
+  const remaining: string[] = [];
+  for (const ref of await managedImages(ctx)) {
+    if (keep.has(ref)) {
+      remaining.push(ref);
+      continue;
+    }
+    try {
+      if ((await ctx.docker.listContainers({ ancestor: ref })).length) {
+        remaining.push(ref);
+        continue;
+      }
+      await ctx.docker.removeImage(ref);
+    } catch {
+      remaining.push(ref);
+    }
+  }
+  await fs.writeFile(await managedImageFile(ctx), JSON.stringify(remaining), { mode: 0o600 });
+}
+
+/**
+ * The IP that published ports without a host IP listen on: `127.0.0.1` when the node has no
+ * address, the address itself when it is an IP, otherwise what it resolves to on this node.
+ */
+export async function resolveBindAddress(
+  address: string | null,
+  lookup: (host: string) => Promise<{ address: string }> = (host) => dns.lookup(host),
+): Promise<string> {
+  if (!address) return '127.0.0.1';
+  const bare = address.replace(/^\[|\]$/g, '');
+  if (net.isIP(bare)) return bare;
+  try {
+    return (await lookup(bare)).address;
+  } catch (e) {
+    throw new Error(
+      `cannot resolve node address ${address} to bind published ports: ${errMessage(e)}`,
+      { cause: e },
+    );
+  }
+}
+
+// Last public-port warning per project, so the event is sent when it changes rather than on every poll.
+const publicPortWarnings = new Map<string, string>();
+
+/** Stops every running container of a service, including the revisions of a rolling service. */
+async function stopService(docker: DockerApi, project: string, service: string): Promise<void> {
+  const running = await docker.listContainers({
+    label: [`${LABEL_PROJECT}=${project}`, `${LABEL_SERVICE}=${service}`],
+  });
+  for (const container of running) await docker.stopContainer(container.Id);
+}
+
+export async function reconcile(
+  desiredState: DesiredState,
+  ctx: AgentContext = defaultContext(),
+  endpoints: Record<string, ServiceEndpoint[]> = {},
+  ports: PortBinding = { address: null, loopback: {} },
+  held: string[] = [],
+): Promise<ProjectStatus> {
+  const dir = path.join(ctx.stateDir, 'projects', desiredState.project);
+  await ensureDir(dir);
+  const serviceNames = Object.keys(containerSpecs(desiredState, ctx.nodeName).specs);
+  if (!serviceNames.length) {
+    if (ctx.apply) {
+      await sweepOrphans(ctx.docker, desiredState.project, new Set()).catch(() => {});
+      await clearRolloutState(dir).catch(() => {});
+    }
+    return {
+      project: desiredState.project,
+      observedVersion: desiredState.version,
+      ...(desiredState.revision ? { observedRevision: desiredState.revision } : {}),
+      health: 'skipped',
+      services: [],
+      serviceStates: {},
+    };
+  }
+  const serviceStates: Record<string, ServiceState> = Object.fromEntries(
+    serviceNames.map((service) => [
+      service,
+      { rolloutState: 'pending', image: desiredState.services[service]?.image },
+    ]),
+  );
+  const emit = (service: string, rolloutState: string, message = rolloutState, level = 'info') =>
+    api(ctx, '/agent/v1/events', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        projectId: desiredState.project,
+        level,
+        type: `service.${rolloutState}`,
+        message,
+        metadata: { service, version: desiredState.version, node: ctx.nodeName },
+      }),
+    }).catch(() => {});
+  const sec = await api<SecretsResponse>(
+    ctx,
+    `/agent/v1/secrets?project=${encodeURIComponent(desiredState.project)}&services=${encodeURIComponent(serviceNames.join(','))}`,
+  );
+  const currentSecretVersions = serviceSecretVersions(
+    desiredState.compose,
+    serviceNames,
+    sec.versions || {},
+  );
+  const db = await agentDb(ctx.stateDir);
+  const previousRow = db.get<AppliedStateRow>(
+    'SELECT version, revision FROM applied_state WHERE project = ?',
+    desiredState.project,
+  );
+  // A held service is stopped and left alone (a restore is rewriting its data) until control drops the hold.
+  const heldSet = new Set(held.filter((service) => serviceNames.includes(service)));
+  for (const service of heldSet) serviceStates[service].rolloutState = 'held';
+  const rolling = serviceNames.filter(
+    (service) => !heldSet.has(service) && isRolling(desiredState.compose.services[service]),
+  );
+  const rollingSet = new Set(rolling);
+  const mainServices = serviceNames.filter(
+    (service) => !rollingSet.has(service) && !heldSet.has(service),
+  );
+  // Published images are pulled only for a new desired revision. Pulling on every poll would let a tag that moved
+  // upstream (`mariadb:11`) recreate the container without a deploy.
+  const sameDesiredVersion = previousRow
+    ? desiredState.revision
+      ? previousRow.revision === desiredState.revision
+      : previousRow.version === desiredState.version
+    : false;
+  const loopback = new Set(ports.loopback[desiredState.project] || []);
+  // Resolve only when some port actually binds to the node address; a hostname nobody needs must not fail the apply.
+  const needsAddress =
+    addressBoundServices(desiredState.compose, serviceNames, loopback).length > 0;
+  const bind: PortBind = {
+    address: needsAddress ? await resolveBindAddress(ports.address) : '127.0.0.1',
+    loopback,
+  };
+  const plan = containerSpecs(desiredState, ctx.nodeName, {
+    secrets: sec.secrets || {},
+    secretVersions: sec.versions || {},
+    endpoints,
+    bind,
+  });
+  await warnPublicPorts(ctx, desiredState, serviceNames, bind);
+  const failedStatus = (error: string): ProjectStatus => ({
+    project: desiredState.project,
+    observedVersion: desiredState.version,
+    ...(desiredState.revision ? { observedRevision: desiredState.revision } : {}),
+    health: 'failed',
+    services: serviceNames,
+    serviceStates,
+    error,
+  });
+  // Lifecycle events say what changed, not that the agent is still polling. They are sent when the desired revision
+  // or any container definition (which includes the secret versions it uses) changes, when an apply fails (once)
+  // and when it recovers (once).
+  const eventFingerprint = createHash('sha256')
+    .update(
+      JSON.stringify([
+        desiredState.revision || desiredState.version,
+        mainServices.map((service) => plan.specs[service].hash),
+      ]),
+    )
+    .digest('hex')
+    .slice(0, 16);
+  const knownEvents = mainServices.length
+    ? db.get<EventStateRow>(
+        'SELECT fingerprint, phase FROM event_state WHERE project = ?',
+        desiredState.project,
+      )
+    : undefined;
+  const announce = knownEvents?.fingerprint !== eventFingerprint;
+  const wasFailed = !announce && knownEvents?.phase === 'failed';
+  const markEvents = (phase: 'serving' | 'failed') =>
+    db.run(
+      'INSERT INTO event_state(project, fingerprint, phase) VALUES(?,?,?) ON CONFLICT(project) DO UPDATE SET fingerprint=excluded.fingerprint, phase=excluded.phase',
+      desiredState.project,
+      eventFingerprint,
+      phase,
+    );
+  const deps = {
+    waitForHealth: (container: string, service: string, dependency?: boolean) =>
+      waitForHealth(
+        ctx,
+        desiredState.project,
+        container,
+        service,
+        desiredState.services[service]?.health ?? (dependency ? { type: 'docker' } : null),
+      ),
+    ensureArtifact: async (service: string) => {
+      const artifact = desiredState.services[service].artifact;
+      if (artifact) await ensureArtifact(ctx, artifact);
+    },
+    pullImage: (service: string) =>
+      ctx.docker.pullImage(
+        plan.specs[service].body.Image,
+        sec.registryAuth?.[imageLocation(plan.specs[service].body.Image).host],
+      ),
+    emit,
+  };
+  let failing: string | undefined;
+  if (ctx.apply) {
+    try {
+      await ensureProjectResources(ctx.docker, desiredState.project, plan);
+      await sweepOrphans(ctx.docker, desiredState.project, new Set(serviceNames));
+      for (const service of heldSet) await stopService(ctx.docker, desiredState.project, service);
+      if (mainServices.length)
+        await reconcileRecreate(
+          ctx.docker,
+          {
+            desired: desiredState,
+            dir,
+            plan,
+            nodeName: ctx.nodeName,
+            deps,
+            services: mainServices,
+            pull: !sameDesiredVersion,
+          },
+          {
+            pulling: async (service) => {
+              serviceStates[service].rolloutState = 'pulling';
+              if (announce) await emit(service, 'pulling');
+            },
+            starting: async (service) => {
+              serviceStates[service].rolloutState = 'starting';
+              if (announce) await emit(service, 'starting');
+            },
+            checking: async (service) => {
+              serviceStates[service].rolloutState = 'health_checking';
+              if (announce) await emit(service, 'health_checking');
+            },
+            serving: async (service) => {
+              serviceStates[service].rolloutState = 'serving';
+              serviceStates[service].healthyAt = now();
+              if (announce || wasFailed)
+                await emit(
+                  service,
+                  'serving',
+                  wasFailed ? 'serving again after a failure' : 'serving',
+                );
+            },
+            failing: (service) => {
+              failing = service;
+            },
+          },
+        );
+      if (mainServices.length && (announce || wasFailed)) markEvents('serving');
+    } catch (e) {
+      if (mainServices.length && !wasFailed) {
+        // Announce a failure once; retries of the same failure stay quiet until it recovers or the inputs change.
+        await emit(failing ?? mainServices.join(', '), 'failed', errMessage(e), 'error');
+        markEvents('failed');
+      }
+      // Rolling services are untouched by a failure here, so keep reporting their current revision as serving.
+      if (!rolling.length) {
+        // Callers turn the throw into a failed status; carry the per-service states so a held writer is still seen.
+        throw Object.assign(e instanceof Error ? e : new Error(errMessage(e)), { serviceStates });
+      }
+      Object.assign(serviceStates, await activeRollingStates(dir, rolling));
+      return failedStatus(errMessage(e));
+    }
+    if (rolling.length) {
+      const rolled = await reconcileRolling(ctx.docker, {
+        desired: desiredState,
+        dir,
+        services: rolling,
+        plan,
+        nodeName: ctx.nodeName,
+        rolloutPorts: ctx.rolloutPorts,
+        deps,
+      });
+      Object.assign(serviceStates, rolled.serviceStates);
+      const errors = Object.entries(rolled.errors);
+      if (errors.length)
+        return failedStatus(errors.map(([service, error]) => `${service}: ${error}`).join('; '));
+    } else await clearRolloutState(dir);
+  } else {
+    for (const service of serviceNames) serviceStates[service].rolloutState = 'serving';
+  }
+  db.run(
+    `INSERT INTO applied_state(project, version, revision, applied_at, service_states_json, secret_versions_json)
+     VALUES(?,?,?,?,?,?)
+     ON CONFLICT(project) DO UPDATE SET version=excluded.version, revision=excluded.revision, applied_at=excluded.applied_at,
+       service_states_json=excluded.service_states_json, secret_versions_json=excluded.secret_versions_json`,
+    desiredState.project,
+    desiredState.version,
+    desiredState.revision || null,
+    now(),
+    JSON.stringify(serviceStates),
+    JSON.stringify(currentSecretVersions),
+  );
+  return {
+    project: desiredState.project,
+    observedVersion: desiredState.version,
+    ...(desiredState.revision ? { observedRevision: desiredState.revision } : {}),
+    health: 'serving',
+    services: serviceNames,
+    serviceStates,
+  };
+}
+
+/** Emits a `ports.public` warning when published ports of this project are bound to a public node address. */
+async function warnPublicPorts(
+  ctx: AgentContext,
+  desiredState: DesiredState,
+  serviceNames: string[],
+  bind: PortBind,
+): Promise<void> {
+  const key = `${ctx.stateDir}\0${desiredState.project}`;
+  const exposed = isPublicAddress(bind.address)
+    ? addressBoundServices(desiredState.compose, serviceNames, bind.loopback)
+    : [];
+  const message = exposed.length
+    ? `published ports of ${exposed.join(', ')} listen on public address ${bind.address}; give the node a private address, or write the host IP in ports to make the exposure explicit`
+    : '';
+  if ((publicPortWarnings.get(key) ?? '') === message) return;
+  publicPortWarnings.set(key, message);
+  if (!message) return;
+  await api(ctx, '/agent/v1/events', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      projectId: desiredState.project,
+      level: 'warn',
+      type: 'ports.public',
+      message,
+      metadata: { services: exposed, address: bind.address, node: ctx.nodeName },
+    }),
+  }).catch(() => {});
+}
+
+/** Docker `extra_hosts` values must be IPs, so resolve hostname node addresses on this agent. */
+export async function endpointAddressesForAgent(
+  endpoints: Record<string, ServiceEndpoint[]> = {},
+  localServices: Set<string> = new Set(),
+  lookup: (host: string) => Promise<{ address: string }> = (host) => dns.lookup(host),
+): Promise<Record<string, ServiceEndpoint[]>> {
+  const cache = new Map<string, Promise<string>>();
+  const resolve = (address: string): Promise<string> => {
+    if (net.isIP(address)) return Promise.resolve(address);
+    let resolved = cache.get(address);
+    if (!resolved) {
+      resolved = lookup(address).then(
+        ({ address: ip }) => ip,
+        (error: unknown) => {
+          throw new Error(
+            `cannot resolve node address ${address} for cross-node service names: ${errMessage(error)}`,
+            { cause: error },
+          );
+        },
+      );
+      cache.set(address, resolved);
+    }
+    return resolved;
+  };
+  return Object.fromEntries(
+    await Promise.all(
+      Object.entries(endpoints)
+        .filter(([service]) => !localServices.has(service))
+        .map(async ([service, list]) => [
+          service,
+          (
+            await Promise.all(
+              list.map(async (ep) => {
+                try {
+                  return { ...ep, address: await resolve(ep.address) };
+                } catch (error) {
+                  console.error(errMessage(error));
+                  return null;
+                }
+              }),
+            )
+          ).filter((ep): ep is ServiceEndpoint => ep !== null),
+        ]),
+    ),
+  );
+}
+
+export async function pollOnce(ctx: AgentContext = defaultContext()): Promise<ProjectStatus[]> {
+  const work = await api<WorkResponse & { desiredState?: DesiredState }>(ctx, '/agent/v1/work');
+  const projects: ProjectStatus[] = [];
+  for (const desired of work.desiredStates || (work.desiredState ? [work.desiredState] : [])) {
+    try {
+      projects.push(
+        await reconcile(
+          desired,
+          ctx,
+          await endpointAddressesForAgent(
+            work.serviceEndpoints?.[desired.project],
+            new Set(
+              Object.entries(desired.services)
+                .filter(([, spec]) => spec.placement?.nodes?.includes(ctx.nodeName))
+                .map(([name]) => name),
+            ),
+          ),
+          work.ports,
+          work.holds?.[desired.project],
+        ),
+      );
+    } catch (e) {
+      projects.push({
+        project: desired.project,
+        observedVersion: desired.version,
+        ...(desired.revision ? { observedRevision: desired.revision } : {}),
+        health: 'failed',
+        error: errMessage(e),
+        ...((e as { serviceStates?: ProjectStatus['serviceStates'] }).serviceStates
+          ? {
+              serviceStates: (e as { serviceStates: ProjectStatus['serviceStates'] }).serviceStates,
+            }
+          : {}),
+      });
+    }
+  }
+  let ingress: IngressStatus | undefined;
+  if (ctx.apply) {
+    const ingressCtx = { docker: ctx.docker, stateDir: ctx.stateDir, caddyImage: ctx.caddyImage };
+    if (work.ingress) ingress = await reconcileIngress(ingressCtx, work.ingress);
+    else await removeIngress(ingressCtx).catch(() => false);
+  }
+  const commandResults: CommandResult[] = [];
+  const jobs = jobRunnerFor(ctx);
+  for (const command of work.commands || []) {
+    // Backups can run for an hour, so they run in the background and report through later polls.
+    if (command.type.startsWith('backup.')) {
+      await jobs.start(command);
+      continue;
+    }
+    try {
+      commandResults.push(await executeCommand(command, ctx));
+    } catch (e) {
+      commandResults.push({
+        commandId: command.id,
+        state: 'failed',
+        result: { error: errMessage(e) },
+      });
+    }
+  }
+  const jobResults = jobs.pending();
+  commandResults.push(...jobResults);
+  const report: StatusReport = {
+    node: ctx.nodeName,
+    sentAt: new Date().toISOString(),
+    projects,
+    commandResults,
+  };
+  const running = jobs.statuses();
+  if (running.length) report.jobs = running;
+  if (ingress) report.ingress = ingress;
+  if (work.retainedImages && projects.every((project) => project.health !== 'failed'))
+    await pruneManagedImages(ctx, work.retainedImages);
+  await api(ctx, '/agent/v1/status', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(report),
+  });
+  await jobs.acknowledge(jobResults);
+  return projects;
+}
+
+async function readJoinKey(): Promise<string | null> {
+  if (process.env.TUG_JOIN_KEY) return process.env.TUG_JOIN_KEY.trim();
+  const file = process.env.TUG_JOIN_KEY_FILE;
+  if (file) {
+    try {
+      return (await fs.readFile(file, 'utf8')).trim();
+    } catch (e) {
+      throw new Error(`cannot read TUG_JOIN_KEY_FILE ${file}: ${errMessage(e)}`, { cause: e });
+    }
+  }
+  return null;
+}
+/** Enrolls with a single-use bootstrap certificate; a retry reuses the pending key, which control accepts by key. */
+async function enroll(joinKey: string): Promise<AgentDocument> {
+  let decoded: JoinKey;
+  try {
+    decoded = JSON.parse(Buffer.from(joinKey, 'base64url').toString('utf8'));
+    if (decoded.v !== 2) throw new Error('unsupported join key version');
+    parseCredential(decoded.credential);
+  } catch (e) {
+    throw new Error('invalid join key (expected a base64url-encoded v2 join key)', { cause: e });
+  }
+  const transport = createTransport(decoded.credential, CONTROL_URL_OVERRIDE || decoded.connectUrl);
+  console.log(`enrolling with ${decoded.credential.url} as ${decoded.name}`);
+  const csr = await agentIdentityCsr(STATE_DIR);
+  const body: EnrollRequest = {
+    csr,
+    address: process.env.TUG_NODE_ADDRESS,
+  };
+  try {
+    const res = await transport.http(`${transport.base}/agent/v1/enroll`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error(`enroll failed: ${res.status} ${await res.text()}`);
+    const doc = await installIdentity(STATE_DIR, (await res.json()) as EnrollResponse);
+    console.log(`enrolled as node ${doc.nodeName}`);
+    return doc;
+  } finally {
+    void transport.close();
+  }
+}
+/** Loads the persisted identity, or enrolls with a join key. Without either the agent refuses to start. */
+export async function loadOrEnroll(): Promise<AgentDocument> {
+  let doc = await loadAgentDocument(STATE_DIR);
+  if (!doc) {
+    const joinKey = await readJoinKey();
+    if (!joinKey) throw new Error(describeMissingIdentity());
+    doc = await enroll(joinKey);
+  }
+  NODE_NAME = doc.nodeName;
+  activeDocument = doc;
+  return doc;
+}
+
+const RENEW_RETRY_MS = 15 * 60_000;
+
+export async function main(): Promise<void> {
+  const doc = await loadOrEnroll();
+  const ctx = defaultContext(doc);
+  console.log(`tug-agent node=${NODE_NAME} control=${ctx.controlUrl} apply=${APPLY}`);
+  let renewAt = renewalTime(doc.cert);
+  /** Renews with the same key, saves, then swaps the client and reconnects. Failure keeps the old identity until it expires. */
+  const renewIfDue = async (): Promise<void> => {
+    if (Date.now() < renewAt || !ctx.credential) return;
+    try {
+      const current = ctx.credential as AgentDocument;
+      const next = await renewCertificate(STATE_DIR, current, (csr) =>
+        api<{ certificate: string }>(ctx, '/agent/v1/renew', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ csr }),
+        }),
+      );
+      const transport = createTransport(next, CONTROL_URL_OVERRIDE);
+      const previous = ctx.http;
+      ctx.http = transport.http as HttpClient;
+      ctx.credential = next;
+      void previous;
+      renewAt = renewalTime(next.cert);
+      wake.close();
+      console.log('node certificate renewed');
+    } catch (e) {
+      renewAt = Date.now() + RENEW_RETRY_MS;
+      console.error(`certificate renewal failed (keeping the current one): ${errMessage(e)}`);
+    }
+  };
+  const wake = new AgentWakeChannel(ctx, undefined, {
+    onLive: (frame) => live.handle(frame),
+    onDisconnect: () => live.dispose(),
+  });
+  const live = new AgentLiveOperations(ctx, (frame) => {
+    wake.send(frame);
+  });
+  for (;;) {
+    await renewIfDue();
+    try {
+      await pollOnce(ctx);
+    } catch (e) {
+      console.error(errMessage(e));
+    }
+    try {
+      await wake.wait(INTERVAL);
+    } catch (e) {
+      console.error(`agent wake wait failed: ${errMessage(e)}`);
+      await new Promise((r) => setTimeout(r, INTERVAL));
+    }
+  }
+}
+if (import.meta.url === `file://${process.argv[1]}`) main();

@@ -6,29 +6,29 @@ import {
   integerOption,
   nodeSettings,
   resolveCliConfig,
-} from './cli-config.ts';
-import { CliLiveError } from './cli-live.ts';
-import { setVerbose } from './cli-process.ts';
-import { isUsageError } from './cli-usage.ts';
-import { CREDENTIAL_NAME_PATTERN, PROJECT_NAME_PATTERN } from './credentials.ts';
-import { packageVersion } from './image.ts';
-import { errMessage } from './util.ts';
-import { CONFIG_HELP, setResolvedConfig } from './commands/context.ts';
-import { registerBackup } from './commands/backup.ts';
-import { registerControl } from './commands/control.ts';
-import { registerCredential } from './commands/credential.ts';
-import { registerDeploy } from './commands/deploy.ts';
-import { registerInit } from './commands/init.ts';
-import { registerNode } from './commands/node.ts';
-import { registerObserve } from './commands/observe.ts';
-import { registerRestore } from './commands/restore.ts';
-import { registerHold } from './commands/hold.ts';
-import { registerImage } from './commands/image.ts';
-import { registerLint } from './commands/lint.ts';
-import { registerDomain } from './commands/domain.ts';
-import { registerSecret } from './commands/secret.ts';
-import { registerService } from './commands/service.ts';
-import { registerVolume } from './commands/volume.ts';
+} from './cli/config.ts';
+import { CliLiveError } from './cli/live.ts';
+import { setVerbose } from './cli/process.ts';
+import { isUsageError } from './cli/usage.ts';
+import { CREDENTIAL_NAME_PATTERN, PROJECT_NAME_PATTERN } from './roles.ts';
+import { packageVersion } from './images/image.ts';
+import { errMessage } from './errors.ts';
+import { CONFIG_HELP, setResolvedConfig } from './cli/commands/context.ts';
+import { registerBackup } from './cli/commands/backup.ts';
+import { registerControl } from './cli/commands/control.ts';
+import { registerCredential } from './cli/commands/credential.ts';
+import { registerDeploy } from './cli/commands/deploy.ts';
+import { registerInit } from './cli/commands/init.ts';
+import { registerNode } from './cli/commands/node.ts';
+import { registerObserve } from './cli/commands/observe.ts';
+import { registerRestore } from './cli/commands/restore.ts';
+import { registerHold } from './cli/commands/hold.ts';
+import { registerImage } from './cli/commands/image.ts';
+import { registerLint } from './cli/commands/lint.ts';
+import { registerDomain } from './cli/commands/domain.ts';
+import { registerSecret } from './cli/commands/secret.ts';
+import { registerService } from './cli/commands/service.ts';
+import { registerVolume } from './cli/commands/volume.ts';
 
 const VERBOSE_HELP =
   'show the output of quiet steps, such as Docker pulls and installers on a remote host (also TUG_VERBOSE=1)';

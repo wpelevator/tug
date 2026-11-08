@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { DockerEngine } from '../../src/docker-api.ts';
-import { runBackupJob } from '../../src/backup-job.ts';
+import { runBackupJob } from '../../src/backup/job.ts';
 import type { BackupJobPayload } from '../../src/protocol.ts';
 
 const RESTIC = process.env.TUG_RESTIC_IMAGE || 'restic/restic:0.17.3';

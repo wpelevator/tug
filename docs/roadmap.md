@@ -186,7 +186,7 @@ Claims must match verified behavior. Image rollback does not undo data, schema o
 
 A 1.0 tag promises that [these contracts](releases.md#what-10-freezes) change only compatibly inside a major, so the gate is about being able to keep that promise, not about features:
 
-- [x] Control and agent databases carry a schema version and ordered migrations, copy a database aside before the first migration and refuse one from a newer Tug ([Architecture](architecture.md#sqlite-storage)); the committed `v0.2.0` and `v0.14.0` schemas upgrade in `src/db-migrate.test.ts`.
+- [x] Control and agent databases carry a schema version and ordered migrations, copy a database aside before the first migration and refuse one from a newer Tug ([Architecture](architecture.md#sqlite-storage)); the committed `v0.2.0` and `v0.14.0` schemas upgrade in `src/db/migrate.test.ts`.
 - [x] Version skew follows semver: only a newer major (or `0.minor` before 1.0) is refused, and `releases.md` ties the bump to wire compatibility.
 - [x] The public contracts are listed in [Releases](releases.md#what-10-freezes) and the `x-tug` schema is published and linted against the validator.
 - [x] SEC-01 is recorded as accepted by design instead of left open; no other original finding is open.

@@ -49,13 +49,13 @@ Status: proposed.
 
 Control and agent would write one JSON object per line with `time`, `level`, `component`, `msg` and context fields where they apply: `requestId`, `node`, `project`, `service`, `deploymentId`. Two environment variables would select the output: `TUG_LOG_FORMAT=json|text` and `TUG_LOG_LEVEL` (`debug`, `info`, `warn`, `error`). Text would stay the default so existing installs read the same, and JSON is meant for `docker logs` piped to whatever the operator already uses.
 
-Credential private keys, join keys and secret values are never logged, and the logger would redact known field names as a second line of defence. The CLI keeps its human-readable output; only the long-running processes change. Every existing `console.log` and `console.error` in `src/control.ts` and `src/agent.ts` would move to the logger.
+Credential private keys, join keys and secret values are never logged, and the logger would redact known field names as a second line of defence. The CLI keeps its human-readable output; only the long-running processes change. Every existing `console.log` and `console.error` in `src/control/control.ts` and `src/agent/agent.ts` would move to the logger.
 
 ### Metrics on control
 
 Status: proposed.
 
-Control would serve `GET /metrics` in the Prometheus text format. It needs the `read` role from [Access control](access-control.md#roles), so Prometheus would present the client certificate and key of a `read` operator credential (`tls_config` with `cert_file`, `key_file` and `ca_file` extracted from the credential file); a credential limited to projects would see only those projects' series. Adding the route means adding it to `ROUTE_ROLES` in `src/credentials.ts` and to the endpoint table, which the existing test already requires.
+Control would serve `GET /metrics` in the Prometheus text format. It needs the `read` role from [Access control](access-control.md#roles), so Prometheus would present the client certificate and key of a `read` operator credential (`tls_config` with `cert_file`, `key_file` and `ca_file` extracted from the credential file); a credential limited to projects would see only those projects' series. Adding the route means adding it to `ROUTE_ROLES` in `src/control/credentials.ts` and to the endpoint table, which the existing test already requires.
 
 Naming follows the Prometheus conventions: a `tug_` prefix, base units (`_seconds`, `_bytes`), `_total` for counters. Labels are bounded: project, node and service names are operator-defined and few; route labels use the route pattern (`/api/v1/deployments/:id`), never the raw path; deployment IDs, command IDs, versions and error messages are never labels.
 

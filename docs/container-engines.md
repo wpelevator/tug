@@ -11,7 +11,7 @@ Tug already speaks the Engine API through the `DockerApi` interface in `src/dock
 ## Findings that shape the plan
 
 - The agent uses about 25 `DockerApi` methods at API `v1.41` over a unix socket (`DOCKER_HOST` or `/var/run/docker.sock`). Podman's compat layer serves this surface, but behavior at the edges differs (see [Risks to verify](#risks-to-verify)).
-- Everything outside the agent shells out to the `docker` binary: `build` (`src/build.ts`), `save` and `image inspect` (`src/artifacts.ts`), `load`, `tag` and `image rm` (`src/control.ts`), `manifest inspect` (`src/image.ts`), `compose config` (`src/normalize.ts`) and `version` (`src/control.ts` doctor check). Podman's CLI accepts the same arguments for all but Compose.
+- Everything outside the agent shells out to the `docker` binary: `build` (`src/images/build.ts`), `save` and `image inspect` (`src/images/artifacts.ts`), `load`, `tag` and `image rm` (`src/control/control.ts`), `manifest inspect` (`src/images/image.ts`), `compose config` (`src/compose/normalize.ts`) and `version` (`src/control/control.ts` doctor check). Podman's CLI accepts the same arguments for all but Compose.
 - The runtime image ships `docker-cli`, and control and agent containers mount the engine socket. The installer ([Nodes](nodes.md)) installs Docker's repositories and rejects `podman-docker`.
 - Archive validation already tolerates the containerd image store's `docker save` output, so image-ID differences between stores are handled; Podman's `podman save` output must be checked against the same validator.
 

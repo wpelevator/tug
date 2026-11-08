@@ -2,8 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import * as yaml from 'js-yaml';
-import { resolveBackups } from './backup-config.ts';
-import { buildDesiredState, validateCompose } from './compose.ts';
+import { resolveBackups } from './backup/config.ts';
+import { buildDesiredState, validateCompose } from './compose/compose.ts';
 import type { ComposeFile } from './protocol.ts';
 import { normalized } from '../tests/fake-docker.ts';
 

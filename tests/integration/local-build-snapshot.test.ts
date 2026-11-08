@@ -6,7 +6,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { createLocalBuildSnapshot } from '../../src/cli-build.ts';
+import { createLocalBuildSnapshot } from '../../src/cli/build.ts';
 
 const exec = promisify(execFile);
 

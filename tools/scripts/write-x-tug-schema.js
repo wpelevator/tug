@@ -4,7 +4,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { xTugSchema } from '../../src/x-tug-schema.ts';
+import { xTugSchema } from '../../src/compose/x-tug-schema.ts';
 
 const target = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),

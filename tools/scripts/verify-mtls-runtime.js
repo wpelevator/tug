@@ -13,8 +13,8 @@ const dist = new URL('../../dist/', import.meta.url).href;
 const { Pki, serverNames, generateKeyPair, createCsr, identityUri, peerIdentity } = await import(
   `${dist}pki.js`
 );
-const { serverTlsOptions } = await import(`${dist}tls-server.js`);
-const { createTransport } = await import(`${dist}agent-credential.js`);
+const { serverTlsOptions } = await import(`${dist}control/tls-server.js`);
+const { createTransport } = await import(`${dist}transport.js`);
 
 const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-verify-'));
 const results = [];

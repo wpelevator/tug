@@ -2,8 +2,8 @@
 // desired-state shape persisted in `desired_states.state_json`. Types plus a few shared constants;
 // control.ts, agent.ts, compose.ts and cli.ts all import from here.
 
-import { deploymentLifecycle } from './lifecycles.ts';
-import { activeStates, terminalStates } from './lifecycle.ts';
+import { deploymentLifecycle } from './db/lifecycles.ts';
+import { activeStates, terminalStates } from './db/lifecycle.ts';
 
 // ---- Compose input (what the operator deploys) -------------------------------------------------
 
@@ -196,7 +196,7 @@ export interface DesiredState {
 export const ACTIVE_DEPLOYMENT_STATES = activeStates(deploymentLifecycle);
 /** Deployment states a CLI wait loop stops on. */
 export const TERMINAL_DEPLOYMENT_STATES = terminalStates(deploymentLifecycle);
-export type { DeploymentState } from './lifecycles.ts';
+export type { DeploymentState } from './db/lifecycles.ts';
 
 // ---- Commands (control -> agent) ---------------------------------------------------------------
 

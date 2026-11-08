@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
-import { openDb, openSnapshotDb } from '../../src/db.ts';
+import { openDb, openSnapshotDb } from '../../src/db/db.ts';
 
 const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-db-benchmark-'));
 const report = { node: process.version, events: 100_000, metadataQueries: 1000 };

@@ -19,12 +19,12 @@ The benefit is less accidental disclosure through `Config.Env`, `docker inspect`
 
 ## Where the code stands
 
-- `src/normalize.ts` runs `docker compose config` and keeps project-secret references as sentinels, so values never reach the operator machine. `src/compose.ts` rejects top-level and service `secrets`.
-- `src/control.ts` validates sentinel references at deploy time and serves current values and versions through `/agent/v1/secrets`, filtered by requested services and actual node placement. `TUG_REGISTRY_AUTH` is reserved and delivered separately.
+- `src/compose/normalize.ts` runs `docker compose config` and keeps project-secret references as sentinels, so values never reach the operator machine. `src/compose/compose.ts` rejects top-level and service `secrets`.
+- `src/control/control.ts` validates sentinel references at deploy time and serves current values and versions through `/agent/v1/secrets`, filtered by requested services and actual node placement. `TUG_REGISTRY_AUTH` is reserved and delivered separately.
 - `src/container-spec.ts` hashes definitions plus referenced secret versions and substitutes values into Engine definitions. Recreate and rolling reconciliation both use these hashes, so file references must take part without putting values into definitions.
-- `src/agent.ts` fetches secrets before reconciling, and `src/reconciler.ts` creates candidates and removes obsolete containers. Preparation must finish before an existing container is replaced, and cleanup must follow actual container removal.
+- `src/agent/agent.ts` fetches secrets before reconciling, and `src/agent/reconciler.ts` creates candidates and removes obsolete containers. Preparation must finish before an existing container is replaced, and cleanup must follow actual container removal.
 - Agents run in containers. SSH installation binds `/var/lib/tug` and enrollment uses a named state volume, so a path inside either is not automatically the path the Docker daemon sees.
-- `src/live.ts` `startOneOff` clones the selected container's mounts, so `tug run` containers become secret-file consumers that cleanup must retain.
+- `src/agent/live.ts` `startOneOff` clones the selected container's mounts, so `tug run` containers become secret-file consumers that cleanup must retain.
 - `tug secret set` reads one stdin chunk and trims it, which breaks PEM files. Secret removal has no reference guard, and deleting and recreating a secret can reset its numeric version.
 
 ## Proposed contract
@@ -103,11 +103,11 @@ Exit: the host-path and reboot behavior is demonstrated with real Docker. If the
 
 ### Phase 2: input, references and store integrity
 
-- [ ] Typed declarations and strict validation in `src/protocol.ts`, `src/compose.ts` and normalization, with octal-string and numeric modes handled unambiguously, and one place that discovers references.
-- [ ] Deploy admission and `/agent/v1/secrets` in `src/control.ts` carry file references and non-reusable generations, keeping placement filtering, the registry reservation and latest-value rollback.
+- [ ] Typed declarations and strict validation in `src/protocol.ts`, `src/compose/compose.ts` and normalization, with octal-string and numeric modes handled unambiguously, and one place that discovers references.
+- [ ] Deploy admission and `/agent/v1/secrets` in `src/control/control.ts` carry file references and non-reusable generations, keeping placement filtering, the registry reservation and latest-value rollback.
 - [ ] Locked, reference-aware deletion and fail-closed handling of missing secrets, TLS references and direct API submissions included.
-- [ ] Exact `--file` and stdin input with consistent names and limits in `src/commands/secret.ts`, with tests for multiline values, trailing newlines, empty text and oversize input.
-- [ ] Tests in `src/compose.test.ts`, `src/normalize.test.ts`, `src/control.secrets-scope.test.ts`, `src/container-spec.test.ts` and the CLI for aliases, defaults, unsupported sources, path conflicts, ownership, reserved names, recreated generations, unrelated services and unused declarations.
+- [ ] Exact `--file` and stdin input with consistent names and limits in `src/cli/commands/secret.ts`, with tests for multiline values, trailing newlines, empty text and oversize input.
+- [ ] Tests in `src/compose/compose.test.ts`, `src/compose/normalize.test.ts`, `src/control/secrets-scope.test.ts`, `src/container-spec.test.ts` and the CLI for aliases, defaults, unsupported sources, path conflicts, ownership, reserved names, recreated generations, unrelated services and unused declarations.
 
 ### Phase 3: mount lifecycle and bootstrap
 

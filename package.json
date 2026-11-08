@@ -34,7 +34,7 @@
     "test:integration:agent": "node --test 'tests/integration/**/*.test.ts'",
     "test:integration:ingress": "node --test tests/integration/ingress-resilience.test.ts",
     "test:integration:backups": "node --test tests/integration/backup-job.test.ts tests/integration/run-job.test.ts",
-    "test:smoke:dist": "npm run build && CLI_ENTRY=dist/cli.js node --test src/cli.templates.test.ts",
+    "test:smoke:dist": "npm run build && CLI_ENTRY=dist/cli.js node --test src/cli/templates.test.ts",
     "changeset": "changeset",
     "version-packages": "changeset version && npm install --package-lock-only --ignore-scripts",
     "release": "changeset publish",

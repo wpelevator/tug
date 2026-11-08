@@ -20,7 +20,7 @@ Out of scope, consistent with the [product decisions](roadmap.md#product-decisio
 ## Where authorization sits today
 
 - A client certificate resolves to an `Actor { name, role, projects }`. The credential row holds the role and project list; the certificate carries only an ID and authorization follows the key hash.
-- `ROUTE_ROLES` in `src/credentials.ts` maps each `METHOD path` to a role, `createGuard` checks the role and then a project resolver, and handlers call `assertProject` and `projectScope` for what is known only after parsing. A test ties the table, the router and [the endpoint table](access-control.md#endpoint-table) together.
+- `ROUTE_ROLES` in `src/control/credentials.ts` maps each `METHOD path` to a role, `createGuard` checks the role and then a project resolver, and handlers call `assertProject` and `projectScope` for what is known only after parsing. A test ties the table, the router and [the endpoint table](access-control.md#endpoint-table) together.
 - Revocation, expiry and key replacement are database state read on every request. The design keeps that property.
 
 The design below evolves this shape; it does not replace it.
@@ -106,7 +106,7 @@ Control generates the key and returns the credential once, as `credential create
 For an operation a grant marks `gate: approval` (or any grant along the chain does):
 
 1. The caller sends the request as a plan and gets effect-free review material. For a deploy that is the diff against the current desired state, the risk tags, the images, data moves and ingress changes, and a `planId` hashing exactly that content.
-2. A **proposal** is stored, with the lifecycle `pending → approved → executed` and `rejected`, `expired` and `cancelled` as other exits. It is another lifecycle declared in `src/lifecycles.ts`, so the transition guard and its tests apply.
+2. A **proposal** is stored, with the lifecycle `pending → approved → executed` and `rejected`, `expired` and `cancelled` as other exits. It is another lifecycle declared in `src/db/lifecycles.ts`, so the transition guard and its tests apply.
 3. An approver holding `proposal.approve` on that resource approves it. The approver must not be in the requester's lineage, so an agent cannot approve itself.
 4. The requester repeats the call with `approval: <proposalId>`. Control recomputes the hash from the request content and refuses a mismatch, an expired proposal or a changed base state; a proposal is single use. The approved call runs the same code path as an ungated call with `approved_by` added to the audit record, so there is one implementation.
 
@@ -169,7 +169,7 @@ The decision is a small closed-vocabulary engine with a pure decision function a
 
 ## Storage and compatibility
 
-- One migration step, appended in `src/db.ts` with a previous-release fixture: `operator_credentials` gains `grants_json`, `parent_id`, `on_behalf_of` and `via`, and a `proposals` table arrives with approvals. Existing rows have NULL grants, meaning "the preset", so nothing changes for them.
+- One migration step, appended in `src/db/db.ts` with a previous-release fixture: `operator_credentials` gains `grants_json`, `parent_id`, `on_behalf_of` and `via`, and a `proposals` table arrives with approvals. Existing rows have NULL grants, meaning "the preset", so nothing changes for them.
 - `role` stays. A grants-only credential stores `custom`, and an older control that reads it fails closed (the role rank lookup is undefined, so every check denies).
 - The credential file (`v: 1`) is unchanged; grants live on control. `POST /api/v1/credentials` gains optional `grants`, `ttlSeconds` and `parent`, so the change is additive. Operations, grants and sessions are minors under [the 1.0 contracts](releases.md#what-10-freezes); the `root` default is a separate decision ([below](#decisions)).
 - The endpoint table in [Access control](access-control.md#endpoint-table) gains an operation and an effect column, and the test that compares the table with the router and the page keeps it honest.

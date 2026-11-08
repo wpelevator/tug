@@ -23,12 +23,12 @@ if (process.argv.slice(2).some((a) => a === '--help' || a === '-h' || a === 'hel
 switch (role) {
   case 'control': {
     if (command === 'issue-credential') {
-      const { issueHostCredential, parseIssueArgs } = await import('./control-credential.ts');
+      const { issueHostCredential, parseIssueArgs } = await import('./control/credential-issue.ts');
       process.stdout.write(`${await issueHostCredential(parseIssueArgs(process.argv.slice(4)))}\n`);
       break;
     }
-    const { createApp, listen } = await import('./control.ts');
-    const { SchemaTooNewError } = await import('./db-migrate.ts');
+    const { createApp, listen } = await import('./control/control.ts');
+    const { SchemaTooNewError } = await import('./db/migrate.ts');
     try {
       const app = await createApp();
       await listen(app);
@@ -44,7 +44,7 @@ switch (role) {
     if (command === 'identity') {
       // One-shot: print the CSR for the pending key (generated into the state volume on first use). Safe to repeat.
       // `--current <node>` reuses the installed key when this host is already enrolled as that node.
-      const { agentIdentityCsr } = await import('./agent-credential.ts');
+      const { agentIdentityCsr } = await import('./agent/credential.ts');
       // An operator reads this through `tug node add` over SSH: a plain message, not a stack trace.
       try {
         const flag = process.argv.indexOf('--current');
@@ -61,7 +61,7 @@ switch (role) {
     }
     if (command === 'install-cert') {
       // One-shot: read the identity response from stdin, validate it against the pending key and install it durably.
-      const { installCertFromText } = await import('./agent-credential.ts');
+      const { installCertFromText } = await import('./agent/credential.ts');
       const doc = await installCertFromText(
         process.env.TUG_STATE_DIR || '/var/lib/tug',
         await readStdin(),
@@ -69,8 +69,8 @@ switch (role) {
       console.log(`installed identity for node ${doc.nodeName}`);
       break;
     }
-    const { main } = await import('./agent.ts');
-    const { SchemaTooNewError } = await import('./db-migrate.ts');
+    const { main } = await import('./agent/agent.ts');
+    const { SchemaTooNewError } = await import('./db/migrate.ts');
     try {
       await main();
     } catch (error) {
