@@ -101,7 +101,7 @@ test('the repository example and sample compose files validate against the schem
   const validate = compile();
   for (const file of [
     'examples/wordpress/docker-compose.yml',
-    'docker-compose.sample.yml',
+    'tests/integration/compose/docker-compose.sample.yml',
     'docker-compose.tug.yml',
   ]) {
     assert.equal(validate(await loadYaml(file)), true, `${file} must be a valid Tug compose file`);

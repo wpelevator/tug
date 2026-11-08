@@ -12,9 +12,9 @@ const control = process.env.TUG_CONTROL_URL || 'https://127.0.0.1:18080';
 let credential;
 const files = [
   '-f',
-  'docker-compose.integration.yml',
+  'tests/integration/compose/docker-compose.integration.yml',
   '-f',
-  'docker-compose.integration-rollout.yml',
+  'tests/integration/compose/docker-compose.integration-rollout.yml',
 ];
 const composeArgs = ['compose', '-p', project, ...files];
 const PROJECT = 'rolldemo';

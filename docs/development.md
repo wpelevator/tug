@@ -96,15 +96,15 @@ Services with `build:` upload the current directory and control builds and store
 
 ## Integration test
 
-`docker-compose.sample.yml` is a three-service sample app with explicit placement: `web` on `vps-a`, `worker` on `vps-b`, `cache` on `vps-c`.
+`tests/integration/compose/docker-compose.sample.yml` is a three-service sample app with explicit placement: `web` on `vps-a`, `worker` on `vps-b`, `cache` on `vps-c`.
 
-`docker-compose.integration.yml` starts a control plane and three fake VPSes. On macOS/Docker Desktop each fake VPS is a privileged Linux container with its own Docker daemon and Tug agent, so agents apply containers into isolated Docker environments through their own Engine API rather than the host daemon.
+`tests/integration/compose/docker-compose.integration.yml` starts a control plane and three fake VPSes. On macOS/Docker Desktop each fake VPS is a privileged Linux container with its own Docker daemon and Tug agent, so agents apply containers into isolated Docker environments through their own Engine API rather than the host daemon.
 
 ```bash
 npm run test:integration
 ```
 
-The test starts control, runs a provisioner that issues the root credential and each fake VPS's node identity (the `agent identity` / `agent install-cert` flow, written to the shared `/tokens` volume), sets a sample secret, deploys `docker-compose.sample.yml`, waits for all three agents to report the desired revision, verifies published images run by the digest pinned on control, and tears the stack down. Set `KEEP_INTEGRATION_STACK=true` to keep containers and volumes for inspection. The integration network defaults to subnet `10.89.240.0/24`; override it with `TUG_TEST_SUBNET` if that overlaps with local Docker or VPN networks. For concurrent runs, set a unique `COMPOSE_PROJECT_NAME`, `TUG_TEST_PORT` and matching `TUG_CONTROL_URL` (an `https://` connect target; the credential still verifies `https://control:8443`).
+The test starts control, runs a provisioner that issues the root credential and each fake VPS's node identity (the `agent identity` / `agent install-cert` flow, written to the shared `/tokens` volume), sets a sample secret, deploys `tests/integration/compose/docker-compose.sample.yml`, waits for all three agents to report the desired revision, verifies published images run by the digest pinned on control, and tears the stack down. Set `KEEP_INTEGRATION_STACK=true` to keep containers and volumes for inspection. The integration network defaults to subnet `10.89.240.0/24`; override it with `TUG_TEST_SUBNET` if that overlaps with local Docker or VPN networks. For concurrent runs, set a unique `COMPOSE_PROJECT_NAME`, `TUG_TEST_PORT` and matching `TUG_CONTROL_URL` (an `https://` connect target; the credential still verifies `https://control:8443`).
 
 ### Registry-free image integration
 
@@ -112,7 +112,7 @@ The test starts control, runs a provisioner that issues the root credential and 
 npm run test:integration:no-registry
 ```
 
-The Node-driven `tools/scripts/integration-no-registry.js` uses `docker-compose.integration-no-registry.yml` with isolated control and node Docker daemons and no registry service or registry configuration. It verifies remote builds with changed application contents under a reused display version, rollback, agent restart, local application builds and backup/restore with a fresh image download. Separate daemons ensure a node cannot accidentally reuse control's already-built image instead of downloading the archive. The API port defaults to `18081` (`TUG_IMAGE_TEST_PORT` overrides it); use a unique `COMPOSE_PROJECT_NAME` when running alongside other tests. `KEEP_INTEGRATION_STACK=true` preserves the stack for inspection. These container tests do not establish real SSH installation, public ACME certificate issuance or a real-host private-network/NAT baseline.
+The Node-driven `tools/scripts/integration-no-registry.js` uses `tests/integration/compose/docker-compose.integration-no-registry.yml` with isolated control and node Docker daemons and no registry service or registry configuration. It verifies remote builds with changed application contents under a reused display version, rollback, agent restart, local application builds and backup/restore with a fresh image download. Separate daemons ensure a node cannot accidentally reuse control's already-built image instead of downloading the archive. The API port defaults to `18081` (`TUG_IMAGE_TEST_PORT` overrides it); use a unique `COMPOSE_PROJECT_NAME` when running alongside other tests. `KEEP_INTEGRATION_STACK=true` preserves the stack for inspection. These container tests do not establish real SSH installation, public ACME certificate issuance or a real-host private-network/NAT baseline.
 
 ### Rolling rollout integration test
 
@@ -120,7 +120,7 @@ The Node-driven `tools/scripts/integration-no-registry.js` uses `docker-compose.
 npm run test:integration:rollout
 ```
 
-Layers `docker-compose.integration-rollout.yml` over the same stack with a single fake VPS (`vps-a`) that runs the app and is the Caddy ingress node, then runs `tools/scripts/integration-rollout.js`. It deploys v1 of a rolling nginx service next to an unchanged recreated service, keeps requesting the app through Caddy from inside the VPS every ~50 ms while v2 rolls out (zero failed requests, v1 then v2 observed, the old container removed after the drain, the recreated service's container id unchanged), then deploys v3 whose health check fails and asserts that v2 kept serving the whole time, v3 never received a request, control recorded `deployment.auto_rollback` and the rollback deployment succeeded. It uses the compose project `tug-it-rollout` and the same host ports as the other integration tests, so run them one at a time; `KEEP_INTEGRATION_STACK=true` keeps the stack.
+Layers `tests/integration/compose/docker-compose.integration-rollout.yml` over the same stack with a single fake VPS (`vps-a`) that runs the app and is the Caddy ingress node, then runs `tools/scripts/integration-rollout.js`. It deploys v1 of a rolling nginx service next to an unchanged recreated service, keeps requesting the app through Caddy from inside the VPS every ~50 ms while v2 rolls out (zero failed requests, v1 then v2 observed, the old container removed after the drain, the recreated service's container id unchanged), then deploys v3 whose health check fails and asserts that v2 kept serving the whole time, v3 never received a request, control recorded `deployment.auto_rollback` and the rollback deployment succeeded. It uses the compose project `tug-it-rollout` and the same host ports as the other integration tests, so run them one at a time; `KEEP_INTEGRATION_STACK=true` keeps the stack.
 
 ## Test VPS with Lima
 
@@ -136,7 +136,7 @@ limactl start --name=vps template-vps.yml
 npm run test:integration:network
 ```
 
-Layers `docker-compose.integration-network.yml` over the same stack with plain numeric node `address` values and `vps-c` marked as an ingress node, deploys `docker-compose.network-sample.yml` (`web` on `vps-a`, `client` on `vps-b`) and runs `tools/scripts/integration-verify-network.js`: a container on `vps-b` fetches `http://web:8080` by its cross-node service name, Caddy on `vps-c` serves `Host: app.test` from `vps-a`, and generated published-port bindings use the intended private node addresses rather than every interface. It uses the compose project `tug-it-net` and the same ports as the plain integration test, so run them one at a time.
+Layers `tests/integration/compose/docker-compose.integration-network.yml` over the same stack with plain numeric node `address` values and `vps-c` marked as an ingress node, deploys `tests/integration/compose/docker-compose.network-sample.yml` (`web` on `vps-a`, `client` on `vps-b`) and runs `tools/scripts/integration-verify-network.js`: a container on `vps-b` fetches `http://web:8080` by its cross-node service name, Caddy on `vps-c` serves `Host: app.test` from `vps-a`, and generated published-port bindings use the intended private node addresses rather than every interface. It uses the compose project `tug-it-net` and the same ports as the plain integration test, so run them one at a time.
 
 ## First boot with QEMU
 

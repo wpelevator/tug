@@ -7,7 +7,8 @@ services:
       - "8080:80"
     x-tug:
       placement:
-        nodes: [vps-a]
+        nodes:
+          - vps-a
       health:
         type: http
         port: 80
@@ -19,7 +20,11 @@ services:
 
   client:
     image: busybox:1.36
-    command: ["sh", "-c", "while true; do sleep 30; done"]
+    command:
+      - "sh"
+      - "-c"
+      - "while true; do sleep 30; done"
     x-tug:
       placement:
-        nodes: [vps-b]
+        nodes:
+          - vps-b
