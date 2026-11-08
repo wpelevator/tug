@@ -179,6 +179,36 @@ export function buildIngressWork({
 const upstreamHost = (address: string) =>
   address.includes(':') && !address.startsWith('[') ? `[${address}]` : address;
 
+/**
+ * How long a request keeps looking for a usable upstream before it fails. Caddy's default is 0, which
+ * turns a dial failure into an immediate 502; this window covers the gap between an upstream dying and the
+ * next agent poll withdrawing it, and a `recreate` restart. A refused connection is always retryable, but
+ * after a successful connect only GET is, so a POST is never replayed.
+ */
+export const PROXY_TRY_DURATION = '5s';
+export const PROXY_TRY_INTERVAL = '250ms';
+/**
+ * How long a failed upstream is skipped when a route has several. Short on purpose: it only has to cover
+ * the polls between a failure and the endpoint being withdrawn.
+ */
+export const PROXY_FAIL_DURATION = '10s';
+/**
+ * Caddy closes WebSockets and other streams when its config is reloaded. One Caddy serves every project on
+ * the node, so without a delay a deploy to one site would cut live streams on all of them.
+ */
+export const PROXY_STREAM_CLOSE_DELAY = '5m';
+
+/** The `reverse_proxy` subdirectives that keep requests and streams alive across upstream churn and reloads. */
+function proxyResilience(upstreamCount: number): string[] {
+  return [
+    `\t\tlb_try_duration ${PROXY_TRY_DURATION}`,
+    `\t\tlb_try_interval ${PROXY_TRY_INTERVAL}`,
+    // With one upstream, marking it unhealthy only turns a blip into an outage; the retry window is enough.
+    ...(upstreamCount > 1 ? [`\t\tfail_duration ${PROXY_FAIL_DURATION}`, '\t\tmax_fails 1'] : []),
+    `\t\tstream_close_delay ${PROXY_STREAM_CLOSE_DELAY}`,
+  ];
+}
+
 export function renderCaddyfile(routes: IngressRoute[], opts: { acmeEmail?: string } = {}): string {
   const out: string[] = [];
   if (opts.acmeEmail) out.push('{', `\temail ${opts.acmeEmail}`, '}', '');
@@ -192,6 +222,7 @@ export function renderCaddyfile(routes: IngressRoute[], opts: { acmeEmail?: stri
     out.push(
       `\treverse_proxy ${route.upstreams.join(' ')} {`,
       '\t\tlb_policy round_robin',
+      ...proxyResilience(route.upstreams.length),
       '\t}',
       '}',
       '',

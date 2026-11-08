@@ -95,6 +95,8 @@ Proposed:
 - Latency and packet loss between ingress and app, using `tc netem` inside the privileged containers if the host kernel provides it.
 - A Pebble server, Let's Encrypt's own test ACME server, with Caddy pointed at it, so automatic certificates are covered without the internet or rate limits.
 
+`npm run test:integration:ingress` runs the stock Caddy image against the Caddyfile Tug renders, with the upstream on the Docker host and no fake VPS. It checks that a request made while the upstream is down is retried and served instead of failing with a 502, and that a WebSocket survives a config reload, each with the relevant directive removed as a control so the test proves the directive does the work. It pulls `caddy:2-alpine` and runs as the `Integration (ingress resilience)` CI job.
+
 The language stack examples have a separate Docker check: `node --test tests/integration/language-stacks.test.ts`. It builds each application, migrates a real database, uploads and downloads a file through a minimal S3 HTTP fixture, runs the configured database dump and restore, and clears Redis to verify recovered metadata. The fixture does not verify S3 signatures and does not replace a test against an actual object storage provider or a Tug deployment.
 
 ## Tier 3: real hosts

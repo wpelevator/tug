@@ -1,0 +1,220 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import http from 'node:http';
+import net from 'node:net';
+import os from 'node:os';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { DEFAULT_CADDY_IMAGE, renderCaddyfile } from '../../src/ingress.ts';
+
+// Runs the stock Caddy image against the Caddyfile Tug renders, with the upstream on the Docker host, to
+// check the behavior the directives are there for rather than that Caddy parses them.
+
+const docker = (...args: string[]) => spawnSync('docker', args, { encoding: 'utf8' });
+const HAVE_DOCKER = docker('info').status === 0;
+const HOST = 'resilience.test';
+
+async function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const s = net.createServer();
+    s.listen(0, '127.0.0.1', () => {
+      const { port } = s.address() as net.AddressInfo;
+      s.close(() => resolve(port));
+    });
+    s.on('error', reject);
+  });
+}
+
+function caddyfile(upstreamPort: number, mutate: (text: string) => string = (t) => t): string {
+  return mutate(
+    renderCaddyfile([
+      {
+        project: 'p',
+        service: 's',
+        host: HOST,
+        tls: 'off',
+        upstreams: [`host.docker.internal:${upstreamPort}`],
+      },
+    ]),
+  );
+}
+
+interface Edge {
+  port: number;
+  reload(text: string): Promise<void>;
+  stop(): void;
+}
+
+async function startCaddy(dir: string, text: string): Promise<Edge> {
+  await fs.writeFile(path.join(dir, 'Caddyfile'), text);
+  const port = await freePort();
+  const name = `tug-resilience-${process.pid}-${port}`;
+  const run = docker(
+    'run',
+    '-d',
+    '--rm',
+    '--name',
+    name,
+    '--add-host',
+    'host.docker.internal:host-gateway',
+    '-p',
+    `127.0.0.1:${port}:80`,
+    '-v',
+    `${dir}:/etc/caddy`,
+    process.env.TUG_CADDY_IMAGE || DEFAULT_CADDY_IMAGE,
+  );
+  assert.equal(run.status, 0, `caddy container starts: ${run.stderr}`);
+  // Docker accepts the published port before Caddy listens, so wait for an HTTP answer to an unrouted host.
+  for (let i = 0; i < 100; i++) {
+    if ((await get(port, '/', 'ready.test')).status !== undefined) break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return {
+    port,
+    async reload(next) {
+      // Same container, new file: Caddy swaps to a fresh config exactly as the agent's reload does.
+      await fs.writeFile(path.join(dir, 'Caddyfile'), next);
+      const r = docker('exec', name, 'caddy', 'reload', '--config', '/etc/caddy/Caddyfile');
+      assert.equal(r.status, 0, `caddy reload succeeds: ${r.stderr}`);
+    },
+    stop() {
+      docker('rm', '-f', name);
+    },
+  };
+}
+
+/** One GET through the edge for `HOST`; resolves with the status and body, or the transport error. */
+function get(
+  port: number,
+  url: string,
+  host = HOST,
+): Promise<{ status?: number; body: string; error?: string }> {
+  return new Promise((resolve) => {
+    const req = http.request({ host: '127.0.0.1', port, path: url, headers: { host } }, (res) => {
+      let body = '';
+      res.on('data', (c) => (body += c));
+      res.on('end', () => resolve({ status: res.statusCode, body }));
+      res.on('aborted', () => resolve({ status: res.statusCode, body, error: 'aborted' }));
+      res.on('error', (e) => resolve({ status: res.statusCode, body, error: e.message }));
+    });
+    req.on('error', (e) => resolve({ body: '', error: e.message }));
+    req.end();
+  });
+}
+
+test(
+  'a request that arrives while the upstream is down waits for it instead of failing with a 502',
+  { skip: !HAVE_DOCKER && 'Docker is not available', timeout: 60000 },
+  async (t) => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-resilience-'));
+    const upstreamPort = await freePort();
+    const edge = await startCaddy(dir, caddyfile(upstreamPort));
+    const upstream = http.createServer((_req, res) => res.end('hello'));
+    t.after(async () => {
+      edge.stop();
+      upstream.closeAllConnections();
+      upstream.close();
+      await fs.rm(dir, { recursive: true, force: true });
+    });
+
+    // The service restarts: nothing listens for the first second, then it comes up.
+    setTimeout(() => upstream.listen(upstreamPort, '0.0.0.0'), 1000);
+    const res = await get(edge.port, '/');
+    assert.equal(
+      res.status,
+      200,
+      `a request during a short upstream outage is retried and served: ${JSON.stringify(res)}`,
+    );
+    assert.equal(res.body, 'hello', 'the retried request reaches the upstream that came back');
+
+    const noRetry = await startCaddy(
+      await fs.mkdtemp(path.join(os.tmpdir(), 'tug-resilience-')),
+      caddyfile(await freePort(), (text) => text.replace(/\t\tlb_try_duration .*\n/, '')),
+    );
+    t.after(() => noRetry.stop());
+    const failed = await get(noRetry.port, '/');
+    assert.equal(
+      failed.status,
+      502,
+      'without lb_try_duration the same outage is an immediate 502, so the retry test above proves the directive works',
+    );
+  },
+);
+
+test(
+  'a WebSocket stays open when the config is reloaded because stream_close_delay holds it',
+  { skip: !HAVE_DOCKER && 'Docker is not available', timeout: 90000 },
+  async (t) => {
+    const upstreamPort = await freePort();
+    const upstream = http.createServer();
+    // A minimal upgrade endpoint: after the 101 Caddy only tunnels bytes, so raw lines stand in for frames.
+    upstream.on('upgrade', (_req, socket) => {
+      socket.write(
+        'HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n',
+      );
+      let n = 0;
+      const timer = setInterval(() => {
+        socket.write(`chunk${++n}\n`);
+        if (n === 20) {
+          clearInterval(timer);
+          socket.end('done\n');
+        }
+      }, 200);
+      socket.on('close', () => clearInterval(timer));
+      socket.on('error', () => {});
+    });
+    await new Promise<void>((r) => upstream.listen(upstreamPort, '0.0.0.0', r));
+    t.after(() => {
+      upstream.closeAllConnections();
+      upstream.close();
+    });
+
+    const websocketAcrossReload = async (mutate: (text: string) => string) => {
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-resilience-'));
+      const edge = await startCaddy(dir, caddyfile(upstreamPort, mutate));
+      t.after(async () => {
+        edge.stop();
+        await fs.rm(dir, { recursive: true, force: true });
+      });
+      const received = new Promise<string>((resolve) => {
+        const req = http.request({
+          host: '127.0.0.1',
+          port: edge.port,
+          path: '/',
+          headers: { host: HOST, connection: 'Upgrade', upgrade: 'websocket' },
+        });
+        req.on('upgrade', (_res, socket) => {
+          let body = '';
+          socket.on('data', (c) => (body += c));
+          socket.on('close', () => resolve(body));
+          socket.on('error', () => resolve(body));
+        });
+        req.on('error', () => resolve(''));
+        req.end();
+      });
+      await new Promise((r) => setTimeout(r, 1000));
+      // An unrelated site changing: the new Caddyfile has an extra route, as after another project's deploy.
+      await edge.reload(
+        `${caddyfile(upstreamPort, mutate)}\nhttp://other.test {\n\trespond "other"\n}\n`,
+      );
+      return received;
+    };
+
+    const held = await websocketAcrossReload((text) => text);
+    assert.match(
+      held,
+      /done\n$/,
+      `the WebSocket survives a reload and finishes: ${JSON.stringify(held)}`,
+    );
+
+    const cut = await websocketAcrossReload((text) =>
+      text.replace(/\t\tstream_close_delay .*\n/, ''),
+    );
+    assert.doesNotMatch(
+      cut,
+      /done\n$/,
+      'without stream_close_delay the reload cuts the WebSocket, which is the problem the directive solves',
+    );
+  },
+);

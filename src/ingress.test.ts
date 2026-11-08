@@ -10,6 +10,10 @@ import {
   ingressConfigHash,
   reconcileIngress,
   removeIngress,
+  PROXY_FAIL_DURATION,
+  PROXY_STREAM_CLOSE_DELAY,
+  PROXY_TRY_DURATION,
+  PROXY_TRY_INTERVAL,
   renderCaddyfile,
   resolveServiceEndpoints,
 } from './ingress.ts';
@@ -170,9 +174,9 @@ test('ingress dials local and remote services on their bound node addresses', ()
     ],
     'web runs on two nodes, so its port is bound to the node address and the local upstream uses it too; container port 80 resolves to published 8080',
   );
-  assert.equal(
+  assert.match(
     work.caddyfile,
-    `app.example.com {\n\treverse_proxy 192.168.1.4:8080 192.168.1.5:8080 {\n\t\tlb_policy round_robin\n\t}\n}\n`,
+    /^app\.example\.com \{\n\treverse_proxy 192\.168\.1\.4:8080 192\.168\.1\.5:8080 \{\n\t\tlb_policy round_robin\n/,
     'the Caddyfile lists the same upstreams',
   );
   assert.deepEqual(work.warnings, []);
@@ -457,5 +461,51 @@ test('removeIngress deletes the container but keeps ACME volumes, and is a no-op
     docker.calls,
     [`rm ${CADDY_CONTAINER}`],
     'only the container is removed; no volume is touched',
+  );
+});
+
+test('every route keeps requests and streams alive across upstream churn and reloads', () => {
+  const route = (host: string, upstreams: string[]) => ({
+    project: 'p',
+    service: 's',
+    host,
+    tls: 'off' as const,
+    upstreams,
+  });
+  const out = renderCaddyfile([
+    route('one.example.com', ['10.0.0.1:80']),
+    route('many.example.com', ['10.0.0.1:80', '10.0.0.2:80']),
+  ]);
+  const [one, many] = out.split('\n\n');
+  for (const [label, block] of [
+    ['single upstream', one],
+    ['several upstreams', many],
+  ]) {
+    assert.match(
+      block,
+      new RegExp(`lb_try_duration ${PROXY_TRY_DURATION}\\n`),
+      `${label}: requests retry for a window instead of failing at the first dial error`,
+    );
+    assert.match(
+      block,
+      new RegExp(`lb_try_interval ${PROXY_TRY_INTERVAL}\\n`),
+      `${label}: retries are paced`,
+    );
+    assert.match(
+      block,
+      new RegExp(`stream_close_delay ${PROXY_STREAM_CLOSE_DELAY}\\n`),
+      `${label}: a reload does not cut live WebSockets`,
+    );
+    assert.match(block, /lb_policy round_robin/, `${label}: round_robin stays the default policy`);
+  }
+  assert.doesNotMatch(
+    one,
+    /fail_duration|max_fails/,
+    'a single upstream is never marked unhealthy, since that would turn a blip into an outage',
+  );
+  assert.match(
+    many,
+    new RegExp(`fail_duration ${PROXY_FAIL_DURATION}\\n\\t\\tmax_fails 1\\n`),
+    'with several upstreams a failed one is skipped until the agent withdraws it',
   );
 });
