@@ -1,7 +1,8 @@
 services:
   control:
     image: tug-runtime:integration
-    build: .
+    build:
+      context: ../../..
     command: control
     environment:
       PORT: 8443
@@ -15,9 +16,12 @@ services:
 
   provisioner:
     image: tug-runtime:integration
-    build: .
-    entrypoint: ["node"]
-    command: ["tools/scripts/integration-provision.js"]
+    build:
+      context: ../../..
+    entrypoint:
+      - "node"
+    command:
+      - "tools/scripts/integration-provision.js"
     restart: "no"
     environment:
       TUG_CONTROL_URL: https://control:8443
@@ -33,7 +37,7 @@ services:
   vps-a:
     image: tug-fake-vps:integration
     build:
-      context: .
+      context: ../../..
       dockerfile: tools/docker/fake-vps/Dockerfile
     privileged: true
     environment:
@@ -50,7 +54,7 @@ services:
   vps-b:
     image: tug-fake-vps:integration
     build:
-      context: .
+      context: ../../..
       dockerfile: tools/docker/fake-vps/Dockerfile
     privileged: true
     environment:
@@ -67,7 +71,7 @@ services:
   vps-c:
     image: tug-fake-vps:integration
     build:
-      context: .
+      context: ../../..
       dockerfile: tools/docker/fake-vps/Dockerfile
     privileged: true
     environment:

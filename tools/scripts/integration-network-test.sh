@@ -6,7 +6,7 @@ set -euo pipefail
 # CI prebuilds the images with a layer cache and sets TUG_COMPOSE_BUILD="" to skip the rebuild.
 BUILD_FLAG=${TUG_COMPOSE_BUILD---build}
 
-COMPOSE_FILES=(-f docker-compose.integration.yml -f docker-compose.integration-network.yml)
+COMPOSE_FILES=(-f tests/integration/compose/docker-compose.integration.yml -f tests/integration/compose/docker-compose.integration-network.yml)
 PROJECT=${COMPOSE_PROJECT_NAME:-tug-it-net}
 # Connect target only: the credential's public URL (https://control:8443) is what gets verified.
 CONTROL=${TUG_CONTROL_URL:-https://127.0.0.1:18080}
@@ -37,7 +37,7 @@ done
 TUG_CONFIG=$(mktemp)
 export TUG_CONFIG TUG_CREDENTIAL_FILE="$CRED" TUG_CONTROL_URL="$CONTROL"
 node -e 'require("node:fs").writeFileSync(process.env.TUG_CONFIG, "{}")'
-node src/cli.ts deploy -f docker-compose.network-sample.yml --project netdemo --timeout 240
+node src/cli.ts deploy -f tests/integration/compose/docker-compose.network-sample.yml --project netdemo --timeout 240
 COMPOSE_PROJECT_NAME="$PROJECT" node tools/scripts/integration-verify-network.js
 
 echo "network integration test passed"

@@ -1,7 +1,8 @@
 services:
   control:
     build: .
-    command: ["control"]
+    command:
+      - "control"
     environment:
       PORT: 8443
       TUG_CONTROL_URL: ${TUG_CONTROL_URL:?set TUG_CONTROL_URL to the https origin clients use, e.g. https://localhost:8443}
@@ -14,8 +15,10 @@ services:
 
   agent:
     build: .
-    command: ["agent"]
-    profiles: ["agent"]
+    command:
+      - "agent"
+    profiles:
+      - "agent"
     environment:
       # Connect-only override; the agent's identity (agent.json) carries the verified public URL.
       TUG_CONTROL_URL: https://control:8443

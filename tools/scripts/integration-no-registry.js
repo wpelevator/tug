@@ -10,7 +10,10 @@ import { api, fetchRootCredential } from './mtls-fetch.js';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
 const project = process.env.COMPOSE_PROJECT_NAME || `tug-images-${process.pid}`;
-const file = path.join(root, 'docker-compose.integration-no-registry.yml');
+const file = path.join(
+  root,
+  'tests/integration/compose/docker-compose.integration-no-registry.yml',
+);
 const control = `https://127.0.0.1:${process.env.TUG_IMAGE_TEST_PORT || 18081}`;
 let credential;
 let credentialFile;
