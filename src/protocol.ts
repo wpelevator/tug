@@ -332,8 +332,16 @@ export interface CommandResult {
  * upgrade, so credentials never appear in the URL or a message. A wake is only a hint: the agent fetches the
  * authoritative state from `/agent/v1/work` and continues periodic polling if notifications are lost.
  */
+/**
+ * What this control can do on the agent socket beyond the wake hints and live sessions, listed in `ready`. An agent uses a
+ * feature only when its control lists it: inside one major a newer agent may talk to an older control, which closes the
+ * socket on a frame it does not know. A control that predates `features` lists none.
+ */
+export type StreamFeature = 'agent.event';
+export const STREAM_FEATURES: StreamFeature[] = ['agent.event'];
+
 export type StreamMessage =
-  | { type: 'ready'; nodeId: string; cursor: number }
+  | { type: 'ready'; nodeId: string; cursor: number; features?: StreamFeature[] }
   | { type: 'work-available'; cursor: number; project?: string };
 
 /** Live operations always resolve their project/service placement on control before reaching an agent. */

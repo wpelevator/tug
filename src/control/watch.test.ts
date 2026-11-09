@@ -7,6 +7,9 @@ import os from 'node:os';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { WebSocket } from 'ws';
+import { AgentWakeChannel } from '../agent/agent.ts';
+import type { AgentContext } from '../agent/agent.ts';
+import { FakeDocker } from '../../tests/fake-docker.ts';
 import { LiveHub, attachAgentStream, createApp } from './control.ts';
 import { WatchHub } from './watch.ts';
 import { json, testControlUrl, testIdentity, testImageResolver } from '../../tests/helpers.ts';
@@ -742,4 +745,55 @@ test('a failure to store agent events leaves the agent socket, and the live sess
     false,
   );
   assert.equal(ws.closedWith, 1008, 'a malformed frame still closes it');
+});
+
+test('control lists what the agent socket supports in ready, and a real agent channel then sends events over it', async () => {
+  const s = await server();
+  try {
+    assert.equal((await deployWeb(s)).status, 200, 'the project places a service on the node');
+    const ready = await open(s, '/agent/v1/stream', s.registered.nodeId);
+    assert.deepEqual(
+      ((await ready.next('ready')) as { features: string[] }).features,
+      ['agent.event'],
+      'ready lists agent.event',
+    );
+    ready.ws.terminate();
+    const ctx = {
+      docker: new FakeDocker(),
+      controlUrl: s.base,
+      credential: {},
+    } as unknown as AgentContext;
+    const channel = new AgentWakeChannel(
+      ctx,
+      (url) =>
+        new WebSocket(url.replace(/^https?/, 'ws'), { headers: idHeaders(s.registered.nodeId) }),
+    );
+    await channel.wait(150);
+    assert.equal(
+      channel.sendEvent({
+        projectId: 'site',
+        level: 'warn',
+        type: 'container.exited',
+        message: 'sent by a real channel',
+      }),
+      true,
+      'the channel uses the socket because control listed the feature',
+    );
+    let stored: { message: string; node_id: string } | undefined;
+    for (let i = 0; i < 100 && !stored; i++) {
+      const list = (await json(await s.call('GET', '/api/v1/events'))) as {
+        events: { message: string; node_id: string }[];
+      };
+      stored = list.events.find((e) => e.message === 'sent by a real channel');
+      if (!stored) await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(
+      stored?.node_id,
+      s.registered.nodeId,
+      'the event is stored against the node whose socket carried it',
+    );
+    channel.close();
+  } finally {
+    await s.close();
+  }
 });

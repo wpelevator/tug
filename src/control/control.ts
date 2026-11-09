@@ -100,6 +100,7 @@ import {
   BACKUP_COMMAND_TYPES,
   CLIENT_VERSION_HEADER,
   SKEW_CLIENT_NEWER,
+  STREAM_FEATURES,
   VERSION_STAMP_HEADER,
   compareCompat,
   majorMinor,
@@ -181,7 +182,12 @@ class WakeHub {
     const previous = this.streams.get(nodeId);
     if (previous && previous !== ws) previous.close(1000, 'replaced by a newer agent connection');
     this.streams.set(nodeId, ws);
-    const ready: StreamMessage = { type: 'ready', nodeId, cursor: this.cursor(nodeId) };
+    const ready: StreamMessage = {
+      type: 'ready',
+      nodeId,
+      cursor: this.cursor(nodeId),
+      features: STREAM_FEATURES,
+    };
     ws.send(JSON.stringify(ready));
     this.onPresence();
     ws.once('close', () => {

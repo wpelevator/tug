@@ -217,6 +217,8 @@ export class AgentWakeChannel {
   private socket?: WebSocket;
   private cursor = 0;
   private pending = false;
+  /** What the control said it can do in its last `ready`; empty for an older control, and while disconnected. */
+  private features = new Set<string>();
   private waiter?: () => void;
   private readonly handlers: LiveChannelHandlers;
 
@@ -293,11 +295,18 @@ export class AgentWakeChannel {
         )
           return;
         this.cursor = Math.max(this.cursor, Number(frame.cursor));
+        if (frame.type === 'ready')
+          this.features = new Set(
+            Array.isArray(frame.features)
+              ? frame.features.filter((feature): feature is string => typeof feature === 'string')
+              : [],
+          );
         if (frame.type === 'work-available') this.notify();
       });
       socket.on('close', () => {
         if (this.socket === socket) {
           this.socket = undefined;
+          this.features = new Set();
           this.handlers.onDisconnect?.();
         }
         if (settled) this.waiter?.();
@@ -306,6 +315,7 @@ export class AgentWakeChannel {
       socket.on('error', () => {
         if (this.socket === socket) {
           this.socket = undefined;
+          this.features = new Set();
           this.handlers.onDisconnect?.();
         }
         socket.terminate();
@@ -352,6 +362,8 @@ export class AgentWakeChannel {
 
   /** Sends events over the open socket; false when it is not open, and the caller falls back to HTTP. */
   sendEvent(event: AgentEvent): boolean {
+    // An older control closes the socket on a frame it does not know, so only a control that listed it gets one.
+    if (!this.features.has('agent.event')) return false;
     return this.send({ v: 1, type: 'agent.event', events: [event] });
   }
 
@@ -375,6 +387,7 @@ export class AgentWakeChannel {
   close(): void {
     const socket = this.socket;
     this.socket = undefined;
+    this.features = new Set();
     this.handlers.onDisconnect?.();
     socket?.close();
     this.waiter?.();
