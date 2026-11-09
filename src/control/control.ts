@@ -760,7 +760,7 @@ export async function createApp(
     recordEvent(db, {
       actor: 'control',
       type: 'control.restore_activated',
-      message: `control started from a restored backup: ${retired.commands} queued or running commands and ${retired.restores} workload restores from the backup were retired`,
+      message: `control started from a restored backup: ${retired.commands} queued or running commands, ${retired.backupRuns} workload backup runs and ${retired.restores} workload restores from the backup were retired`,
       metadata: { ...retired },
     });
   }
@@ -3426,6 +3426,8 @@ export async function createApp(
   const resticImage = () => process.env.TUG_RESTIC_IMAGE || DEFAULT_RESTIC_IMAGE;
   /** How long one control backup, listing or fetch may take before its helper is removed; the module default is 30 minutes. */
   const controlJobLimitMs = () => Number(process.env.TUG_CONTROL_BACKUP_LIMIT_MS) || undefined;
+  /** How long restic may print only backend retry notices before the job is failed with the cause; the module default is 2 minutes. */
+  const controlStallMs = () => Number(process.env.TUG_CONTROL_BACKUP_STALL_MS) || undefined;
   const controlEvent = (level: 'info' | 'error', type: string, message: string, meta: object) =>
     db.run(
       'INSERT INTO events(id,project_id,deployment_id,node_id,level,type,message,metadata_json,created_at) VALUES(?,?,?,?,?,?,?,?,?)',
@@ -3521,6 +3523,7 @@ export async function createApp(
           password: controlRepositoryPassword(masterKey),
           resticImage: resticImage(),
           limitMs: controlJobLimitMs(),
+          stallMs: controlStallMs(),
         },
         archive.artifactRef,
         // What the snapshot holds, visible when choosing one: no images and, always, no workload data.
@@ -3633,6 +3636,7 @@ export async function createApp(
           password: controlRepositoryPassword(masterKey),
           resticImage: resticImage(),
           limitMs: controlJobLimitMs(),
+          stallMs: controlStallMs(),
         });
       } catch (e) {
         remote = { state: 'error', snapshots: [], error: errMessage(e) };
@@ -3721,6 +3725,7 @@ export async function createApp(
           password,
           resticImage: resticImage(),
           limitMs: controlJobLimitMs(),
+          stallMs: controlStallMs(),
           signal: abort.signal,
         },
         fetched,

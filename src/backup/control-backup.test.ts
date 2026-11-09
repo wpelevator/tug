@@ -13,6 +13,9 @@ import {
 } from './control-backup.ts';
 import { repositoryPassword } from './destination.ts';
 import { FakeDocker } from '../../tests/fake-docker.ts';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
+import type { AttachedProcess } from '../docker-api.ts';
 
 const S3 = {
   url: 's3:https://s3.example.com/bucket/tug/',
@@ -583,6 +586,172 @@ test('a stalled exec handshake hits the deadline and the cancel, and a late cont
       await late.listContainers(),
       [],
       'a container that was created after the job gave up is removed, not left running',
+    );
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+const retryNotice = (seconds: number, cause: string) =>
+  `Stat(<config/>) returned error, retrying after ${seconds}s: Stat: ${cause}`;
+/** What real restic printed when the bucket was created while it was still retrying (seen on a QEMU VM). */
+const BUCKET_APPEARED = [
+  retryNotice(8.2, 'The specified bucket does not exist'),
+  retryNotice(20.8, 'The specified bucket does not exist'),
+  retryNotice(70.9, 'The specified bucket does not exist'),
+  'Fatal: repository does not exist: unable to open config file: Stat: The specified key does not exist.',
+  'Is there a repository at the following location?',
+  's3:http://10.0.2.2:9000/tug-backups/_control',
+].join('\n');
+
+test('only the final failure decides whether a repository is missing, not the retries before it', () => {
+  assert.equal(
+    isMissingRepository(BUCKET_APPEARED),
+    true,
+    'a bucket that did not exist during earlier attempts and was created since leaves a repository to create',
+  );
+  assert.equal(
+    isMissingRepository(
+      [
+        retryNotice(8, 'The specified key does not exist'),
+        'Fatal: unable to open config file: Stat: The specified bucket does not exist',
+      ].join('\n'),
+    ),
+    false,
+    'a final failure about the bucket is a backend error whatever the retries said',
+  );
+  assert.equal(
+    isMissingRepository(retryNotice(8, 'The specified key does not exist')),
+    false,
+    'retry notices alone are not evidence of anything',
+  );
+});
+
+test('a bucket created while restic was retrying lets the first backup initialize the repository', async () => {
+  const dir = await scratch();
+  const archive = path.join(dir, 'a.tar.gz');
+  await fs.writeFile(archive, 'x');
+  const docker = dockerWith((cmd) =>
+    cmd[1] === 'cat' ? { code: 1, err: BUCKET_APPEARED } : { code: 0 },
+  );
+  try {
+    const result = await pushControlArchive(docker, S3, archive);
+    assert.equal(result.repository, 'initialized', 'the repository is created, not refused');
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a failure reports restic's final message and a count of retries, not the whole retry log", async () => {
+  const dir = await scratch();
+  const archive = path.join(dir, 'a.tar.gz');
+  await fs.writeFile(archive, 'x');
+  const log = [
+    retryNotice(8, 'The specified bucket does not exist'),
+    retryNotice(21, 'The specified bucket does not exist'),
+    retryNotice(71, 'The specified bucket does not exist'),
+    'Fatal: unable to open config file: Stat: The specified bucket does not exist',
+  ].join('\n');
+  const docker = dockerWith((cmd) => (cmd[1] === 'cat' ? { code: 1, err: log } : { code: 0 }));
+  try {
+    await assert.rejects(
+      () => pushControlArchive(docker, S3, archive),
+      (error: Error) =>
+        /Fatal: unable to open config file/.test(error.message) &&
+        /restic retried 3 times; last error: Stat: The specified bucket does not exist/.test(
+          error.message,
+        ) &&
+        !/returned error, retrying/.test(error.message),
+      'the message names the final failure and the last cause once, without three notices',
+    );
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+/** A restic process that prints `lines` over time and then, when `exits`, finishes with code 0. */
+function chattyExec(docker: FakeDocker, match: string, lines: string[], exits: boolean): void {
+  const original = docker.execStart.bind(docker);
+  docker.execStart = async (id, options) => {
+    if (options.cmd[1] !== match) return original(id, options);
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    const proc = Object.assign(new EventEmitter(), {
+      stdin: null,
+      stdout,
+      stderr,
+      kill: () => true,
+    }) as unknown as AttachedProcess;
+    lines.forEach((line, index) => setTimeout(() => stderr.write(line + '\n'), 10 + index * 25));
+    if (exits)
+      setTimeout(
+        () => {
+          stdout.end();
+          stderr.end();
+          proc.emit('close', 0, null);
+        },
+        10 + lines.length * 25 + 30,
+      );
+    return proc;
+  };
+}
+
+test('restic that only retries a failing backend is failed with the cause instead of running to the limit', async () => {
+  const dir = await scratch();
+  const archive = path.join(dir, 'a.tar.gz');
+  await fs.writeFile(archive, 'x');
+  const docker = dockerWith(() => ({ code: 0 }));
+  chattyExec(
+    docker,
+    'cat',
+    [
+      retryNotice(8, 'The specified bucket does not exist'),
+      retryNotice(20, 'The specified bucket does not exist'),
+    ],
+    false,
+  );
+  try {
+    const started = Date.now();
+    await assert.rejects(
+      () => pushControlArchive(docker, { ...S3, stallMs: 150 }, archive),
+      /restic made no progress for 0s: restic retried 2 times; last error: Stat: The specified bucket does not exist/,
+      'the stall names what restic kept failing with',
+    );
+    assert.ok(
+      Date.now() - started < 5000,
+      'it fails at the stall limit, not at the 30 minute job limit',
+    );
+    assert.equal(
+      docker.calls.filter((call) => call.startsWith('rm ')).length,
+      1,
+      'the helper, and restic with it, is removed',
+    );
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a slow store that retries and then makes progress is not failed as stalled', async () => {
+  const dir = await scratch();
+  const archive = path.join(dir, 'a.tar.gz');
+  await fs.writeFile(archive, 'x');
+  const docker = dockerWith(() => ({ code: 0 }));
+  chattyExec(
+    docker,
+    'cat',
+    [
+      retryNotice(8, 'timeout'),
+      'repository abc123 opened (version 2, compression level auto)',
+      retryNotice(8, 'timeout'),
+    ],
+    true,
+  );
+  try {
+    const result = await pushControlArchive(docker, { ...S3, stallMs: 400 }, archive);
+    assert.equal(
+      result.repository,
+      'ok',
+      'output that is not a retry notice counts as progress, so the job completes',
     );
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
