@@ -150,9 +150,13 @@ export function registerBackup(program: Command): void {
     .option('--limit <n>', 'number of recent runs to show', '20')
     .option(
       '--check',
-      'exit nonzero when a target is stale, or its last run failed or was missed, or there is no destination; for cron and monitors',
+      'exit nonzero when a target is stale, or its last run failed or was missed, or nothing is protected (no destination, or no enabled target); for cron and monitors',
     )
-    .action(async (o: { limit: string; check?: boolean; json?: boolean }) => {
+    .option(
+      '--allow-empty',
+      'with --check, accept a project that has no enabled backup target (a destination is still required)',
+    )
+    .action(async (o: { limit: string; check?: boolean; allowEmpty?: boolean; json?: boolean }) => {
       const project = (await loadCfg()).project || 'site';
       const listing = await request<BackupListing>(
         'GET',
@@ -178,7 +182,10 @@ export function registerBackup(program: Command): void {
             `${r.finished_at ?? r.queued_at}\t${r.target}\t${r.trigger}\t${runState(r)}\t${r.snapshot_id?.slice(0, 8) ?? '-'}\t${formatBytes(r.size_bytes)}\t${r.id}${r.error ? `\t${r.error}` : ''}`,
           );
       if (o.check) {
-        const problems = backupCheckProblems(listing);
+        const problems = backupCheckProblems(listing, {
+          requireProtection: true,
+          allowEmpty: o.allowEmpty,
+        });
         for (const problem of problems) console.error(`PROBLEM ${problem}`);
         if (problems.length) process.exitCode = 1;
       }

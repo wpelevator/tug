@@ -52,7 +52,7 @@ Opened first, often daily, often left running on a second monitor. This is the s
 | Nodes online, stale, disabled, last seen | `status` | `stale` means no recent contact, not that the machine is off ([Nodes](nodes.md#status-and-diagnostics)). |
 | Per project: current deployment, version, state, age, who deployed | `status` | The current deployment can fall outside the 20 returned rows; show "not in recent results" rather than hide the project. |
 | Services serving against expected, per node | `status` (`serviceStates`) | `serving` is a rollout state, distinct from node connectivity and deployment state. |
-| Backup freshness per target, last failure | `backups` | The same signal as `tug backup list --check`: stale, failed or missed. |
+| Backup freshness per target, last failure | `backups` | The same signal as `tug backup list --check`: stale, failed or missed. A project with no backup targets shows `-` rather than a problem; only `--check` treats it as unprotected. |
 | Warnings and errors since the last look | `events` | Includes `ports.public` and automatic rollbacks (`system:auto-rollback`). |
 | Certificate expiry, ingress state, clock skew | `diagnostics` (admin) | Polled slowly; omitted for a `read` credential. |
 | Held services, interrupted restores | `holds`, `restores` | A project left locked is an outage that looks quiet. |

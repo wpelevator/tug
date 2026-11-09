@@ -244,7 +244,8 @@ The test layers, the metrics milestones are held to and the backlog of mocked te
 - [x] M11 `restore` waits for the restored writers to be serving again (five minutes, then it finishes with a warning)
 - [ ] M11 list and remove scratch-restore volumes, and expire safety snapshots (they accumulate for ever and only `restic forget` removes them)
 - [x] M11 `backup list --check`: exit nonzero when any target is stale, failed or missed, as an interim for cron and monitors until webhooks (M8) exist
-- [ ] M11 `backup list --check` also fails when nothing is protected (no destination, or no enabled targets), and `backup list` shows each target's protection level: local only, off-host, verified, restore-tested
+- [x] M11 `backup list --check` also fails when nothing is protected: no destination, or no enabled targets unless `--allow-empty` (2.0.0)
+- [ ] M11 `backup list` shows each target's protection level: local only, off-host, verified, restore-tested
 - [ ] Control recovery drill on disposable hosts for the PR #123 paths (`control backup --download`, `control restore --from-file`, the activation journal): a damaged repository, a crash during activation, and agents reconnecting after an older snapshot is restored
 - [ ] Bulk `exec`/`run` input and output with end-to-end backpressure, verified at 100 MB in both directions with a slow reader and a hash check
 - [ ] Operator scope cues: control-wide views labelled, the resolved control and project shown before high-impact commands, compact human output for `ps`, `events` and `doctor`
