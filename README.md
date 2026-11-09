@@ -24,6 +24,7 @@ Follow [Deploy your first service](docs/getting-started.md) to install tug, depl
 ```bash
 npm install -g @wpelevator/tug      # or run it with npx @wpelevator/tug
 
+tug lint                            # check your compose.yaml offline, no server needed
 tug setup root@203.0.113.5          # install the control plane
 tug node add root@203.0.113.5 --name app1  # install the agent on the same VPS
 tug deploy                          # deploy a Compose file in this directory
@@ -172,7 +173,7 @@ See [Not for you if](#not-for-you-if) for what tug deliberately leaves out. Node
   the control API.
 ```
 
-`tug deploy` reads your Compose file on your machine and sends it to the control plane, which stores it as an immutable desired state, builds application images when needed and pins published images to digests. tug delivers its built images as archives; published images are pulled from their upstream registries. Each agent fetches the work for its node, applies it through the Docker Engine API, runs the health checks and reports back. The control plane marks the deployment done when every node reports it serving. Compose runs only on your machine for application normalization; nodes need Docker, and the control installation also uses Compose. Cross-node workload traffic uses your own private network.
+`tug deploy` reads your Compose file on your machine and sends it to the control plane, which stores it as an immutable desired state, builds application images when needed and pins published images to digests. tug delivers its built images as archives; published images are pulled from their upstream registries. Each agent fetches the work for its node, applies it through the Docker Engine API, runs the health checks and reports back. The control plane marks the deployment done when every node reports it serving. tug reads Compose files with its own built-in reader, so Docker Compose is not needed anywhere: nodes need only Docker Engine, and control runs as a container started with `docker run`. Cross-node workload traffic uses your own private network.
 
 Control serves mutual TLS directly on one port (`8443`). Every operator, CI job and node authenticates with a certificate from a private CA created at install, so the control address can be a bare IP and can change later. Do not terminate TLS in front of it. A `controlUrl` in `tug.yml` tells the CLI where control is (see [CLI configuration](docs/cli.md#config-file)). [Architecture](docs/architecture.md) covers every flow in detail, and [Security](docs/security.md) the trust boundaries.
 
