@@ -2042,7 +2042,9 @@ export async function createApp(
   const backupTickMs = Number(process.env.TUG_BACKUP_TICK_MS) || 30_000;
   /** Assigned with the control backup code below; control's own nightly backup into the destination. */
   let controlDestinationTick: () => void = () => {};
-  const backupTimer = setInterval(() => {
+  const backupTimer: NodeJS.Timeout = setInterval(() => {
+    // A restore closes the database for good (control restarts to use the restored one): nothing left to schedule.
+    if (restartRequired) return void clearInterval(backupTimer);
     try {
       backups.tick();
       controlDestinationTick();
@@ -2052,6 +2054,14 @@ export async function createApp(
     }
   }, backupTickMs);
   backupTimer.unref();
+  /** Stops the scheduler; called when the server closes, so a closed control never ticks against a closed database. */
+  app.locals.stopBackupScheduler = () => clearInterval(backupTimer);
+  const listenOnApp = app.listen.bind(app) as (...args: unknown[]) => import('node:http').Server;
+  app.listen = ((...args: unknown[]) => {
+    const server = listenOnApp(...args);
+    server.once('close', () => clearInterval(backupTimer));
+    return server;
+  }) as typeof app.listen;
   try {
     backups.tick(); // catch up on slots missed while control was down
     restores.advance(); // re-adopt unfinished restores and keep their projects locked
@@ -4782,6 +4792,7 @@ export async function listen(app: express.Express, port = PORT): Promise<https.S
   sweep.unref();
   renew.unref();
   server.once('close', () => {
+    (app.locals.stopBackupScheduler as () => void)();
     clearInterval(sweep);
     clearInterval(renew);
   });
