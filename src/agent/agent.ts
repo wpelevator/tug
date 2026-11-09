@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import fs from 'node:fs/promises';
 import { imageLocation } from '../images/registry.ts';
+import { unstableServices } from './stability.ts';
 import { createReadStream, createWriteStream, existsSync, readFileSync } from 'node:fs';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -35,7 +36,7 @@ import { API_VERSION, DockerEngine, isNotFound } from '../docker-api.ts';
 import { DockerEventWatcher } from './docker-events.ts';
 import type { ContainerSummary, DockerApi } from '../docker-api.ts';
 import type { PortBind } from '../compose/compose.ts';
-import { JobRunner } from './jobs.ts';
+import { JobRunner, defaultJobConcurrency } from './jobs.ts';
 import {
   LIVE_MAX_FRAME_BYTES,
   LIVE_START_TIMEOUT_MS,
@@ -153,7 +154,7 @@ function jobRunnerFor(ctx: AgentContext): JobRunner {
     runner = new JobRunner({
       docker: ctx.docker,
       stateDir: ctx.stateDir,
-      concurrency: Number(process.env.TUG_BACKUP_CONCURRENCY) || 1,
+      concurrency: Number(process.env.TUG_BACKUP_CONCURRENCY) || defaultJobConcurrency(),
       fetchCredentials: (commandId) =>
         api<BackupCredentialsResponse>(
           ctx,
@@ -1296,6 +1297,19 @@ export async function reconcile(
   } else {
     for (const service of serviceNames) serviceStates[service].rolloutState = 'serving';
   }
+  if (ctx.apply)
+    try {
+      const unstable = await unstableServices(
+        ctx.docker,
+        desiredState.project,
+        serviceNames.filter((service) => !heldSet.has(service)),
+        new Set(rolling),
+      );
+      for (const [service, reason] of Object.entries(unstable))
+        serviceStates[service].unstable = reason;
+    } catch {
+      /* the state is advisory; a Docker error here must not fail an otherwise converged project */
+    }
   db.run(
     `INSERT INTO applied_state(project, version, revision, applied_at, service_states_json, secret_versions_json)
      VALUES(?,?,?,?,?,?)
@@ -1436,6 +1450,20 @@ export async function pollOnce(ctx: AgentContext = defaultContext()): Promise<Pr
   const commandResults: CommandResult[] = [];
   const jobs = jobRunnerFor(ctx);
   for (const command of work.commands || []) {
+    if (command.type === 'backup.cancel') {
+      try {
+        const { commandId } = JSON.parse(command.payload_json ?? '{}') as { commandId?: string };
+        const found = typeof commandId === 'string' && (await jobs.cancel(commandId));
+        commandResults.push({ commandId: command.id, state: 'succeeded', result: { found } });
+      } catch (e) {
+        commandResults.push({
+          commandId: command.id,
+          state: 'failed',
+          result: { error: errMessage(e) },
+        });
+      }
+      continue;
+    }
     // Backups can run for an hour, so they run in the background and report through later polls.
     if (command.type.startsWith('backup.')) {
       await jobs.start(command);

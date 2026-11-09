@@ -106,6 +106,10 @@ export function formatLiveResult(value: unknown): string {
   return `${json}\n`;
 }
 
+/** Input is read from a pipe only while this much or less is waiting to be sent; the rest waits in the pipe. */
+const STDIN_HIGH_WATER_BYTES = 256 * 1024;
+const STDIN_LOW_WATER_BYTES = 64 * 1024;
+
 /** Runs one session without exiting the process or owning the caller's streams. */
 export async function runCliLive(
   request: LiveRequest,
@@ -129,6 +133,7 @@ export async function runCliLive(
     wake = resolve;
   });
   let queuedBytes = 0;
+  let inputPaused = false;
   let sending = Promise.resolve();
   const fail = (error: unknown): void => {
     failure ??= error instanceof Error ? error : new Error(String(error));
@@ -137,10 +142,6 @@ export async function runCliLive(
   const send = (message: LiveClientMessage): void => {
     const size = message.type === 'stdin' ? message.data.byteLength : 0;
     queuedBytes += size;
-    if (queuedBytes > 1024 * 1024) {
-      fail(new CliLiveError('stdin exceeded the live session buffer limit'));
-      return;
-    }
     sending = sending
       .then(async () => {
         if (!complete && !controller.signal.aborted) await session!.send(message);
@@ -148,6 +149,11 @@ export async function runCliLive(
       .catch(fail)
       .finally(() => {
         queuedBytes -= size;
+        // Resume a paused input only after most of what was queued has gone out.
+        if (inputPaused && queuedBytes <= STDIN_LOW_WATER_BYTES) {
+          inputPaused = false;
+          stdin.resume();
+        }
       });
   };
   const cancel = (): void => {
@@ -156,6 +162,11 @@ export async function runCliLive(
   };
   const onData = (data: Buffer | string): void => {
     send({ type: 'stdin', data: Buffer.from(data) });
+    // A pipe is read faster than the connection drains, so stop reading instead of queueing the whole input in memory.
+    if (queuedBytes >= STDIN_HIGH_WATER_BYTES && !inputPaused) {
+      inputPaused = true;
+      stdin.pause();
+    }
   };
   const onEnd = (): void => {
     send({ type: 'stdin-end' });

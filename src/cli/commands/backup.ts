@@ -16,6 +16,9 @@ interface BackupRunRecord {
   finished_at: string | null;
   queued_at: string | null;
   error: string | null;
+  /** What the node last said about a queued or running job. */
+  phase?: string;
+  waitingFor?: string;
 }
 interface BackupListing {
   destinationConfigured: boolean;
@@ -37,6 +40,13 @@ const formatBytes = (bytes: number | null): string =>
     : bytes < 1024 ** 2
       ? `${Math.ceil(bytes / 1024)} KiB`
       : `${(bytes / 1024 ** 2).toFixed(1)} MiB`;
+/** `queued behind bkr_…` or `running (uploading)` for a job the node reported on; the plain state otherwise. */
+const runState = (run: BackupRunRecord): string =>
+  run.phase === 'queued' && run.waitingFor
+    ? `queued behind ${run.waitingFor}`
+    : run.phase && run.phase !== 'queued' && run.state === 'running'
+      ? `running (${run.phase})`
+      : run.state;
 const BACKUP_TERMINAL = ['succeeded', 'failed', 'missed', 'cancelled'];
 
 export function registerBackup(program: Command): void {
@@ -153,13 +163,24 @@ export function registerBackup(program: Command): void {
       if (!o.json)
         for (const r of listing.runs)
           console.log(
-            `${r.finished_at ?? r.queued_at}\t${r.target}\t${r.trigger}\t${r.state}\t${r.snapshot_id?.slice(0, 8) ?? '-'}\t${formatBytes(r.size_bytes)}${r.error ? `\t${r.error}` : ''}`,
+            `${r.finished_at ?? r.queued_at}\t${r.target}\t${r.trigger}\t${runState(r)}\t${r.snapshot_id?.slice(0, 8) ?? '-'}\t${formatBytes(r.size_bytes)}\t${r.id}${r.error ? `\t${r.error}` : ''}`,
           );
       if (o.check) {
         const problems = backupCheckProblems(listing);
         for (const problem of problems) console.error(`PROBLEM ${problem}`);
         if (problems.length) process.exitCode = 1;
       }
+    });
+  backup
+    .command('cancel <run>')
+    .description(
+      'stop a queued or running backup (the run id is the last column of `tug backup list`); it is reported as cancelled and not retried',
+    )
+    .action(async (run: string) => {
+      const project = (await loadCfg()).project || 'site';
+      print(
+        await request('POST', `/api/v1/backups/${encodeURIComponent(run)}/cancel`, { project }),
+      );
     });
   backup
     .command('password')

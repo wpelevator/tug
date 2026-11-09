@@ -350,3 +350,39 @@ Two fresh Ubuntu 24.04 arm64 VMs under QEMU (the official cloud image, checksum 
 - The join key remains in `/var/lib/cloud/instance/user-data.txt` and `scripts/runcmd` on the guest after enrollment (readable by root only, and the key is single-use) and in the agent container's environment.
 
 **Not run:** Debian, Rocky or AlmaLinux, RHEL, amd64 guests, Ubuntu 26.04, a real provider's user-data and metadata service, or a distribution that needs the manual path with a working Docker.
+
+## Operator workflows on merged main, QEMU VM, 9 November 2026
+
+Setup: merged `main` at `322cb38` (PR 119), one Ubuntu 24.04 arm64 VM under QEMU (4 GB, user networking, hardware acceleration) running control and one node, an S3-compatible RustFS on the laptop over plain HTTP, the `examples/wordpress` project, and a throwaway "legacy" WordPress 6.8.3 site on the laptop as the migration source (a SQL dump of 88 KB and a `wp-content` tarball of 14 MB with a 1 MiB sentinel file). Control and agent were first installed from the pre-merge branch tree and then upgraded in place to merged `main`; the failure-reporting results below are from `main`.
+
+| Workflow | Result |
+| --- | --- |
+| Install control and node, deploy WordPress and MariaDB | Works: about 40 s from a fresh VM for the deploy |
+| Migrate an existing site: import SQL | Works for a small dump (`tug exec -i db -- mariadb …`, under 1 s) |
+| Migrate an existing site: import uploads | **Fails.** `tug exec -i` rejects more than 1 MiB of stdin (`stdin exceeded the live session buffer limit`, `src/cli/live.ts`). Worked only when split into 28 chunks of 512 KiB appended with repeated calls (10 s), after which the file hash matched. Any real database dump fails the same way |
+| Migrate: rewrite URLs | Not possible with the stock `wordpress` image (no WP-CLI); the docs say to bake it into your image but no example does |
+| Staging as a second project (`--project shop-staging`, own secrets, port) | Works: 12 s to deploy beside production. Copying the small database through a pipe between two `tug exec` calls works (0.6 s) |
+| Staging: copy production uploads | **Fails.** `tug exec` stdout is cut at 6 MiB (`operator buffer limit exceeded`) and the receiving side dies with `ECONNRESET`. A restic snapshot cannot be restored into another project's services (repository per project), and there is no `tug project delete` |
+| Backup and scratch restore of a volume | Works: 15 MiB in 12 s, scratch restore in 6 s, sentinel hash verified. The scratch volume is invisible to `tug volume list` (known gap) |
+| Backup destination down | Detected in 8 s: `backup.failed` events, `backup list --check` exits 1 |
+| **Backup repository damaged** (4 KiB overwritten in a stored data pack) | **Not detected.** The next `backup run` succeeded (`0 KiB added`), `--check` exited 0, and a scratch restore stayed in `restoring` for more than 15 minutes with no error until control was restarted. There is no `restic check`. The RustFS server may have turned the damage into read errors that restic retries, so a different store could fail faster; the lack of any verification is the finding |
+| Crash and crash loop on merged `main` | Works: `container.exited` (`warn`) on the first exit 1, `container.crashloop` (`error`) after three in five minutes. A signal-killed container (137) is ignored by design |
+| What `tug status` says in those cases | **Misleading.** A crash-looping service and a site whose home page returns 500 (health path `wp-includes/version.php` still 200) both show `serving`, and the deployment stays `succeeded` |
+
+Not exercised: the operator watch channel and `tug tui` push over a real network (covered by unit tests only), public DNS, Let's Encrypt, NAT, a second node, multi-hundred-megabyte data, AWS S3, amd64, and outbound alerts (none exist).
+
+### Job queue on the same VM, branch build, 9 November 2026
+
+The VM was upgraded to the branch (control and agent, `--build-local-image`); it reports 4 GB, so the agent ran two jobs at a time. The RustFS store was paused with `docker pause` so connections hang instead of failing.
+
+| Check | Result |
+| --- | --- |
+| Hung backup of `shop` `wp-content`, then a manual backup of `shop` `db`, then a manual backup of project `shop-staging` | The first showed `running (checking)`, the second `queued behind bkr_…` (same project, so it shares the repository), and staging's ran at the same time in the second slot |
+| `tug backup cancel` of the queued run | `failed`, error `cancelled by an operator`, a `backup.cancelled` warning, nothing queued as a retry |
+| `tug backup cancel` of the running run | Same result within 15 s, and its restic helper container was gone |
+| Cancelling a run that already finished | `409 already failed` |
+| In-place restore of `shop` with the store paused, then `tug restore cancel` while it waited on its safety backup | The safety backup was cancelled, the restore ended `failed … nothing was changed`, and the held `wordpress` container was running again |
+| Staging's hung backup left alone | After 600 s it failed on its own with `restic made no progress for 600s (0 bytes so far); the repository may be unreadable or the backup store unreachable`, a `backup.failed` event, and no helper containers left |
+
+Not run: lane order on a real node (a restore ahead of a manual backup ahead of a scheduled one is covered by tests with a fake Docker), cancelling a restore that is already restoring, and a host with under 3 GiB of memory (one job at a time).
+

@@ -208,7 +208,9 @@ export type CommandType =
   | 'backup.check'
   | 'backup.run'
   | 'backup.restore'
-  | 'backup.list';
+  | 'backup.list'
+  /** Payload `{ commandId }`: stops that job on the node, whether it is queued or running. */
+  | 'backup.cancel';
 
 /** Commands whose helper containers need the backup destination's credentials. */
 export const BACKUP_COMMAND_TYPES: readonly CommandType[] = [
@@ -275,12 +277,25 @@ export interface BackupJobResult {
 }
 
 /** Live jobs in `StatusReport.jobs`, so control can tell "running" from "lost". */
+/**
+ * Who goes first when a node has more jobs than it runs at once: a restore and its safety backup (a site is down
+ * while they wait), then a backup someone asked for, then scheduled ones.
+ */
+/** The error a cancelled job reports; control tells it from a failure (no automatic retry). */
+export const JOB_CANCELLED = 'cancelled by an operator';
+
+export type JobLane = 'restore' | 'manual' | 'scheduled';
+
 export interface JobStatus {
   commandId: string;
   runId: string;
   phase: JobPhase;
+  /** When the job started running, or, while `queued`, when it was queued on the node. */
   startedAt: string;
   bytes?: number;
+  lane?: JobLane;
+  /** While `queued`: the run (`bkr_…` or `rst_…`) it waits for. */
+  waitingFor?: string;
 }
 
 /** A `commands` table row as delivered in `GET /agent/v1/work`. */
@@ -317,6 +332,7 @@ export type CommandResultPayload =
   | { stdout: string; stderr: string }
   | { project: string; volume: string; deleted: true }
   | BackupJobResult
+  | { found: boolean }
   | { error: string };
 
 export interface CommandResult {
@@ -534,6 +550,8 @@ export interface ServiceState {
   rolloutRevision?: string;
   /** Rolling services: why the newest revision was rejected while this (older) one keeps serving. */
   rolloutError?: string;
+  /** Set when the container does not stay up: Docker keeps restarting it, or it exited with an error and stays down. */
+  unstable?: string;
 }
 
 export interface ProjectStatus {

@@ -27,7 +27,9 @@ export interface FakeContainer {
   id: string;
   name: string;
   body: CreateContainerBody;
-  state: 'created' | 'running' | 'exited';
+  state: 'created' | 'running' | 'exited' | 'restarting';
+  /** `State.ExitCode` of the last exit. */
+  exitCode?: number;
   ip: string;
   /** Overrides `State.Health.Status`; unset means the image has no HEALTHCHECK. */
   health?: string;
@@ -52,7 +54,7 @@ export class FakeDocker implements DockerApi {
   info_: DaemonInfo = { OSType: 'linux', Architecture: 'x86_64', ServerVersion: '27.0.0' };
   version_: DaemonVersion = { Version: '27.0.0', ApiVersion: '1.46', MinAPIVersion: '1.24' };
   /** State a container is in after `startContainer`; `exited` simulates a crash on start. */
-  startsAs: 'running' | 'exited' = 'running';
+  startsAs: 'running' | 'exited' | 'restarting' = 'running';
   logOutput = new Map<string, string>();
   private seq = 0;
 
@@ -147,6 +149,7 @@ export class FakeDocker implements DockerApi {
       State: {
         Status: c.state,
         Running: c.state === 'running',
+        ...(c.exitCode !== undefined ? { ExitCode: c.exitCode } : {}),
         ...(c.health ? { Health: { Status: c.health } } : {}),
       },
       NetworkSettings: {

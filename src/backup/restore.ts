@@ -610,7 +610,26 @@ export function createRestoreService(deps: RestoreDeps) {
     );
   }
 
-  return { plan, start, advance, releaseInterrupted, resume, holds, list };
+  /**
+   * Stops a restore's current job. While it waits on its safety backup, that backup fails and nothing has changed; while
+   * it is restoring, the job fails and the restore is interrupted, with its writers still stopped for resume or release.
+   */
+  function cancel(id: string): { ok: true; state: string } | { error: string; status: number } {
+    const restore = db.get<RestoreRunRow>('SELECT * FROM restore_runs WHERE id=?', id);
+    if (!restore) return { error: 'restore not found', status: 404 };
+    const stopped =
+      restore.state === 'safety_backup' && restore.safety_run_id
+        ? backups.cancelRun(restore.project_id, restore.safety_run_id)
+        : restore.state === 'restoring'
+          ? backups.cancelJob(restore.node_id, restore.project_id, restore.command_id)
+          : {
+              error: `restore is ${restore.state}; only one waiting on its safety backup or restoring can be cancelled`,
+              status: 409,
+            };
+    return 'error' in stopped ? stopped : { ok: true, state: restore.state };
+  }
+
+  return { plan, start, advance, releaseInterrupted, resume, cancel, holds, list };
 }
 
 export type RestoreService = ReturnType<typeof createRestoreService>;

@@ -1,6 +1,8 @@
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { runBackupJob, removeStaleJobContainers } from '../backup/job.ts';
+import { JOB_CANCELLED } from '../protocol.ts';
 import { redactSecrets } from '../backup/destination.ts';
 import { errMessage } from '../errors.ts';
 import { now } from '../db/row.ts';
@@ -11,6 +13,7 @@ import type {
   BackupJobPayload,
   Command,
   CommandResult,
+  JobLane,
   JobPhase,
   JobStatus,
 } from '../protocol.ts';
@@ -34,6 +37,30 @@ export interface JobHost {
 
 interface Active extends JobStatus {
   controller: AbortController;
+  project: string;
+}
+
+interface Queued {
+  command: Command;
+  payload: BackupJobPayload;
+  lane: JobLane;
+  queuedAt: string;
+}
+
+const LANE_ORDER: Record<JobLane, number> = { restore: 0, manual: 1, scheduled: 2 };
+
+export function laneOf(command: Command, payload: BackupJobPayload): JobLane {
+  if (command.type === 'backup.restore' || payload.tags?.includes('trigger:pre-restore'))
+    return 'restore';
+  return payload.tags?.includes('trigger:manual') ? 'manual' : 'scheduled';
+}
+
+/**
+ * Jobs a node runs at once. Each restic helper reserves its own memory (512 MB by default), so a small host runs one
+ * at a time; `TUG_BACKUP_CONCURRENCY` overrides this.
+ */
+export function defaultJobConcurrency(totalMemory = os.totalmem()): number {
+  return totalMemory >= 3 * 1024 ** 3 ? 2 : 1;
 }
 
 /**
@@ -44,7 +71,7 @@ interface Active extends JobStatus {
 export class JobRunner {
   private readonly host: JobHost;
   private readonly active = new Map<string, Active>();
-  private readonly queue: { command: Command; payload: BackupJobPayload }[] = [];
+  private readonly queue: Queued[] = [];
   private results: CommandResult[] = [];
   private ready: Promise<void> | undefined;
   private settled: (() => void) | undefined;
@@ -114,26 +141,70 @@ export class JobRunner {
       await this.save();
       return;
     }
-    this.queue.push({ command, payload });
+    this.queue.push({
+      command,
+      payload,
+      lane: laneOf(command, payload),
+      queuedAt: now(),
+    });
     await this.save();
     this.pump();
   }
 
+  /**
+   * Stops a job: a queued one never starts and an active one is aborted (its helper containers are removed). Either way
+   * a failed result says it was cancelled. Returns whether the job was found.
+   */
+  async cancel(commandId: string, reason = JOB_CANCELLED): Promise<boolean> {
+    await this.init();
+    const queued = this.queue.findIndex((job) => job.command.id === commandId);
+    if (queued >= 0) {
+      this.queue.splice(queued, 1);
+      this.results.push({ commandId, state: 'failed', result: { error: reason } });
+      await this.save();
+      this.settled?.();
+      return true;
+    }
+    const active = this.active.get(commandId);
+    if (!active) return false;
+    active.controller.abort(new Error(reason));
+    return true;
+  }
+
+  /** The job a queued one waits for: one running for the same project (they share a repository), else the oldest. */
+  private blockerOf(job: Queued): Active | undefined {
+    const running = [...this.active.values()];
+    return running.find((a) => a.project === job.payload.project) ?? running[0];
+  }
+
+  /**
+   * Starts what can start: the best lane first, oldest first inside a lane, never two jobs of one project at once (they
+   * contend for the project's repository lock) and never more than `concurrency` in all.
+   */
   private pump(): void {
-    const limit = this.host.concurrency ?? 1;
-    while (this.active.size < limit && this.queue.length) {
-      const job = this.queue.shift()!;
-      void this.execute(job.command, job.payload);
+    const limit = this.host.concurrency ?? defaultJobConcurrency();
+    while (this.active.size < limit) {
+      const busy = new Set([...this.active.values()].map((a) => a.project));
+      let best = -1;
+      this.queue.forEach((job, index) => {
+        if (busy.has(job.payload.project)) return;
+        if (best < 0 || LANE_ORDER[job.lane] < LANE_ORDER[this.queue[best].lane]) best = index;
+      });
+      if (best < 0) return;
+      const [job] = this.queue.splice(best, 1);
+      void this.execute(job.command, job.payload, job.lane);
     }
   }
 
-  private async execute(command: Command, payload: BackupJobPayload): Promise<void> {
+  private async execute(command: Command, payload: BackupJobPayload, lane: JobLane): Promise<void> {
     const controller = new AbortController();
     const status: Active = {
       commandId: command.id,
       runId: payload.runId,
       phase: 'pulling',
       startedAt: now(),
+      lane,
+      project: payload.project,
       controller,
     };
     this.active.set(command.id, status);
@@ -183,12 +254,16 @@ export class JobRunner {
   /** Jobs that are running or waiting, for the status report's heartbeat. */
   statuses(): JobStatus[] {
     return [
-      ...[...this.active.values()].map(({ controller: _controller, ...status }) => status),
-      ...this.queue.map(({ command, payload }) => ({
-        commandId: command.id,
-        runId: payload.runId,
+      ...[...this.active.values()].map(
+        ({ controller: _controller, project: _project, ...status }) => status,
+      ),
+      ...this.queue.map((job) => ({
+        commandId: job.command.id,
+        runId: job.payload.runId,
         phase: 'queued' as const,
-        startedAt: now(),
+        startedAt: job.queuedAt,
+        lane: job.lane,
+        ...(this.blockerOf(job) ? { waitingFor: this.blockerOf(job)!.runId } : {}),
       })),
     ];
   }

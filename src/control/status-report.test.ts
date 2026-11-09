@@ -71,3 +71,54 @@ test('malformed reports are refused with the offending path', () => {
       `${JSON.stringify(body)} should be refused with ${message}`,
     );
 });
+
+test('an agent-reported unstable reason is kept and must be text', () => {
+  const report = parseStatusReport({
+    node: 'n1',
+    projects: [
+      project({
+        serviceStates: {
+          web: { rolloutState: 'serving', unstable: 'restarting after exiting with code 1' },
+        },
+      }),
+    ],
+  });
+  assert.equal(
+    report.projects[0].serviceStates?.web.unstable,
+    'restarting after exiting with code 1',
+    'the reason reaches the stored status',
+  );
+  assert.throws(
+    () =>
+      parseStatusReport({
+        node: 'n1',
+        projects: [project({ serviceStates: { web: { rolloutState: 'serving', unstable: {} } } })],
+      }),
+    StatusReportError,
+    'a non-text reason is refused',
+  );
+});
+
+test('a job heartbeat keeps its lane and what it waits for, and drops an unknown lane', () => {
+  const report = parseStatusReport({
+    node: 'n1',
+    projects: [],
+    jobs: [
+      {
+        commandId: 'c1',
+        runId: 'r1',
+        phase: 'queued',
+        startedAt: 't',
+        lane: 'restore',
+        waitingFor: 'r0',
+      },
+      { commandId: 'c2', runId: 'r2', phase: 'queued', startedAt: 't', lane: 'bogus' },
+    ],
+  });
+  assert.deepEqual(
+    [report.jobs?.[0].lane, report.jobs?.[0].waitingFor],
+    ['restore', 'r0'],
+    'the lane and the run a queued job waits for reach control',
+  );
+  assert.equal(report.jobs?.[1].lane, undefined, 'a lane control does not know is dropped');
+});

@@ -3,9 +3,11 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { JobRunner } from './jobs.ts';
+import type { PassThrough } from 'node:stream';
+import { JobRunner, defaultJobConcurrency, laneOf } from './jobs.ts';
 import { backupArgs, forgetArgs, memoryBytes, parseSummary, runBackupJob } from '../backup/job.ts';
 import { FakeDocker } from '../../tests/fake-docker.ts';
+import { JOB_CANCELLED } from '../protocol.ts';
 import type { BackupJobPayload, Command } from '../protocol.ts';
 
 const payload = (overrides: Partial<BackupJobPayload> = {}): BackupJobPayload => ({
@@ -167,6 +169,8 @@ test('jobs beyond the concurrency limit wait queued and are reported as such', a
   const phases = Object.fromEntries(jobs.statuses().map((s) => [s.commandId, s.phase]));
   assert.equal(phases.cmd_b, 'queued', 'the second job waits while the first runs');
   assert.notEqual(phases.cmd_a, 'queued', 'the first job is running');
+  await jobs.cancel('cmd_b');
+  await jobs.cancel('cmd_a');
 });
 
 test('restic arguments carry the node as host, tags, retention and the stdin name', () => {
@@ -313,6 +317,111 @@ test('scratch restore checks restore identity and can resume the same restore', 
   );
 });
 
+const SNAPSHOT_LISTING = JSON.stringify([{ tags: ['project:site', 'target:volume:uploads'] }]);
+const volumeRestore = (mode: 'in-place' | 'scratch') =>
+  payload({
+    runId: 'rst_abc123',
+    type: 'volume',
+    target: 'volume:uploads',
+    volume: { name: 'uploads', dockerVolume: 'tug_v4_site_uploads' },
+    restore: {
+      snapshotId: 'snap',
+      mode,
+      ...(mode === 'scratch' ? { scratchVolume: 'tug_site_restore-x' } : {}),
+    },
+  });
+
+test('an in-place volume restore reads and verifies the snapshot beside the live data before replacing it', async () => {
+  const docker = dockerWith((cmd) => {
+    if (cmd[0] === 'restic' && cmd[1] === 'snapshots') return { code: 0, out: SNAPSHOT_LISTING };
+    return { code: 0 };
+  });
+  docker.volumes.set('tug_v4_site_uploads', {
+    Name: 'tug_v4_site_uploads',
+    Labels: { 'tug.project': 'site', 'tug.volume': 'uploads' },
+  });
+  await runBackupJob(volumeRestore('in-place'), 'cmd', { docker, credentials }, 'backup.restore');
+  const commands = docker.execOptions.map((o) => o.cmd.join(' '));
+  const restored = commands.findIndex((c) => c.startsWith('restic restore'));
+  const swapped = commands.findIndex((c) => c.startsWith('sh -ec'));
+  assert.ok(
+    restored >= 0 && swapped > restored,
+    'the live data is replaced only after restic finished',
+  );
+  assert.match(
+    commands[restored],
+    /--target \/data\/\.tug-restore-rst_abc123 .*--verify|--verify.*--target/,
+    'the snapshot is restored beside the live data and verified',
+  );
+  assert.ok(
+    !commands.some((c) => c.includes('-mindepth 1 -delete')),
+    'the volume is never emptied before the snapshot has been read',
+  );
+});
+
+test('a scratch restore still restores straight into its empty volume', async () => {
+  const docker = dockerWith((cmd) =>
+    cmd[0] === 'restic' && cmd[1] === 'snapshots'
+      ? { code: 0, out: SNAPSHOT_LISTING }
+      : { code: 0 },
+  );
+  await runBackupJob(volumeRestore('scratch'), 'cmd', { docker, credentials }, 'backup.restore');
+  const restore = docker.execOptions
+    .map((o) => o.cmd.join(' '))
+    .find((c) => c.startsWith('restic restore'));
+  assert.match(restore ?? '', /--target \/ /, 'a scratch restore targets / so files land in /data');
+});
+
+test('a restore that makes no progress fails with a clear error and leaves the live volume alone', async () => {
+  const docker = dockerWith((cmd) => {
+    if (cmd[0] === 'restic' && cmd[1] === 'snapshots') return { code: 0, out: SNAPSHOT_LISTING };
+    if (cmd[0] === 'restic' && cmd[1] === 'restore') return undefined; // restic retrying a failing store: no exit, no progress
+    return { code: 0 };
+  });
+  docker.volumes.set('tug_v4_site_uploads', {
+    Name: 'tug_v4_site_uploads',
+    Labels: { 'tug.project': 'site', 'tug.volume': 'uploads' },
+  });
+  await assert.rejects(
+    runBackupJob(
+      volumeRestore('in-place'),
+      'cmd',
+      { docker, credentials, stallMs: 80 },
+      'backup.restore',
+    ),
+    /made no progress for .*unreadable or the backup store unreachable/,
+    'a stalled restore fails instead of waiting for the job limit',
+  );
+  const commands = docker.execOptions.map((o) => o.cmd.join(' '));
+  assert.ok(
+    !commands.some((c) => c.startsWith('sh -ec')),
+    'the live volume is not touched when the snapshot could not be read',
+  );
+  assert.ok(
+    commands.some((c) => c === 'rm -rf /data/.tug-restore-rst_abc123'),
+    'the partial staging copy is removed',
+  );
+  assert.equal(docker.names().length, 0, 'the helper containers are removed');
+});
+
+test('cancelling a job reaches a restic command that never returns', async () => {
+  const docker = dockerWith((cmd) => {
+    if (cmd[0] === 'restic' && cmd[1] === 'snapshots') return { code: 0, out: SNAPSHOT_LISTING };
+    if (cmd[0] === 'restic' && cmd[1] === 'restore') return undefined;
+    return { code: 0 };
+  });
+  const controller = new AbortController();
+  const running = runBackupJob(
+    volumeRestore('scratch'),
+    'cmd',
+    { docker, credentials, signal: controller.signal },
+    'backup.restore',
+  );
+  setTimeout(() => controller.abort(new Error('the job exceeded its 5s limit')), 50);
+  await assert.rejects(running, /exceeded its 5s limit/, 'the time limit ends a hung restore');
+  assert.equal(docker.names().length, 0, 'the helper containers are removed after the abort');
+});
+
 const SUMMARY =
   '{"message_type":"summary","snapshot_id":"snap1234","data_added":10,"total_bytes_processed":20}\n';
 
@@ -396,5 +505,195 @@ test('a command backup fails clearly when the service is not running on the node
     JSON.stringify(jobs.pending()[0].result),
     /service db is not running on this node/,
     'there is nothing to back up from a stopped service',
+  );
+});
+
+/** A job that stays active until it is cancelled: the helper's `restic version` never answers. */
+const holding = () =>
+  dockerWith((cmd) => (cmd.join(' ') === 'restic version' ? undefined : { code: 0 }));
+const job = (id: string, project: string, trigger: string, type = 'backup.run') =>
+  command(
+    id,
+    payload({
+      runId: `run_${id}`,
+      project,
+      tags: ['tug', `project:${project}`, `trigger:${trigger}`],
+    }),
+    type,
+  );
+const phaseOf = (jobs: JobRunner, id: string) =>
+  jobs.statuses().find((status) => status.commandId === id)?.phase;
+const tick = () => new Promise((resolve) => setTimeout(resolve, 20));
+
+test('lanes: a restore starts before a manual backup, which starts before a scheduled one', () => {
+  const lane = (trigger: string, type = 'backup.run') =>
+    laneOf(job('x', 'p', trigger, type), payload({ tags: [`trigger:${trigger}`] }));
+  assert.equal(lane('schedule'), 'scheduled', 'a scheduled backup is the lowest lane');
+  assert.equal(lane('retry'), 'scheduled', 'so is a retry');
+  assert.equal(lane('manual'), 'manual', 'a backup someone asked for comes next');
+  assert.equal(lane('pre-restore'), 'restore', 'a safety backup waits for no scheduled backup');
+  assert.equal(lane('schedule', 'backup.restore'), 'restore', 'a restore is the highest lane');
+});
+
+test('the node runs the best lane first, one job per project, and no more than its concurrency', async () => {
+  const { jobs } = await runner(holding(), 2);
+  await jobs.start(job('A', 'p1', 'schedule'));
+  await jobs.start(job('B', 'p1', 'schedule'));
+  await jobs.start(job('C', 'p2', 'schedule'));
+  await jobs.start(job('D', 'p3', 'manual'));
+  await jobs.start(job('E', 'p4', 'restore', 'backup.restore'));
+  await tick();
+  assert.equal(phaseOf(jobs, 'A') === 'queued', false, 'the first job starts at once');
+  assert.equal(phaseOf(jobs, 'C') === 'queued', false, 'a second project uses the second slot');
+  const queued = new Map(
+    jobs
+      .statuses()
+      .filter((s) => s.phase === 'queued')
+      .map((s) => [s.commandId, s]),
+  );
+  assert.deepEqual([...queued.keys()].sort(), ['B', 'D', 'E'], 'everything else waits');
+  assert.equal(
+    queued.get('B')?.waitingFor,
+    'run_A',
+    'a job waits for the running job of its own project',
+  );
+  assert.equal(queued.get('E')?.lane, 'restore', 'the lane is reported');
+
+  assert.equal(await jobs.cancel('A'), true, 'cancelling a running job finds it');
+  await tick();
+  assert.equal(
+    [phaseOf(jobs, 'B'), phaseOf(jobs, 'D'), phaseOf(jobs, 'E')].map((p) => p === 'queued').join(),
+    'true,true,false',
+    'the restore takes the freed slot ahead of an older scheduled backup and a manual one',
+  );
+
+  assert.equal(await jobs.cancel('C'), true);
+  await tick();
+  assert.equal(phaseOf(jobs, 'D') === 'queued', false, 'a manual backup is next');
+  assert.equal(phaseOf(jobs, 'B') === 'queued', true, 'the scheduled backup still waits its turn');
+
+  assert.equal(await jobs.cancel('E'), true);
+  assert.equal(await jobs.cancel('D'), true);
+  await tick();
+  assert.equal(
+    phaseOf(jobs, 'B') === 'queued',
+    false,
+    'the scheduled backup runs once the lanes ahead are empty',
+  );
+  await jobs.cancel('B');
+  await settle(jobs, 5);
+  assert.deepEqual(
+    jobs
+      .pending()
+      .map((r) => [r.state, (r.result as { error?: string }).error])
+      .filter(([, e]) => e !== JOB_CANCELLED),
+    [],
+    'every cancelled job reports that it was cancelled, not a failure',
+  );
+});
+
+test('cancelling a queued job removes it and reports it cancelled; an unknown job is not found', async () => {
+  const { jobs } = await runner(holding(), 1);
+  await jobs.start(job('A', 'p1', 'schedule'));
+  await jobs.start(job('B', 'p2', 'schedule'));
+  await tick();
+  assert.equal(phaseOf(jobs, 'B'), 'queued', 'the second job waits for the only slot');
+  assert.equal(await jobs.cancel('B'), true, 'a queued job can be cancelled');
+  assert.equal(phaseOf(jobs, 'B'), undefined, 'it never starts');
+  assert.deepEqual(
+    jobs.pending().map((r) => [r.commandId, (r.result as { error?: string }).error]),
+    [['B', JOB_CANCELLED]],
+    'its result says it was cancelled',
+  );
+  assert.equal(
+    await jobs.cancel('nope'),
+    false,
+    'a job the node does not know is reported as not found',
+  );
+  await jobs.cancel('A');
+});
+
+test('a job removes its helper containers when it is cancelled while running', async () => {
+  const docker = holding();
+  const { jobs } = await runner(docker, 1);
+  await jobs.start(job('A', 'p1', 'schedule'));
+  await tick();
+  assert.ok(docker.names().length > 0, 'the helper runs');
+  await jobs.cancel('A');
+  await settle(jobs, 1);
+  assert.equal(docker.names().length, 0, 'cancelling removes the helper containers');
+});
+
+test('a node with little memory runs one job at a time and a larger one two', () => {
+  assert.equal(defaultJobConcurrency(2 * 1024 ** 3), 1, 'each helper reserves 512 MB');
+  assert.equal(defaultJobConcurrency(8 * 1024 ** 3), 2, 'a larger host can run two');
+});
+
+test('restic output that is only retry notices is not progress, so a failing store still stalls the job', async () => {
+  const docker = dockerWith((cmd) => {
+    if (cmd[0] === 'restic' && cmd[1] === 'snapshots')
+      return {
+        code: 0,
+        out: JSON.stringify([{ tags: ['project:site', 'target:volume:uploads'] }]),
+      };
+    return cmd[1] === 'restore' ? undefined : { code: 0 };
+  });
+  docker.volumes.set('tug_v4_site_uploads', {
+    Name: 'tug_v4_site_uploads',
+    Labels: { 'tug.project': 'site', 'tug.volume': 'uploads' },
+  });
+  const running = runBackupJob(
+    payload({
+      type: 'volume',
+      target: 'volume:uploads',
+      volume: { name: 'uploads', dockerVolume: 'tug_v4_site_uploads' },
+      restore: { snapshotId: 'snap', mode: 'scratch', scratchVolume: 'tug_site_restore-x' },
+    }),
+    'cmd',
+    { docker, credentials, stallMs: 150 },
+    'backup.restore',
+  );
+  const noise = setInterval(() => {
+    for (const proc of docker.execProcesses)
+      (proc.stderr as unknown as PassThrough).write(
+        'Load(<data/ab12cd>, 0, 0) returned error, retrying after 1.2s: 500\n',
+      );
+  }, 20);
+  try {
+    await assert.rejects(
+      running,
+      /made no progress/,
+      'retry notices every 20 ms do not count as progress',
+    );
+  } finally {
+    clearInterval(noise);
+  }
+});
+
+test('a prune that stalls after the snapshot was taken is a warning, not a failed backup', async () => {
+  const docker = dockerWith((cmd) => {
+    if (cmd[0] === 'restic' && cmd[1] === 'backup') return { code: 0, out: SUMMARY };
+    return cmd[1] === 'forget' ? undefined : { code: 0 };
+  });
+  docker.volumes.set('tug_v4_site_uploads', {
+    Name: 'tug_v4_site_uploads',
+    Labels: { 'tug.project': 'site', 'tug.volume': 'uploads' },
+  });
+  const result = await runBackupJob(
+    payload({
+      type: 'volume',
+      target: 'volume:uploads',
+      volume: { name: 'uploads', dockerVolume: 'tug_v4_site_uploads' },
+      retention: { daily: 7 },
+    }),
+    'cmd',
+    { docker, credentials, stallMs: 80 },
+    'backup.run',
+  );
+  assert.equal(result.snapshotId, 'snap1234', 'the snapshot that was taken is reported');
+  assert.match(
+    result.warnings?.join(' ') ?? '',
+    /retention failed: restic made no progress/,
+    'the stalled prune is a warning',
   );
 });

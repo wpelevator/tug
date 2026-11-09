@@ -69,11 +69,13 @@ The project column says how a scoped credential's allowed projects are checked: 
 | `GET /api/v1/watch` | `read` | WebSocket, one-way; every frame is filtered to allowed projects; 8 sockets per credential |
 | `GET /api/v1/commands/:id` | `deploy` | Command's project; commands without a project (diagnostics) need `admin` |
 | `POST /api/v1/backups/run` | `deploy` | Body `project` |
+| `POST /api/v1/backups/:id/cancel` | `deploy` | Body `project`; stops a queued or running backup |
 | `GET /api/v1/backups` | `read` | Query `project` |
 | `POST /api/v1/restores` | `admin` | Body `project`; without `confirm` it only returns the plan |
 | `GET /api/v1/restores` | `read` | Query `project`; `state=interrupted` returns all interrupted restores |
 | `POST /api/v1/restores/:id/release` | `admin` | Drops the holds of an interrupted restore |
 | `POST /api/v1/restores/:id/resume` | `admin` | Runs an interrupted restore again |
+| `POST /api/v1/restores/:id/cancel` | `admin` | Stops a restore waiting on its safety backup or restoring |
 | `GET /api/v1/backup/destination` | `admin` | Control-wide; URL and variable names, never values |
 | `POST /api/v1/backup/destination` | `admin` | Control-wide |
 | `DELETE /api/v1/backup/destination` | `admin` | Control-wide |

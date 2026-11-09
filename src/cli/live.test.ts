@@ -333,7 +333,7 @@ test('abort during connection establishment closes a late session', async () => 
   assert.equal(f.closed(), 1, 'a connection completing after cancellation must be closed');
 });
 
-test('TTY validation, transport send failures and stdin overflow clean up', async () => {
+test('TTY validation and transport send failures clean up', async () => {
   const noTty = fixture();
   noTty.stdin.isTTY = false;
   await assert.rejects(
@@ -346,27 +346,24 @@ test('TTY validation, transport send failures and stdin overflow clean up', asyn
     undefined,
     'invalid terminal setup must fail before starting a remote operation',
   );
-  for (const overflow of [false, true]) {
-    const f = fixture();
-    f.session.events = {
-      [Symbol.asyncIterator]: () => ({
-        next: () => new Promise<IteratorResult<LiveEvent>>(() => {}),
-      }),
-    };
-    if (!overflow)
-      f.session.send = async () => {
-        throw new Error('send failed');
-      };
-    const running = runCliLive(exec({ interactive: true }), f.transport, f.io);
-    await tick();
-    f.stdin.write(Buffer.alloc(overflow ? 1024 * 1024 + 1 : 1));
-    await assert.rejects(
-      running,
-      overflow ? /buffer limit/ : /send failed/,
-      'input failures must stop the operation instead of leaking or buffering indefinitely',
-    );
-    assert.equal(f.closed(), 1, 'input failures must close the session');
-  }
+  const f = fixture();
+  f.session.events = {
+    [Symbol.asyncIterator]: () => ({
+      next: () => new Promise<IteratorResult<LiveEvent>>(() => {}),
+    }),
+  };
+  f.session.send = async () => {
+    throw new Error('send failed');
+  };
+  const running = runCliLive(exec({ interactive: true }), f.transport, f.io);
+  await tick();
+  f.stdin.write(Buffer.alloc(1));
+  await assert.rejects(
+    running,
+    /send failed/,
+    'input failures must stop the operation instead of leaking or buffering indefinitely',
+  );
+  assert.equal(f.closed(), 1, 'input failures must close the session');
 });
 
 test('followed logs forward channels and support cancellation without stdin listeners', async () => {
@@ -463,5 +460,52 @@ test('failed structured operations emit no partial JSON document', async () => {
     Buffer.concat(f.output).length,
     0,
     'failed structured operations must not emit a success document',
+  );
+});
+
+test('piped input larger than any buffer is delivered in full while only a bounded amount is held in memory', async () => {
+  const f = fixture();
+  let release!: () => void;
+  const finished = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  f.session.events = {
+    [Symbol.asyncIterator]: () => {
+      let done = false;
+      return {
+        next: () =>
+          done
+            ? new Promise<IteratorResult<LiveEvent>>(() => {})
+            : finished.then(() => {
+                done = true;
+                return { done: false, value: { type: 'exit', code: 0 } as LiveEvent };
+              }),
+      };
+    },
+  };
+  let delivered = 0;
+  let peak = 0;
+  f.session.send = async (message) => {
+    if (message.type !== 'stdin') return;
+    // A slow link: each chunk takes a moment to leave, so the producer outruns it.
+    await new Promise((resolve) => setTimeout(resolve, 1));
+    delivered += message.data.byteLength;
+  };
+  const running = runCliLive(exec({ interactive: true }), f.transport, f.io);
+  await tick();
+  const chunk = Buffer.alloc(64 * 1024, 7);
+  const total = 160 * chunk.length; // 10 MiB
+  for (let sent = 0; sent < total; sent += chunk.length) {
+    peak = Math.max(peak, sent - delivered);
+    if (!f.stdin.write(chunk)) await new Promise((resolve) => f.stdin.once('drain', resolve));
+  }
+  f.stdin.end();
+  while (delivered < total) await new Promise((resolve) => setTimeout(resolve, 5));
+  release();
+  assert.equal(await running, 0, 'the operation finishes normally');
+  assert.equal(delivered, total, 'every byte of a 10 MiB input reaches the remote command');
+  assert.ok(
+    peak < 4 * 1024 * 1024,
+    `the unsent input stays bounded instead of growing to the size of the file (peak ${peak} bytes)`,
   );
 });
