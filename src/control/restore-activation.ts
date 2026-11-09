@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { advanceWhere } from '../db/lifecycle.ts';
-import { commandLifecycle, restoreLifecycle } from '../db/lifecycles.ts';
+import { backupRunLifecycle, commandLifecycle, restoreLifecycle } from '../db/lifecycles.ts';
 import type { Db } from '../db/db.ts';
 
 /**
@@ -152,13 +152,14 @@ export async function finishActivation(dataDir: string, journal: Activation): Pr
 export interface Retired {
   commands: number;
   restores: number;
+  backupRuns: number;
 }
 
 /**
  * A backup holds the commands that were queued or in flight when it was taken, and the workload restores that were
  * under way. Delivering them again after a restore would repeat work against a world that has moved on (a
  * \`volume.delete\` for a volume that has since been recreated under the same name). They stay in the history but
- * are retired before the restored control accepts any agent work: queued commands are cancelled, commands that were
+ * are retired before the restored control accepts any agent work: queued commands are cancelled, their backup runs are missed, commands that were
  * delivered fail, a restore that had not touched data fails and a restore that was writing is \`interrupted\`, which
  * keeps its writers stopped until the operator resumes or releases it.
  */
@@ -188,6 +189,26 @@ export function retireAfterRestore(db: Db): Retired {
         result_json: JSON.stringify({ error: reason }),
       },
     );
+  // A workload backup run is tied to the command that carries it. With the command retired the run would stay queued
+  // (or running) for ever and show as a backup in progress, so it is closed too: a run nobody picked up is missed, one
+  // that was running fails.
+  const backupRuns =
+    advanceWhere(
+      db,
+      backupRunLifecycle,
+      'queued',
+      'missed',
+      { sql: '1=1' },
+      { error: reason, finished_at: at },
+    ) +
+    advanceWhere(
+      db,
+      backupRunLifecycle,
+      'running',
+      'failed',
+      { sql: '1=1' },
+      { error: reason, finished_at: at },
+    );
   const untouched = db.all<{ id: string }>(
     "SELECT id FROM restore_runs WHERE state IN ('locking','holding','safety_backup')",
   );
@@ -212,5 +233,5 @@ export function retireAfterRestore(db: Db): Retired {
       state_changed_at: at,
     },
   );
-  return { commands, restores };
+  return { commands, restores, backupRuns };
 }

@@ -174,6 +174,13 @@ test('retiring after a restore keeps the history and stops anything from being r
     db.run(
       "INSERT INTO service_holds(project_id,service,reason,restore_id,created_at) VALUES('site','db','restore','rst_holding','t')",
     );
+    const insertRun = (id: string, state: string) =>
+      db.run(
+        "INSERT INTO backup_runs(id,project_id,target,type,trigger,state,queued_at) VALUES(?,'site','volume:x','volume','manual',?,'t')",
+        id,
+        state,
+      );
+    for (const state of ['queued', 'running', 'succeeded']) insertRun(`bkr_${state}`, state);
     const retired = retireAfterRestore(db);
     const state = (table: string, id: string) =>
       (db.get(`SELECT state FROM ${table} WHERE id=?`, id) as { state: string }).state;
@@ -194,10 +201,23 @@ test('retiring after a restore keeps the history and stops anything from being r
       0,
       'the holds of a restore that failed are released',
     );
-    assert.deepEqual(retired, { commands: 2, restores: 4 }, 'the counts say what was retired');
+    assert.deepEqual(
+      ['queued', 'running', 'succeeded'].map(
+        (name) =>
+          (db.get('SELECT state FROM backup_runs WHERE id=?', `bkr_${name}`) as { state: string })
+            .state,
+      ),
+      ['missed', 'failed', 'succeeded'],
+      'a run nobody picked up is missed and one that was running fails, so none shows as in progress for ever',
+    );
+    assert.deepEqual(
+      retired,
+      { commands: 2, restores: 4, backupRuns: 2 },
+      'the counts say what was retired',
+    );
     assert.deepEqual(
       retireAfterRestore(db),
-      { commands: 0, restores: 0 },
+      { commands: 0, restores: 0, backupRuns: 0 },
       'retiring is repeatable',
     );
   } finally {

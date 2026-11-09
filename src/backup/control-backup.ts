@@ -5,7 +5,7 @@ import { pipeline } from 'node:stream/promises';
 import { redactSecrets } from './destination.ts';
 import { collect, ensureImage, parseSummary } from './job.ts';
 import type { Collected } from './job.ts';
-import type { DockerApi } from '../docker-api.ts';
+import type { AttachedProcess, DockerApi } from '../docker-api.ts';
 
 /** Name of the stdin stream restic stores the archive under; `restic dump` reads it back by this path. */
 export const CONTROL_ARCHIVE_NAME = 'control.tar.gz';
@@ -14,6 +14,12 @@ const CONTROL_HOST = 'control';
 const CONTROL_TAG = 'control';
 /** One control backup or fetch may take this long before its helper container is removed. */
 export const CONTROL_JOB_LIMIT_MS = 30 * 60_000;
+/**
+ * restic retries a backend that errors (a missing bucket, a refused login, an unreachable store) for many minutes and
+ * says nothing but notices while it does, so a job would look busy until its limit. Failing after this long without any
+ * other output, once a notice has been seen, reports the cause instead.
+ */
+export const CONTROL_STALL_MS = 2 * 60_000;
 /** Removing the helper gets this long; a leftover one is removed at the next control start. */
 const REMOVE_LIMIT_MS = 30_000;
 const RETENTION = [
@@ -38,8 +44,24 @@ const CONFIG_IS_ABSENT =
   /specified key does not exist|NoSuchKey|no such file or directory|file does not exist|unexpected HTTP response \(404\)|\b404 (page )?not found/i;
 const NOT_A_MISSING_REPOSITORY =
   /NoSuchBucket|bucket does not exist|AccessDenied|Forbidden|Unauthorized|InvalidAccessKey|SignatureDoesNotMatch|dial tcp|no such host|timeout|timed out|connection refused|connection reset|certificate|wrong password|\(40[13]\)/i;
-export const isMissingRepository = (stderr: string): boolean =>
-  CONFIG_IS_ABSENT.test(stderr) && !NOT_A_MISSING_REPOSITORY.test(stderr);
+/**
+ * restic keeps retrying a failing backend and prints one notice per attempt ("Stat(<config/>) returned error,
+ * retrying after 8s: ..."), then ends with its final `Fatal:` message. The notices are history: a bucket that
+ * did not exist a minute ago and was created since ends in "repository does not exist", and only that final state
+ * says what to do. Classification and summaries therefore ignore the notices.
+ */
+const RETRY_NOTICE = /returned error, retrying after [^:]*:\s*/i;
+function splitRetries(text: string): { notices: string[]; rest: string[] } {
+  const lines = text.split('\n').filter((line) => line.trim());
+  return {
+    notices: lines.filter((line) => RETRY_NOTICE.test(line)),
+    rest: lines.filter((line) => !RETRY_NOTICE.test(line)),
+  };
+}
+export const isMissingRepository = (stderr: string): boolean => {
+  const final = splitRetries(stderr).rest.join('\n');
+  return CONFIG_IS_ABSENT.test(final) && !NOT_A_MISSING_REPOSITORY.test(final);
+};
 
 export interface ControlRepositoryAccess {
   /** The destination URL as stored, such as `s3:https://host/bucket/prefix`. */
@@ -51,6 +73,8 @@ export interface ControlRepositoryAccess {
   resticImage: string;
   /** Overrides {@link CONTROL_JOB_LIMIT_MS}. */
   limitMs?: number;
+  /** A restic command that only prints backend retry notices for this long is failed; defaults to {@link CONTROL_STALL_MS}. */
+  stallMs?: number;
   /** Cancels the job (a client that went away); the helper is removed either way. */
   signal?: AbortSignal;
 }
@@ -76,7 +100,18 @@ const isPipeBreak = (error: unknown): boolean =>
     (error as NodeJS.ErrnoException | undefined)?.code ?? '',
   );
 
-const lastLines = (text: string): string => text.trim().split('\n').slice(-6).join(' | ');
+/** restic's final message, with the retry history reduced to a count and the last error (not pages of notices). */
+function summarize(text: string): string {
+  const { notices, rest } = splitRetries(text);
+  const final = rest.slice(-4).join(' | ');
+  if (!notices.length) return final;
+  const last = notices[notices.length - 1].replace(
+    /^.*?returned error, retrying after [^:]*:\s*/i,
+    '',
+  );
+  const retried = `restic retried ${notices.length} time${notices.length === 1 ? '' : 's'}; last error: ${last}`;
+  return final ? `${final} (${retried})` : retried;
+}
 
 type Exec = (cmd: string[]) => Promise<Collected>;
 
@@ -143,8 +178,55 @@ async function withRestic<T>(
       out: redact(result.out),
       err: redact(result.err),
     });
-    const exec: Exec = async (cmd) =>
-      finish(await Promise.race([docker.execStart(id, { cmd }).then(collect), timeout]));
+    const stallMs = access.stallMs ?? CONTROL_STALL_MS;
+    /** Fails when restic has only been retrying for `stallMs`; any other output counts as progress. */
+    const watchStall = (proc: AttachedProcess): { stalled: Promise<never>; stop: () => void } => {
+      let lastProgress = Date.now();
+      let retrying = false;
+      let tail = '';
+      let pending = '';
+      const seen = (chunk: Buffer) => {
+        pending += chunk.toString('utf8');
+        const lines = pending.split('\n');
+        pending = lines.pop() ?? '';
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          tail = (tail + '\n' + line).slice(-4096);
+          if (RETRY_NOTICE.test(line)) retrying = true;
+          else {
+            lastProgress = Date.now();
+            retrying = false;
+          }
+        }
+      };
+      proc.stdout.on('data', seen);
+      proc.stderr.on('data', seen);
+      let interval: NodeJS.Timeout | undefined;
+      const stalled = new Promise<never>((_, reject) => {
+        interval = setInterval(
+          () => {
+            if (!retrying || Date.now() - lastProgress < stallMs) return;
+            reject(
+              new ControlBackupError(
+                `restic made no progress for ${Math.round(stallMs / 1000)}s: ${redact(summarize(tail))}`,
+              ),
+            );
+          },
+          Math.max(10, Math.min(1000, stallMs / 4)),
+        );
+      });
+      stalled.catch(() => undefined);
+      return { stalled, stop: () => clearInterval(interval) };
+    };
+    const exec: Exec = async (cmd) => {
+      const proc = await Promise.race([docker.execStart(id, { cmd }), timeout]);
+      const watch = watchStall(proc);
+      try {
+        return finish(await Promise.race([collect(proc), timeout, watch.stalled]));
+      } finally {
+        watch.stop();
+      }
+    };
     /** `write` streams a local file into restic's stdin; `read` streams restic's stdout into a local file. */
     const run = async (cmd: string[], file: string, mode: 'read' | 'write'): Promise<Collected> => {
       const starting = docker.execStart(id, { cmd, stdin: mode === 'write' });
@@ -161,7 +243,14 @@ async function withRestic<T>(
         mode === 'write'
           ? pipeline(createReadStream(file), proc.stdin!)
           : pipeline(proc.stdout, createWriteStream(file, { mode: 0o600 }));
-      const [transfer, result] = await Promise.race([Promise.allSettled([moved, done]), timeout]);
+      const watch = watchStall(proc);
+      let settled;
+      try {
+        settled = await Promise.race([Promise.allSettled([moved, done]), timeout, watch.stalled]);
+      } finally {
+        watch.stop();
+      }
+      const [transfer, result] = settled;
       if (result.status === 'rejected') throw result.reason;
       // restic that exits early (a lock timeout, a wrong repository) breaks the pipe and its own message is the cause;
       // any other transfer failure (a full disk, an unreadable archive) is the cause itself.
@@ -211,11 +300,11 @@ export async function pushControlArchive(
       // Only a missing repository is created; a wrong password or an unreachable bucket must fail the backup.
       if (!isMissingRepository(probe.err))
         throw new ControlBackupError(
-          `repository check failed: ${lastLines(probe.err || probe.out)}`,
+          `repository check failed: ${summarize(probe.err || probe.out)}`,
         );
       const init = await exec(['restic', 'init']);
       if (init.code !== 0)
-        throw new ControlBackupError(`repository init failed: ${lastLines(init.err || init.out)}`);
+        throw new ControlBackupError(`repository init failed: ${summarize(init.err || init.out)}`);
       repository = 'initialized';
     }
     const backup = await run(
@@ -238,7 +327,7 @@ export async function pushControlArchive(
       'write',
     );
     if (backup.code !== 0)
-      throw new ControlBackupError(`backup failed: ${lastLines(backup.err || backup.out)}`);
+      throw new ControlBackupError(`backup failed: ${summarize(backup.err || backup.out)}`);
     const forget = await exec([
       'restic',
       'forget',
@@ -258,7 +347,7 @@ export async function pushControlArchive(
       repository,
       ...(forget.code === 0
         ? {}
-        : { warning: `retention failed: ${lastLines(forget.err || forget.out)}` }),
+        : { warning: `retention failed: ${summarize(forget.err || forget.out)}` }),
     };
   });
 }
@@ -290,7 +379,7 @@ function parseSnapshots(output: string): ControlSnapshot[] {
     parsed = JSON.parse(output);
   } catch {
     throw new ControlBackupError(
-      `restic listed snapshots in an unexpected format: ${lastLines(output)}`,
+      `restic listed snapshots in an unexpected format: ${summarize(output)}`,
     );
   }
   const list = (Array.isArray(parsed) ? parsed : []).flatMap(
@@ -325,13 +414,13 @@ export async function listControlSnapshots(
     if (probe.code !== 0) {
       if (isMissingRepository(probe.err)) return { state: 'missing' as const, snapshots: [] };
       throw new ControlBackupError(
-        `cannot read the control repository (wrong control password or credentials, or an unreachable store): ${lastLines(probe.err || probe.out)}`,
+        `cannot read the control repository (wrong control password or credentials, or an unreachable store): ${summarize(probe.err || probe.out)}`,
       );
     }
     const listed = await exec(['restic', 'snapshots', '--json', ...SNAPSHOT_FILTER]);
     if (listed.code !== 0)
       throw new ControlBackupError(
-        `could not list the control backups: ${lastLines(listed.err || listed.out)}`,
+        `could not list the control backups: ${summarize(listed.err || listed.out)}`,
       );
     return { state: 'ok' as const, snapshots: parseSnapshots(listed.out) };
   });
@@ -354,7 +443,7 @@ export async function fetchControlArchive(
       throw new ControlBackupError(
         isMissingRepository(probe.err)
           ? `no control backup was found at ${controlRepository(access.url)}`
-          : `cannot read the control repository (wrong control password or credentials, or an unreachable store): ${lastLines(probe.err || probe.out)}`,
+          : `cannot read the control repository (wrong control password or credentials, or an unreachable store): ${summarize(probe.err || probe.out)}`,
       );
     if (snapshot !== 'latest') {
       // Only snapshots control itself stored may be restored into control, whatever else the repository holds.
@@ -372,7 +461,7 @@ export async function fetchControlArchive(
     if (dump.code !== 0) {
       await rm(destination, { force: true });
       throw new ControlBackupError(
-        `could not read ${snapshot === 'latest' ? 'the latest' : `snapshot ${snapshot} of the`} control backup: ${lastLines(dump.err)}`,
+        `could not read ${snapshot === 'latest' ? 'the latest' : `snapshot ${snapshot} of the`} control backup: ${summarize(dump.err)}`,
       );
     }
   });
