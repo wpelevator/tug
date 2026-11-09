@@ -2,7 +2,7 @@ import { selectBackups } from './selection.ts';
 import { withProgress } from '../progress.ts';
 import type { Command } from 'commander';
 import { backupCheckProblems } from '../../backup/check.ts';
-import { collectList, loadCfg, print, readStdin, request } from './context.ts';
+import { collectList, loadCfg, print, readEnvValues, request } from './context.ts';
 
 interface BackupRunRecord {
   id: string;
@@ -22,6 +22,12 @@ interface BackupRunRecord {
 }
 interface BackupListing {
   destinationConfigured: boolean;
+  /** Control's own off-host backup; null while there is no destination. */
+  control?: {
+    lastSuccessAt: string | null;
+    lastStatus: string | null;
+    problem: string | null;
+  } | null;
   targets: {
     target: string;
     node: string | null;
@@ -155,6 +161,10 @@ export function registerBackup(program: Command): void {
       if (o.json) print(listing);
       else if (!listing.targets.length)
         console.log('no backup targets; add x-tug.backup to a database service or volume');
+      if (!o.json && listing.control)
+        console.log(
+          `control\t-\tnightly\tlast success ${listing.control.lastSuccessAt ?? 'never'}${listing.control.problem ? `\t${listing.control.problem}` : ''}`,
+        );
       if (!o.json)
         for (const t of listing.targets)
           console.log(
@@ -212,15 +222,7 @@ export function registerBackup(program: Command): void {
       [],
     )
     .action(async (url: string, o: { env: string[] }) => {
-      const missing = o.env.filter((name) => process.env[name] === undefined);
-      const lines = missing.length
-        ? (await readStdin()).split(/\r?\n/).filter((line) => line.length > 0)
-        : [];
-      if (lines.length < missing.length)
-        throw new Error(`expected a value on stdin for ${missing.slice(lines.length).join(', ')}`);
-      const env = Object.fromEntries(
-        o.env.map((name) => [name, process.env[name] ?? lines[missing.indexOf(name)]]),
-      );
+      const env = await readEnvValues(o.env);
       console.log(
         JSON.stringify(await request('POST', '/api/v1/backup/destination', { url, env })),
       );

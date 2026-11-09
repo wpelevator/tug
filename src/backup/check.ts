@@ -2,6 +2,7 @@
 export interface BackupCheckInput {
   destinationConfigured: boolean;
   targets: { target: string; enabled: boolean; problem?: string | null }[];
+  control?: { problem: string | null } | null;
 }
 
 /** What a monitor should be told: one line per problem, empty when every backup target is healthy. */
@@ -12,5 +13,6 @@ export function backupCheckProblems(listing: BackupCheckInput): string[] {
     .map((target) => `${target.target}: ${target.problem}`);
   if (active.length && !listing.destinationConfigured)
     problems.unshift('no backup destination is configured');
+  if (listing.control?.problem) problems.push(`control: ${listing.control.problem}`);
   return problems;
 }

@@ -132,13 +132,13 @@ export function parseSummary(output: string): Summary {
   return {};
 }
 
-interface Collected {
+export interface Collected {
   code: number;
   out: string;
   err: string;
 }
 
-function collect(proc: AttachedProcess): Promise<Collected> {
+export function collect(proc: AttachedProcess): Promise<Collected> {
   const out: Buffer[] = [];
   const err: Buffer[] = [];
   let outSize = 0;
@@ -183,7 +183,7 @@ class Tail extends Transform {
 
 export class JobError extends Error {}
 
-async function ensureImage(docker: DockerApi, ref: string): Promise<void> {
+export async function ensureImage(docker: DockerApi, ref: string): Promise<void> {
   if (await docker.inspectImage(ref)) return;
   await docker.pullImage(ref);
 }

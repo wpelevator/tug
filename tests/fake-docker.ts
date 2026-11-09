@@ -270,7 +270,11 @@ export class FakeDocker implements DockerApi {
     return { code: failure?.code ?? 0, out: failure?.out ?? '', err: failure?.err ?? '' };
   }
   /** Scripts `execStart`: when it returns a result the process writes it and closes with that exit code. */
-  execResponder?: (cmd: string[]) => { code: number; out?: string; err?: string } | undefined;
+  execResponder?: (
+    cmd: string[],
+  ) => { code: number; out?: string | Buffer; err?: string } | undefined;
+  /** Everything written to the stdin of started execs, in order. */
+  execStdinData: Buffer[] = [];
   execProcesses: AttachedProcess[] = [];
   execOptions: ExecOptions[] = [];
   async execStart(id: string, options: ExecOptions): Promise<AttachedProcess> {
@@ -280,6 +284,7 @@ export class FakeDocker implements DockerApi {
     const stdout = new PassThrough();
     const stderr = new PassThrough();
     const stdin = options.stdin ? new PassThrough() : null;
+    stdin?.on('data', (chunk: Buffer) => this.execStdinData.push(chunk));
     const proc = Object.assign(new EventEmitter(), {
       stdin,
       stdout,

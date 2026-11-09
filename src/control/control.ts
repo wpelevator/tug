@@ -112,6 +112,8 @@ import {
   repositoryPassword,
   redactSecrets,
 } from '../backup/destination.ts';
+import { fetchControlArchive, pushControlArchive } from '../backup/control-backup.ts';
+import { DEFAULT_RESTIC_IMAGE } from '../backup/scheduler.ts';
 import { createBackupService } from '../backup/scheduler.ts';
 import { createRestoreService, discoverWriters } from '../backup/restore.ts';
 import {
@@ -1954,9 +1956,12 @@ export async function createApp(
   const restores = createRestoreService({ db, backups, wake: (project) => wakeAll(project) });
   app.locals.restores = restores;
   const backupTickMs = Number(process.env.TUG_BACKUP_TICK_MS) || 30_000;
+  /** Assigned with the control backup code below; control's own nightly off-host backup. */
+  let controlOffsiteTick: () => void = () => {};
   const backupTimer = setInterval(() => {
     try {
       backups.tick();
+      controlOffsiteTick();
       restores.advance();
     } catch (e) {
       console.error(`backup scheduler failed: ${errMessage(e)}`);
@@ -2053,6 +2058,7 @@ export async function createApp(
     res.json({
       project,
       destinationConfigured: Boolean(backupDestination()),
+      control: controlOffsiteStatus(),
       ...backups.list(project, limit),
     });
   });
@@ -3162,49 +3168,56 @@ export async function createApp(
       });
     }),
   );
+  /** Writes a consistent control archive into the control backup directory; the caller records it and decides how long it stays. */
+  async function createControlArchive(
+    withImages: boolean,
+  ): Promise<{ backupId: string; artifactRef: string; createdAt: string }> {
+    const backupDir = process.env.TUG_CONTROL_BACKUP_DIR || path.join(DATA_DIR, 'control-backups');
+    // The archive holds the master key and the CA key, so nothing here is ever readable beyond the control user.
+    await fs.mkdir(backupDir, { recursive: true, mode: 0o700 });
+    await fs.chmod(backupDir, 0o700);
+    const ts = now();
+    const backupId = id('cbak');
+    const staging = path.join(backupDir, `${backupId}-staging`);
+    const artifactRef = path.resolve(backupDir, `${backupId}.tar.gz`);
+    try {
+      await fs.rm(staging, { recursive: true, force: true });
+      await fs.mkdir(staging, { mode: 0o700 });
+      const snapshotPath = path.join(staging, 'tug.db');
+      db.run('VACUUM INTO ?', snapshotPath);
+      await fs.chmod(snapshotPath, 0o600);
+      await fs.copyFile(masterKeyFile, path.join(staging, 'master.key'));
+      await fs.chmod(path.join(staging, 'master.key'), 0o600);
+      await fs.cp(path.join(DATA_DIR, 'pki'), path.join(staging, 'pki'), {
+        recursive: true,
+        filter: (src) => path.basename(src) !== 'server.json',
+      });
+      if (withImages) await fs.cp(artifactDir, path.join(staging, 'images'), { recursive: true });
+      await fs.writeFile(
+        path.join(staging, 'metadata.json'),
+        JSON.stringify({ backupId, createdAt: ts, type: 'control', images: withImages }, null, 2),
+        { mode: 0o600 },
+      );
+      await tar.c({ gzip: true, file: artifactRef, cwd: staging, mode: 0o600 }, [
+        'tug.db',
+        'master.key',
+        'metadata.json',
+        'pki',
+        ...(withImages ? ['images'] : []),
+      ]);
+    } catch (error) {
+      await fs.rm(artifactRef, { force: true });
+      throw error;
+    } finally {
+      await fs.rm(staging, { recursive: true, force: true });
+    }
+    return { backupId, artifactRef, createdAt: ts };
+  }
   api('post', '/api/v1/control/backups/run', null, async (req, res) =>
     withWriter(async () => {
-      const backupDir =
-        process.env.TUG_CONTROL_BACKUP_DIR || path.join(DATA_DIR, 'control-backups');
-      // The archive holds the master key and the CA key, so nothing here is ever readable beyond the control user.
-      await fs.mkdir(backupDir, { recursive: true, mode: 0o700 });
-      await fs.chmod(backupDir, 0o700);
-      const ts = now();
-      const backupId = id('cbak');
-      const staging = path.join(backupDir, `${backupId}-staging`);
-      const artifactRef = path.resolve(backupDir, `${backupId}.tar.gz`);
-      try {
-        await fs.rm(staging, { recursive: true, force: true });
-        await fs.mkdir(staging, { mode: 0o700 });
-        const snapshotPath = path.join(staging, 'tug.db');
-        db.run('VACUUM INTO ?', snapshotPath);
-        await fs.chmod(snapshotPath, 0o600);
-        await fs.copyFile(masterKeyFile, path.join(staging, 'master.key'));
-        await fs.chmod(path.join(staging, 'master.key'), 0o600);
-        await fs.cp(path.join(DATA_DIR, 'pki'), path.join(staging, 'pki'), {
-          recursive: true,
-          filter: (src) => path.basename(src) !== 'server.json',
-        });
-        const withImages = req.body?.images !== false;
-        if (withImages) await fs.cp(artifactDir, path.join(staging, 'images'), { recursive: true });
-        await fs.writeFile(
-          path.join(staging, 'metadata.json'),
-          JSON.stringify({ backupId, createdAt: ts, type: 'control', images: withImages }, null, 2),
-          { mode: 0o600 },
-        );
-        await tar.c({ gzip: true, file: artifactRef, cwd: staging, mode: 0o600 }, [
-          'tug.db',
-          'master.key',
-          'metadata.json',
-          'pki',
-          ...(withImages ? ['images'] : []),
-        ]);
-      } catch (error) {
-        await fs.rm(artifactRef, { force: true });
-        throw error;
-      } finally {
-        await fs.rm(staging, { recursive: true, force: true });
-      }
+      const { backupId, artifactRef, createdAt } = await createControlArchive(
+        req.body?.images !== false,
+      );
       db.run(
         'INSERT INTO backups(id,project_id,target,node_id,state,artifact_ref,metadata_json,created_at,completed_at) VALUES(?,?,?,?,?,?,?,?,?)',
         backupId,
@@ -3214,21 +3227,165 @@ export async function createApp(
         'completed',
         artifactRef,
         JSON.stringify({ type: 'control' }),
-        ts,
+        createdAt,
         now(),
       );
       res.json({ backupId, artifactRef, state: 'completed' });
     }),
   );
+  const controlIntervalMs = () =>
+    Number(process.env.TUG_CONTROL_BACKUP_INTERVAL_MS) || 24 * 3600_000;
+  const controlRetryMs = () => Number(process.env.TUG_CONTROL_BACKUP_RETRY_MS) || 3600_000;
+  const resticImage = () => process.env.TUG_RESTIC_IMAGE || DEFAULT_RESTIC_IMAGE;
+  const controlEvent = (level: 'info' | 'error', type: string, message: string, meta: object) =>
+    db.run(
+      'INSERT INTO events(id,project_id,deployment_id,node_id,level,type,message,metadata_json,created_at) VALUES(?,?,?,?,?,?,?,?,?)',
+      id('evt'),
+      '_control',
+      null,
+      null,
+      level,
+      type,
+      message,
+      JSON.stringify(meta),
+      now(),
+    );
+  const lastControlOffsite = (onlyCompleted: boolean) =>
+    db.get<{ state: string; created_at: string; metadata_json: string }>(
+      `SELECT state,created_at,metadata_json FROM backups WHERE project_id='_control' AND target='control-offsite'${onlyCompleted ? " AND state='completed'" : ''} ORDER BY created_at DESC LIMIT 1`,
+    );
+  /** What `tug backup list` shows about control's own off-host backup; null while there is no destination. */
+  function controlOffsiteStatus(): {
+    lastSuccessAt: string | null;
+    lastStatus: string | null;
+    problem: string | null;
+  } | null {
+    if (!backupDestination()) return null;
+    const ok = lastControlOffsite(true);
+    const last = lastControlOffsite(false);
+    const failure =
+      last?.state === 'failed'
+        ? `the last control backup failed: ${(JSON.parse(last.metadata_json) as { error?: string }).error ?? 'unknown error'}`
+        : null;
+    const stale =
+      ok && Date.now() - Date.parse(ok.created_at) > 2 * controlIntervalMs()
+        ? `no successful control backup since ${ok.created_at}`
+        : null;
+    return {
+      lastSuccessAt: ok?.created_at ?? null,
+      lastStatus: last?.state ?? null,
+      problem: failure ?? stale,
+    };
+  }
+  let controlPushRunning = false;
+  /** Backs control up into the shared destination: a consistent archive without images, streamed into restic. */
+  async function runControlOffsite(): Promise<void> {
+    const destination = backupDestination();
+    if (!destination || controlPushRunning) return;
+    controlPushRunning = true;
+    const startedAt = now();
+    let archive: { backupId: string; artifactRef: string } | undefined;
+    try {
+      archive = await withWriter(() => createControlArchive(false));
+      const size = (await fs.stat(archive.artifactRef)).size;
+      const push = await pushControlArchive(
+        docker,
+        { url: destination.url, env: backupEnv(), resticImage: resticImage() },
+        archive.artifactRef,
+      );
+      const meta = { type: 'control', snapshotId: push.snapshotId, sizeBytes: size, ...push };
+      db.run(
+        'INSERT INTO backups(id,project_id,target,node_id,state,artifact_ref,metadata_json,created_at,completed_at) VALUES(?,?,?,?,?,?,?,?,?)',
+        archive.backupId,
+        '_control',
+        'control-offsite',
+        null,
+        'completed',
+        push.snapshotId ?? null,
+        JSON.stringify(meta),
+        startedAt,
+        now(),
+      );
+      controlEvent(
+        'info',
+        'backup.completed',
+        'control backup stored in the backup destination',
+        meta,
+      );
+    } catch (e) {
+      const error = errMessage(e);
+      db.run(
+        'INSERT INTO backups(id,project_id,target,node_id,state,artifact_ref,metadata_json,created_at,completed_at) VALUES(?,?,?,?,?,?,?,?,?)',
+        id('cbak'),
+        '_control',
+        'control-offsite',
+        null,
+        'failed',
+        null,
+        JSON.stringify({ type: 'control', error }),
+        startedAt,
+        now(),
+      );
+      controlEvent('error', 'backup.failed', `control backup failed: ${error}`, { error });
+    } finally {
+      if (archive) await fs.rm(archive.artifactRef, { force: true });
+      controlPushRunning = false;
+    }
+  }
+  controlOffsiteTick = () => {
+    if (controlPushRunning || restartRequired || !backupDestination()) return;
+    const at = Date.now();
+    const ok = lastControlOffsite(true);
+    if (ok && at - Date.parse(ok.created_at) < controlIntervalMs()) return;
+    const last = lastControlOffsite(false);
+    if (last?.state === 'failed' && at - Date.parse(last.created_at) < controlRetryMs()) return;
+    void runControlOffsite().catch((e) => console.error(`control backup failed: ${errMessage(e)}`));
+  };
+  api('get', '/api/v1/control/backups/:id/download', null, async (req, res) => {
+    const row = db.get<{ artifact_ref: string | null }>(
+      "SELECT artifact_ref FROM backups WHERE id=? AND project_id='_control' AND target='control-plane'",
+      String(req.params.id),
+    );
+    if (!row?.artifact_ref) return res.status(404).json({ error: 'no such control backup' });
+    if (!(await fs.stat(row.artifact_ref).catch(() => null)))
+      return res.status(404).json({ error: 'the control backup is no longer on disk' });
+    res.setHeader('content-type', 'application/gzip');
+    res.setHeader(
+      'content-disposition',
+      `attachment; filename="${path.basename(row.artifact_ref)}"`,
+    );
+    res.sendFile(row.artifact_ref, { dotfiles: 'allow' });
+  });
   api('post', '/api/v1/control/restore', null, async (req, res) =>
     withWriter(async () => {
       if (!req.body.confirm)
         return res.status(400).json({
           error: 'confirm=true is required; restore overwrites control data then requires restart',
         });
-      const artifactRef = req.body.artifactRef;
+      let artifactRef = req.body.artifactRef;
+      let fetched: string | undefined;
+      if (req.body.fromDestination) {
+        let source;
+        try {
+          source = parseBackupDestination(req.body.fromDestination);
+        } catch (e) {
+          return res.status(400).json({ error: errMessage(e) });
+        }
+        fetched = path.join(DATA_DIR, 'control-restore-download.tar.gz');
+        try {
+          await fetchControlArchive(
+            docker,
+            { url: source.url, env: source.env, resticImage: resticImage() },
+            fetched,
+          );
+        } catch (e) {
+          await fs.rm(fetched, { force: true });
+          return res.status(400).json({ error: errMessage(e) });
+        }
+        artifactRef = fetched;
+      }
       if (typeof artifactRef !== 'string' || !artifactRef)
-        return res.status(400).json({ error: 'artifactRef required' });
+        return res.status(400).json({ error: 'artifactRef or fromDestination required' });
       const restoreDir =
         process.env.TUG_CONTROL_RESTORE_DIR || path.join(DATA_DIR, 'control-restore');
       let snapshot;
@@ -3244,6 +3401,8 @@ export async function createApp(
             throw new Error('unsafe control backup entry');
         });
         await tar.x({ file: artifactRef, cwd: restoreDir, strict: true });
+        // The fetched copy is extracted; do not leave a second copy of the keys on disk while the restore runs.
+        if (fetched) await fs.rm(fetched, { force: true });
         const key = (await fs.readFile(path.join(restoreDir, 'master.key'), 'utf8')).trim();
         if (!/^[A-Za-z0-9+/]{43}=$/.test(key)) throw new Error('invalid backup master key');
         snapshot = openSnapshotDb(path.join(restoreDir, 'tug.db'));
@@ -3318,6 +3477,8 @@ export async function createApp(
           /* Preserve the restore error. */
         }
         res.status(restartRequired ? 500 : 400).json({ error: errMessage(e), restartRequired });
+      } finally {
+        if (fetched) await fs.rm(fetched, { force: true });
       }
     }),
   );

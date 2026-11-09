@@ -1,3 +1,4 @@
+import path from 'node:path';
 import { withProgress } from '../progress.ts';
 import { runProcess, runStep, STAGE_MARKER } from '../process.ts';
 import type { Command } from 'commander';
@@ -7,7 +8,15 @@ import { assertImagePublished, resolveImage } from '../../images/image.ts';
 import { decodeCredential, fingerprintPem, writeFileDurable } from '../../pki.ts';
 import { loadTemplate } from '../load-template.ts';
 import { errMessage } from '../../errors.ts';
-import { collectList, loadCfg, print, request, templatesDir } from './context.ts';
+import {
+  collectList,
+  download,
+  loadCfg,
+  print,
+  readEnvValues,
+  request,
+  templatesDir,
+} from './context.ts';
 import type { InstallOpts } from './context.ts';
 import { bootstrapDocker, hostHasDocker, preflightRemote, transferTugImage } from './host.ts';
 import { importCredential } from './init.ts';
@@ -218,25 +227,67 @@ export function registerControl(program: Command): void {
       'create a control-plane backup (state, PKI, master key and retained image archives; not workload volumes)',
     )
     .option('--no-images', 'leave the retained build archives out (deploy again to rebuild them)')
-    .action(async (o: { images: boolean }) =>
-      withProgress('Creating control-plane backup', async () =>
-        print(await request('POST', '/api/v1/control/backups/run', { images: o.images })),
-      ),
+    .option(
+      '--download',
+      'also save the archive on this machine; it holds the master key and the CA key, so store it encrypted. The copy on control stays in its backup directory',
+    )
+    .option(
+      '-o, --output <file>',
+      'where --download saves the archive, default ./tug-control-backup-<id>.tar.gz in the working directory; an existing file is never overwritten. Implies --download',
+    )
+    .action(async (o: { images: boolean; download?: boolean; output?: string }) =>
+      withProgress('Creating control-plane backup', async (progress) => {
+        const result = await request<{ backupId: string; artifactRef: string; state: string }>(
+          'POST',
+          '/api/v1/control/backups/run',
+          { images: o.images },
+        );
+        if (!o.download && !o.output) return print(result);
+        const file = path.resolve(o.output ?? `tug-control-backup-${result.backupId}.tar.gz`);
+        progress.stage(`Downloading the archive to ${file}`);
+        await download(
+          `/api/v1/control/backups/${encodeURIComponent(result.backupId)}/download`,
+          file,
+        );
+        print({ ...result, downloadedTo: file });
+      }),
     );
   control
-    .command('restore <artifactRef>')
+    .command('restore [artifactRef]')
     .description(
-      'restore a control-plane backup on the control-plane host; requires a control restart',
+      'restore a control-plane backup, from an archive path on the control-plane host or with --from-destination from the shared backup destination; requires a control restart',
+    )
+    .option(
+      '--from-destination <url>',
+      'restore the newest control backup stored in this backup destination, such as s3:https://s3.example.com/bucket/tug-backups; the credential variables come from --env',
+    )
+    .option(
+      '--env <name>',
+      'credential variable of the destination, such as AWS_ACCESS_KEY_ID (repeat or comma-separate for several); each value is read from the variable of that name in your environment, else from a line on stdin',
+      collectList,
+      [],
     )
     .option('--confirm')
-    .action(async (artifactRef: string, o: { confirm?: boolean }) =>
-      withProgress('Restoring control-plane backup', async () =>
-        print(
-          await request('POST', '/api/v1/control/restore', {
-            artifactRef,
-            confirm: Boolean(o.confirm),
-          }),
-        ),
-      ),
+    .action(
+      async (
+        artifactRef: string | undefined,
+        o: { confirm?: boolean; fromDestination?: string; env: string[] },
+      ) => {
+        if (Boolean(artifactRef) === Boolean(o.fromDestination))
+          throw new Error('name either an archive path or --from-destination <url>');
+        if (artifactRef && o.env.length) throw new Error('--env goes with --from-destination');
+        const fromDestination = o.fromDestination
+          ? { url: o.fromDestination, env: await readEnvValues(o.env) }
+          : undefined;
+        return withProgress('Restoring control-plane backup', async () =>
+          print(
+            await request('POST', '/api/v1/control/restore', {
+              artifactRef,
+              fromDestination,
+              confirm: Boolean(o.confirm),
+            }),
+          ),
+        );
+      },
     );
 }
