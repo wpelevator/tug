@@ -1,3 +1,6 @@
+import { formatContainers } from '../observe-format.ts';
+import type { ContainerSummary } from '../observe-format.ts';
+import { formatLiveResult } from '../live.ts';
 import { selectService } from './selection.ts';
 import type { Command } from 'commander';
 import { projectOf, request, runLive, waitForCommand } from './context.ts';
@@ -38,10 +41,20 @@ export function registerService(program: Command): void {
     });
   program
     .command('ps')
-    .description('print per-container state as JSON')
+    .description("list the project's containers on a node with their state, image and ports")
     .option('--node <name>', 'select one node')
-    .action(async (o: { node?: string }) => {
-      await runLive('ps', o);
+    .option('--json', "print Docker's container list as JSON for scripts")
+    .action(async (o: { node?: string; json?: boolean }) => {
+      await runLive(
+        'ps',
+        { node: o.node },
+        o.json
+          ? {}
+          : {
+              formatResult: (value) =>
+                `${Array.isArray(value) ? formatContainers(value as ContainerSummary[]) : formatLiveResult(value).trimEnd()}\n`,
+            },
+      );
     });
   program
     .command('inspect [service]')

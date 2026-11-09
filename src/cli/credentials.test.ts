@@ -160,7 +160,7 @@ test('credential create, credential list and credential revoke work against cont
       'a scoped credential is refused other projects',
     );
 
-    const events = JSON.parse((await tug(OPERATOR, 'events', '--all')).stdout).events;
+    const events = JSON.parse((await tug(OPERATOR, 'events', '--all', '--json')).stdout).events;
     assert.equal(
       events[0].type,
       'credential.create',
