@@ -252,6 +252,15 @@ test('disconnects and aborted connections terminate without leaking sockets', as
 });
 
 test('CLI commands route through resolved configuration and preserve exec argv including newlines', async () => {
+  const PS_RESULT = [
+    {
+      Names: ['/tug-selected-web-1'],
+      Image: 'nginx:1.27',
+      State: 'running',
+      Status: 'Up 1 minute',
+      Labels: { 'tug.service': 'web' },
+    },
+  ];
   const f = await serverFixture();
   const requests: any[] = [];
   f.server.on('connection', (socket) =>
@@ -261,7 +270,7 @@ test('CLI commands route through resolved configuration and preserve exec argv i
       requests.push(message.request);
       frame(socket, { type: 'live.started', node: 'n' });
       if (['ps', 'inspect'].includes(message.request.operation))
-        frame(socket, { type: 'live.result', value: { containers: ['one'] } });
+        frame(socket, { type: 'live.result', value: PS_RESULT });
       else
         frame(socket, {
           type: 'live.output',
@@ -285,11 +294,17 @@ test('CLI commands route through resolved configuration and preserve exec argv i
       timeout: 10000,
     });
   try {
-    const ps = await cli('ps', '--node', 'node-a', '--project', 'selected');
+    const ps = await cli('ps', '--node', 'node-a', '--project', 'selected', '--json');
     assert.deepEqual(
       JSON.parse(ps.stdout),
-      { containers: ['one'] },
-      'ps must print a structured JSON document',
+      PS_RESULT,
+      'ps --json must print the structured JSON document unchanged',
+    );
+    const table = (await cli('ps', '--node', 'node-a', '--project', 'selected')).stdout;
+    assert.match(
+      table,
+      /^SERVICE\s+STATE\s+STATUS\s+IMAGE\s+PORTS\s+CONTAINER\nweb\s+running\s+Up 1 minute\s+nginx:1\.27\s+-\s+tug-selected-web-1\n$/,
+      'ps without --json prints a table of the containers',
     );
     await cli('inspect', 'web', '--node', 'node-a');
     const logs = await cli('logs', 'web', '--follow', '--tail', '0');
@@ -313,12 +328,12 @@ test('CLI commands route through resolved configuration and preserve exec argv i
       'explicit project and node must reach the live session',
     );
     assert.equal(
-      requests[1].project,
+      requests[2].project,
       'from-env',
       'live operations must use the same environment project resolution as other commands',
     );
     assert.deepEqual(
-      requests[3].command,
+      requests[4].command,
       ['sh', '-c', 'printf "a\nb"', '--remote-flag'],
       'exec argv after -- must preserve newlines and remote flags verbatim',
     );
