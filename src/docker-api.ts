@@ -138,7 +138,8 @@ export interface ExecOptions {
 }
 export interface LogsOptions {
   follow?: boolean;
-  tail?: number;
+  /** Lines from the end to start with (default 100); `'all'` replays the whole log. */
+  tail?: number | 'all';
   timestamps?: boolean;
 }
 
