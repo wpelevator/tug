@@ -26,7 +26,7 @@ async function stubSsh(dir: string) {
   await fs.writeFile(
     path.join(bin, 'ssh'),
     `#!/bin/sh\nfor a in "$@"; do printf '%s\\n' "$a"; done >> "${log}"\nprintf '\\n--END--\\n' >> "${log}"\ncase "$*" in\n  *"agent identity"*) cat "$TUG_STUB_CSR" ;;\n  *issue-credential*) cat "$TUG_STUB_CREDENTIAL" ;;
-  *"cat /data/pki/ca.crt"*) cat "\${TUG_STUB_PERSISTED_CA:-/dev/null}" ;;\nesac\n`,
+  *"cat /data/pki/ca.crt"*) cat "\${TUG_STUB_PERSISTED_CA:-/dev/null}" ;;\n  */etc/tug/agent.env*) printf '%s' "\${TUG_STUB_LEGACY_URL:-}" ;;\nesac\n`,
     { mode: 0o755 },
   );
   return { bin, log };
@@ -145,7 +145,7 @@ test('install commands render the shipped templates (src in dev, dist in the ima
   const ssh = await stubSsh(dir);
   const csrFile = path.join(dir, 'node.csr');
   await fs.writeFile(csrFile, await createCsr((await generateKeyPair()).privateKeyPem));
-  const env = {
+  const env: NodeJS.ProcessEnv = {
     ...process.env,
     ...control.env,
     PATH: `${ssh.bin}${path.delimiter}${process.env.PATH}`,
@@ -153,7 +153,7 @@ test('install commands render the shipped templates (src in dev, dist in the ima
     TUG_STUB_CSR: csrFile,
     TUG_STUB_CREDENTIAL: control.credentialFile,
   };
-  await fs.writeFile(env.TUG_CONFIG, '{}');
+  await fs.writeFile(env.TUG_CONFIG as string, '{}');
   // TUG_CONTROL_URL is the connect target for API commands but the advertised address for control setup, so a shell
   // that exports it for the first would change the second. Keep it away from control setup here.
   const cli = (...args: string[]) => {
@@ -194,6 +194,21 @@ test('install commands render the shipped templates (src in dev, dist in the ima
       'control setup does not build an image unless --build-local-image is set',
     );
     assert.doesNotMatch(script, unrenderedVariable, 'no unrendered template variables');
+    assert.match(
+      script,
+      /- tug-control:\/data/,
+      'control keeps its data in the tug-control named volume, not a host directory',
+    );
+    assert.match(
+      script,
+      /docker volume create tug-control/,
+      'the installer creates the volume the Compose file declares external',
+    );
+    assert.ok(
+      script.indexOf('tug control migrate') !== -1 &&
+        script.indexOf('tug control migrate') < script.indexOf('docker compose -f'),
+      'control setup checks for unmigrated data before it writes or starts anything',
+    );
 
     await fs.rm(ssh.log);
     await cli(
@@ -228,7 +243,25 @@ test('install commands render the shipped templates (src in dev, dist in the ima
     await fs.rm(ssh.log);
     await cli('node', 'add', 'root@node.test', '--name', 'n-tpl', '--no-wait');
     script = await fs.readFile(ssh.log, 'utf8');
-    assert.ok(script.includes('TUG_NODE_NAME=n-tpl'), 'agent.env rendered');
+    assert.ok(
+      script.includes('-v tug-agent:/var/lib/tug '),
+      'the agent keeps its state in the tug-agent named volume, not a host directory',
+    );
+    assert.doesNotMatch(
+      script,
+      /agent\.env|--env-file|\/etc\/tug/,
+      'the install writes no environment file or other host path for the agent',
+    );
+    assert.doesNotMatch(
+      script,
+      /TUG_CONTROL_URL=/,
+      'without --agent-control-url the agent is started without a control override',
+    );
+    assert.ok(
+      script.indexOf('tug node migrate n-tpl') !== -1 &&
+        script.indexOf('tug node migrate n-tpl') < script.indexOf('agent identity'),
+      'node add checks for unmigrated agent state before it touches the host',
+    );
     assert.ok(!script.includes('TUG_AGENT_TOKEN'), 'no bearer token reaches the node');
     assert.ok(script.includes('agent install-cert'), 'the certificate is installed over SSH');
     assert.ok(
@@ -265,13 +298,50 @@ test('install commands render the shipped templates (src in dev, dist in the ima
     );
     script = await fs.readFile(ssh.log, 'utf8');
     assert.ok(
-      script.includes(`TUG_CONTROL_URL=${agentControlUrl}`),
-      'agent installation should write the separately advertised URL while registration reaches the operator API',
+      script.includes(`-e TUG_CONTROL_URL='${agentControlUrl}'`),
+      'agent installation should pass the separately advertised URL as a flag while registration reaches the operator API',
     );
     assert.ok(
       script.includes('/dev/tcp/agent-control.test/443'),
       'node preflight should test TCP reachability of the agent URL',
     );
+    await fs.rm(ssh.log);
+    env.TUG_STUB_LEGACY_URL = 'https://legacy-url.test';
+    await cli('node', 'migrate', 'n-mig', 'root@mig.test', '--no-wait');
+    script = await fs.readFile(ssh.log, 'utf8');
+    const order = [
+      'old agent was started again',
+      'agent identity',
+      'docker run -d --name tug-agent',
+    ].map((marker) => script.indexOf(marker));
+    assert.ok(
+      order.every((at, i) => at !== -1 && (i === 0 || at > order[i - 1])),
+      'node migrate copies the state, then creates the identity from the migrated key, then installs the agent',
+    );
+    assert.match(
+      script,
+      /-e TUG_CONTROL_URL='https:\/\/legacy-url.test'/,
+      'a connect URL the old install kept in agent.env is carried over rather than silently dropped',
+    );
+    await fs.rm(ssh.log);
+    await cli(
+      'node',
+      'migrate',
+      'n-mig',
+      'root@mig.test',
+      '--agent-control-url',
+      'https://explicit.test',
+      '--no-wait',
+    );
+    script = await fs.readFile(ssh.log, 'utf8');
+    assert.match(
+      script,
+      /-e TUG_CONTROL_URL='https:\/\/explicit.test'/,
+      'an explicit --agent-control-url wins over the old agent.env value',
+    );
+    assert.doesNotMatch(script, /legacy-url\.test/, 'the old value is not used when one is given');
+    delete env.TUG_STUB_LEGACY_URL;
+
     const privateEnroll = JSON.parse(
       (
         await cli(
@@ -478,7 +548,7 @@ test('batch identity commands apply every per-node setting and preserve explicit
       assert.match(a, /node-agent:test/, `node ${verb} should apply the per-node image`);
       assert.match(
         a,
-        /TUG_CONTROL_URL=https:\/\/node-control.test:8443/,
+        /-e TUG_CONTROL_URL='https:\/\/node-control.test:8443'/,
         `node ${verb} should apply the per-node agent URL`,
       );
       assert.doesNotMatch(
@@ -494,7 +564,7 @@ test('batch identity commands apply every per-node setting and preserve explicit
       assert.match(b, /default-agent:test/, `node ${verb} should inherit the default image`);
       assert.match(
         b,
-        /TUG_CONTROL_URL=https:\/\/default-control.test:8443/,
+        /-e TUG_CONTROL_URL='https:\/\/default-control.test:8443'/,
         `node ${verb} should inherit the default agent URL`,
       );
       assert.match(b, /download.docker.com/, `node ${verb} should inherit Docker installation`);
@@ -575,7 +645,7 @@ test('batch identity commands apply every per-node setting and preserve explicit
       assert.match(calls, /flag-agent:test/, 'an explicit image should apply to every node');
       assert.match(
         calls,
-        /TUG_CONTROL_URL=https:\/\/flag-control.test/,
+        /-e TUG_CONTROL_URL='https:\/\/flag-control.test'/,
         'an explicit agent URL should apply to every node',
       );
       assert.match(

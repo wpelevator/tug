@@ -938,8 +938,17 @@ test('teardown stops the agent and removes Tug state, and only deletes volumes o
   const { teardownScript } = await import('./commands/host.ts');
   const safe = teardownScript(false);
   assert.match(safe, /docker rm -f tug-agent tug-caddy/, 'the agent and ingress are stopped');
-  assert.match(safe, /rm -rf \/etc\/tug \/var\/lib\/tug/, 'agent state is removed');
-  assert.ok(!safe.includes('docker volume'), 'volumes are kept by default');
+  assert.match(
+    safe,
+    /docker volume rm tug-agent /,
+    'the agent volume holds the node key, so it is removed even without --delete-data',
+  );
+  assert.match(
+    safe,
+    /rm -rf \/etc\/tug \/var\/lib\/tug/,
+    'state of a host not yet migrated is removed',
+  );
+  assert.ok(!safe.includes('docker volume ls'), 'project volumes are kept by default');
   assert.match(safe, /runs the control plane.*exit 3/, 'a control host is refused');
   assert.match(
     teardownScript(true),

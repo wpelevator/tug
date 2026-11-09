@@ -1,6 +1,7 @@
 import test, { describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  bindMountWarnings,
   domainProblem,
   publishesHostPort,
   buildDesiredState,
@@ -725,5 +726,42 @@ test('x-tug.ingress.host takes one hostname or a list, and every name is validat
     twoServices,
     /ingress\.host shared\.example\.com is already used by a/,
     'a name in a list cannot be reused by another service',
+  );
+});
+
+test('bindMountWarnings names each service and host path that ties a service to one host, and stays silent for named volumes', () => {
+  const compose = {
+    services: {
+      web: {
+        image: 'nginx',
+        volumes: [
+          { type: 'volume', source: 'data', target: '/data' },
+          { type: 'bind', source: '/srv/assets', target: '/assets' },
+          { type: 'tmpfs', target: '/run' },
+        ],
+      },
+      db: { image: 'mysql', volumes: [{ type: 'volume', source: 'db', target: '/var/lib/mysql' }] },
+    },
+    volumes: { data: {}, db: {} },
+  } as unknown as ComposeFile;
+  const warnings = bindMountWarnings(compose);
+  assert.equal(
+    warnings.length,
+    1,
+    'only the bind mount is reported; named volumes and tmpfs are portable',
+  );
+  assert.match(
+    warnings[0],
+    /web bind-mounts \/srv\/assets/,
+    'the warning names the service and the host path',
+  );
+  assert.match(warnings[0], /named volume/, 'the warning points at the portable alternative');
+  assert.deepEqual(
+    bindMountWarnings({
+      services: { db: compose.services.db },
+      volumes: compose.volumes,
+    } as ComposeFile),
+    [],
+    'a definition with only named volumes prints no warning',
   );
 });

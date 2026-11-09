@@ -117,7 +117,7 @@ sequenceDiagram
     Ctrl->>DB: insert node with a new immutable ID and the CSR key hash
     Ctrl-->>CLI: { node, certificate, ca, url }
     CLI->>Host: ssh: agent install-cert (response on stdin)
-    CLI->>Host: ssh node-install.sh (writes /etc/tug/agent.env, docker run agent)
+    CLI->>Host: ssh node-install.sh (docker run agent with the tug-agent volume)
     Host->>Agent: start container
     loop every TUG_POLL_INTERVAL_MS
         Agent->>Ctrl: GET /agent/v1/work (node certificate, mTLS)
@@ -289,4 +289,4 @@ Agents write generated state under `TUG_STATE_DIR` (default `/var/lib/tug`):
 /var/lib/tug/projects/<project>/rollout.json               # rolling services: active/candidate/draining revisions and the last rejected one
 ```
 
-The state directory must be a persistent volume (`-v tug-agent:/var/lib/tug`; `node add` mounts the host directory), so `agent.json` survives container recreation and the agent does not enroll again after an image update or reboot.
+The state directory must be a persistent volume (`-v tug-agent:/var/lib/tug`, which `node add` and `node enroll` both use), so `agent.json` survives container recreation and the agent does not enroll again after an image update or reboot. The agent writes nothing else to the host. A node installed by an earlier release keeps this state in the host directory `/var/lib/tug` until `tug node migrate` moves it into the volume (see [Nodes](nodes.md#moving-agent-state-into-the-volume-node-migrate)).

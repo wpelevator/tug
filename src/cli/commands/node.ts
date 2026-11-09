@@ -20,6 +20,14 @@ import { isNodeHost } from '../../node-address.ts';
 import { assertImagePublished, resolveImage } from '../../images/image.ts';
 import type { EnrollmentCredentialResponse, IdentityResponse, JoinKey } from '../../protocol.ts';
 import { loadTemplate } from '../load-template.ts';
+import {
+  AGENT_LEFTOVERS,
+  AGENT_VOLUME,
+  agentGuardScript,
+  agentMigrateScript,
+  readLegacyControlUrlScript,
+  LEGACY_AGENT_DIR,
+} from '../migrate.ts';
 import { errMessage } from '../../errors.ts';
 import {
   collectList,
@@ -57,7 +65,6 @@ export interface NodeIdentityOpts extends InstallOpts {
   ingress?: boolean;
   yes?: boolean;
 }
-const AGENT_STATE = '/var/lib/tug';
 
 function addNodeIdentityOptions(command: Command): Command {
   return command
@@ -127,14 +134,18 @@ async function installNodeIdentity(
       ? await transferTugImage(sshTarget, requestedImage, progress)
       : requestedImage;
     const started = new Date().toISOString();
+    // Before anything is written: a host that still keeps its state in the old directory must migrate first, or the
+    // agent would start on an empty volume.
+    progress.stage(`Checking agent state on ${name}`);
+    await runStep('ssh', ['--', sshTarget, agentGuardScript(image, name)], { progress });
     if (repair)
       await runLocal('ssh', [
         '--',
         sshTarget,
-        `mkdir -p ${AGENT_STATE} && cd ${AGENT_STATE} && for f in agent.json agent-pending.json; do [ -e "$f" ] && mv "$f" "$f.corrupt-$(date +%s)"; done; true`,
+        `docker run --rm --entrypoint sh -v ${AGENT_VOLUME}:/s ${sh(image)} -c 'cd /s && for f in agent.json agent-pending.json; do [ -e "$f" ] && mv "$f" "$f.corrupt-$(date +%s)"; done; true'`,
       ]);
     const agent = (command: string, interactive = false) =>
-      `mkdir -p ${AGENT_STATE} && docker run --rm ${interactive ? '-i ' : ''}-v ${AGENT_STATE}:${AGENT_STATE} ${sh(image)} agent ${command}`;
+      `docker run --rm ${interactive ? '-i ' : ''}-v ${AGENT_VOLUME}:/var/lib/tug ${sh(image)} agent ${command}`;
     progress.stage(`Creating identity for node ${name}`);
     // Adding a node the host is already enrolled as reuses its key, so re-running `node add` upgrades the agent in place;
     // `node replace` and `node repair` deliberately ask for a new key.
@@ -147,13 +158,9 @@ async function installNodeIdentity(
     await runCapture('ssh', ['--', sshTarget, agent('install-cert', true)], {
       input: JSON.stringify(response),
     });
-    const env = await loadTemplate(templatesDir, 'agent.env', {
-      CONTROL_URL_LINE: connectUrl ? `TUG_CONTROL_URL=${connectUrl}\n` : '',
-      NODE_NAME: name,
-    });
     progress.stage(`Installing agent on node ${name}`);
     const remote = await loadTemplate(templatesDir, 'node-install.sh', {
-      ENV: env,
+      ENV_FLAGS: connectUrl ? `-e TUG_CONTROL_URL=${sh(connectUrl)} ` : '',
       IMAGE_SH: sh(image),
       MARKER: STAGE_MARKER,
       RUN_FLAGS: `${HOST_NETWORK_FLAG} `,
@@ -340,6 +347,90 @@ async function runNodeIdentity(
   if (!(await installNodeIdentity(sshTarget, name, mode, o, repair))) process.exitCode = 1;
 }
 
+/**
+ * Moves one node's agent state from the old host directory into the `tug-agent` volume and reinstalls the agent on
+ * it. The old agent is stopped, not removed, and started again if the copy fails; the key is reused, so control sees
+ * an ordinary upgrade of the same node. A connect-only control URL the old install kept in /etc/tug/agent.env is
+ * carried over unless one is given.
+ */
+async function migrateNode(
+  sshTarget: string,
+  name: string,
+  o: NodeIdentityOpts,
+  printResult = true,
+): Promise<boolean> {
+  if (!o.agentControlUrl) {
+    const legacy = (await runCapture('ssh', ['--', sshTarget, readLegacyControlUrlScript])).trim();
+    if (legacy) {
+      console.error(`keeping the agent's connect URL ${legacy} from /etc/tug/agent.env`);
+      o.agentControlUrl = legacy;
+    }
+  }
+  await withProgress(
+    `Copying agent state of node ${name} into the ${AGENT_VOLUME} volume`,
+    (progress) =>
+      runStep(
+        'ssh',
+        ['--', sshTarget, agentMigrateScript(resolveImage(o.image, o.buildLocalImage))],
+        { progress },
+      ),
+  );
+  const reporting = await installNodeIdentity(sshTarget, name, 'create', o, false, false);
+  if (printResult)
+    print({
+      ok: true,
+      node: name,
+      ...(o.wait ? { reporting } : {}),
+      leftover: AGENT_LEFTOVERS,
+    });
+  console.error(
+    `node ${name}: the old ${LEGACY_AGENT_DIR} and /etc/tug are no longer used; remove them on the host once the node reports online`,
+  );
+  return reporting;
+}
+
+async function runNodeMigrate(
+  positional: { name?: string; ssh?: string },
+  o: NodeIdentityOpts,
+  command: Command,
+): Promise<void> {
+  const cfg = await loadCfg();
+  if (o.select && o.all) throw new Error('--select and --all cannot be combined');
+  if (o.all || o.select) {
+    if (positional.name || positional.ssh)
+      throw new Error('node migrate --all/--select cannot be combined with a node or SSH target');
+    const results: { node: string; ok: boolean; reporting?: boolean; error?: string }[] = [];
+    const names = o.select
+      ? await selectNodes(Object.keys(cfg.nodes).filter((name) => cfg.nodes[name].ssh))
+      : Object.keys(cfg.nodes);
+    for (const name of names) {
+      const target = cfg.nodes[name].ssh as string | undefined;
+      if (!target) continue;
+      const merged = { ...o, name };
+      applyConfigDefaults(command, merged, nodeSettings(cfg, name));
+      try {
+        const reporting = await migrateNode(target, name, merged, false);
+        results.push({ node: name, ok: true, ...(merged.wait ? { reporting } : {}) });
+      } catch (e) {
+        results.push({ node: name, ok: false, error: errMessage(e) });
+      }
+    }
+    print({ results });
+    if (results.some((r) => !r.ok || r.reporting === false)) process.exitCode = 1;
+    return;
+  }
+  const name = positional.name ?? (await selectNode());
+  o.name = name;
+  applyConfigDefaults(command, o, nodeSettings(cfg, name));
+  const sshTarget = positional.ssh ?? (nodeSettings(cfg, name).ssh as string | undefined);
+  if (!sshTarget)
+    throw new Error(
+      `node migrate needs an SSH target: pass <ssh-target> or set nodes.${name}.ssh in ${cfg.file}`,
+    );
+  if (o.agentControlUrl) normalizeControlUrl(o.agentControlUrl);
+  if (!(await migrateNode(sshTarget, name, o))) process.exitCode = 1;
+}
+
 export function registerNode(program: Command): void {
   const node = program.command('node').description('add, inspect, repair and remove nodes');
 
@@ -389,6 +480,39 @@ export function registerNode(program: Command): void {
         ) => runNodeIdentity({ name, ssh }, o, 'replace', command, repair),
       );
   }
+
+  node
+    .command('migrate [name] [sshTarget]')
+    .description(
+      'move the agent state of a node installed before it lived in a Docker volume from /var/lib/tug into the tug-agent volume and reinstall the agent on it, keeping its key (the SSH target defaults to nodes.<name>.ssh in the config file; --all walks every configured node). Run it before the next node add, replace or repair on such a host, which refuse until then',
+    )
+    .option(
+      '--all',
+      'walk every node with an ssh target in the config file, continuing after failures',
+    )
+    .option('--select', 'choose registered nodes with configured SSH targets')
+    .option(
+      '--agent-control-url <url>',
+      "connect-only URL the agent dials (default: the one in the node's /etc/tug/agent.env, if any)",
+    )
+    .option(
+      '--image <tag>',
+      "Tug image to run (default: ghcr.io/wpelevator/tug:<this CLI's version>)",
+    )
+    .option(
+      '--build-local-image',
+      'build the image from the current checkout and copy it to the host over SSH; for development',
+    )
+    .option('--no-wait', 'do not wait for the node to report after the install')
+    .option('-y, --yes', 'accepted so scripts can pass the same flags as node add; this never asks')
+    .action(
+      async (
+        name: string | undefined,
+        ssh: string | undefined,
+        o: NodeIdentityOpts,
+        command: Command,
+      ) => runNodeMigrate({ name, ssh }, { ...o, label: [] }, command),
+    );
 
   node
     .command('list')
@@ -584,7 +708,7 @@ export function registerNode(program: Command): void {
               '--teardown deletes data on the host; pass -y to confirm without a terminal',
             );
           console.error(
-            `This will stop the Tug agent on ${sshTarget}, remove its Tug containers and networks and delete /etc/tug and /var/lib/tug${
+            `This will stop the Tug agent on ${sshTarget}, remove its Tug containers and networks and delete the agent's identity (the ${AGENT_VOLUME} volume, and /etc/tug and /var/lib/tug on a host not yet migrated)${
               o.deleteData
                 ? ', and DELETE every project volume and the ingress certificates'
                 : ' (project volumes are kept)'
