@@ -161,6 +161,11 @@ test('a due slot queues exactly one backup command, and repeated ticks do not qu
     'one repository per project',
   );
   assert.equal(job.payload.limits.memory, '512m', 'the restic helper defaults to 512m');
+  assert.equal(
+    job.payload.resticImage,
+    'restic/restic:0.19.1',
+    'the restic helper defaults to the current restic release',
+  );
   assert.deepEqual(
     job.payload.command,
     {

@@ -24,7 +24,7 @@ import type {
 import { JOB_CANCELLED } from '../protocol.ts';
 
 /** Pinned by tag; override on control with `TUG_RESTIC_IMAGE` (a digest reference is recommended for production). */
-export const DEFAULT_RESTIC_IMAGE = 'restic/restic:0.17.3';
+export const DEFAULT_RESTIC_IMAGE = 'restic/restic:0.19.1';
 const MINUTE = 60_000;
 const DEFAULT_MEMORY = '512m';
 const RETRY_DELAY_MS = 10 * MINUTE;
