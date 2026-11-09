@@ -81,7 +81,7 @@ if (!fs.existsSync(keyPath))
 // The shims make `ssh root@127.0.0.1` and `scp` reach the guest without touching ~/.ssh.
 const bin = path.join(work, 'bin');
 fs.mkdirSync(bin, { recursive: true });
-const sshOptions = `-i '${keyPath}' -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o BatchMode=yes -o ServerAliveInterval=15`;
+const sshOptions = `-i '${keyPath}' -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o BatchMode=yes -o IdentitiesOnly=yes -o ServerAliveInterval=15`;
 fs.writeFileSync(
   path.join(bin, 'ssh'),
   `#!/bin/sh\nexec /usr/bin/ssh -p ${sshPort} ${sshOptions} "$@"\n`,
@@ -231,7 +231,12 @@ try {
     'the legacy install used the Docker Compose plugin',
   );
   const caBefore = guestOut('sha256sum /var/lib/tug-control/pki/ca.crt | cut -d" " -f1');
-  const agentBefore = guestOut('sha256sum /var/lib/tug/agent.json | cut -d" " -f1');
+  // The agent rewrites agent.json when its certificate is reissued, so compare the node's private key, not the file.
+  const keyHash = `const o=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));const k=Object.values(o).find(v=>typeof v==="string"&&v.includes("PRIVATE KEY"));console.log(k?require("crypto").createHash("sha256").update(k).digest("hex"):"none")`;
+  const agentBefore = guestOut(
+    `python3 -c "import json,hashlib,sys;o=json.load(open('/var/lib/tug/agent.json'));k=[v for v in o.values() if isinstance(v,str) and 'PRIVATE KEY' in v];print(hashlib.sha256(k[0].encode()).hexdigest() if k else 'none')"`,
+  );
+  check(agentBefore !== 'none', 'the legacy agent.json holds the node private key');
   const nodeIdBefore = JSON.parse(legacy(['node', 'list', '--json'], { quiet: true }).stdout);
   const nodesOf = (v) => (Array.isArray(v) ? v : (v.nodes ?? []));
   check(
@@ -246,7 +251,7 @@ try {
     path.join(project, 'compose.yaml'),
     `services:\n  web:\n    image: nginx:1.27-alpine\n    ports: ["8080:80"]\n    environment:\n      API_KEY: \${API_KEY}\n    volumes:\n      - site:/usr/share/nginx/html\n    x-tug:\n      placement:\n        nodes: [${nodeName}]\n      health:\n        type: tcp\n        port: 80\nvolumes:\n  site:\n`,
   );
-  legacy(['secret', 'set', 'API_KEY', 'sekret-v1']);
+  legacy(['secret', 'set', 'API_KEY', '--value', 'sekret-v1']);
   legacy(['deploy', '--timeout', '300'], { cwd: project });
   legacy([
     'exec',
@@ -299,19 +304,14 @@ try {
     () => current(['node', 'list', '--json'], { fail: false, quiet: true }).status === 0,
     60,
   );
-  current([
-    'node',
-    'migrate',
-    nodeName,
-    target,
-    '--agent-control-url',
-    agentUrl,
-    '--build-local-image',
-  ]);
+  current(
+    ['node', 'migrate', nodeName, target, '--agent-control-url', agentUrl, '--build-local-image'],
+    { cwd: repo },
+  );
   check(
     guestOut(
-      'docker run --rm --entrypoint sha256sum -v tug-agent:/s tug:local /s/agent.json',
-    ).split(' ')[0] === agentBefore,
+      `docker run --rm --entrypoint node -v tug-agent:/s "$(docker inspect -f '{{.Config.Image}}' tug-agent)" -e '${keyHash}' /s/agent.json`,
+    ) === agentBefore,
     'the node key moved into the tug-agent volume unchanged',
   );
   await waitFor(
@@ -335,7 +335,10 @@ try {
     guest('docker compose version', { fail: false }).status !== 0,
     'the Compose plugin is removed from the guest',
   );
-  current(['control', 'setup', target, '--build-local-image', '--control-url', clientUrl, '-y']);
+  // The image build runs in the checkout (it needs the Dockerfile), not in the work directory.
+  current(['control', 'setup', target, '--build-local-image', '--control-url', clientUrl, '-y'], {
+    cwd: repo,
+  });
   check(
     guestOut('docker inspect -f "{{.Config.Image}}" tug-control-control-1') === 'tug:local' ||
       /tug:local|tug@sha/.test(
@@ -369,7 +372,7 @@ try {
     guestOut('curl -fsS localhost:8080/marker.txt').includes('legacy-data'),
     'the service kept serving and its volume kept its data through the upgrade',
   );
-  const secrets = current(['secret', 'list', '--json'], { quiet: true }).stdout;
+  const secrets = current(['secret', 'list'], { quiet: true }).stdout;
   check(secrets.includes('API_KEY'), 'the secret survived the upgrade');
   fs.writeFileSync(path.join(project, '.env'), 'GREETING=hello-native\n');
   fs.writeFileSync(
