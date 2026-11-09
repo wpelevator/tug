@@ -1,7 +1,15 @@
 /** The control status endpoint returns database rows and a JSON-encoded node report. */
 export interface StatusResponse {
   projects: { id: string; current_deployment_id: string | null }[];
-  deployments: { id: string; version: string; state: string; error_message: string | null }[];
+  deployments: {
+    id: string;
+    version: string;
+    state: string;
+    error_message: string | null;
+    project_id?: string;
+    created_at?: string;
+    actor?: string | null;
+  }[];
   nodes: { id: string; name: string; status: string; last_seen_at: string | null }[];
   statuses: {
     project_id: string;

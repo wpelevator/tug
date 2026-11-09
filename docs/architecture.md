@@ -24,7 +24,7 @@ The [README](../README.md#how-it-fits-together) has an overview diagram of how t
 | Path | Contents |
 | --- | --- |
 | `cli.ts`, `main.ts` | The two entry points (`tug` and `tug-runtime`), kept at the root so `dist/cli.js` and `dist/main.js` do not move. |
-| `cli/` | The operator CLI: `commands/` (one file per command group) and the prompt, progress, picker, config, install and live-session helpers, named without a `cli-` prefix. |
+| `cli/` | The operator CLI: `commands/` (one file per command group), `tui/` (the full-screen UI behind `tug tui`, see [Terminal UI](tui.md)) and the prompt, progress, picker, config, install and live-session helpers, named without a `cli-` prefix. |
 | `control/` | The control plane: the API, credentials and the role table, secrets, TLS listener, status-report validation and node diagnostics. |
 | `agent/` | The node agent: the reconcile loop, agent identity, jobs, live sessions and the injectable runners. |
 | `db/` | SQLite driver contract, node driver, migrations, transactions, project locks, row ids and the lifecycle tables and writers. |

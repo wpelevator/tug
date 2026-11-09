@@ -217,6 +217,8 @@ The test layers, the metrics milestones are held to and the backlog of mocked te
 - [ ] M5 remote process termination when an exec session is cancelled or disconnected
 - [x] M6 node labels, label placement, replicas spread, `global` mode, `scale` command, verified on real hosts
 - [x] M7 `nfs` volume type, removed: shared storage is the operator's (S3-compatible storage or `driver_opts`)
+- [x] `tug tui` terminal UI phases 1 to 3: overview and attention list, live logs, inspect and shell, confirmed restart, rollback, cancel and backup, and `GET /api/v1/whoami` ([Terminal UI](tui.md))
+- [ ] `tug tui` phase 4 (admin actions typed-name confirmation, screen lock, preferences, credential contexts) and phase 5 (metrics columns with M9)
 - [x] M8 scoped operator credentials, CI deploy example, credential names in the audit trail ([Access control](access-control.md))
 - [ ] M8 outbound webhooks
 - [x] M9 event hygiene ([Architecture](architecture.md#events)) and observability design ([Observability](observability.md))

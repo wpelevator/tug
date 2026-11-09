@@ -207,6 +207,7 @@ Start with the [single-VPS tutorial](docs/getting-started.md), then choose the t
   - [Observability status and proposal](docs/observability.md)
   - [Capabilities proposal](docs/capabilities.md)
   - [Consoles and agent-built control planes (proposal)](docs/consoles.md)
+  - [Terminal UI (`tug tui`)](docs/tui.md)
   - [Terminology](docs/terminology.md)
   - [Standalone binary (prototype)](docs/standalone-binary.md)
   - [Docker Swarm comparison](docs/swarm-comparison.md)

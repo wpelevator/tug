@@ -3380,6 +3380,11 @@ export async function createApp(
   api('get', '/api/v1/version', null, async (req, res) => {
     res.json({ v: ownVersion });
   });
+  // Lets a client such as `tug tui` offer only the actions its credential may use; nothing here is secret.
+  api('get', '/api/v1/whoami', null, async (req, res) => {
+    const { name, role, projects } = req.actor!;
+    res.json({ name, role, projects });
+  });
   api('get', '/api/v1/status', null, async (req, res) => {
     const projects = projectScope(req.actor!, 'id');
     const deployments = projectScope(req.actor!, 'project_id');

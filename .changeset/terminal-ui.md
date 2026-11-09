@@ -1,0 +1,5 @@
+---
+'@wpelevator/tug': minor
+---
+
+New `tug tui`: a live full-screen view of the whole setup, in the spirit of K9s. It opens on an attention list of what is wrong (a service that failed to apply, a stale node, a failed or stuck deployment, an automatic rollback, a stale or missing backup, an interrupted restore, certificate and version warnings), then projects, nodes and recent events, and drills down from a problem to the service on its node. From there `l` follows logs, `i` and `p` inspect containers, `s` opens a shell, and `r`, `R`, `x` and `b` restart a service, roll a project back, cancel a deployment and run a backup, each after a confirmation. `:` jumps between views, `/` filters, and `--readonly` refuses every key that changes something. `tug tui --once` prints the same attention list and exits 1 when anything needs attention, for cron and shell prompts, and `--json` prints it for scripts. Control gains `GET /api/v1/whoami` (`read` role), which returns the calling credential's name, role and project scope so a client can offer only what the role allows; a control without it still works and lets the control decide. See `docs/tui.md`.
