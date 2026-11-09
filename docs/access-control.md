@@ -7,7 +7,7 @@ The certificate's URI SAN names the **identity class**, which decides which rout
 | SAN | Class | May reach |
 | --- | --- | --- |
 | `tug:node:<id>` | node (`<id>` is the immutable node ID, not the node name) | `/agent/v1/*` (including `POST /agent/v1/renew` and the agent stream) |
-| `tug:operator:<id>` | operator or CI | `/api/v1/*` and `/api/v1/live`, subject to role and project scope |
+| `tug:operator:<id>` | operator or CI | `/api/v1/*`, `/api/v1/live` and `/api/v1/watch`, subject to role and project scope |
 | `tug:enroll:<id>` | bootstrap | `POST /agent/v1/enroll` only |
 
 A principal outside its class gets `403`. Authorization follows the **public key**, not the certificate: control stores the SHA-256 of each principal's SubjectPublicKeyInfo (`key_hash`) and accepts any CA-signed certificate for that key, so renewal is just signing another certificate for the same key. Replacing a key makes every certificate for the old key unusable at once.
@@ -49,7 +49,8 @@ The project column says how a scoped credential's allowed projects are checked: 
 | `GET /api/v1/status` | `read` | Response is filtered to allowed projects |
 | `GET /api/v1/version` | `read` | None; reports control's own version |
 | `GET /api/v1/whoami` | `read` | None; reports the caller's credential name, role and project scope |
-| `GET /api/v1/events` | `read` | `project` query, or filtered to allowed projects |
+| `GET /api/v1/events` | `read` | `project` query, or filtered to allowed projects; `after` follows the log by `seq` |
+| `GET /api/v1/watch` | `read` | WebSocket; hints and new events filtered to allowed projects |
 | `GET /api/v1/projects/:project` | `read` | Path |
 | `GET /api/v1/deployments/:id` | `read` | Deployment's project |
 | `GET /api/v1/volumes` | `read` | Query; includes node name, persistence and referencing services |
@@ -65,6 +66,7 @@ The project column says how a scoped credential's allowed projects are checked: 
 | `POST /api/v1/restart` | `deploy` | Body |
 | `POST /api/v1/logs` | `deploy` | Body |
 | `GET /api/v1/live` | `deploy` | First WebSocket frame |
+| `GET /api/v1/watch` | `read` | WebSocket, one-way; every frame is filtered to allowed projects; 8 sockets per credential |
 | `GET /api/v1/commands/:id` | `deploy` | Command's project; commands without a project (diagnostics) need `admin` |
 | `POST /api/v1/backups/run` | `deploy` | Body `project` |
 | `GET /api/v1/backups` | `read` | Query `project` |

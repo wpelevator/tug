@@ -1,7 +1,7 @@
 import readline from 'node:readline';
 import type { Readable, Writable } from 'node:stream';
 import { errMessage } from '../../errors.ts';
-import type { LiveRequest } from '../../protocol.ts';
+import type { LiveRequest, WatchFrame } from '../../protocol.ts';
 import { parseLiveRequest, runCliLive } from '../live.ts';
 import type { CliLiveStdin, CliLiveStdout, CliLiveTransport, LiveEvent } from '../live.ts';
 import { ACTIONS, runAction } from './actions.ts';
@@ -35,6 +35,11 @@ export interface TuiOptions {
   cliVersion: string;
   env?: NodeJS.ProcessEnv;
   intervals?: Intervals;
+  /** Opens the push channel from control; the screen works without it, polling faster. */
+  watch?: (handlers: {
+    onFrame: (frame: WatchFrame) => void;
+    onState: (connected: boolean) => void;
+  }) => { start(): void; stop(): void };
   /** Ends the screen from outside (a test, or a signal). */
   signal?: AbortSignal;
 }
@@ -131,6 +136,11 @@ export async function runTui(options: TuiOptions): Promise<number> {
     },
     options.intervals,
   );
+
+  const watch = options.watch?.({
+    onFrame: (frame) => poller.onWatch(frame),
+    onState: (connected) => poller.onWatchState(connected),
+  });
 
   const flash = (text: string, tone: Tone): void => dispatch({ type: 'flash', text, tone });
 
@@ -351,11 +361,13 @@ export async function runTui(options: TuiOptions): Promise<number> {
     stdin.resume();
     stdout.on('resize', onResize);
     poller.start();
+    watch?.start();
     if (options.view) void poller.load(options.view);
     draw(true);
     return await done;
   } finally {
     clearInterval(ticker);
+    watch?.stop();
     poller.stop();
     live?.abort();
     options.signal?.removeEventListener('abort', abort);

@@ -144,3 +144,86 @@ test('registry auth uses padded base64url for every credential byte length', asy
     }
   }
 });
+
+test('events streams parsed JSON lines across chunk boundaries, sends since and filters, and ends cleanly on abort', async () => {
+  let url = '';
+  const d = await daemon((req, res) => {
+    url = req.url ?? '';
+    res.write(
+      '{"Type":"container","Action":"die","Actor":{"ID":"abc","Attributes":{"exitCode":"1","na',
+    );
+    setTimeout(() => {
+      res.write(
+        'me":"web"}},"time":100}\n\nnot json\n{"Type":"container","Action":"oom","Actor":{"ID":"abc","Attributes":{}},"time":101}\n',
+      );
+    }, 20);
+    // The daemon keeps the stream open: it only ends when the client goes away.
+  });
+  const controller = new AbortController();
+  try {
+    const seen: { Action: string; name?: string }[] = [];
+    for await (const event of d.engine.events({
+      since: 99,
+      filters: { type: ['container'], event: ['die', 'oom'] },
+      signal: controller.signal,
+    })) {
+      seen.push({ Action: event.Action, name: event.Actor.Attributes.name });
+      if (seen.length === 2) controller.abort();
+    }
+    assert.deepEqual(
+      seen,
+      [
+        { Action: 'die', name: 'web' },
+        { Action: 'oom', name: undefined },
+      ],
+      'a line split across chunks is reassembled and a blank or invalid line is skipped',
+    );
+    assert.match(
+      url,
+      /^\/v1\.41\/events\?since=99&filters=/,
+      'since and filters are sent as query parameters',
+    );
+    assert.deepEqual(
+      JSON.parse(new URL(url, 'http://x').searchParams.get('filters')!),
+      { type: ['container'], event: ['die', 'oom'] },
+      'filters are JSON',
+    );
+  } finally {
+    d.close();
+  }
+});
+
+test('events fails when the daemon ends the stream or answers an error, so the caller reconnects', async () => {
+  const ended = await daemon((_req, res) =>
+    res.end('{"Type":"container","Action":"die","Actor":{"ID":"a","Attributes":{}},"time":1}\n'),
+  );
+  try {
+    const seen: string[] = [];
+    await assert.rejects(
+      (async () => {
+        for await (const event of ended.engine.events()) seen.push(event.Action);
+      })(),
+      /event stream ended/,
+      'a stream the daemon closes is an error, not a quiet end',
+    );
+    assert.deepEqual(seen, ['die'], 'events before the end are delivered');
+  } finally {
+    ended.close();
+  }
+  const refused = await daemon((_req, res) => {
+    res.statusCode = 500;
+    res.end(JSON.stringify({ message: 'daemon is shutting down' }));
+  });
+  try {
+    await assert.rejects(
+      (async () => {
+        for await (const event of refused.engine.events()) void event;
+      })(),
+      (error) =>
+        error instanceof DockerError && error.status === 500 && /shutting down/.test(error.message),
+      'an error answer carries the daemon’s message',
+    );
+  } finally {
+    refused.close();
+  }
+});

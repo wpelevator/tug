@@ -394,6 +394,37 @@ export type OperatorLiveMessage =
   | { v: 1; type: 'live.exit'; sessionId: string; code: number }
   | { v: 1; type: 'live.error'; sessionId?: string; message: string };
 
+/** What a `GET /api/v1/watch` subscriber hears about. `nodes` has no project: node connectivity is control-wide. */
+export type WatchTopic = 'status' | 'nodes' | 'events' | 'backups' | 'restores';
+export interface WatchChange {
+  topic: WatchTopic;
+  project?: string;
+}
+/** One row of the events table as `GET /api/v1/events` returns it, with its position in the log as `seq`. */
+export interface WatchEvent {
+  seq: number;
+  id: string;
+  project_id: string | null;
+  deployment_id: string | null;
+  node_id: string | null;
+  level: string;
+  type: string;
+  message: string;
+  metadata_json: string | null;
+  created_at: string;
+  actor: string | null;
+}
+/**
+ * Frames control sends on `GET /api/v1/watch`, a WebSocket (`read` role, filtered to the credential's projects). They are
+ * hints and new events, not state: the client refetches what a `watch.changed` names, and `GET /api/v1/status` stays
+ * the truth. A client that falls behind is told to `watch.resync` or is disconnected, and reconnects.
+ */
+export type WatchFrame =
+  | { v: 1; type: 'watch.ready'; cursor: number; version: string }
+  | { v: 1; type: 'watch.changed'; changes: WatchChange[] }
+  | { v: 1; type: 'watch.events'; events: WatchEvent[]; cursor: number }
+  | { v: 1; type: 'watch.resync'; reason: string };
+
 /** Response from the long-poll fallback used when a WebSocket cannot be established. */
 export type WakeResponse = { type: 'work-available' | 'timeout'; cursor: number; project?: string };
 
@@ -535,6 +566,13 @@ export interface AgentEvent {
   type?: string;
   message?: string;
   metadata?: Record<string, unknown>;
+}
+
+/** Sent by an agent over its stream socket instead of `POST /agent/v1/events` while the socket is open. */
+export interface AgentEventFrame {
+  v: 1;
+  type: 'agent.event';
+  events: AgentEvent[];
 }
 
 // ---- Node registration / enrollment ------------------------------------------------------------

@@ -218,7 +218,7 @@ export function deriveAttention(snapshot: Snapshot, now: number, cliVersion?: st
         rank: 2,
         key: `node:${node.name}`,
         subject: `node ${node.name}`,
-        reason: `stale, last seen ${ageOf(node.last_seen_at, now)} ago${hosted.length ? `; hosts ${hosted.join(', ')}` : ''}`,
+        reason: `stale, last seen ${ageOf(node.last_seen_at, now)} ago${node.connected ? ' but its stream is still open' : ''}${hosted.length ? `; hosts ${hosted.join(', ')}` : ''}`,
         since: node.last_seen_at ?? undefined,
         target: { name: 'node', node: node.name },
         context: { node: node.name },

@@ -134,7 +134,9 @@ function header(state: UiState, env: Env, options: RenderOptions): string[] {
       ? { text: `◌ disconnected${age !== undefined ? ` · data ${age}s old` : ''}`, tone: 'error' }
       : age === undefined
         ? { text: '○ connecting', tone: 'dim' }
-        : { text: `● live ${age}s`, tone: age > 15 ? 'warn' : 'ok' };
+        : snapshot.watch.connected
+          ? { text: '● live · push', tone: 'ok' }
+          : { text: `● live ${age}s`, tone: age > 15 ? 'warn' : 'ok' };
   const skew = version && version !== options.cliVersion ? ` (cli ${options.cliVersion})` : '';
   const first = spread(
     [

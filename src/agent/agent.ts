@@ -32,6 +32,7 @@ import {
   volumeName,
 } from '../container-spec.ts';
 import { API_VERSION, DockerEngine, isNotFound } from '../docker-api.ts';
+import { DockerEventWatcher } from './docker-events.ts';
 import type { ContainerSummary, DockerApi } from '../docker-api.ts';
 import type { PortBind } from '../compose/compose.ts';
 import { JobRunner } from './jobs.ts';
@@ -43,6 +44,8 @@ import {
 } from '../protocol.ts';
 import { packageVersion } from '../images/image.ts';
 import type {
+  AgentEvent,
+  AgentEventFrame,
   AgentLiveCommand,
   AgentLiveFrame,
   LiveRequest as ProtocolLiveRequest,
@@ -111,6 +114,18 @@ export interface AgentContext {
   caddyImage?: string;
   /** Host port range (`LOW-HIGH`) for rolling-rollout revisions; default 20000-20999. */
   rolloutPorts?: string;
+  /** Sends an event over the open stream socket; false when there is none, and the event goes by HTTP instead. */
+  pushEvent?: (event: AgentEvent) => boolean;
+}
+
+/** Reports an event to control: over the stream socket while it is open (no request, no handshake), else by HTTP. */
+export async function postEvent(ctx: AgentContext, event: AgentEvent): Promise<void> {
+  if (ctx.pushEvent?.(event)) return;
+  await api(ctx, '/agent/v1/events', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(event),
+  });
 }
 
 let activeDocument: AgentDocument | undefined;
@@ -330,7 +345,17 @@ export class AgentWakeChannel {
     await this.longPoll(timeoutMs);
   }
 
-  send(frame: AgentLiveOutputFrame): boolean {
+  /** Wakes the loop for an immediate reconcile, as a `work-available` hint from control does. */
+  poke(): void {
+    this.notify();
+  }
+
+  /** Sends events over the open socket; false when it is not open, and the caller falls back to HTTP. */
+  sendEvent(event: AgentEvent): boolean {
+    return this.send({ v: 1, type: 'agent.event', events: [event] });
+  }
+
+  send(frame: AgentLiveOutputFrame | AgentEventFrame): boolean {
     const socket = this.socket;
     if (!socket || socket.readyState !== WebSocket.OPEN) return false;
     if (socket.bufferedAmount > 1048576) {
@@ -1070,16 +1095,12 @@ export async function reconcile(
     ]),
   );
   const emit = (service: string, rolloutState: string, message = rolloutState, level = 'info') =>
-    api(ctx, '/agent/v1/events', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        projectId: desiredState.project,
-        level,
-        type: `service.${rolloutState}`,
-        message,
-        metadata: { service, version: desiredState.version, node: ctx.nodeName },
-      }),
+    postEvent(ctx, {
+      projectId: desiredState.project,
+      level,
+      type: `service.${rolloutState}`,
+      message,
+      metadata: { service, version: desiredState.version, node: ctx.nodeName },
     }).catch(() => {});
   const sec = await api<SecretsResponse>(
     ctx,
@@ -1301,16 +1322,12 @@ async function warnPublicPorts(
   if ((publicPortWarnings.get(key) ?? '') === message) return;
   publicPortWarnings.set(key, message);
   if (!message) return;
-  await api(ctx, '/agent/v1/events', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      projectId: desiredState.project,
-      level: 'warn',
-      type: 'ports.public',
-      message,
-      metadata: { services: exposed, address: bind.address, node: ctx.nodeName },
-    }),
+  await postEvent(ctx, {
+    projectId: desiredState.project,
+    level: 'warn',
+    type: 'ports.public',
+    message,
+    metadata: { services: exposed, address: bind.address, node: ctx.nodeName },
   }).catch(() => {});
 }
 
@@ -1538,6 +1555,16 @@ export async function main(): Promise<void> {
   const live = new AgentLiveOperations(ctx, (frame) => {
     wake.send(frame);
   });
+  ctx.pushEvent = (event) => wake.sendEvent(event);
+  // Crashed, killed and unhealthy containers are noticed from the daemon's event stream, not at the next poll.
+  const watcher = new DockerEventWatcher({
+    docker: ctx.docker,
+    nodeName: ctx.nodeName,
+    post: (event) => postEvent(ctx, event),
+    wake: () => wake.poke(),
+    log: (message) => console.error(message),
+  });
+  if (ctx.apply) watcher.start();
   for (;;) {
     await renewIfDue();
     try {

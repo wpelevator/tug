@@ -20,7 +20,7 @@ The full screen needs a terminal on stdin and stdout; without one, `tug tui` say
 
 Feasible with what exists, and built without a controller change beyond one small read route. Four things shaped it:
 
-1. **Everything is a poll.** There is no stream or change feed ([Consoles](consoles.md#controller-changes)); `GET /api/v1/events` has no cursor and `stale` is computed when `status` is read. `GET /api/v1/status` is one bounded read (projects, the 20 latest deployments, nodes, per-node project status), so polling it every 3 seconds is cheap and is the design. A change feed would later replace polling without changing the screen.
+1. **Polling is the floor, push is the fast path.** `GET /api/v1/status` is one bounded read (projects, the 20 latest deployments, nodes, per-node project status), so polling it every 3 seconds is cheap and is the baseline. The screen also opens control's [watch channel](architecture.md#operator-watch-channel) and, while it is open, refetches only what a hint names, takes new events from the stream without a request, and polls a quarter as often as a backstop. The header says `● live · push` then. Without the channel (an older control, a proxy that drops WebSockets) it polls at the normal rate and nothing else changes.
 2. **Live detail already has a channel.** `ps`, `inspect`, `logs --follow` and `exec -t` run through the WebSocket live channel ([CLI](cli.md#services-and-volumes), `runCliLive` in `src/cli/live.ts`), including PTY resize. The screen reuses that transport for the log view, the inspection pane and the shell, so those features are not new protocol.
 3. **Two things cannot be shown honestly yet.** CPU, memory, disk and restart counts need the agent stats of [M9](observability.md#node-and-service-stats-reported-by-agents); until then the screen shows container state from `ps` on demand and nothing resembling `top`. The caller's own role is not in the credential file (`Credential` holds only url, CA, certificate and key), so control gained `GET /api/v1/whoami` (`read`), which returns the credential name, role and project scope; a control without it leaves the role unknown and the screen lets the control decide.
 4. **Roles shape the screen.** `GET /api/v1/nodes`, diagnostics, credentials and backup destination are `admin`; `logs`, `exec`, `ps` and `inspect` are `deploy`; the rest is `read`. A `read` credential still gets nodes from `status`, but without address, ingress and labels, and the screen never asks for admin-only routes it cannot use.
@@ -140,11 +140,11 @@ PROJECT  VERSION  DEPLOYMENT  SERVICES  NODES  BACKUP   AGE  BY
 blog     v7       succeeded   2/2       1/1    -        3d   kaspars
 site     v42      succeeded   2/4       1/3    problem  2h   ci-github
 ─ Nodes ────────────────────────────────────────────────────────────────────────────────────────────
-NODE  STATUS  LAST SEEN  SERVICES
-app1  online  3s         site/db site/web
-app2  online  2s         site/web
-app3  stale   12m        site/db
-app4  online  4s         blog/db blog/web
+NODE  STATUS  LINK  LAST SEEN  SERVICES
+app1  online  -     3s         site/db site/web
+app2  online  -     2s         site/web
+app3  stale   -     12m        site/db
+app4  online  -     4s         blog/db blog/web
 ─ Events ───────────────────────────────────────────────────────────────────────────────────────────
 AGE  LEVEL  PROJECT  TYPE            ACTOR      MESSAGE
 4m   error  site     service.failed  -          web on app2: health check returned 503
@@ -152,7 +152,7 @@ AGE  LEVEL  PROJECT  TYPE            ACTOR      MESSAGE
  ? help  q quit  :view  / filter  enter open  e events  d describe  l logs  i inspect  p ps  s shel…
 ```
 
-- **Header** shows control identity, control version (with the CLI's when they differ), the credential's role, connection state with the age of the data, and counters computed from the same list the attention pane shows, so the two cannot disagree. Services count a stale node's services as expected but not serving. Before the first answer it says `○ connecting` and the panes say they are waiting, never "nothing needs attention"; after a failed poll it says `◌ disconnected · data 40s old` and keeps the last data on screen.
+- **Header** shows control identity, control version (with the CLI's when they differ), the credential's role, connection state with the age of the data, and counters computed from the same list the attention pane shows, so the two cannot disagree. Services count a stale node's services as expected but not serving. `● live · push` replaces the data age while the watch channel is open. The nodes table has a `LINK` column: `stream` when the agent holds its socket to control, `poll` when it does not (or uses the long-poll fallback), `-` from a control that does not say; a stale node whose stream is still open says so in the attention list, since that agent is running and not reconciling. Before the first answer it says `○ connecting` and the panes say they are waiting, never "nothing needs attention"; after a failed poll it says `◌ disconnected · data 40s old` and keeps the last data on screen.
 - **Attention rows** carry an age where one is known: a failed apply from the agent's `service.failed` event (status reports have no start time, since their timestamp changes on every poll, so with no event there is no age), a stale node from its last contact, a backup problem from the last success, an event-based note from the event. Rank 4 notes (public ports, held services, a node that never connected) are dimmed and marked `·` instead of `▲`, so they do not compete with failures.
 - **Overview** is four panes (attention, projects, nodes, events). `tab` moves between panes and each pane remembers its selection by identity, so a refresh that reorders rows does not move it. `enter` opens the selected row. On a terminal too short for all four it shows the attention pane and the focused pane.
 - **Resource views** are K9s-style tables with the same chrome: `:projects`, `:nodes`, `:services`, `:deployments`, `:events`, `:backups`, `:restores`, `:domains`, `:volumes`, `:secrets`, `:credentials`, each taking an optional project (`:events site`). `esc` goes up one level and the breadcrumb (`overview › site › web@app2`) shows where you are. Domains, volumes and secrets load for one project (the resolved project unless named) and credentials are control-wide (admin).
@@ -214,6 +214,7 @@ poller ──▶ snapshot ──▶ deriveAttention ──▶ render(state, fram
 control                  stdin keys ──▶ reduce(state, key) ──▶ effects (logs, shell, action, load)
 ```
 
+- **Push.** `src/cli/watch-client.ts` keeps the watch socket open (reconnecting with backoff and jitter, validating every frame) and the poller reacts to it: `watch.ready` and `watch.resync` refetch everything, `watch.changed` refetches only the feeds it names, and `watch.events` rows are merged into the event list by id with no request. While it is open the polling intervals below are four times longer; when it drops they return to normal.
 - **Poller.** `status` every 3 seconds, events every 5, backups, restores and nodes every 30, diagnostics every 60, and an on-demand list every 15 while loaded, each with up to 10% jitter and backoff (to eight times the interval) after failures. `whoami` and the control version are asked once. One request per feed is in flight at a time. Nodes and diagnostics are admin-only and are not requested unless `whoami` says admin (or is unavailable, in which case one 403 turns them off for good). A failed poll keeps the last data and records the error beside it. Each request opens its own pinned mTLS connection, as every CLI call does; a long-lived connection is a possible later saving.
 - **Selection** is remembered by row identity per table, so it survives a refresh that reorders rows.
 - **Derivation.** `deriveAttention(snapshot, now, cliVersion)` owns the ranking and is the part to test hardest, since it is what the operator trusts. A stale, disabled or unknown node's last report is never read as current health; control is reported unreachable after 15 seconds without an answer, or at once before the first.
@@ -237,7 +238,7 @@ No new runtime dependency. Alternatives considered:
 None blocked the first three phases. In order of value, each an additive minor under [the frozen contracts](releases.md#what-10-freezes):
 
 1. **`GET /api/v1/whoami`** (`read`): done. It lets the screen hide actions the role cannot use instead of learning from a 403, and is useful to `tug` itself.
-2. **Events cursor and change feed** (`events?after=`, `GET /api/v1/watch`), planned in [Consoles](consoles.md#controller-changes). Turns polling into pushes and makes `stale` an event.
+2. **Events cursor and change feed** (`events?after=`, `GET /api/v1/watch`): done, see [Architecture](architecture.md#operator-watch-channel).
 3. **Agent stats and `/metrics`** ([M9](observability.md)). Adds CPU, memory, disk, restarts and a sparkline column to services and nodes. Without it the screen does not pretend to be `top`.
 4. **A single summary endpoint**, only if the multi-call poll proves heavy. `status`, `backups` and `restores` for one screen are a few small reads; measure before adding a route.
 

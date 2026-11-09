@@ -3,6 +3,7 @@
 import http from 'node:http';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
+import { StringDecoder } from 'node:string_decoder';
 import type { Readable, Writable } from 'node:stream';
 
 /** Oldest Engine API the agent speaks (Docker 20.10+, which the nested daemons in the integration tests run). */
@@ -141,6 +142,24 @@ export interface LogsOptions {
   timestamps?: boolean;
 }
 
+/** One entry of the daemon's event stream (`GET /events`). Container events carry the container labels in `Actor.Attributes`. */
+export interface DockerEvent {
+  Type: string;
+  Action: string;
+  Actor: { ID: string; Attributes: Record<string, string> };
+  /** Seconds since the epoch. */
+  time: number;
+  timeNano?: number;
+}
+export interface EventsOptions {
+  /** Replay events from this Unix time (seconds) before following live ones. */
+  since?: number;
+  /** Engine API filters, such as `{ type: ['container'], event: ['die'] }`. */
+  filters?: Record<string, string[]>;
+  /** Ends the stream; the iterator then finishes without an error. */
+  signal?: AbortSignal;
+}
+
 export interface DockerApi {
   version(): Promise<DaemonVersion>;
   info(): Promise<DaemonInfo>;
@@ -162,6 +181,8 @@ export interface DockerApi {
   execRun(id: string, cmd: string[]): Promise<{ code: number; out: string; err: string }>;
   /** Starts an interactive or streaming exec; `close` carries the exit code. */
   execStart(id: string, options: ExecOptions): Promise<AttachedProcess>;
+  /** The daemon's event stream as parsed JSON lines, until `signal` aborts or the connection ends (which throws). */
+  events(options?: EventsOptions): AsyncIterable<DockerEvent>;
   inspectNetwork(name: string): Promise<NetworkInspect | null>;
   createNetwork(name: string, labels: Record<string, string>): Promise<void>;
   inspectVolume(name: string): Promise<VolumeInspect | null>;
@@ -551,6 +572,54 @@ export class DockerEngine implements DockerApi {
     await this.call('POST', `/exec/${execId}/resize`, {
       query: { h: String(rows), w: String(columns) },
     }).catch(() => {});
+  }
+
+  async *events(options: EventsOptions = {}): AsyncGenerator<DockerEvent> {
+    const { signal } = options;
+    if (signal?.aborted) return;
+    const res = await this.request('GET', '/events', {
+      query: {
+        since: options.since === undefined ? undefined : String(options.since),
+        filters: options.filters ? JSON.stringify(options.filters) : undefined,
+      },
+    });
+    const status = res.statusCode || 0;
+    if (status < 200 || status >= 300) {
+      const text = await readBody(res);
+      let message = text.trim();
+      try {
+        message = (JSON.parse(text) as { message?: string }).message || message;
+      } catch {
+        /* not JSON */
+      }
+      throw new DockerError(status, message || `Docker API GET /events: HTTP ${status}`);
+    }
+    const stop = () => res.destroy();
+    signal?.addEventListener('abort', stop, { once: true });
+    const decoder = new StringDecoder('utf8');
+    let buffer = '';
+    try {
+      for await (const chunk of res) {
+        buffer += decoder.write(chunk as Buffer);
+        let newline: number;
+        while ((newline = buffer.indexOf('\n')) >= 0) {
+          const line = buffer.slice(0, newline).trim();
+          buffer = buffer.slice(newline + 1);
+          if (!line) continue;
+          try {
+            yield JSON.parse(line) as DockerEvent;
+          } catch {
+            /* a line that is not an event: skip it */
+          }
+        }
+      }
+    } catch (error) {
+      if (!signal?.aborted) throw error;
+    } finally {
+      signal?.removeEventListener('abort', stop);
+      res.destroy();
+    }
+    if (!signal?.aborted) throw new Error('Docker event stream ended');
   }
 
   async inspectNetwork(name: string): Promise<NetworkInspect | null> {

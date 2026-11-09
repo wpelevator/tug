@@ -4,7 +4,7 @@ import type { CliLiveSession, CliLiveTransport, LiveEvent } from '../src/cli/liv
 import type { LiveRequest } from '../src/protocol.ts';
 import type { Api } from '../src/cli/tui/actions.ts';
 import { runTui } from '../src/cli/tui/app.ts';
-import type { TuiIO } from '../src/cli/tui/app.ts';
+import type { TuiIO, TuiOptions } from '../src/cli/tui/app.ts';
 import { staleBackup, unhealthyStatus } from './tui-fixtures.ts';
 
 /** A fake terminal, API and live transport for driving `runTui` in tests. */
@@ -106,7 +106,12 @@ export function fakeTransport() {
 }
 
 export function start(
-  over: { status?: () => ReturnType<typeof unhealthyStatus>; readonly?: boolean } = {},
+  over: {
+    status?: () => ReturnType<typeof unhealthyStatus>;
+    readonly?: boolean;
+    watch?: TuiOptions['watch'];
+    intervals?: TuiOptions['intervals'];
+  } = {},
 ) {
   const term = fakeTerminal();
   const { api, calls } = fakeApi(over.status);
@@ -120,7 +125,8 @@ export function start(
     controlLabel: 'control-3fa9.tug',
     cliVersion: '1.2.0',
     env: { NO_COLOR: '1' },
-    intervals: FAST,
+    intervals: over.intervals ?? FAST,
+    watch: over.watch,
   });
   return { term, calls, live, done };
 }
