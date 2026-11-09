@@ -8,7 +8,7 @@ import { createLocalBuildSnapshot, createSourceArchive, prepareLocalImages } fro
 import { createProgress, withProgress } from '../progress.ts';
 import { canPrompt } from '../prompt.ts';
 import { findMissingSecrets, promptForSecrets } from '../secrets.ts';
-import { composeHash } from '../../compose/compose.ts';
+import { bindMountWarnings, composeHash } from '../../compose/compose.ts';
 import { normalizeCompose } from '../../compose/normalize.ts';
 import {
   loadCfg,
@@ -109,6 +109,7 @@ export function registerDeploy(program: Command): void {
               `warning: ${o.file} is named ${declared} but the Tug project is ${project}; secrets, backups and restores are scoped to the Tug project (set project: ${declared} in tug.yml, or pass --project)`,
             );
           const compose = await normalizeCompose(o.file, secretNames, { project });
+          for (const warning of bindMountWarnings(compose)) console.error(warning);
           const version = o.version || `git-${composeHash(compose)}`;
           let response: DeployResponse;
           if (o.buildLocal) {

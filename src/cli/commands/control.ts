@@ -11,6 +11,13 @@ import { collectList, loadCfg, print, request, templatesDir } from './context.ts
 import type { InstallOpts } from './context.ts';
 import { bootstrapDocker, hostHasDocker, preflightRemote, transferTugImage } from './host.ts';
 import { importCredential } from './init.ts';
+import {
+  CONTROL_LEFTOVERS,
+  CONTROL_VOLUME,
+  LEGACY_CONTROL_DIR,
+  controlGuardScript,
+  controlMigrateScript,
+} from '../migrate.ts';
 
 interface SetupOpts extends InstallOpts {
   extraSan: string[];
@@ -106,6 +113,10 @@ function addSetup(parent: Command, description: string): void {
         const runImage = o.buildLocalImage
           ? await transferTugImage(sshTarget, image, progress)
           : image;
+        // Before anything is written: a control host that still keeps its data in the old directory must migrate first,
+        // or a fresh control would create a second CA on an empty volume (--recover-root included).
+        progress.stage(`Checking control data on ${sshTarget}`);
+        await runStep('ssh', ['--', sshTarget, controlGuardScript(runImage)], { progress });
         const yamlValue = (value: string) => JSON.stringify(value);
         const compose = await loadTemplate(templatesDir, 'control-compose.yml', {
           IMAGE: yamlValue(runImage),
@@ -191,6 +202,20 @@ export function registerControl(program: Command): void {
     .command('control')
     .description('install, back up and restore the control plane');
   addSetup(control, description);
+  control
+    .command('migrate <sshTarget>')
+    .description(
+      `move the control data of a control plane installed before it lived in a Docker volume from ${LEGACY_CONTROL_DIR} into the ${CONTROL_VOLUME} volume and restart control on it, keeping its image, URL and port. Run it before the next control setup on such a host, which refuses until then`,
+    )
+    .action(async (sshTarget: string) =>
+      withProgress(`Migrating control data on ${sshTarget}`, async (progress) => {
+        await runStep('ssh', ['--', sshTarget, controlMigrateScript(STAGE_MARKER)], { progress });
+        console.error(
+          `${LEGACY_CONTROL_DIR} is no longer used; remove it on ${sshTarget} once control is confirmed healthy (it holds a copy of the master key and the CA)`,
+        );
+        print({ ok: true, sshTarget, volume: CONTROL_VOLUME, leftover: CONTROL_LEFTOVERS });
+      }),
+    );
   addSetup(program, 'shortcut for `tug control setup`');
   control
     .command('backup')

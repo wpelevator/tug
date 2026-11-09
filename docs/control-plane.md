@@ -77,7 +77,7 @@ This procedure was exercised with the published 0.9.0 release on two VPSes and a
 
 1. Stop or isolate the old control plane before directing agents to the replacement. Two active control planes with divergent state are not a supported failover setup. Running workload containers continue serving while control is unavailable.
 2. Install the matching Tug release on the replacement host with `tug control setup`, writing its temporary bootstrap credential to a private file. This initializes a new control and CA solely to authorize the restore.
-3. Copy the decrypted control archive into the replacement control data directory with mode `0600`. The standard installer mounts host `/var/lib/tug-control` as `/data`: for example, a host file `/var/lib/tug-control/restore-input.tar.gz` is addressed to the API as `/data/restore-input.tar.gz`. The archive path is read on the control host; the CLI does not upload a local file.
+3. Copy the decrypted control archive into the replacement control data volume with mode `0600`. The standard installer mounts the Docker volume `tug-control` as `/data`: for example `docker cp restore-input.tar.gz tug-control-control-1:/data/restore-input.tar.gz` followed by `docker exec tug-control-control-1 chmod 600 /data/restore-input.tar.gz` puts the file where the API addresses it as `/data/restore-input.tar.gz`. The archive path is read on the control host; the CLI does not upload a local file.
 4. Run `tug control restore /data/restore-input.tar.gz --confirm --credential <bootstrap-credential>`, then restart the control container. Restore replaces the bootstrap CA, credentials, state and image store; the temporary credential no longer authenticates after restart.
 5. Connect with the original operator credential and use `--control-url https://<replacement-host>:8443` if the address changed. Verify the recovered projects, deployments and backup catalog. Agents that still point to the old address must be repointed; the tested 0.9.0 path was `tug node replace <node> <ssh-target> --control-url https://<replacement-host>:8443 --agent-control-url https://<replacement-host>:8443 --credential <original-credential>`. Verify that each node returns online and that the site serves the expected data.
 
@@ -103,12 +103,22 @@ The control's database upgrades itself when the new control starts: it copies a 
 
 Before an upgrade, keep the fallback lane: `ssh <host> docker tag ghcr.io/wpelevator/tug:<previous> tug:rollback`, then redeploy with `tug control setup <ssh-target> --image tug:rollback` if the new control misbehaves. Confirm the upgrade with `tug doctor` and `tug ps` right after, then match the agents with `tug node add --all` (see [Upgrading an agent](nodes.md#image)); see the [mismatch runbook](troubleshooting.md#cli-control-version-or-credentialca-mismatches) when `tug doctor` reports a CA fingerprint mismatch.
 
+## Moving control data into the volume (`control migrate`)
+
+Control installed by an earlier release keeps its data (database, master key, CA, build archives) in the host directory `/var/lib/tug-control`; since then it keeps it in the Docker volume `tug-control`, so nothing on the host is needed to move or rebuild the control host. `tug control setup` on such a host refuses, naming this command, because a new install would start on an empty volume and create a second CA.
+
+```bash
+tug control migrate root@control.example.com
+```
+
+It rewrites nothing you chose: control keeps its image, URL, port and SANs. In order it stops control (never removes it), copies the directory into the volume as root with modes and SQLite files intact, writes a version marker into the volume last, points `/opt/tug-control/docker-compose.yml` at the volume, starts control again and waits for its CA. If the copy fails the old control is started again and the Compose file is untouched; rerunning after any failure finishes the job. The old directory is left in place as a fallback and holds a copy of the master key and the CA, so remove it once control is confirmed healthy. Control stays on the image it was running, so the `0700` restriction control now puts on its data directory applies once `tug control setup` upgrades it, which works as before after migrating.
+
 ## Moving the control plane
 
 Because clients verify the generated control name, the address is only a default:
 
 1. Move or re-address the host and set the new `TUG_CONTROL_URL` on control (or rerun `control setup` with the new `--control-url`). Control adds the new address to its certificate on restart.
-2. Until credentials are refreshed, point clients at the new address: `tug --control-url https://NEW:8443 ...` or `TUG_CONTROL_URL`, and for an agent set `TUG_CONTROL_URL` in `/etc/tug/agent.env`.
+2. Until credentials are refreshed, point clients at the new address: `tug --control-url https://NEW:8443 ...` or `TUG_CONTROL_URL`, and for an agent rerun `tug node add <node> <ssh-target> --agent-control-url https://NEW:8443`, an idempotent upgrade that keeps the node's key and passes the new address to the agent as `TUG_CONTROL_URL`.
 3. Optionally reissue credentials so they carry the new default: `control setup --recover-root` for root, `credential create` for others, `node replace` for nodes.
 
 No credential becomes invalid because the address changed. The control name only changes if the CA itself is replaced, which requires redistributing every credential.

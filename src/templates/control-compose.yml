@@ -11,5 +11,9 @@ services:
     ports:
       - "{{PORT}}:8443"
     volumes:
-      - /var/lib/tug-control:/data
+      - tug-control:/data
       - /var/run/docker.sock:/var/run/docker.sock
+
+volumes:
+  tug-control:
+    external: true

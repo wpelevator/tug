@@ -628,6 +628,11 @@ export async function createApp(
   const ACME_EMAIL = process.env.TUG_ACME_EMAIL || undefined;
   const INGRESS_ACCESS_LOG = process.env.TUG_INGRESS_ACCESS_LOG === 'true';
 
+  // The data directory is 0700 because it holds the master key and the CA key. As a host directory the installer set
+  // that; the root of a Docker volume is created 0755, so control restricts it itself.
+  await fs.mkdir(DATA_DIR, { recursive: true, mode: 0o700 });
+  await fs.chmod(DATA_DIR, 0o700);
+
   const db = await (options.openDatabase || openDb)(dbFile);
   const wakeHub = new WakeHub();
 

@@ -522,6 +522,23 @@ function validateTopLevel(compose: ComposeFile, errors: string[]): void {
   }
 }
 
+/**
+ * Warnings for absolute bind mounts: the path is a directory of one specific host, so the service cannot move to
+ * another node or VM without someone recreating and filling that path by hand. Named volumes move with a backup and
+ * restore, so they are the portable choice. A bind mount stays valid; this only tells the operator what it costs.
+ */
+export function bindMountWarnings(compose: ComposeFile): string[] {
+  const warnings: string[] = [];
+  for (const [name, svc] of Object.entries(compose.services || {}))
+    for (const mount of svc.volumes || []) {
+      if (typeof mount === 'string' || String(mount.type ?? '') !== 'bind') continue;
+      warnings.push(
+        `warning: ${name} bind-mounts ${String(mount.source)}, a path on one host; the service cannot move to another node or VM without recreating that path by hand (a named volume moves with tug backup and restore)`,
+      );
+    }
+  return warnings;
+}
+
 /** The lower-cased names of `x-tug.ingress.host`, a hostname or a list of them; the first is the primary. */
 export function ingressHostList(ingress: { host?: unknown }): string[] {
   const list = Array.isArray(ingress.host) ? ingress.host : [ingress.host];

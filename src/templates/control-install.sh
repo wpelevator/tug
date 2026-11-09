@@ -1,6 +1,6 @@
 set -eu
-mkdir -p /opt/tug-control /var/lib/tug-control
-chmod 700 /var/lib/tug-control
+mkdir -p /opt/tug-control
+docker volume create tug-control >/dev/null
 cat > /opt/tug-control/docker-compose.yml <<'YAML'
 {{COMPOSE}}YAML
 echo '{{MARKER}}Pulling the control image and starting control'

@@ -22,7 +22,15 @@ export const COMMAND_SETTINGS: Record<string, Setting> = {
   wait: {
     type: 'boolean',
     flag: '--no-wait',
-    commands: ['deploy', 'rollback', 'backup run', 'node add', 'node replace', 'node repair'],
+    commands: [
+      'deploy',
+      'rollback',
+      'backup run',
+      'node add',
+      'node replace',
+      'node repair',
+      'node migrate',
+    ],
   },
 };
 /** Per-node connection data (`nodes.<name>`); `nodeDefaults` takes the subset that is not node-specific. */
@@ -30,7 +38,7 @@ export const NODE_SETTINGS: Record<string, Setting> = {
   ssh: {
     type: 'string',
     flag: '<ssh-target>',
-    commands: ['node add', 'node replace', 'node repair'],
+    commands: ['node add', 'node replace', 'node repair', 'node migrate'],
   },
   address: {
     type: 'string',
@@ -50,12 +58,19 @@ export const NODE_SETTINGS: Record<string, Setting> = {
   image: {
     type: 'string',
     flag: '--image',
-    commands: ['node add', 'node replace', 'node repair', 'node enroll', 'control setup'],
+    commands: [
+      'node add',
+      'node replace',
+      'node repair',
+      'node migrate',
+      'node enroll',
+      'control setup',
+    ],
   },
   agentControlUrl: {
     type: 'string',
     flag: '--agent-control-url',
-    commands: ['node add', 'node replace', 'node repair', 'node enroll'],
+    commands: ['node add', 'node replace', 'node repair', 'node migrate', 'node enroll'],
   },
 };
 const NODE_SPECIFIC_KEYS = ['ssh', 'address'];

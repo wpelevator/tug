@@ -23,7 +23,7 @@ The benefit is less accidental disclosure through `Config.Env`, `docker inspect`
 - `src/control/control.ts` validates sentinel references at deploy time and serves current values and versions through `/agent/v1/secrets`, filtered by requested services and actual node placement. `TUG_REGISTRY_AUTH` is reserved and delivered separately.
 - `src/container-spec.ts` hashes definitions plus referenced secret versions and substitutes values into Engine definitions. Recreate and rolling reconciliation both use these hashes, so file references must take part without putting values into definitions.
 - `src/agent/agent.ts` fetches secrets before reconciling, and `src/agent/reconciler.ts` creates candidates and removes obsolete containers. Preparation must finish before an existing container is replaced, and cleanup must follow actual container removal.
-- Agents run in containers. SSH installation binds `/var/lib/tug` and enrollment uses a named state volume, so a path inside either is not automatically the path the Docker daemon sees.
+- Agents run in containers and keep their state in the `tug-agent` named volume, so a path under the state directory is not a path the Docker daemon sees on the host.
 - `src/agent/live.ts` `startOneOff` clones the selected container's mounts, so `tug run` containers become secret-file consumers that cleanup must retain.
 - `tug secret set` reads one stdin chunk and trims it, which breaks PEM files. Secret removal has no reference guard, and deleting and recreating a secret can reset its numeric version.
 

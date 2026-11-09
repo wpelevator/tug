@@ -43,7 +43,7 @@ CLI options override environment variables, which override the config files and 
 | `TUG_JOIN_KEY` / `TUG_JOIN_KEY_FILE` | unset | Join key (or a `0600` file holding it) used only when the node has no identity yet; ignored once `agent.json` exists. |
 | `TUG_NODE_NAME` | hostname | Node name when not bound by the enrollment key. |
 | `TUG_NODE_ADDRESS` | unset | Private inter-node address reported at enrollment; also used for service endpoints, ingress upstreams and published-port binding. |
-| `TUG_STATE_DIR` | `/var/lib/tug` | Identity (`agent.json`, `agent-pending.json`), applied revisions, managed-image identities, temporary image downloads, ingress config and generated project files. |
+| `TUG_STATE_DIR` | `/var/lib/tug` | Identity (`agent.json`, `agent-pending.json`), applied revisions, managed-image identities, temporary image downloads, ingress config and generated project files. In the agent container this is the `tug-agent` volume. |
 | `TUG_POLL_INTERVAL_MS` | `5000` | Maximum quiet interval between reconciliations. A WebSocket or long-poll wake can start one sooner. |
 | `TUG_APPLY` | `true` | Set `false` to render files and report without touching Docker. |
 | `TUG_ROLLOUT_PORTS` | `20000-20999` | Host port range (`LOW-HIGH`) for revisions of rolling services; each running or draining revision uses one port. |
