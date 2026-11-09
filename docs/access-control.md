@@ -79,7 +79,7 @@ The project column says how a scoped credential's allowed projects are checked: 
 | `GET /api/v1/backup/destination` | `admin` | Control-wide; URL and variable names, never values |
 | `POST /api/v1/backup/destination` | `admin` | Control-wide |
 | `DELETE /api/v1/backup/destination` | `admin` | Control-wide |
-| `GET /api/v1/backup/repository-password` | `admin` | Query `project`; prints the repository password |
+| `GET /api/v1/backup/repository-password` | `admin` | Query `project` prints that project's repository password; `control` prints the control repository password |
 | `POST /api/v1/secrets` | `admin` | Control-wide |
 | `DELETE /api/v1/secrets/:name` | `admin` | Control-wide |
 | `DELETE /api/v1/volumes/:name` | `admin` | Control-wide |

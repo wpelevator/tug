@@ -1,5 +1,6 @@
-import { createHmac } from 'node:crypto';
+import { createHmac, randomBytes } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
+import { rm } from 'node:fs/promises';
 import { pipeline } from 'node:stream/promises';
 import { redactSecrets } from './destination.ts';
 import { collect, ensureImage, parseSummary } from './job.ts';
@@ -31,6 +32,8 @@ export interface ControlRepositoryAccess {
   url: string;
   /** The destination's credential variables, decrypted. */
   env: Record<string, string>;
+  /** The control repository password: {@link controlRepositoryPassword} on control, the escrowed copy on a restore. */
+  password: string;
   resticImage: string;
   /** Overrides {@link CONTROL_JOB_LIMIT_MS}. */
   limitMs?: number;
@@ -40,25 +43,21 @@ export interface ControlRepositoryAccess {
 export const controlRepository = (url: string): string => `${url.replace(/\/+$/, '')}/_control`;
 
 /**
- * The control repository password. It is derived from the destination's own secret, never from the master key
- * (which is inside the archive), so the bucket login is the whole recovery kit. Rotating the secret starts a new
- * repository; older snapshots need the old secret.
+ * The control repository password, derived from the master key like every project's. Nodes are only ever given the
+ * passwords of their own projects and the derivation cannot be inverted, so a node that holds the destination
+ * credentials still cannot open or forge a control snapshot. The master key is inside the archive, so the derived
+ * password (`tug backup password --control`) is the one value an operator must keep off the server: it opens the
+ * archive, and the archive restores the master key every project password derives from.
  */
-export function controlRepositoryPassword(env: Record<string, string>): string {
-  const secret =
-    env.AWS_SECRET_ACCESS_KEY ??
-    Object.keys(env)
-      .sort()
-      .map((name) => `${name}=${env[name]}`)
-      .join('\n');
-  return createHmac('sha256', secret).update('tug-control').digest('hex');
+export function controlRepositoryPassword(masterKey: string): string {
+  return createHmac('sha256', masterKey).update('tug-control').digest('hex');
 }
 
 export class ControlBackupError extends Error {}
 
 const lastLines = (text: string): string => text.trim().split('\n').slice(-6).join(' | ');
 
-type Exec = (cmd: string[], options?: { input?: string }) => Promise<Collected>;
+type Exec = (cmd: string[]) => Promise<Collected>;
 
 /** Runs `work` against a restic helper container that is always removed afterwards. */
 async function withRestic<T>(
@@ -69,41 +68,43 @@ async function withRestic<T>(
     run: (cmd: string[], file: string, mode: 'read' | 'write') => Promise<Collected>,
   ) => Promise<T>,
 ): Promise<T> {
-  const password = controlRepositoryPassword(access.env);
-  const redact = (text: string) => redactSecrets(text, [...Object.values(access.env), password]);
+  const redact = (text: string) =>
+    redactSecrets(text, [...Object.values(access.env), access.password]);
   const repository = controlRepository(access.url);
   const binds = repository.startsWith('/') ? [`${repository}:${repository}`] : [];
   const limit = access.limitMs ?? CONTROL_JOB_LIMIT_MS;
   let container: string | undefined;
+  // One limit covers the image pull, the helper and every restic command.
   let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () =>
+        reject(new ControlBackupError(`restic did not finish within ${Math.round(limit / 1000)}s`)),
+      limit,
+    );
+  });
+  timeout.catch(() => undefined);
   try {
-    await ensureImage(docker, access.resticImage);
-    container = await docker.createContainer(`tug-control-backup-${Date.now().toString(36)}`, {
-      Image: access.resticImage,
-      Entrypoint: ['sleep'],
-      Cmd: ['86400'],
-      Env: [
-        ...Object.entries(access.env).map(([key, value]) => `${key}=${value}`),
-        `RESTIC_REPOSITORY=${repository}`,
-        `RESTIC_PASSWORD=${password}`,
-        'GOMAXPROCS=2',
-      ],
-      Labels: { 'tug.job': 'control-backup' },
-      HostConfig: { Memory: 512 * 1024 ** 2, Binds: binds },
-    });
+    await Promise.race([ensureImage(docker, access.resticImage), timeout]);
+    container = await docker.createContainer(
+      `tug-control-backup-${randomBytes(4).toString('hex')}`,
+      {
+        Image: access.resticImage,
+        Entrypoint: ['sleep'],
+        Cmd: ['86400'],
+        Env: [
+          ...Object.entries(access.env).map(([key, value]) => `${key}=${value}`),
+          `RESTIC_REPOSITORY=${repository}`,
+          `RESTIC_PASSWORD=${access.password}`,
+          'GOMAXPROCS=2',
+        ],
+        Labels: { 'tug.job': 'control-backup' },
+        HostConfig: { Memory: 512 * 1024 ** 2, Binds: binds },
+      },
+    );
     await docker.startContainer(container);
     const id = container;
-    const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(
-        () =>
-          reject(
-            new ControlBackupError(`restic did not finish within ${Math.round(limit / 1000)}s`),
-          ),
-        limit,
-      );
-    });
-    timeout.catch(() => undefined);
-    const finish = async (result: Collected): Promise<Collected> => ({
+    const finish = (result: Collected): Collected => ({
       ...result,
       out: redact(result.out),
       err: redact(result.err),
@@ -113,14 +114,17 @@ async function withRestic<T>(
     /** `write` streams a local file into restic's stdin; `read` streams restic's stdout into a local file. */
     const run = async (cmd: string[], file: string, mode: 'read' | 'write'): Promise<Collected> => {
       const proc = await docker.execStart(id, { cmd, stdin: mode === 'write' });
+      // A read sends stdout to the file; collect() still keeps a bounded copy, which is ignored.
       const done = collect(proc);
       const moved =
         mode === 'write'
           ? pipeline(createReadStream(file), proc.stdin!)
           : pipeline(proc.stdout, createWriteStream(file, { mode: 0o600 }));
-      // Collecting stdout would buffer a whole archive, so a read leaves stdout to the file and collects only stderr.
-      const result = await Promise.race([Promise.all([moved, done]).then(([, r]) => r), timeout]);
-      return finish(result);
+      const [transfer, result] = await Promise.race([Promise.allSettled([moved, done]), timeout]);
+      if (result.status === 'rejected') throw result.reason;
+      // restic that exits early (a lock timeout, a wrong repository) breaks the pipe; its own message is the cause.
+      if (transfer.status === 'rejected' && result.value.code === 0) throw transfer.reason;
+      return finish(result.value);
     };
     return await work(exec, run);
   } catch (error) {
@@ -217,7 +221,7 @@ export async function fetchControlArchive(
       throw new ControlBackupError(
         MISSING_REPOSITORY.test(probe.err)
           ? `no control backup was found at ${controlRepository(access.url)}`
-          : `cannot read the control repository (wrong credentials or unreachable store): ${lastLines(probe.err || probe.out)}`,
+          : `cannot read the control repository (wrong control password or credentials, or an unreachable store): ${lastLines(probe.err || probe.out)}`,
       );
     const dump = await run(
       [
@@ -233,9 +237,11 @@ export async function fetchControlArchive(
       destination,
       'read',
     );
-    if (dump.code !== 0)
+    if (dump.code !== 0) {
+      await rm(destination, { force: true });
       throw new ControlBackupError(
         `could not read the latest control backup: ${lastLines(dump.err)}`,
       );
+    }
   });
 }

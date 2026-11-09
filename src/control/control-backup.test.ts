@@ -77,6 +77,8 @@ async function until<T>(read: () => Promise<T | undefined>, what: string): Promi
   }
   throw new Error(`timed out waiting for ${what}`);
 }
+const controlPassword = async (base: string): Promise<string> =>
+  (await json(await call(base, 'GET', '/api/v1/backup/repository-password?control=1'))).password;
 const listing = async (base: string) => json(await call(base, 'GET', '/api/v1/backups'));
 
 test('control backup archives can be downloaded byte for byte, and only the ones control made', async () => {
@@ -85,6 +87,11 @@ test('control backup archives can be downloaded byte for byte, and only the ones
     const backup = await json(await call(s.base, 'POST', '/api/v1/control/backups/run', {}));
     const res = await call(s.base, 'GET', `/api/v1/control/backups/${backup.backupId}/download`);
     assert.equal(res.status, 200, 'an existing control backup downloads');
+    assert.equal(
+      res.headers.get('cache-control'),
+      'no-store',
+      'an archive full of keys must not be cached by anything on the way',
+    );
     assert.match(
       res.headers.get('content-disposition') ?? '',
       new RegExp(`${backup.backupId}\\.tar\\.gz`),
@@ -94,6 +101,11 @@ test('control backup archives can be downloaded byte for byte, and only the ones
       Buffer.from(await res.arrayBuffer()),
       await fs.readFile(backup.artifactRef),
       'the downloaded bytes are the archive on disk',
+    );
+    const audit = JSON.stringify(await json(await call(s.base, 'GET', '/api/v1/events')));
+    assert.ok(
+      audit.includes('control.backup_download') && audit.includes('control.backup'),
+      'creating and downloading a control backup are both audited',
     );
     const missing = await call(s.base, 'GET', '/api/v1/control/backups/cbak_nope/download');
     assert.equal(missing.status, 404, 'an unknown backup id is not found');
@@ -111,11 +123,30 @@ test('with a destination control backs itself up off-host without images and kee
       null,
       'control reports no control backup while there is no destination',
     );
+    const created: { Env?: string[] }[] = [];
+    const createContainer = docker.createContainer.bind(docker);
+    docker.createContainer = async (name, body) => {
+      created.push(body);
+      return createContainer(name, body);
+    };
     await call(s.base, 'POST', '/api/v1/backup/destination', DESTINATION);
     const control = await until(async () => {
       const { control } = await listing(s.base);
       return control?.lastSuccessAt ? control : undefined;
     }, 'the first control backup');
+    const password = await controlPassword(s.base);
+    assert.ok(
+      created[0].Env?.includes(`RESTIC_PASSWORD=${password}`),
+      'the helper opens the control repository with the password derived from the master key',
+    );
+    assert.ok(
+      !created[0].Env?.some(
+        (entry) =>
+          entry.includes(DESTINATION.env.AWS_SECRET_ACCESS_KEY) &&
+          entry.startsWith('RESTIC_PASSWORD'),
+      ),
+      'the destination secret plays no part in the repository password',
+    );
     assert.equal(control.problem, null, 'a healthy control backup reports no problem');
     const sent = Buffer.concat(docker.execStdinData);
     assert.deepEqual(
@@ -176,7 +207,9 @@ test('a failing control backup is reported and retried only after the retry dela
 test('restore from the destination reads the newest control snapshot with the supplied login', async () => {
   const source = await server(resticDocker());
   let archive: Buffer;
+  let password: string;
   try {
+    password = await controlPassword(source.base);
     const backup = await json(await call(source.base, 'POST', '/api/v1/control/backups/run', {}));
     archive = await fs.readFile(backup.artifactRef);
   } finally {
@@ -189,7 +222,7 @@ test('restore from the destination reads the newest control snapshot with the su
   try {
     const refused = await call(target.base, 'POST', '/api/v1/control/restore', {
       confirm: true,
-      fromDestination: { url: 'ftp://nope' },
+      fromDestination: { url: 'ftp://nope', password },
     });
     assert.equal(
       refused.status,
@@ -199,9 +232,26 @@ test('restore from the destination reads the newest control snapshot with the su
     const neither = await call(target.base, 'POST', '/api/v1/control/restore', { confirm: true });
     assert.equal(neither.status, 400, 'a restore must name an archive or a destination');
 
+    for (const bad of [undefined, 'short', 'z'.repeat(64)]) {
+      const noPassword = await call(target.base, 'POST', '/api/v1/control/restore', {
+        confirm: true,
+        fromDestination: { ...DESTINATION, password: bad },
+      });
+      assert.equal(
+        noPassword.status,
+        400,
+        'a restore from the destination needs the control password from backup password --control',
+      );
+      assert.match((await json(noPassword)).error, /control password is required/);
+    }
+    const local = await call(target.base, 'POST', '/api/v1/control/restore', {
+      confirm: true,
+      fromDestination: { url: '/srv/backups', env: {}, password },
+    });
+    assert.equal(local.status, 400, 'a restore does not bind-mount a host path into a helper');
     const res = await call(target.base, 'POST', '/api/v1/control/restore', {
       confirm: true,
-      fromDestination: DESTINATION,
+      fromDestination: { ...DESTINATION, password },
     });
     assert.equal(
       res.status,
@@ -213,8 +263,9 @@ test('restore from the destination reads the newest control snapshot with the su
       docker.calls.some((c) => c.includes('restic dump latest /control.tar.gz')),
       'the newest snapshot of the control repository is read',
     );
-    await assert.rejects(
-      () => fs.stat(path.join(target.dir, 'control-restore-download.tar.gz')),
+    assert.deepEqual(
+      (await fs.readdir(target.dir)).filter((name) => name.startsWith('control-restore-download')),
+      [],
       'the fetched archive is removed after the restore',
     );
   } finally {
@@ -232,7 +283,7 @@ test('restore from the destination reports an empty destination without touching
   try {
     const res = await call(s.base, 'POST', '/api/v1/control/restore', {
       confirm: true,
-      fromDestination: DESTINATION,
+      fromDestination: { ...DESTINATION, password: await controlPassword(s.base) },
     });
     assert.equal(res.status, 400, 'a destination without a control backup is refused');
     assert.match((await json(res)).error, /no control backup was found/, 'the reason is stated');
@@ -240,5 +291,108 @@ test('restore from the destination reports an empty destination without touching
     assert.equal(still.status, 200, 'control keeps serving, so nothing was restored');
   } finally {
     await s.close();
+  }
+});
+
+test('the control password route names the repository only once a destination exists', async () => {
+  const s = await server(resticDocker());
+  try {
+    const before = await json(
+      await call(s.base, 'GET', '/api/v1/backup/repository-password?control=1'),
+    );
+    assert.equal(before.repository, null, 'there is no repository before a destination is set');
+    assert.match(
+      before.password,
+      /^[0-9a-f]{64}$/,
+      'the password can be escrowed before a destination exists',
+    );
+    await call(s.base, 'POST', '/api/v1/backup/destination', DESTINATION);
+    const after = await json(
+      await call(s.base, 'GET', '/api/v1/backup/repository-password?control=1'),
+    );
+    assert.equal(
+      after.repository,
+      'https://s3.example.com/bucket/tug/_control'.replace('https://', 's3:https://'),
+      'the control repository sits beside the project repositories',
+    );
+    assert.equal(after.password, before.password, 'the password is stable');
+    assert.ok(
+      JSON.stringify(await json(await call(s.base, 'GET', '/api/v1/events'))).includes(
+        'backup.key_read',
+      ),
+      'reading the control password is audited',
+    );
+  } finally {
+    await s.close();
+  }
+});
+
+test('a restore that cannot read the repository reports it and keeps no download', async () => {
+  const docker = resticDocker((cmd) =>
+    cmd[1] === 'cat' ? { code: 1, err: 'wrong password or no key found' } : { code: 0 },
+  );
+  const s = await server(docker);
+  try {
+    const res = await call(s.base, 'POST', '/api/v1/control/restore', {
+      confirm: true,
+      fromDestination: { ...DESTINATION, password: 'a'.repeat(64) },
+    });
+    assert.equal(res.status, 400, 'a wrong password is refused');
+    assert.match(
+      (await json(res)).error,
+      /wrong control password or credentials/,
+      'the error names the likely cause',
+    );
+    assert.deepEqual(
+      (await fs.readdir(s.dir)).filter((name) => name.startsWith('control-restore-download')),
+      [],
+      'no fetched file stays behind',
+    );
+  } finally {
+    await s.close();
+  }
+});
+
+test('archives a crash left behind are swept at startup, recent ones are kept', async () => {
+  const docker = resticDocker();
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-ctlbak-sweep-'));
+  const backups = path.join(dir, 'control-backups');
+  await fs.mkdir(backups, { recursive: true });
+  const orphan = path.join(backups, 'cbak_orphan.tar.gz');
+  const fresh = path.join(backups, 'cbak_fresh.tar.gz');
+  await fs.writeFile(orphan, 'old');
+  await fs.writeFile(fresh, 'new');
+  const old = new Date(Date.now() - 2 * 3600_000);
+  await fs.utimes(orphan, old, old);
+  const saved = { dir: process.env.TUG_DATA_DIR, backups: process.env.TUG_CONTROL_BACKUP_DIR };
+  process.env.TUG_DATA_DIR = dir;
+  process.env.TUG_CONTROL_BACKUP_DIR = backups;
+  try {
+    const app = await createApp({
+      identity: testIdentity,
+      controlUrl: testControlUrl,
+      images: { resolve: testImageResolver },
+      docker,
+    });
+    const srv = await new Promise<Server>((resolve) => {
+      const x = app.listen(0, () => resolve(x));
+    });
+    try {
+      await until(
+        async () => ((await fs.stat(orphan).catch(() => null)) ? undefined : true),
+        'the orphan to be swept',
+      );
+      assert.ok(await fs.stat(fresh), 'a recent archive may still be being written, so it is kept');
+    } finally {
+      await new Promise((resolve) => srv.close(resolve));
+    }
+  } finally {
+    for (const [key, value] of [
+      ['TUG_DATA_DIR', saved.dir],
+      ['TUG_CONTROL_BACKUP_DIR', saved.backups],
+    ] as const)
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    await fs.rm(dir, { recursive: true, force: true });
   }
 });

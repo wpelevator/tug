@@ -195,9 +195,15 @@ export function registerBackup(program: Command): void {
   backup
     .command('password')
     .description(
-      "print the project's repository and its password for offline escrow; anyone holding the password and destination credentials can read the project's backups",
+      "print the project's repository and its password for offline escrow; anyone holding the password and destination credentials can read the project's backups. With --control it prints control's own repository and password instead",
     )
-    .action(async () => {
+    .option(
+      '--control',
+      "print the control-plane repository and its password: the one value to keep off the server besides the destination credentials, because the control backup restores the master key every project's password derives from",
+    )
+    .action(async (o: { control?: boolean }) => {
+      if (o.control)
+        return print(await request('GET', '/api/v1/backup/repository-password?control=1'));
       const project = (await loadCfg()).project || 'site';
       print(
         await request(
@@ -225,6 +231,9 @@ export function registerBackup(program: Command): void {
       const env = await readEnvValues(o.env);
       console.log(
         JSON.stringify(await request('POST', '/api/v1/backup/destination', { url, env })),
+      );
+      console.error(
+        'Control now backs itself up here every night. Keep its password with these credentials: tug backup password --control',
       );
     });
   destination

@@ -409,13 +409,18 @@ test('long-wait commands report progress on stderr and retain their results and 
         );
         await assert.rejects(
           run('control', 'backup', '-o', file),
-          /EEXIST/,
+          /already exists/,
           'an existing file is never overwritten',
         );
         assert.equal(
           await fs.readFile(file, 'utf8'),
           JSON.stringify({ archive: true }),
           'a refused overwrite leaves the earlier archive intact',
+        );
+        assert.deepEqual(
+          requested.filter((route) => route === 'POST /api/v1/control/backups/run'),
+          [],
+          'a taken output name is refused before a backup is created on control',
         );
         const previous = process.cwd();
         process.chdir(dir);
@@ -456,6 +461,8 @@ test('long-wait commands report progress on stderr and retain their results and 
         );
         process.env.TUG_TEST_KEY = 'AKIA1';
         process.env.TUG_TEST_SECRET = 'secret1';
+        process.env.TUG_CONTROL_BACKUP_PASSWORD =
+          'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
         try {
           await run(
             'control',
@@ -469,6 +476,7 @@ test('long-wait commands report progress on stderr and retain their results and 
         } finally {
           delete process.env.TUG_TEST_KEY;
           delete process.env.TUG_TEST_SECRET;
+          delete process.env.TUG_CONTROL_BACKUP_PASSWORD;
         }
         assert.deepEqual(
           bodies['POST /api/v1/control/restore'],
@@ -476,13 +484,29 @@ test('long-wait commands report progress on stderr and retain their results and 
             fromDestination: {
               url: 's3:https://s3.example.com/bucket/tug',
               env: { TUG_TEST_KEY: 'AKIA1', TUG_TEST_SECRET: 'secret1' },
+              password: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
             },
             confirm: true,
           },
-          'the destination and its credential values are sent to control',
+          'the destination, its credential values and the control password are sent to control',
         );
       },
     );
+    await t.test('backup password --control asks for the control repository', async () => {
+      routes = {
+        'GET /api/v1/backup/repository-password': {
+          control: true,
+          repository: 's3:x/_control',
+          password: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        },
+      };
+      await run('backup', 'password', '--control');
+      assert.equal(
+        JSON.parse(out.join('')).control,
+        true,
+        'the control password is printed as JSON on stdout',
+      );
+    });
   } finally {
     process.exitCode = originalExitCode;
     await new Promise<void>((resolve) => server.close(() => resolve()));

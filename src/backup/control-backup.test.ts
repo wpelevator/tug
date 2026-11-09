@@ -9,11 +9,13 @@ import {
   fetchControlArchive,
   pushControlArchive,
 } from './control-backup.ts';
+import { repositoryPassword } from './destination.ts';
 import { FakeDocker } from '../../tests/fake-docker.ts';
 
 const S3 = {
   url: 's3:https://s3.example.com/bucket/tug/',
   env: { AWS_ACCESS_KEY_ID: 'AKIAEXAMPLE', AWS_SECRET_ACCESS_KEY: 'sekret-value-1' },
+  password: controlRepositoryPassword('master-key-1'),
   resticImage: 'restic/restic:0.17.3',
 };
 const dockerWith = (responder: FakeDocker['execResponder']): FakeDocker => {
@@ -32,22 +34,17 @@ test('the control repository sits beside the project repositories under a name n
   assert.equal(controlRepository(S3.url), 's3:https://s3.example.com/bucket/tug/_control');
 });
 
-test('the control password follows the destination secret and nothing the archive contains', () => {
-  const base = controlRepositoryPassword(S3.env);
+test('the control password follows the master key, so nodes that hold the destination login cannot derive it', () => {
+  const base = controlRepositoryPassword('master-key-1');
   assert.equal(
     base,
-    controlRepositoryPassword({ ...S3.env }),
-    'the same login gives the same password',
-  );
-  assert.equal(
-    base,
-    controlRepositoryPassword({ ...S3.env, AWS_ACCESS_KEY_ID: 'OTHER' }),
-    'for S3 only the secret key matters, so the access key id may change',
+    controlRepositoryPassword('master-key-1'),
+    'the same master key gives the same password',
   );
   assert.notEqual(
     base,
-    controlRepositoryPassword({ ...S3.env, AWS_SECRET_ACCESS_KEY: 'rotated-secret' }),
-    'a rotated secret starts a new repository',
+    controlRepositoryPassword('master-key-2'),
+    'another installation derives another password',
   );
   assert.match(
     base,
@@ -55,9 +52,9 @@ test('the control password follows the destination secret and nothing the archiv
     'the password is a hex string restic accepts from an environment variable',
   );
   assert.notEqual(
-    controlRepositoryPassword({ SFTP_PASSWORD: 'a', SFTP_USER: 'b' }),
-    controlRepositoryPassword({ SFTP_PASSWORD: 'a' }),
-    'other backends derive from every credential variable',
+    base,
+    repositoryPassword('master-key-1', '_control'),
+    'it differs from any project repository password derived from the same key',
   );
 });
 
@@ -166,6 +163,70 @@ test('a fetch writes the newest control snapshot to a private file and reports a
       () => fetchControlArchive(empty, S3, path.join(dir, 'none.tar.gz')),
       /no control backup was found/,
       'an empty destination says there is no control backup',
+    );
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('restic that exits early is reported with its own message, not the broken pipe', async () => {
+  const dir = await scratch();
+  const archive = path.join(dir, 'a.tar.gz');
+  await fs.writeFile(archive, 'x'.repeat(64 * 1024));
+  const docker = dockerWith((cmd) =>
+    cmd[1] === 'backup'
+      ? { code: 1, err: 'unable to create lock in backend: repository is already locked' }
+      : { code: 0 },
+  );
+  docker.execStdinError = Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
+  try {
+    await assert.rejects(
+      () => pushControlArchive(docker, S3, archive),
+      (error: Error) => /already locked/.test(error.message) && !/EPIPE/.test(error.message),
+      "the failure carries restic's stderr instead of the pipe error",
+    );
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a failed dump leaves no partial archive behind, and the password never reaches an error', async () => {
+  const dir = await scratch();
+  const target = path.join(dir, 'out.tar.gz');
+  const docker = dockerWith((cmd) =>
+    cmd[1] === 'dump'
+      ? { code: 1, out: Buffer.from('partial'), err: `ciphertext error with ${S3.password}` }
+      : { code: 0 },
+  );
+  try {
+    await assert.rejects(
+      () => fetchControlArchive(docker, S3, target),
+      (error: Error) =>
+        /could not read the latest control backup/.test(error.message) &&
+        !error.message.includes(S3.password),
+      'the failure is reported with the control password redacted',
+    );
+    await assert.rejects(() => fs.stat(target), 'the partial file is removed');
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a hung restic fails at the time limit and its helper is removed', async () => {
+  const dir = await scratch();
+  const archive = path.join(dir, 'a.tar.gz');
+  await fs.writeFile(archive, 'x');
+  const docker = dockerWith(() => undefined); // never answers
+  try {
+    await assert.rejects(
+      () => pushControlArchive(docker, { ...S3, limitMs: 50 }, archive),
+      /did not finish within/,
+      'a stuck helper cannot hold the backup forever',
+    );
+    assert.equal(
+      docker.calls.filter((call) => call.startsWith('rm ')).length,
+      1,
+      'the helper container is removed after the timeout',
     );
   } finally {
     await fs.rm(dir, { recursive: true, force: true });

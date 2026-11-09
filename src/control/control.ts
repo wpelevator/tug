@@ -112,7 +112,12 @@ import {
   repositoryPassword,
   redactSecrets,
 } from '../backup/destination.ts';
-import { fetchControlArchive, pushControlArchive } from '../backup/control-backup.ts';
+import {
+  controlRepository,
+  controlRepositoryPassword,
+  fetchControlArchive,
+  pushControlArchive,
+} from '../backup/control-backup.ts';
 import { DEFAULT_RESTIC_IMAGE } from '../backup/scheduler.ts';
 import { createBackupService } from '../backup/scheduler.ts';
 import { createRestoreService, discoverWriters } from '../backup/restore.ts';
@@ -2111,6 +2116,18 @@ export async function createApp(
     res.json({ ok: true, removed });
   });
   api('get', '/api/v1/backup/repository-password', null, async (req, res) => {
+    if (req.query.control !== undefined) {
+      const destination = backupDestination();
+      audit(req.actor!, {
+        type: 'backup.key_read',
+        message: `control repository password read by ${req.actor!.name}`,
+      });
+      return res.json({
+        control: true,
+        repository: destination ? controlRepository(destination.url) : null,
+        password: controlRepositoryPassword(masterKey),
+      });
+    }
     const project = String(req.query.project || '');
     if (!PROJECT_NAME_PATTERN.test(project) || isReservedProject(project))
       return res.status(400).json({ error: 'project is required' });
@@ -3168,11 +3185,24 @@ export async function createApp(
       });
     }),
   );
+  const controlBackupDir = () =>
+    process.env.TUG_CONTROL_BACKUP_DIR || path.join(DATA_DIR, 'control-backups');
+  /** Removes archives a crash left behind: files control never recorded, old enough that nothing is still writing them. */
+  async function sweepOrphanControlArchives(): Promise<void> {
+    const dir = controlBackupDir();
+    for (const name of await fs.readdir(dir).catch(() => [] as string[])) {
+      if (!/^cbak_[A-Za-z0-9_-]+\.tar\.gz$/.test(name)) continue;
+      const file = path.resolve(dir, name);
+      if (db.get('SELECT 1 FROM backups WHERE artifact_ref=?', file)) continue;
+      const stat = await fs.stat(file).catch(() => null);
+      if (stat && Date.now() - stat.mtimeMs > 3600_000) await fs.rm(file, { force: true });
+    }
+  }
   /** Writes a consistent control archive into the control backup directory; the caller records it and decides how long it stays. */
   async function createControlArchive(
     withImages: boolean,
   ): Promise<{ backupId: string; artifactRef: string; createdAt: string }> {
-    const backupDir = process.env.TUG_CONTROL_BACKUP_DIR || path.join(DATA_DIR, 'control-backups');
+    const backupDir = controlBackupDir();
     // The archive holds the master key and the CA key, so nothing here is ever readable beyond the control user.
     await fs.mkdir(backupDir, { recursive: true, mode: 0o700 });
     await fs.chmod(backupDir, 0o700);
@@ -3230,6 +3260,10 @@ export async function createApp(
         createdAt,
         now(),
       );
+      audit(req.actor!, {
+        type: 'control.backup',
+        message: `control backup ${backupId} created by ${req.actor!.name}`,
+      });
       res.json({ backupId, artifactRef, state: 'completed' });
     }),
   );
@@ -3288,11 +3322,18 @@ export async function createApp(
     try {
       archive = await withWriter(() => createControlArchive(false));
       const size = (await fs.stat(archive.artifactRef)).size;
+      if (restartRequired) return;
       const push = await pushControlArchive(
         docker,
-        { url: destination.url, env: backupEnv(), resticImage: resticImage() },
+        {
+          url: destination.url,
+          env: backupEnv(),
+          password: controlRepositoryPassword(masterKey),
+          resticImage: resticImage(),
+        },
         archive.artifactRef,
       );
+      if (restartRequired) return;
       const meta = { type: 'control', snapshotId: push.snapshotId, sizeBytes: size, ...push };
       db.run(
         'INSERT INTO backups(id,project_id,target,node_id,state,artifact_ref,metadata_json,created_at,completed_at) VALUES(?,?,?,?,?,?,?,?,?)',
@@ -3313,6 +3354,8 @@ export async function createApp(
         meta,
       );
     } catch (e) {
+      // A restore replaced the database while this push ran; there is nothing left to record it in.
+      if (restartRequired) return;
       const error = errMessage(e);
       db.run(
         'INSERT INTO backups(id,project_id,target,node_id,state,artifact_ref,metadata_json,created_at,completed_at) VALUES(?,?,?,?,?,?,?,?,?)',
@@ -3341,6 +3384,7 @@ export async function createApp(
     if (last?.state === 'failed' && at - Date.parse(last.created_at) < controlRetryMs()) return;
     void runControlOffsite().catch((e) => console.error(`control backup failed: ${errMessage(e)}`));
   };
+  void sweepOrphanControlArchives().catch(() => undefined);
   api('get', '/api/v1/control/backups/:id/download', null, async (req, res) => {
     const row = db.get<{ artifact_ref: string | null }>(
       "SELECT artifact_ref FROM backups WHERE id=? AND project_id='_control' AND target='control-plane'",
@@ -3349,6 +3393,11 @@ export async function createApp(
     if (!row?.artifact_ref) return res.status(404).json({ error: 'no such control backup' });
     if (!(await fs.stat(row.artifact_ref).catch(() => null)))
       return res.status(404).json({ error: 'the control backup is no longer on disk' });
+    audit(req.actor!, {
+      type: 'control.backup_download',
+      message: `control backup ${String(req.params.id)} downloaded by ${req.actor!.name}`,
+    });
+    res.setHeader('cache-control', 'no-store');
     res.setHeader('content-type', 'application/gzip');
     res.setHeader(
       'content-disposition',
@@ -3356,34 +3405,58 @@ export async function createApp(
     );
     res.sendFile(row.artifact_ref, { dotfiles: 'allow' });
   });
-  api('post', '/api/v1/control/restore', null, async (req, res) =>
+  /**
+   * Reads the newest control snapshot of a destination into a private file before the restore takes the writer queue:
+   * a slow or hung bucket must not block deploys and every other write for the length of the fetch.
+   */
+  const fetchRestoreSource: RequestHandler = async (req, res, next) => {
+    const from = req.body?.fromDestination;
+    if (!from) return next();
+    if (!req.body.confirm)
+      return res.status(400).json({
+        error: 'confirm=true is required; restore overwrites control data then requires restart',
+      });
+    if (restartRequired)
+      return res.status(503).json({ error: 'control restored; restart required' });
+    let source;
+    try {
+      source = parseBackupDestination(from);
+    } catch (e) {
+      return res.status(400).json({ error: errMessage(e) });
+    }
+    if (source.url.startsWith('/'))
+      return res.status(400).json({
+        error: 'a restore reads a shared destination (s3:, sftp: or rest:), not a local path',
+      });
+    const password = (from as { password?: unknown }).password;
+    if (typeof password !== 'string' || !/^[0-9a-f]{64}$/.test(password))
+      return res.status(400).json({
+        error:
+          'the control password is required; it is the one printed by `tug backup password --control` on the old control',
+      });
+    const fetched = path.join(DATA_DIR, `control-restore-download-${id('dl')}.tar.gz`);
+    res.locals.fetched = fetched;
+    res.once('close', () => void fs.rm(fetched, { force: true }));
+    try {
+      await fetchControlArchive(
+        docker,
+        { url: source.url, env: source.env, password, resticImage: resticImage() },
+        fetched,
+      );
+    } catch (e) {
+      return res.status(400).json({ error: errMessage(e) });
+    }
+    next();
+  };
+  api('post', '/api/v1/control/restore', null, fetchRestoreSource, async (req, res) =>
     withWriter(async () => {
       if (!req.body.confirm)
         return res.status(400).json({
           error: 'confirm=true is required; restore overwrites control data then requires restart',
         });
       let artifactRef = req.body.artifactRef;
-      let fetched: string | undefined;
-      if (req.body.fromDestination) {
-        let source;
-        try {
-          source = parseBackupDestination(req.body.fromDestination);
-        } catch (e) {
-          return res.status(400).json({ error: errMessage(e) });
-        }
-        fetched = path.join(DATA_DIR, 'control-restore-download.tar.gz');
-        try {
-          await fetchControlArchive(
-            docker,
-            { url: source.url, env: source.env, resticImage: resticImage() },
-            fetched,
-          );
-        } catch (e) {
-          await fs.rm(fetched, { force: true });
-          return res.status(400).json({ error: errMessage(e) });
-        }
-        artifactRef = fetched;
-      }
+      const fetched = res.locals.fetched as string | undefined;
+      if (fetched) artifactRef = fetched;
       if (typeof artifactRef !== 'string' || !artifactRef)
         return res.status(400).json({ error: 'artifactRef or fromDestination required' });
       const restoreDir =

@@ -275,6 +275,8 @@ export class FakeDocker implements DockerApi {
   ) => { code: number; out?: string | Buffer; err?: string } | undefined;
   /** Everything written to the stdin of started execs, in order. */
   execStdinData: Buffer[] = [];
+  /** When set, the stdin of every exec that takes one fails with this error right after it starts (a process that exited early). */
+  execStdinError?: Error;
   execProcesses: AttachedProcess[] = [];
   execOptions: ExecOptions[] = [];
   async execStart(id: string, options: ExecOptions): Promise<AttachedProcess> {
@@ -285,6 +287,8 @@ export class FakeDocker implements DockerApi {
     const stderr = new PassThrough();
     const stdin = options.stdin ? new PassThrough() : null;
     stdin?.on('data', (chunk: Buffer) => this.execStdinData.push(chunk));
+    const stdinError = this.execStdinError;
+    if (stdin && stdinError) setImmediate(() => stdin.destroy(stdinError));
     const proc = Object.assign(new EventEmitter(), {
       stdin,
       stdout,
