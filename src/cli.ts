@@ -10,6 +10,7 @@ import {
 import { CliLiveError } from './cli/live.ts';
 import { setVerbose } from './cli/process.ts';
 import { isUsageError } from './cli/usage.ts';
+import { addJsonOption } from './cli/json-option.ts';
 import { CREDENTIAL_NAME_PATTERN, PROJECT_NAME_PATTERN } from './roles.ts';
 import { packageVersion } from './images/image.ts';
 import { errMessage } from './errors.ts';
@@ -168,6 +169,7 @@ function forbidExtraArguments(command: Command): void {
   command.allowExcessArguments(false);
   for (const child of command.commands) forbidExtraArguments(child);
 }
+for (const command of program.commands) addJsonOption(command);
 for (const command of program.commands) addConnectionOptions(command);
 forbidExtraArguments(program);
 program.showHelpAfterError();

@@ -2,7 +2,7 @@ import { selectMany } from '../selection.ts';
 import { selectBackup, selectRestore, selectSnapshot, serviceChoices } from './selection.ts';
 import { withProgress } from '../progress.ts';
 import type { Command } from 'commander';
-import { collectList, loadCfg, request } from './context.ts';
+import { collectList, loadCfg, print, request } from './context.ts';
 
 interface RestorePlanView {
   target: string;
@@ -66,6 +66,7 @@ export function registerRestore(program: Command): void {
           writers: string[] | false;
           confirm?: boolean;
           timeout: string;
+          json?: boolean;
         },
         command: Command,
       ) => {
@@ -97,21 +98,27 @@ export function registerRestore(program: Command): void {
             confirm: o.confirm === true,
           });
           const plan = result.plan;
-          console.log(`target:   ${plan.target} on ${plan.node}`);
-          console.log(
-            `snapshot: ${plan.snapshotId}${plan.snapshotTime ? ` (${plan.snapshotTime})` : ''}`,
-          );
-          console.log(
+          /** With --json the plan and the outcome are one document, printed when the command ends. */
+          const finish = (outcome: object = {}): void => {
+            if (o.json) print({ ...result, ...outcome });
+          };
+          const say = (line: string): void => {
+            if (!o.json) console.log(line);
+          };
+          say(`target:   ${plan.target} on ${plan.node}`);
+          say(`snapshot: ${plan.snapshotId}${plan.snapshotTime ? ` (${plan.snapshotTime})` : ''}`);
+          say(
             `mode:     ${plan.mode}${plan.scratchVolume ? ` into new volume ${plan.scratchVolume}` : ''}`,
           );
           if (plan.mode === 'in-place') {
-            console.log(`stops:    ${plan.writers.length ? plan.writers.join(', ') : 'nothing'}`);
-            console.log(
+            say(`stops:    ${plan.writers.length ? plan.writers.join(', ') : 'nothing'}`);
+            say(
               `safety:   ${plan.safetyBackup ? 'a backup of the current data is taken first' : 'none (--no-safety-backup)'}`,
             );
           }
           if (!result.confirmed) {
-            console.log('\nNothing was changed. Run again with --confirm to restore.');
+            say('\nNothing was changed. Run again with --confirm to restore.');
+            finish();
             return;
           }
           progress.stage(`Restore ${result.restoreId}: queued`);
@@ -126,9 +133,10 @@ export function registerRestore(program: Command): void {
             if (record) progress.stage(`Restore ${record.id}: ${record.state}`);
             if (record?.state === 'succeeded') {
               if (record.error) console.error(`warning: ${record.error}`);
-              console.log(
+              say(
                 `restore ${record.id} completed${record.scratch_volume ? `; files are in volume ${record.scratch_volume}` : ''}`,
               );
+              finish({ restore: record });
               return;
             }
             if (record && ['failed', 'interrupted', 'released'].includes(record.state)) {
@@ -137,6 +145,7 @@ export function registerRestore(program: Command): void {
                 console.error(
                   `the services stay stopped; run tug restore resume ${record.id} to try again or tug restore release ${record.id} to start them (data may be partly restored)`,
                 );
+              finish({ restore: record });
               process.exitCode = 1;
               return;
             }
@@ -144,6 +153,7 @@ export function registerRestore(program: Command): void {
               console.error(
                 `timed out waiting; restore ${result.restoreId} continues on control (tug restore list)`,
               );
+              finish({ timedOut: true });
               process.exitCode = 1;
               return;
             }
@@ -154,12 +164,13 @@ export function registerRestore(program: Command): void {
   restore
     .command('list')
     .description('show recent restores and their state')
-    .action(async () => {
+    .action(async (o: { json?: boolean }) => {
       const project = (await loadCfg()).project || 'site';
       const { restores } = await request<{ restores: RestoreRecord[] }>(
         'GET',
         `/api/v1/restores?project=${encodeURIComponent(project)}`,
       );
+      if (o.json) return print({ restores });
       if (!restores.length) console.log('no restores');
       for (const r of restores)
         console.log(
