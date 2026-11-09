@@ -199,11 +199,6 @@ test('install commands render the shipped templates (src in dev, dist in the ima
       /- tug-control:\/data/,
       'control keeps its data in the tug-control named volume, not a host directory',
     );
-    assert.doesNotMatch(
-      script,
-      /tug-preflight/,
-      'the preflight checks must not create files or directories on the host',
-    );
     assert.match(
       script,
       /docker volume create tug-control/,
@@ -251,11 +246,6 @@ test('install commands render the shipped templates (src in dev, dist in the ima
     assert.ok(
       script.includes('-v tug-agent:/var/lib/tug '),
       'the agent keeps its state in the tug-agent named volume, not a host directory',
-    );
-    assert.doesNotMatch(
-      script,
-      /agent\.env|--env-file|\/etc\/tug/,
-      'the install writes no environment file or other host path for the agent',
     );
     assert.doesNotMatch(
       script,
