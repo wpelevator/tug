@@ -1,3 +1,4 @@
+import { JOB_CANCELLED } from '../protocol.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
@@ -618,4 +619,34 @@ test('a restore that succeeds drops the holds a move placed', async () => {
   f.finish(f.queued.at(-1)!.id, 'succeeded');
   f.restores.advance();
   assert.deepEqual(f.holds(), [], 'the writers are released once the data is back');
+});
+
+test('cancelling a restore stops its safety backup (nothing changes) or its restore job (interrupted)', async () => {
+  const f = await fixture();
+  f.catalog('service:db', 'snap1', '2026-11-01T09:00:00Z');
+  const plan = f.restores.plan(request());
+  assert.ok(!('error' in plan));
+  const id = (f.restores.start(request(), plan) as { restoreId: string }).restoreId;
+  const early = f.restores.cancel(id);
+  assert.ok(
+    'error' in early && early.status === 409,
+    'a restore that is only waiting for its writers to stop has no job to cancel',
+  );
+  assert.deepEqual(f.restores.cancel('rst_nope'), { error: 'restore not found', status: 404 });
+
+  f.reportHeld(true);
+  f.restores.advance();
+  const safety = f.queued.at(-1)!;
+  assert.ok(
+    'ok' in f.restores.cancel(id),
+    'a restore waiting on its safety backup can be cancelled',
+  );
+  const stop = f.queued.at(-1)!;
+  assert.equal(stop.type, 'backup.cancel', 'the node is told to stop a job');
+  assert.deepEqual(stop.payload, { commandId: safety.id }, 'the safety backup');
+
+  f.backups.onResult(safety.id, 'failed', { error: JOB_CANCELLED });
+  f.restores.advance();
+  assert.equal(f.state(id).state, 'failed', 'a cancelled safety backup ends the restore');
+  assert.deepEqual(f.holds(), [], 'nothing was changed, so the writers start again');
 });
