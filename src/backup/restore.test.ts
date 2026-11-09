@@ -332,6 +332,11 @@ test('an in-place restore locks, holds writers, takes a safety backup, restores,
     safety.payload.tags.includes('trigger:pre-restore'),
     'it is tagged so retention keeps it',
   );
+  assert.equal(
+    safety.payload.retention,
+    undefined,
+    'it does not prune, or it would forget the earlier same-day snapshot the restore is about to read',
+  );
 
   f.backups.onResult(safety.id, 'succeeded', {
     runId: safety.payload.runId,

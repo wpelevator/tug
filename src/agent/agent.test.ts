@@ -65,6 +65,28 @@ const twoServices: ComposeFile = {
   },
 };
 
+test('a service whose container Docker keeps restarting is reported unstable instead of serving cleanly', async () => {
+  const control = fakeControl(() => ({ secrets: {}, versions: {} }));
+  const ctx = await makeCtx({ http: control.http });
+  await reconcile(desired(twoServices), ctx);
+  const d = fake(ctx);
+  const web = [...d.containers.values()].find((c) => c.name.startsWith('tug-proj-web'))!;
+  web.state = 'restarting';
+  web.exitCode = 1;
+  d.startsAs = 'restarting'; // starting a container Docker is already restarting leaves it restarting
+  const status = await reconcile(desired(twoServices), ctx);
+  assert.equal(
+    status.serviceStates?.web.unstable,
+    'restarting after exiting with code 1',
+    'the report says the container does not stay up',
+  );
+  assert.equal(
+    status.serviceStates?.worker.unstable,
+    undefined,
+    'a healthy neighbour is not reported unstable',
+  );
+});
+
 test('reconcile creates the network, then pulls, creates and starts each service and reports serving', async () => {
   const control = fakeControl(() => ({ secrets: {}, versions: {} }));
   const ctx = await makeCtx({ http: control.http });

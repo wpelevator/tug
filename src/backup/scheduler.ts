@@ -260,7 +260,10 @@ export function createBackupService(deps: BackupServiceDeps) {
         `run:${runId}`,
         `trigger:${trigger}`,
       ],
-      retention: config.retention,
+      // A safety backup taken before a restore must not prune: it is newer than the snapshot about to be restored, so
+      // `--keep-daily` would forget that snapshot (the latest of an earlier run the same day) before the restore reads it.
+      // The next scheduled backup applies retention again.
+      ...(trigger === 'pre-restore' ? {} : { retention: config.retention }),
       limits: { memory: config.memory ?? DEFAULT_MEMORY, timeoutSec: config.timeoutSec },
     };
     if (config.kind === 'service') {

@@ -130,10 +130,14 @@ function serviceStateLines(serviceStates: object): string[] {
       const item = (state && typeof state === 'object' ? state : {}) as {
         rolloutState?: unknown;
         rolloutError?: unknown;
+        unstable?: unknown;
       };
       if (typeof item.rolloutState !== 'string') return [];
       const error =
         typeof item.rolloutError === 'string' && item.rolloutError ? ` — ${item.rolloutError}` : '';
+      // A service that does not stay up is not serving, whatever the last rollout reached.
+      if (typeof item.unstable === 'string' && item.unstable)
+        return [`    ${name}: unstable — ${item.unstable}`];
       return [`    ${name}: ${item.rolloutState}${error}`];
     });
 }

@@ -78,3 +78,27 @@ test('readable status keeps usable information when a node report is malformed',
   );
   assert.match(output, /Report details unavailable/, 'the missing details must be reported');
 });
+
+test('a service Docker keeps restarting is listed as unstable, not serving', () => {
+  const crashing: StatusResponse = {
+    ...status,
+    statuses: [
+      {
+        ...status.statuses[0],
+        status_json: JSON.stringify({
+          serviceStates: {
+            web: { rolloutState: 'serving', unstable: 'restarting after exiting with code 1' },
+            db: { rolloutState: 'serving' },
+          },
+        }),
+      },
+    ],
+  };
+  const output = formatStatus(crashing);
+  assert.match(
+    output,
+    /web: unstable — restarting after exiting with code 1/,
+    'a crash loop must be visible in the status summary',
+  );
+  assert.match(output, /db: serving/, 'a stable service still reads as serving');
+});

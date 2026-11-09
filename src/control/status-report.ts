@@ -64,6 +64,7 @@ function serviceState(value: unknown, path: string): ServiceState {
     ...(value.rolloutError !== undefined && {
       rolloutError: text(value.rolloutError, `${path}.rolloutError`),
     }),
+    ...(value.unstable !== undefined && { unstable: text(value.unstable, `${path}.unstable`) }),
   };
 }
 

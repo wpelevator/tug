@@ -28,7 +28,16 @@ export interface JobContext {
   onPhase?: (phase: JobPhase, bytes?: number) => void;
   /** Aborts the job (timeout or cancellation); helper containers are removed either way. */
   signal?: AbortSignal;
+  /** How long a restore may go without restoring another byte before it is failed; defaults to `RESTORE_STALL_MS`. */
+  restoreStallMs?: number;
 }
+
+/**
+ * A restore that restores no further file or byte for this long is failed instead of waiting out the job limit.
+ * restic retries a store that errors on every read for many minutes without printing progress, so without this a
+ * damaged or unreachable repository looks like a restore that is still running.
+ */
+export const RESTORE_STALL_MS = 10 * 60_000;
 
 /** `512m`, `2g` or a byte count. */
 export function memoryBytes(value: string): number {
@@ -247,8 +256,73 @@ export async function runBackupJob(
       ],
       HostConfig: { Memory: memoryBytes(payload.limits.memory), Binds: binds },
     });
+    // Cancellation and the job's time limit must reach a restic that never returns; the helpers are removed on the way out.
+    const untilAborted = <T>(work: Promise<T>): Promise<T> => {
+      const signal = ctx.signal;
+      if (!signal) return work;
+      if (signal.aborted) return Promise.reject(signal.reason);
+      return new Promise<T>((resolve, reject) => {
+        const onAbort = () => reject(signal.reason);
+        signal.addEventListener('abort', onAbort, { once: true });
+        work.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
+      });
+    };
     const exec = async (cmd: string[]): Promise<Collected> =>
-      collect(await docker.execStart(restic, { cmd }));
+      untilAborted(docker.execStart(restic, { cmd }).then(collect));
+    /** `restic restore`, failed when it stops making progress. */
+    const restoreWithWatchdog = async (args: string[]): Promise<Collected> => {
+      const stallMs = ctx.restoreStallMs ?? RESTORE_STALL_MS;
+      const proc = await docker.execStart(restic, {
+        cmd: ['restic', 'restore', '--json', ...args],
+      });
+      let lastProgress = Date.now();
+      let files = 0;
+      let bytes = 0;
+      let pending = '';
+      proc.stdout.on('data', (chunk: Buffer) => {
+        pending += chunk.toString('utf8');
+        const lines = pending.split('\n');
+        pending = lines.pop() ?? '';
+        for (const line of lines) {
+          try {
+            const value = JSON.parse(line) as {
+              message_type?: string;
+              files_restored?: number;
+              bytes_restored?: number;
+            };
+            // Status lines repeat every second even when nothing moves, so only growth counts.
+            if (value.message_type !== 'status') lastProgress = Date.now();
+            else if ((value.files_restored ?? 0) > files || (value.bytes_restored ?? 0) > bytes) {
+              files = Math.max(files, value.files_restored ?? 0);
+              bytes = Math.max(bytes, value.bytes_restored ?? 0);
+              lastProgress = Date.now();
+            }
+          } catch {
+            lastProgress = Date.now();
+          }
+        }
+      });
+      let timer: NodeJS.Timeout | undefined;
+      const stalled = new Promise<never>((_, reject) => {
+        timer = setInterval(
+          () => {
+            if (Date.now() - lastProgress < stallMs) return;
+            reject(
+              new JobError(
+                `restic restored nothing for ${Math.round(stallMs / 1000)}s (${files} files, ${bytes} bytes so far); the repository may be unreadable or the backup store unreachable`,
+              ),
+            );
+          },
+          Math.max(10, Math.min(1000, stallMs / 4)),
+        );
+        timer.unref();
+      });
+      try {
+        return await untilAborted(Promise.race([collect(proc), stalled]));
+      } finally {
+        clearInterval(timer);
+      }
+    };
 
     const version = (await exec(['restic', 'version'])).out.match(/restic (\d+\.\d+\.\d+)/)?.[1];
 
@@ -323,20 +397,55 @@ export async function runBackupJob(
             loaded.err || loaded.out,
           );
       } else {
-        // Replace the volume's contents with the snapshot's; a scratch volume starts empty.
         if (restore.mode === 'in-place') {
-          const clear = await exec(['find', '/data', '-mindepth', '1', '-delete']);
-          if (clear.code !== 0) throw fail('could not empty the volume', clear.err);
+          // Restore beside the live data first and swap only once every file has been read and verified, so an
+          // unreadable repository leaves the volume as it was instead of emptied. This needs free space for the snapshot.
+          if (!/^[A-Za-z0-9_-]+$/.test(payload.runId))
+            throw new JobError('the restore run id is not safe to use as a directory name');
+          const staging = `/data/.tug-restore-${payload.runId}`;
+          const dropStaging = () => exec(['rm', '-rf', staging]).catch(() => undefined);
+          await dropStaging();
+          let staged: Collected;
+          try {
+            staged = await restoreWithWatchdog([
+              restore.snapshotId,
+              '--target',
+              staging,
+              '--verify',
+            ]);
+          } catch (error) {
+            await dropStaging();
+            throw error;
+          }
+          if (staged.code !== 0) {
+            await dropStaging();
+            throw fail(
+              'restic restore failed; the volume was not changed',
+              staged.err || staged.out,
+            );
+          }
+          // The snapshot holds /data, so its files are under <staging>/data. Keep the staged copy if the swap fails.
+          const swap = await exec([
+            'sh',
+            '-ec',
+            `find /data -mindepth 1 -maxdepth 1 ! -name '.tug-restore-${payload.runId}' -exec rm -rf {} + ; ` +
+              `find '${staging}/data' -mindepth 1 -maxdepth 1 -exec mv {} /data/ \\; ; rm -rf '${staging}'`,
+          ]);
+          if (swap.code !== 0)
+            throw fail(
+              `could not replace the volume's contents; the restored files are in ${staging}`,
+              swap.err,
+            );
+        } else {
+          // A scratch volume starts empty.
+          const result = await restoreWithWatchdog([
+            restore.snapshotId,
+            '--target',
+            '/',
+            '--verify',
+          ]);
+          if (result.code !== 0) throw fail('restic restore failed', result.err || result.out);
         }
-        const result = await exec([
-          'restic',
-          'restore',
-          restore.snapshotId,
-          '--target',
-          '/',
-          '--verify',
-        ]);
-        if (result.code !== 0) throw fail('restic restore failed', result.err || result.out);
       }
       return {
         runId: payload.runId,

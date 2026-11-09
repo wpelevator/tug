@@ -313,6 +313,111 @@ test('scratch restore checks restore identity and can resume the same restore', 
   );
 });
 
+const SNAPSHOT_LISTING = JSON.stringify([{ tags: ['project:site', 'target:volume:uploads'] }]);
+const volumeRestore = (mode: 'in-place' | 'scratch') =>
+  payload({
+    runId: 'rst_abc123',
+    type: 'volume',
+    target: 'volume:uploads',
+    volume: { name: 'uploads', dockerVolume: 'tug_v4_site_uploads' },
+    restore: {
+      snapshotId: 'snap',
+      mode,
+      ...(mode === 'scratch' ? { scratchVolume: 'tug_site_restore-x' } : {}),
+    },
+  });
+
+test('an in-place volume restore reads and verifies the snapshot beside the live data before replacing it', async () => {
+  const docker = dockerWith((cmd) => {
+    if (cmd[0] === 'restic' && cmd[1] === 'snapshots') return { code: 0, out: SNAPSHOT_LISTING };
+    return { code: 0 };
+  });
+  docker.volumes.set('tug_v4_site_uploads', {
+    Name: 'tug_v4_site_uploads',
+    Labels: { 'tug.project': 'site', 'tug.volume': 'uploads' },
+  });
+  await runBackupJob(volumeRestore('in-place'), 'cmd', { docker, credentials }, 'backup.restore');
+  const commands = docker.execOptions.map((o) => o.cmd.join(' '));
+  const restored = commands.findIndex((c) => c.startsWith('restic restore'));
+  const swapped = commands.findIndex((c) => c.startsWith('sh -ec'));
+  assert.ok(
+    restored >= 0 && swapped > restored,
+    'the live data is replaced only after restic finished',
+  );
+  assert.match(
+    commands[restored],
+    /--target \/data\/\.tug-restore-rst_abc123 .*--verify|--verify.*--target/,
+    'the snapshot is restored beside the live data and verified',
+  );
+  assert.ok(
+    !commands.some((c) => c.includes('-mindepth 1 -delete')),
+    'the volume is never emptied before the snapshot has been read',
+  );
+});
+
+test('a scratch restore still restores straight into its empty volume', async () => {
+  const docker = dockerWith((cmd) =>
+    cmd[0] === 'restic' && cmd[1] === 'snapshots'
+      ? { code: 0, out: SNAPSHOT_LISTING }
+      : { code: 0 },
+  );
+  await runBackupJob(volumeRestore('scratch'), 'cmd', { docker, credentials }, 'backup.restore');
+  const restore = docker.execOptions
+    .map((o) => o.cmd.join(' '))
+    .find((c) => c.startsWith('restic restore'));
+  assert.match(restore ?? '', /--target \/ /, 'a scratch restore targets / so files land in /data');
+});
+
+test('a restore that makes no progress fails with a clear error and leaves the live volume alone', async () => {
+  const docker = dockerWith((cmd) => {
+    if (cmd[0] === 'restic' && cmd[1] === 'snapshots') return { code: 0, out: SNAPSHOT_LISTING };
+    if (cmd[0] === 'restic' && cmd[1] === 'restore') return undefined; // restic retrying a failing store: no exit, no progress
+    return { code: 0 };
+  });
+  docker.volumes.set('tug_v4_site_uploads', {
+    Name: 'tug_v4_site_uploads',
+    Labels: { 'tug.project': 'site', 'tug.volume': 'uploads' },
+  });
+  await assert.rejects(
+    runBackupJob(
+      volumeRestore('in-place'),
+      'cmd',
+      { docker, credentials, restoreStallMs: 80 },
+      'backup.restore',
+    ),
+    /restored nothing for .*unreadable or the backup store unreachable/,
+    'a stalled restore fails instead of waiting for the job limit',
+  );
+  const commands = docker.execOptions.map((o) => o.cmd.join(' '));
+  assert.ok(
+    !commands.some((c) => c.startsWith('sh -ec')),
+    'the live volume is not touched when the snapshot could not be read',
+  );
+  assert.ok(
+    commands.some((c) => c === 'rm -rf /data/.tug-restore-rst_abc123'),
+    'the partial staging copy is removed',
+  );
+  assert.equal(docker.names().length, 0, 'the helper containers are removed');
+});
+
+test('cancelling a job reaches a restic command that never returns', async () => {
+  const docker = dockerWith((cmd) => {
+    if (cmd[0] === 'restic' && cmd[1] === 'snapshots') return { code: 0, out: SNAPSHOT_LISTING };
+    if (cmd[0] === 'restic' && cmd[1] === 'restore') return undefined;
+    return { code: 0 };
+  });
+  const controller = new AbortController();
+  const running = runBackupJob(
+    volumeRestore('scratch'),
+    'cmd',
+    { docker, credentials, signal: controller.signal },
+    'backup.restore',
+  );
+  setTimeout(() => controller.abort(new Error('the job exceeded its 5s limit')), 50);
+  await assert.rejects(running, /exceeded its 5s limit/, 'the time limit ends a hung restore');
+  assert.equal(docker.names().length, 0, 'the helper containers are removed after the abort');
+});
+
 const SUMMARY =
   '{"message_type":"summary","snapshot_id":"snap1234","data_added":10,"total_bytes_processed":20}\n';
 

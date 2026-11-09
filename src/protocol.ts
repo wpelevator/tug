@@ -534,6 +534,8 @@ export interface ServiceState {
   rolloutRevision?: string;
   /** Rolling services: why the newest revision was rejected while this (older) one keeps serving. */
   rolloutError?: string;
+  /** Set when the container does not stay up: Docker keeps restarting it, or it exited with an error and stays down. */
+  unstable?: string;
 }
 
 export interface ProjectStatus {

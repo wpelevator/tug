@@ -66,8 +66,10 @@ export function nodeReports(status: StatusResponse): NodeReport[] {
         const state = isObject(states[name]) ? states[name] : undefined;
         return {
           name,
-          state: text(state?.rolloutState) ?? report.health,
-          ...(text(state?.rolloutError) && { error: text(state?.rolloutError) }),
+          state: text(state?.unstable) ? 'unstable' : (text(state?.rolloutState) ?? report.health),
+          ...(text(state?.unstable)
+            ? { error: text(state?.unstable) }
+            : text(state?.rolloutError) && { error: text(state?.rolloutError) }),
           ...(text(state?.image) && { image: text(state?.image) }),
           ...(typeof state?.port === 'number' && { port: state.port }),
           ...(text(state?.rolloutRevision) && { revision: text(state?.rolloutRevision) }),

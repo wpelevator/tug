@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import fs from 'node:fs/promises';
 import { imageLocation } from '../images/registry.ts';
+import { unstableServices } from './stability.ts';
 import { createReadStream, createWriteStream, existsSync, readFileSync } from 'node:fs';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -1296,6 +1297,19 @@ export async function reconcile(
   } else {
     for (const service of serviceNames) serviceStates[service].rolloutState = 'serving';
   }
+  if (ctx.apply)
+    try {
+      const unstable = await unstableServices(
+        ctx.docker,
+        desiredState.project,
+        serviceNames.filter((service) => !heldSet.has(service)),
+        new Set(rolling),
+      );
+      for (const [service, reason] of Object.entries(unstable))
+        serviceStates[service].unstable = reason;
+    } catch {
+      /* the state is advisory; a Docker error here must not fail an otherwise converged project */
+    }
   db.run(
     `INSERT INTO applied_state(project, version, revision, applied_at, service_states_json, secret_versions_json)
      VALUES(?,?,?,?,?,?)

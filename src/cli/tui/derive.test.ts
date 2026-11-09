@@ -316,3 +316,21 @@ test('a backup problem is dated from the target’s last success', () => {
   const [item] = deriveAttention(snapshot, NOW);
   assert.equal(item.since, ago(31 * 3600), 'the age is how long since the backup last worked');
 });
+
+test('an unstable service is not counted as serving and carries its reason', () => {
+  const status = healthyStatus();
+  const first = status.statuses[0];
+  const detail = JSON.parse(first.status_json ?? '{}') as {
+    serviceStates?: Record<string, Record<string, unknown>>;
+  };
+  const name = Object.keys(detail.serviceStates ?? {})[0];
+  detail.serviceStates![name].unstable = 'restarting after exiting with code 1';
+  first.status_json = JSON.stringify(detail);
+  const before = deriveCounters(snapshotOf(healthyStatus()), NOW, []);
+  const after = deriveCounters(snapshotOf(status), NOW, []);
+  assert.equal(
+    after.servicesServing,
+    before.servicesServing - 1,
+    'a crash-looping service must not count as serving',
+  );
+});

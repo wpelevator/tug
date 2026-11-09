@@ -71,3 +71,30 @@ test('malformed reports are refused with the offending path', () => {
       `${JSON.stringify(body)} should be refused with ${message}`,
     );
 });
+
+test('an agent-reported unstable reason is kept and must be text', () => {
+  const report = parseStatusReport({
+    node: 'n1',
+    projects: [
+      project({
+        serviceStates: {
+          web: { rolloutState: 'serving', unstable: 'restarting after exiting with code 1' },
+        },
+      }),
+    ],
+  });
+  assert.equal(
+    report.projects[0].serviceStates?.web.unstable,
+    'restarting after exiting with code 1',
+    'the reason reaches the stored status',
+  );
+  assert.throws(
+    () =>
+      parseStatusReport({
+        node: 'n1',
+        projects: [project({ serviceStates: { web: { rolloutState: 'serving', unstable: {} } } })],
+      }),
+    StatusReportError,
+    'a non-text reason is refused',
+  );
+});
