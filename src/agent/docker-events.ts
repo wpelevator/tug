@@ -13,48 +13,71 @@ export interface ContainerFailure {
   at: number;
 }
 
-/** Exit codes of a container that was stopped on purpose: clean exit, SIGTERM and SIGKILL (a `docker stop` that timed out). */
-const STOPPED_EXIT_CODES = new Set([0, 137, 143]);
 /** How long after an `oom` event a `die` of the same container is still its consequence. */
 const OOM_WINDOW_SECONDS = 10;
+/**
+ * How long after a `kill` event a `die` of the same container is still its consequence. `docker stop` and `docker rm -f`
+ * (which the agent runs on the previous revision during every rollout) send a signal through the daemon, which reports
+ * it as `kill`, then the container dies with whatever exit code the app chose. Longer than any stop timeout in use.
+ */
+const KILL_WINDOW_SECONDS = 60;
 
-/** The filters that keep the stream to managed containers and the three events worth reading. */
+/** Events remembered per container so a `die` can be read in light of the `oom` or `kill` before it. */
+export interface RecentEvents {
+  oom: Map<string, number>;
+  kill: Map<string, number>;
+}
+export const newRecentEvents = (): RecentEvents => ({ oom: new Map(), kill: new Map() });
+
+/** The filters that keep the stream to managed containers and the four events worth reading. */
 export const EVENT_FILTERS = {
   type: ['container'],
-  event: ['die', 'oom', 'health_status'],
+  event: ['die', 'oom', 'kill', 'health_status'],
   label: [LABEL_PROJECT],
 };
 
 /**
  * Turns a daemon event into a failure, or nothing. Only containers Tug manages for a service count (one-off job
- * containers are expected to exit), and a `die` with the exit code of a deliberate stop is not a failure: the agent
- * itself stops the previous revision during a rollout. A kill by the out-of-memory killer is reported once, as `oom`,
- * and its following `die` is dropped through `recentOom`.
+ * containers are expected to exit). A `die` is a crash unless it is explained:
+ * - exit code 0 is a clean exit, not a failure;
+ * - a `kill` event for the container just before it means somebody asked it to stop (the agent itself, during a
+ *   rollout; an operator with `docker stop`), whatever exit code the app chose on SIGTERM;
+ * - an `oom` event just before it means the memory killer, which is reported once, as `oom`.
+ * Everything else is a failure, including 137 and 143 with no preceding `kill`: a signal that did not come through the
+ * daemon, such as the host's out-of-memory killer or a `kill -9` from a shell.
  */
 export function classifyEvent(
   event: DockerEvent,
-  recentOom: Map<string, number> = new Map(),
+  recent: RecentEvents = newRecentEvents(),
 ): ContainerFailure | undefined {
   if (event.Type !== 'container') return undefined;
   const labels = event.Actor?.Attributes ?? {};
   const project = labels[LABEL_PROJECT];
   const service = labels[LABEL_SERVICE];
   if (!project || !service || labels[LABEL_JOB]) return undefined;
+  for (const [map, window] of [
+    [recent.oom, OOM_WINDOW_SECONDS],
+    [recent.kill, KILL_WINDOW_SECONDS],
+  ] as const)
+    for (const [id, at] of map) if (event.time - at > window) map.delete(id);
   const container = labels.name ?? event.Actor.ID.slice(0, 12);
   const base = { project, service, container, at: event.time };
   const action = event.Action;
   if (action === 'oom') {
-    recentOom.set(event.Actor.ID, event.time);
+    recent.oom.set(event.Actor.ID, event.time);
     return { ...base, kind: 'oom' };
+  }
+  if (action === 'kill') {
+    recent.kill.set(event.Actor.ID, event.time);
+    return undefined;
   }
   if (action.startsWith('health_status')) {
     return action.includes('unhealthy') ? { ...base, kind: 'unhealthy' } : undefined;
   }
   if (action !== 'die') return undefined;
-  const oomAt = recentOom.get(event.Actor.ID);
-  if (oomAt !== undefined && event.time - oomAt <= OOM_WINDOW_SECONDS) return undefined;
+  if (recent.oom.has(event.Actor.ID) || recent.kill.has(event.Actor.ID)) return undefined;
   const exitCode = Number(labels.exitCode);
-  if (!Number.isInteger(exitCode) || STOPPED_EXIT_CODES.has(exitCode)) return undefined;
+  if (!Number.isInteger(exitCode) || exitCode === 0) return undefined;
   return { ...base, kind: 'exited', exitCode };
 }
 
@@ -188,7 +211,7 @@ const WAKE_MIN_INTERVAL_MS = 1000;
 export class DockerEventWatcher {
   private readonly options: WatcherOptions;
   private readonly reporter: FailureReporter;
-  private readonly recentOom = new Map<string, number>();
+  private readonly recent = newRecentEvents();
   private readonly seen: string[] = [];
   private controller?: AbortController;
   private lastWake = 0;
@@ -249,7 +272,7 @@ export class DockerEventWatcher {
     if (this.seen.includes(id)) return;
     this.seen.push(id);
     if (this.seen.length > SEEN_LIMIT) this.seen.shift();
-    const failure = classifyEvent(event, this.recentOom);
+    const failure = classifyEvent(event, this.recent);
     if (!failure) return;
     const now = this.now();
     const reported = this.reporter.report(failure, now);

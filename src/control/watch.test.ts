@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { WebSocket } from 'ws';
-import { attachAgentStream, createApp } from './control.ts';
+import { LiveHub, attachAgentStream, createApp } from './control.ts';
 import { WatchHub } from './watch.ts';
 import { json, testControlUrl, testIdentity, testImageResolver } from '../../tests/helpers.ts';
 import type { WatchFrame } from '../protocol.ts';
@@ -177,6 +177,7 @@ test('the watch upgrade needs an operator credential of any role, and says WebSo
 test('an event an agent reports reaches a watcher as a frame, with its seq and without another request', async () => {
   const s = await server();
   try {
+    assert.equal((await deployWeb(s)).status, 200, 'the project places a service on the node');
     const watcher = await open(s, '/api/v1/watch', OPERATOR);
     const ready = (await watcher.next('watch.ready')) as { cursor: number };
     const posted = await s.call(
@@ -210,6 +211,8 @@ test('an event an agent reports reaches a watcher as a frame, with its seq and w
 test('a scoped credential never receives other projects’ events or control-level events', async () => {
   const s = await server();
   try {
+    await deployWeb(s, 'a');
+    await deployWeb(s, 'b');
     const scoped = await s.mint('only-a', 'read', ['a']);
     const watcher = await open(s, '/api/v1/watch', scoped);
     await watcher.next('watch.ready');
@@ -532,4 +535,211 @@ test('a socket that stops answering pings is terminated, and the timers stop whe
   assert.ok(dead.pings >= 1, 'the hub pings its watchers');
   assert.equal(dead.terminated, true, 'a watcher that never answers is terminated');
   assert.equal(hub.size, 0, 'and removed');
+});
+
+const eventsAfter = async (s: Fixture, query: string, token = OPERATOR) =>
+  (await json(await s.call('GET', `/api/v1/events${query}`, undefined, token))) as {
+    events: {
+      seq: number;
+      message: string;
+      project_id: string | null;
+      deployment_id: string | null;
+    }[];
+    cursor: number;
+  };
+
+test('following the log with cursor skips nothing, even when a page is smaller than what is waiting', async () => {
+  const s = await server();
+  try {
+    for (let i = 1; i <= 7; i++)
+      await s.call('POST', '/agent/v1/events', event({ message: `e${i}` }), s.registered.nodeId);
+    const seen: string[] = [];
+    let cursor = 0;
+    for (let page = 0; page < 5; page++) {
+      const result = await eventsAfter(s, `?after=${cursor}&limit=3`);
+      seen.push(...result.events.map((e) => e.message));
+      assert.ok(
+        result.events.length === 0 || result.cursor === result.events[result.events.length - 1].seq,
+        'the cursor is the last row of the page, not the end of the log',
+      );
+      cursor = result.cursor;
+    }
+    assert.deepEqual(
+      seen,
+      ['e1', 'e2', 'e3', 'e4', 'e5', 'e6', 'e7'],
+      'passing cursor as the next after returns every event once, in order',
+    );
+    const idle = await eventsAfter(s, `?after=${cursor}`);
+    assert.deepEqual(
+      [idle.events.length, idle.cursor],
+      [0, cursor],
+      'a caught-up follower gets nothing and the same cursor',
+    );
+    const newest = await eventsAfter(s, '');
+    assert.equal(
+      newest.cursor,
+      cursor,
+      'the newest-first view reports the newest seq it can see, to start following from',
+    );
+    assert.equal(
+      (await eventsAfter(s, '?after=999999')).cursor,
+      cursor,
+      'a cursor ahead of the log is pulled back to the end of it, so a client can notice',
+    );
+  } finally {
+    await s.close();
+  }
+});
+
+test('a scoped credential is never told the global end of the log, by events or by watch.ready', async () => {
+  const s = await server();
+  try {
+    await deployWeb(s, 'a');
+    await deployWeb(s, 'b');
+    await s.call(
+      'POST',
+      '/agent/v1/events',
+      event({ projectId: 'a', message: 'mine' }),
+      s.registered.nodeId,
+    );
+    for (let i = 0; i < 5; i++)
+      await s.call(
+        'POST',
+        '/agent/v1/events',
+        event({ projectId: 'b', message: `other${i}` }),
+        s.registered.nodeId,
+      );
+    const scoped = await s.mint('only-a', 'read', ['a']);
+    const own = (await eventsAfter(s, '', scoped)).events;
+    assert.ok(
+      own.some((e) => e.message === 'mine'),
+      'its own event is listed',
+    );
+    assert.ok(
+      own.every((e) => !e.message.startsWith('other')),
+      'the other project’s events are not',
+    );
+    const ownEnd = Math.max(...own.map((e) => e.seq));
+    const global = (await eventsAfter(s, '')).cursor;
+    assert.equal(
+      (await eventsAfter(s, '', scoped)).cursor,
+      ownEnd,
+      'its cursor is its own newest event',
+    );
+    assert.ok(
+      ownEnd < global,
+      'which is behind the global end, so the other project’s activity is not revealed',
+    );
+    const watcher = await open(s, '/api/v1/watch', scoped);
+    assert.equal(
+      ((await watcher.next('watch.ready')) as { cursor: number }).cursor,
+      ownEnd,
+      'watch.ready tells it the same',
+    );
+  } finally {
+    await s.close();
+  }
+});
+
+test('an event can name only a project that places a service on the reporting node, and a deployment only of that project', async () => {
+  const s = await server();
+  try {
+    const deployed = (await json(await deployWeb(s, 'site'))) as { deployment: { id: string } };
+    const other = (await json(await deployWeb(s, 'elsewhere'))) as { deployment: { id: string } };
+    await s.call('POST', '/api/v1/nodes/register', { name: 'n2', address: '10.0.0.2' });
+    assert.equal(
+      (
+        await s.call('POST', '/api/v1/deployments', {
+          project: 'only-n2',
+          version: 'v1',
+          compose: {
+            services: { web: { image: 'nginx:alpine', 'x-tug': { placement: { nodes: ['n2'] } } } },
+          },
+        })
+      ).status,
+      200,
+      'a project placed only on another node deploys',
+    );
+    const scoped = await s.mint('only-n2-reader', 'read', ['only-n2']);
+    const watcher = await open(s, '/api/v1/watch', scoped);
+    await watcher.next('watch.ready');
+    const post = (over: Record<string, unknown>) =>
+      s.call('POST', '/agent/v1/events', event(over), s.registered.nodeId);
+    await post({ projectId: 'site', deploymentId: deployed.deployment.id, message: 'placed here' });
+    await post({
+      projectId: 'site',
+      deploymentId: other.deployment.id,
+      message: 'foreign deployment',
+    });
+    await post({ projectId: 'only-n2', message: 'placed on another node' });
+    await post({ projectId: 'does-not-exist', message: 'unknown project' });
+    const rows = (await eventsAfter(s, '?after=0&limit=50')).events;
+    const byMessage = (message: string) => rows.find((row) => row.message === message);
+    assert.equal(
+      byMessage('placed here')?.project_id,
+      'site',
+      'a project placed on this node keeps its events',
+    );
+    assert.equal(
+      byMessage('placed here')?.deployment_id,
+      deployed.deployment.id,
+      'and its own deployment id',
+    );
+    assert.equal(
+      byMessage('foreign deployment')?.deployment_id,
+      null,
+      'a deployment of another project is dropped',
+    );
+    assert.equal(
+      byMessage('placed on another node')?.project_id,
+      null,
+      'a project this node does not serve is stored as a node-level event',
+    );
+    assert.equal(
+      byMessage('unknown project')?.project_id,
+      null,
+      'so is a project that does not exist',
+    );
+    assert.ok(
+      await watcher.none('watch.events', 300),
+      'nothing was attributed to the scoped watcher’s project, so nothing reaches it',
+    );
+  } finally {
+    await s.close();
+  }
+});
+
+test('a failure to store agent events leaves the agent socket, and the live sessions on it, open', () => {
+  let failures = 0;
+  const hub = new LiveHub(
+    async () => {
+      throw new Error('unused');
+    },
+    1000,
+    () => {
+      failures += 1;
+      throw new Error('database is busy');
+    },
+  );
+  const ws = fakeSocket();
+  const quiet = console.error;
+  console.error = () => {};
+  try {
+    hub.agent('node_1', ws as unknown as WebSocket);
+    ws.emit(
+      'message',
+      Buffer.from(JSON.stringify({ v: 1, type: 'agent.event', events: [{ message: 'x' }] })),
+      false,
+    );
+  } finally {
+    console.error = quiet;
+  }
+  assert.equal(failures, 1, 'the events were handed to the store, which failed');
+  assert.equal(ws.closedWith, undefined, 'the socket was not closed over a lost event');
+  ws.emit(
+    'message',
+    Buffer.from(JSON.stringify({ v: 1, type: 'agent.event', events: [], extra: 1 })),
+    false,
+  );
+  assert.equal(ws.closedWith, 1008, 'a malformed frame still closes it');
 });

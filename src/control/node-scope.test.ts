@@ -113,13 +113,18 @@ test('status and events: reports are recorded against the authenticated node, wh
     );
     assert.equal(seen.n1, null, 'a report from n2 must not mark n1 as seen');
     assert.ok(seen.n2, 'the report is attributed to n2');
-    const listed = (await json(await s.call('GET', '/api/v1/events?project=site', s.op))).events;
+    const listed = (await json(await s.call('GET', '/api/v1/events', s.op))).events;
     const mine = listed.find((e: { message: string }) => e.message === 'from n2');
     const n2 = nodes.find((n: { name: string }) => n.name === 'n2');
     assert.equal(
       mine.node_id,
       n2.id,
       'the event carries the authenticated node, not the claimed one',
+    );
+    assert.equal(
+      mine.project_id,
+      null,
+      "n2 places no service of site, so its event is stored as a node-level event, not in the project's log",
     );
     const command = await json(await s.call('GET', `/api/v1/commands/${s.commandId}`, s.op));
     assert.notEqual(command.state, 'succeeded', "n2 must not be able to complete n1's command");

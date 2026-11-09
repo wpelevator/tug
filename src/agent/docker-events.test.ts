@@ -9,6 +9,7 @@ import {
   FailureReporter,
   REPEAT_QUIET_MS,
   classifyEvent,
+  newRecentEvents,
 } from './docker-events.ts';
 import type { ReportedEvent } from './docker-events.ts';
 
@@ -28,7 +29,7 @@ const event = (
   timeNano: time * 1e9,
 });
 
-test('a crash is a die with an exit code that is not a deliberate stop', () => {
+test('a die is a crash unless something explains it: only a clean exit is not a failure by itself', () => {
   assert.equal(
     classifyEvent(event('die', { exitCode: '1' }))?.kind,
     'exited',
@@ -39,12 +40,58 @@ test('a crash is a die with an exit code that is not a deliberate stop', () => {
     139,
     'a segfault is a crash and keeps its code',
   );
-  for (const code of ['0', '137', '143'])
+  assert.equal(
+    classifyEvent(event('die', { exitCode: '0' })),
+    undefined,
+    'a clean exit is not a failure',
+  );
+  for (const code of ['137', '143'])
     assert.equal(
-      classifyEvent(event('die', { exitCode: code })),
-      undefined,
-      `exit code ${code} is how a stop looks, which the agent does itself during a rollout`,
+      classifyEvent(event('die', { exitCode: code }))?.exitCode,
+      Number(code),
+      `exit code ${code} with no kill through the daemon is a signal from elsewhere, such as the host’s memory killer or kill -9`,
     );
+});
+
+test('a die right after a kill the daemon reported is a deliberate stop, whatever exit code the app chose on SIGTERM', () => {
+  const recent = newRecentEvents();
+  assert.equal(
+    classifyEvent(event('kill', { signal: '15' }, 1000), recent),
+    undefined,
+    'the kill event itself is not a failure',
+  );
+  assert.equal(
+    classifyEvent(event('die', { exitCode: '1' }, 1002), recent),
+    undefined,
+    'an app that exits 1 on SIGTERM is not crashing when it is stopped',
+  );
+  const timedOut = newRecentEvents();
+  classifyEvent(event('kill', { signal: '15' }, 1000), timedOut);
+  classifyEvent(event('kill', { signal: '9' }, 1010), timedOut);
+  assert.equal(
+    classifyEvent(event('die', { exitCode: '137' }, 1010), timedOut),
+    undefined,
+    'a stop that had to escalate to SIGKILL is still a stop',
+  );
+  assert.equal(
+    classifyEvent(event('die', { exitCode: '1' }, 1200), timedOut)?.kind,
+    'exited',
+    'a die long after the kill is a separate crash',
+  );
+  const other = newRecentEvents();
+  classifyEvent(event('kill', { signal: '15' }, 1000, 'someone-else'), other);
+  assert.equal(
+    classifyEvent(event('die', { exitCode: '1' }, 1001), other)?.kind,
+    'exited',
+    'a kill of a different container explains nothing',
+  );
+});
+
+test('events remembered for a die are forgotten after their window, so the maps stay small', () => {
+  const recent = newRecentEvents();
+  for (let i = 0; i < 50; i++) classifyEvent(event('kill', {}, 1000 + i, `c${i}`), recent);
+  classifyEvent(event('start', {}, 5000), recent);
+  assert.equal(recent.kill.size, 0, 'old kill records are dropped');
 });
 
 test('only containers Tug manages for a service count, and job containers are expected to exit', () => {
@@ -67,7 +114,7 @@ test('only containers Tug manages for a service count, and job containers are ex
 });
 
 test('an out-of-memory kill is one failure: the die that follows it is dropped', () => {
-  const recent = new Map<string, number>();
+  const recent = newRecentEvents();
   assert.equal(
     classifyEvent(event('oom', {}, 1000), recent)?.kind,
     'oom',
@@ -211,7 +258,8 @@ test('the watcher follows managed containers, reports a crash and asks the agent
   await until(() => w.posted.length === 1, 'the crash to be reported');
   assert.equal(w.posted[0].type, 'container.exited', 'the crash is reported');
   assert.equal(w.wakes(), 1, 'the agent is asked to reconcile at once');
-  docker.emit(event('die', { exitCode: '0' }, 5002, 'other'));
+  docker.emit(event('kill', { signal: '15' }, 5002, 'other'));
+  docker.emit(event('die', { exitCode: '1' }, 5002, 'other'));
   docker.emit(event('start', {}, 5003));
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(w.posted.length, 1, 'a deliberate stop and a start report nothing');

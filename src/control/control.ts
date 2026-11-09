@@ -315,7 +315,7 @@ function parseLiveRequest(value: unknown): LiveRequest {
 }
 
 /** Ephemeral sessions are bound to socket identities; reconnecting never replays work. */
-class LiveHub {
+export class LiveHub {
   private readonly agents = new Map<string, WebSocket>();
   private readonly sessions = new Map<string, LiveSession>();
   private readonly retired = new WeakMap<WebSocket, Set<string>>();
@@ -384,7 +384,12 @@ class LiveHub {
           frameKeys(frame, ['v', 'type', 'events']) &&
           Array.isArray(frame.events)
         ) {
-          this.onAgentEvents(nodeId, frame.events);
+          // Losing an event is better than dropping the socket, which also carries live exec and log sessions.
+          try {
+            this.onAgentEvents(nodeId, frame.events);
+          } catch (error) {
+            console.error(`agent events from node ${nodeId} were not stored: ${errMessage(error)}`);
+          }
           return;
         }
         if (!objectFrame(frame) || frame.v !== 1 || typeof frame.sessionId !== 'string')
@@ -3493,8 +3498,21 @@ export async function createApp(
             after,
             limit,
           );
-    const end = db.get<{ seq: number | null }>('SELECT MAX(rowid) AS seq FROM events')?.seq ?? 0;
-    res.json({ events, cursor: end });
+    // The newest seq this caller can see under the same filter (never the global end, which would leak how many events
+    // other projects have). To follow the log, pass `cursor` as the next `after`: with `after` it is the last row returned,
+    // so paging with `limit` skips nothing, and it never runs ahead of the log if the log was emptied.
+    const visibleEnd =
+      db.get<{ seq: number | null }>(
+        `SELECT MAX(rowid) AS seq FROM events WHERE ${scope.where}`,
+        ...scope.args,
+      )?.seq ?? 0;
+    const cursor =
+      after === undefined
+        ? visibleEnd
+        : events.length
+          ? (events[events.length - 1] as { seq: number }).seq
+          : Math.min(after, visibleEnd);
+    res.json({ events, cursor });
   });
   api('get', '/api/v1/diagnostics', null, async (req, res) => {
     const checks: { name: string; ok: boolean; [key: string]: unknown }[] = [];
@@ -3844,19 +3862,51 @@ export async function createApp(
     }
     res.json({ ok: true });
   });
-  /** Events from an agent, by HTTP or over its stream socket, into the one event log. Fields are coerced and bounded. */
+  /**
+   * Events from an agent, by HTTP or over its stream socket, into the one event log. Fields are coerced and bounded, and
+   * the node is whichever one the connection belongs to. An event names a project only if that project currently places
+   * a service on this node (the rule status reports already follow); otherwise it is stored without one, as a node-level
+   * event, so an agent cannot put rows in another project's log, where that project's scoped readers and watchers would
+   * see them. A deployment id is kept only if it belongs to the project the event ends up in.
+   */
   function ingestEvents(nodeId: string, input: unknown[]): void {
     const text = (value: unknown, max: number): string | null =>
       typeof value === 'string' && value ? value.slice(0, max) : null;
+    const nodeName = db.get<{ name: string }>('SELECT name FROM nodes WHERE id=?', nodeId)?.name;
+    const placed = new Map<string, boolean>();
+    const placesHere = (project: string): boolean => {
+      let known = placed.get(project);
+      if (known === undefined) {
+        const row = currentDesired(project);
+        const desired: DesiredState | undefined = row ? JSON.parse(row.state_json) : undefined;
+        known = Object.values(desired?.services ?? {}).some(
+          (service) => nodeName !== undefined && service.placement?.nodes?.includes(nodeName),
+        );
+        placed.set(project, known);
+      }
+      return known;
+    };
     for (const raw of input.slice(0, 100)) {
       if (!objectFrame(raw)) continue;
       const ev = raw as AgentEvent;
+      const claimed = text(ev.projectId, 128);
+      const project = claimed && placesHere(claimed) ? claimed : null;
+      const claimedDeployment = text(ev.deploymentId, 128);
+      const deployment =
+        project &&
+        claimedDeployment &&
+        db.get<{ project_id: string }>(
+          'SELECT project_id FROM deployments WHERE id=?',
+          claimedDeployment,
+        )?.project_id === project
+          ? claimedDeployment
+          : null;
       const metadata = JSON.stringify(objectFrame(ev.metadata) ? ev.metadata : {});
       db.run(
         'INSERT INTO events(id,project_id,deployment_id,node_id,level,type,message,metadata_json,created_at) VALUES(?,?,?,?,?,?,?,?,?)',
         id('evt'),
-        text(ev.projectId, 128),
-        text(ev.deploymentId, 128),
+        project,
+        deployment,
         nodeId,
         text(ev.level, 16) ?? 'info',
         text(ev.type, 100) ?? 'event',

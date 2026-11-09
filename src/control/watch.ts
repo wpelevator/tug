@@ -120,7 +120,7 @@ export class WatchHub {
     this.send(subscriber, {
       v: 1,
       type: 'watch.ready',
-      cursor: subscriber.cursor,
+      cursor: this.visibleSeq(actor),
       version: this.options.version,
     });
   }
@@ -163,6 +163,18 @@ export class WatchHub {
   private lastSeq(): number {
     return (
       this.options.db.get<{ seq: number | null }>('SELECT MAX(rowid) AS seq FROM events')?.seq ?? 0
+    );
+  }
+
+  /** The newest event seq `actor` may read, which is what a scoped credential is told instead of the global end. */
+  private visibleSeq(actor: Actor): number {
+    if (!actor.projects) return this.lastSeq();
+    if (!actor.projects.length) return 0;
+    return (
+      this.options.db.get<{ seq: number | null }>(
+        `SELECT MAX(rowid) AS seq FROM events WHERE project_id IN (${actor.projects.map(() => '?').join(',')})`,
+        ...actor.projects,
+      )?.seq ?? 0
     );
   }
 
