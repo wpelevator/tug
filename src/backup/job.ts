@@ -315,7 +315,6 @@ export async function runBackupJob(
           },
           Math.max(10, Math.min(1000, stallMs / 4)),
         );
-        timer.unref();
       });
       try {
         return await untilAborted(Promise.race([collect(proc), stalled]));
