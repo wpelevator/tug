@@ -8,6 +8,7 @@ import {
   controlRepositoryPassword,
   fetchControlArchive,
   isMissingRepository,
+  listControlSnapshots,
   pushControlArchive,
 } from './control-backup.ts';
 import { repositoryPassword } from './destination.ts';
@@ -65,8 +66,7 @@ test('a push creates a missing repository, streams the archive into restic and r
   await fs.writeFile(archive, 'archive-bytes');
   const docker = dockerWith((cmd) => {
     const line = cmd.join(' ');
-    if (line === 'restic cat config')
-      return { code: 1, err: 'Is there a repository at the following location?' };
+    if (line === 'restic cat config') return { code: 1, err: NEVER_CREATED };
     if (line.startsWith('restic backup'))
       return { code: 0, out: '{"message_type":"summary","snapshot_id":"abc123def456"}\n' };
     return { code: 0 };
@@ -156,9 +156,7 @@ test('a fetch writes the newest control snapshot to a private file and reports a
     );
 
     const empty = dockerWith((cmd) =>
-      cmd[1] === 'cat'
-        ? { code: 1, err: 'Is there a repository at the following location?' }
-        : { code: 0 },
+      cmd[1] === 'cat' ? { code: 1, err: NEVER_CREATED } : { code: 0 },
     );
     await assert.rejects(
       () => fetchControlArchive(empty, S3, path.join(dir, 'none.tar.gz')),
@@ -351,6 +349,240 @@ test('a cancelled job stops and removes its helper, and a hung container create 
       () => pushControlArchive(stuck, { ...S3, limitMs: 50 }, archive),
       /did not finish within/,
       'a Docker daemon that hangs on create cannot wedge the job',
+    );
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+const SNAP = (id: string, time: string, tags: string[], bytes?: number) => ({
+  id: id.padEnd(64, '0'),
+  short_id: id.slice(0, 8),
+  time,
+  tags,
+  ...(bytes === undefined ? {} : { summary: { total_bytes_processed: bytes } }),
+});
+
+test('snapshot tags are stored with the backup so a listing can say what each one holds', async () => {
+  const dir = await scratch();
+  const archive = path.join(dir, 'a.tar.gz');
+  await fs.writeFile(archive, 'x');
+  const docker = dockerWith(() => ({ code: 0 }));
+  try {
+    await pushControlArchive(docker, S3, archive, { tags: ['images:none', 'tug:1.2.3'] });
+    const backup = execs(docker).find((line) => line.startsWith('restic backup'));
+    assert.match(
+      backup ?? '',
+      /--tag control --tag images:none --tag tug:1.2.3/,
+      'the extra tags follow the control tag',
+    );
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('listing reads the snapshots from the destination, newest first, flat or grouped', async () => {
+  const flat = JSON.stringify([
+    SNAP('aaaa1111', '2026-01-01T00:00:00Z', ['control'], 10),
+    SNAP('bbbb2222', '2026-01-03T00:00:00Z', ['control', 'images:none']),
+  ]);
+  const grouped = JSON.stringify([{ group_key: {}, snapshots: JSON.parse(flat) }]);
+  for (const [what, out] of [
+    ['flat', flat],
+    ['grouped', grouped],
+  ] as const) {
+    const docker = dockerWith((cmd) => (cmd[1] === 'snapshots' ? { code: 0, out } : { code: 0 }));
+    const listing = await listControlSnapshots(docker, S3);
+    assert.equal(listing.state, 'ok', `${what}: a readable repository is ok`);
+    assert.deepEqual(
+      listing.snapshots.map((snapshot) => snapshot.shortId),
+      ['bbbb2222', 'aaaa1111'],
+      `${what}: the newest snapshot comes first`,
+    );
+    assert.equal(
+      listing.snapshots[1].sizeBytes,
+      10,
+      `${what}: the size is kept when restic reports it`,
+    );
+    assert.deepEqual(
+      listing.snapshots[0].tags,
+      ['control', 'images:none'],
+      `${what}: tags are kept`,
+    );
+  }
+  const filtered = dockerWith(() => ({ code: 0, out: '[]' }));
+  await listControlSnapshots(filtered, S3);
+  assert.ok(
+    execs(filtered).some((line) => line === 'restic snapshots --json --host control --tag control'),
+    'only control snapshots are listed, whatever else the repository holds',
+  );
+});
+
+test('listing reports an empty destination as missing and an unreadable one as an error', async () => {
+  const empty = dockerWith((cmd) =>
+    cmd[1] === 'cat' ? { code: 1, err: NEVER_CREATED } : { code: 0 },
+  );
+  assert.deepEqual(
+    await listControlSnapshots(empty, S3),
+    { state: 'missing', snapshots: [] },
+    'a repository that was never created is empty, not an error',
+  );
+  const wrong = dockerWith((cmd) =>
+    cmd[1] === 'cat' ? { code: 1, err: BUCKET_MISSING } : { code: 0 },
+  );
+  await assert.rejects(
+    () => listControlSnapshots(wrong, S3),
+    /cannot read the control repository/,
+    'a wrong bucket is an error',
+  );
+  const garbled = dockerWith((cmd) =>
+    cmd[1] === 'snapshots' ? { code: 0, out: 'not json' } : { code: 0 },
+  );
+  await assert.rejects(
+    () => listControlSnapshots(garbled, S3),
+    /unexpected format/,
+    'output that is not JSON is an error',
+  );
+});
+
+test('a named snapshot is restored only when control stored it, and the id is validated first', async () => {
+  const dir = await scratch();
+  const target = path.join(dir, 'out.tar.gz');
+  const id = 'abcd1234';
+  const docker = dockerWith((cmd) => {
+    if (cmd[1] === 'snapshots')
+      return { code: 0, out: JSON.stringify([SNAP(id, '2026-01-01T00:00:00Z', ['control'])]) };
+    if (cmd[1] === 'dump') return { code: 0, out: Buffer.from('archive') };
+    return { code: 0 };
+  });
+  try {
+    await fetchControlArchive(docker, S3, target, id);
+    assert.ok(
+      execs(docker).some((line) => line.startsWith(`restic dump ${id} /control.tar.gz`)),
+      'the named snapshot, not the latest, is dumped',
+    );
+    assert.ok(
+      execs(docker).some(
+        (line) => line === `restic snapshots ${id} --json --host control --tag control`,
+      ),
+      'the snapshot is first checked to be a control backup',
+    );
+    const stranger = dockerWith((cmd) =>
+      cmd[1] === 'snapshots' ? { code: 0, out: '[]' } : { code: 0 },
+    );
+    await assert.rejects(
+      () => fetchControlArchive(stranger, S3, path.join(dir, 'other.tar.gz'), id),
+      /is not a control backup/,
+      'a snapshot of anything else in the repository is refused',
+    );
+    assert.ok(
+      !execs(stranger).some((line) => line.startsWith('restic dump')),
+      'a refused snapshot is never dumped',
+    );
+    const untouched = dockerWith(() => ({ code: 0 }));
+    for (const bad of ['--all', '../x', 'ABCD1234', 'short', 'latest; rm']) {
+      await assert.rejects(
+        () => fetchControlArchive(untouched, S3, target, bad),
+        /snapshot must be an id/,
+        `${bad} is not accepted as a snapshot id`,
+      );
+    }
+    assert.deepEqual(untouched.calls, [], 'an invalid id is refused before any container starts');
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+const REST_404 =
+  'Fatal: unable to open config file: Stat: unexpected HTTP response (404): 404 page not found\nIs there a repository at the following location?';
+const REST_401 =
+  'Fatal: unable to open config file: Stat: unexpected HTTP response (401): 401 Unauthorized\nIs there a repository at the following location?';
+const LOCAL_MISSING =
+  'Fatal: unable to open config file: stat /srv/backups/_control/config: no such file or directory\nIs there a repository at the following location?';
+const HINT_ONLY =
+  'Fatal: something nobody has seen\nIs there a repository at the following location?';
+
+test('a repository is missing only on positive evidence that its config is absent', () => {
+  for (const [what, text] of [
+    ['an S3 key that does not exist', NEVER_CREATED],
+    ['a local path that does not exist', LOCAL_MISSING],
+    ['a REST server answering 404', REST_404],
+  ] as const)
+    assert.equal(isMissingRepository(text), true, `${what} is a repository to create`);
+  for (const [what, text] of [
+    ['a REST server refusing the login', REST_401],
+    ['an answer with only the hint', HINT_ONLY],
+  ] as const)
+    assert.equal(
+      isMissingRepository(text),
+      false,
+      `${what} is a backend error, not an empty repository`,
+    );
+});
+
+test('a refused REST login fails the push and the fetch instead of initializing or reporting nothing', async () => {
+  const dir = await scratch();
+  const archive = path.join(dir, 'a.tar.gz');
+  await fs.writeFile(archive, 'x');
+  const docker = dockerWith((cmd) => (cmd[1] === 'cat' ? { code: 1, err: REST_401 } : { code: 0 }));
+  try {
+    await assert.rejects(
+      () => pushControlArchive(docker, S3, archive),
+      /repository check failed/,
+      'a refused login fails the backup',
+    );
+    assert.ok(
+      !execs(docker).some((line) => line.startsWith('restic init')),
+      'it is never initialized over',
+    );
+    await assert.rejects(
+      () => fetchControlArchive(docker, S3, path.join(dir, 'o.tar.gz')),
+      /cannot read the control repository/,
+      'a refused login is not reported as "no control backup"',
+    );
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a stalled exec handshake hits the deadline and the cancel, and a late container is removed', async () => {
+  const dir = await scratch();
+  const archive = path.join(dir, 'a.tar.gz');
+  await fs.writeFile(archive, 'x');
+  try {
+    const stalled = dockerWith(() => ({ code: 0 }));
+    const execStart = stalled.execStart.bind(stalled);
+    stalled.execStart = (id, options) =>
+      options.stdin ? new Promise(() => undefined) : execStart(id, options);
+    await assert.rejects(
+      () => pushControlArchive(stalled, { ...S3, limitMs: 50 }, archive),
+      /did not finish within/,
+      'a streaming exec that never starts cannot hold the backup past its limit',
+    );
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 30);
+    await assert.rejects(
+      () => pushControlArchive(stalled, { ...S3, signal: controller.signal }, archive),
+      /cancelled/,
+      'a cancel reaches a stalled handshake too',
+    );
+
+    const late = dockerWith(() => ({ code: 0 }));
+    const createContainer = late.createContainer.bind(late);
+    late.createContainer = async (name, body) => {
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      return createContainer(name, body);
+    };
+    await assert.rejects(
+      () => pushControlArchive(late, { ...S3, limitMs: 30 }, archive),
+      /did not finish within/,
+      'a create that is slower than the limit fails the job',
+    );
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    assert.deepEqual(
+      await late.listContainers(),
+      [],
+      'a container that was created after the job gave up is removed, not left running',
     );
   } finally {
     await fs.rm(dir, { recursive: true, force: true });

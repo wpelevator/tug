@@ -27,15 +27,19 @@ const RETENTION = [
   '6',
 ];
 /**
- * restic appends "Is there a repository at the following location?" to every failure to open the config, so that line
- * alone cannot tell a repository that was never created from a wrong bucket, a refused login or an unreachable store.
- * Only the first is safe to initialize or to report as "no control backup".
+ * restic appends "Is there a repository at the following location?" to every failure to open the config, whatever
+ * the cause, so that line says nothing. A repository counts as missing only on positive evidence that the config
+ * object itself is absent: S3 `NoSuchKey`, a local `no such file`, an SFTP missing file or a 404 from a REST server.
+ * Anything else (a wrong bucket, a refused login, an unreachable store, a wrong password, an answer nobody has seen
+ * before) is a backend error, so it is neither initialized over nor reported as "no control backup". The denylist
+ * stays as a second guard for messages that mention both.
  */
+const CONFIG_IS_ABSENT =
+  /specified key does not exist|NoSuchKey|no such file or directory|file does not exist|unexpected HTTP response \(404\)|\b404 (page )?not found/i;
 const NOT_A_MISSING_REPOSITORY =
-  /NoSuchBucket|bucket does not exist|AccessDenied|Forbidden|InvalidAccessKey|SignatureDoesNotMatch|dial tcp|no such host|timeout|timed out|connection refused|connection reset|certificate|wrong password/i;
+  /NoSuchBucket|bucket does not exist|AccessDenied|Forbidden|Unauthorized|InvalidAccessKey|SignatureDoesNotMatch|dial tcp|no such host|timeout|timed out|connection refused|connection reset|certificate|wrong password|\(40[13]\)/i;
 export const isMissingRepository = (stderr: string): boolean =>
-  /Is there a repository at the following location/i.test(stderr) &&
-  !NOT_A_MISSING_REPOSITORY.test(stderr);
+  CONFIG_IS_ABSENT.test(stderr) && !NOT_A_MISSING_REPOSITORY.test(stderr);
 
 export interface ControlRepositoryAccess {
   /** The destination URL as stored, such as `s3:https://host/bucket/prefix`. */
@@ -91,6 +95,7 @@ async function withRestic<T>(
   const binds = repository.startsWith('/') ? [`${repository}:${repository}`] : [];
   const limit = access.limitMs ?? CONTROL_JOB_LIMIT_MS;
   let container: string | undefined;
+  let finished = false;
   // One limit covers the image pull, the helper and every restic command.
   let timer: NodeJS.Timeout | undefined;
   const timeout = new Promise<never>((_, reject) => {
@@ -111,22 +116,27 @@ async function withRestic<T>(
     // The name is fixed before the helper exists, so a create that hangs and later succeeds is still removed by name.
     const name = `tug-control-backup-${randomBytes(4).toString('hex')}`;
     container = name;
-    await Promise.race([
-      docker.createContainer(name, {
-        Image: access.resticImage,
-        Entrypoint: ['sleep'],
-        Cmd: ['86400'],
-        Env: [
-          ...Object.entries(access.env).map(([key, value]) => `${key}=${value}`),
-          `RESTIC_REPOSITORY=${repository}`,
-          `RESTIC_PASSWORD=${access.password}`,
-          'GOMAXPROCS=2',
-        ],
-        Labels: { 'tug.job': 'control-backup' },
-        HostConfig: { Memory: 512 * 1024 ** 2, Binds: binds },
-      }),
-      timeout,
-    ]);
+    const creating = docker.createContainer(name, {
+      Image: access.resticImage,
+      Entrypoint: ['sleep'],
+      Cmd: ['86400'],
+      Env: [
+        ...Object.entries(access.env).map(([key, value]) => `${key}=${value}`),
+        `RESTIC_REPOSITORY=${repository}`,
+        `RESTIC_PASSWORD=${access.password}`,
+        'GOMAXPROCS=2',
+      ],
+      Labels: { 'tug.job': 'control-backup' },
+      HostConfig: { Memory: 512 * 1024 ** 2, Binds: binds },
+    });
+    // A create that finishes after the job is over (it timed out or was cancelled) must not leave a helper behind.
+    creating.then(
+      () => {
+        if (finished) void docker.removeContainer(name).catch(() => undefined);
+      },
+      () => undefined,
+    );
+    await Promise.race([creating, timeout]);
     await Promise.race([docker.startContainer(name), timeout]);
     const id = name;
     const finish = (result: Collected): Collected => ({
@@ -138,7 +148,14 @@ async function withRestic<T>(
       finish(await Promise.race([docker.execStart(id, { cmd }).then(collect), timeout]));
     /** `write` streams a local file into restic's stdin; `read` streams restic's stdout into a local file. */
     const run = async (cmd: string[], file: string, mode: 'read' | 'write'): Promise<Collected> => {
-      const proc = await docker.execStart(id, { cmd, stdin: mode === 'write' });
+      const starting = docker.execStart(id, { cmd, stdin: mode === 'write' });
+      starting.then(
+        (late) => {
+          if (finished) late.kill();
+        },
+        () => undefined,
+      );
+      const proc = await Promise.race([starting, timeout]);
       // A read sends stdout to the file; collect() still keeps a bounded copy, which is ignored.
       const done = collect(proc);
       const moved =
@@ -163,6 +180,7 @@ async function withRestic<T>(
       cause: error,
     });
   } finally {
+    finished = true;
     clearTimeout(timer);
     // Bounded, so a Docker daemon that hangs here cannot wedge the job (and with it every later control backup).
     if (container)
@@ -185,6 +203,7 @@ export async function pushControlArchive(
   docker: DockerApi,
   access: ControlRepositoryAccess,
   archivePath: string,
+  options: { tags?: string[] } = {},
 ): Promise<ControlPush> {
   return withRestic(docker, access, async (exec, run) => {
     let repository: ControlPush['repository'] = 'ok';
@@ -212,6 +231,7 @@ export async function pushControlArchive(
         CONTROL_HOST,
         '--tag',
         CONTROL_TAG,
+        ...(options.tags ?? []).flatMap((tag) => ['--tag', tag]),
         '--retry-lock',
         '10m',
       ],
@@ -244,12 +264,91 @@ export async function pushControlArchive(
   });
 }
 
-/** Writes the newest control archive of the destination to `destination` (mode 0600); fails when there is none. */
+/** A restic snapshot id as `tug control backup list` prints it: 8 to 64 hex digits. */
+export const CONTROL_SNAPSHOT_ID = /^[0-9a-f]{8,64}$/;
+
+export interface ControlSnapshot {
+  id: string;
+  shortId: string;
+  time: string;
+  tags: string[];
+  /** Bytes of the archive, when restic reports it (0.17 and newer). */
+  sizeBytes?: number;
+}
+
+interface ResticSnapshot {
+  id?: string;
+  short_id?: string;
+  time?: string;
+  tags?: string[];
+  summary?: { total_bytes_processed?: number };
+}
+
+/** The snapshots restic printed, whether flat or grouped, newest first; anything unparseable is an error. */
+function parseSnapshots(output: string): ControlSnapshot[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(output);
+  } catch {
+    throw new ControlBackupError(
+      `restic listed snapshots in an unexpected format: ${lastLines(output)}`,
+    );
+  }
+  const list = (Array.isArray(parsed) ? parsed : []).flatMap(
+    (entry: ResticSnapshot & { snapshots?: ResticSnapshot[] }) => entry.snapshots ?? [entry],
+  );
+  return list
+    .filter(
+      (snapshot): snapshot is Required<Pick<ResticSnapshot, 'id' | 'time'>> & ResticSnapshot =>
+        Boolean(snapshot.id && snapshot.time),
+    )
+    .map((snapshot) => ({
+      id: snapshot.id,
+      shortId: snapshot.short_id ?? snapshot.id.slice(0, 8),
+      time: snapshot.time,
+      tags: snapshot.tags ?? [],
+      ...(snapshot.summary?.total_bytes_processed === undefined
+        ? {}
+        : { sizeBytes: snapshot.summary.total_bytes_processed }),
+    }))
+    .sort((x, y) => y.time.localeCompare(x.time));
+}
+
+const SNAPSHOT_FILTER = ['--host', CONTROL_HOST, '--tag', CONTROL_TAG];
+
+/** What the control repository really holds, from the destination itself; `missing` when nothing was ever stored. */
+export async function listControlSnapshots(
+  docker: DockerApi,
+  access: ControlRepositoryAccess,
+): Promise<{ state: 'ok' | 'missing'; snapshots: ControlSnapshot[] }> {
+  return withRestic(docker, access, async (exec) => {
+    const probe = await exec(['restic', 'cat', 'config']);
+    if (probe.code !== 0) {
+      if (isMissingRepository(probe.err)) return { state: 'missing' as const, snapshots: [] };
+      throw new ControlBackupError(
+        `cannot read the control repository (wrong control password or credentials, or an unreachable store): ${lastLines(probe.err || probe.out)}`,
+      );
+    }
+    const listed = await exec(['restic', 'snapshots', '--json', ...SNAPSHOT_FILTER]);
+    if (listed.code !== 0)
+      throw new ControlBackupError(
+        `could not list the control backups: ${lastLines(listed.err || listed.out)}`,
+      );
+    return { state: 'ok' as const, snapshots: parseSnapshots(listed.out) };
+  });
+}
+
+/** Writes a control archive of the destination (the newest unless `snapshot` names one) to `destination` (mode 0600). */
 export async function fetchControlArchive(
   docker: DockerApi,
   access: ControlRepositoryAccess,
   destination: string,
+  snapshot = 'latest',
 ): Promise<void> {
+  if (snapshot !== 'latest' && !CONTROL_SNAPSHOT_ID.test(snapshot))
+    throw new ControlBackupError(
+      'the snapshot must be an id from `tug control backup list` (8 to 64 hex digits)',
+    );
   await withRestic(docker, access, async (exec, run) => {
     const probe = await exec(['restic', 'cat', 'config']);
     if (probe.code !== 0)
@@ -258,24 +357,23 @@ export async function fetchControlArchive(
           ? `no control backup was found at ${controlRepository(access.url)}`
           : `cannot read the control repository (wrong control password or credentials, or an unreachable store): ${lastLines(probe.err || probe.out)}`,
       );
+    if (snapshot !== 'latest') {
+      // Only snapshots control itself stored may be restored into control, whatever else the repository holds.
+      const listed = await exec(['restic', 'snapshots', snapshot, '--json', ...SNAPSHOT_FILTER]);
+      if (listed.code !== 0 || !parseSnapshots(listed.out).length)
+        throw new ControlBackupError(
+          `snapshot ${snapshot} is not a control backup in ${controlRepository(access.url)}; see \`tug control backup list\``,
+        );
+    }
     const dump = await run(
-      [
-        'restic',
-        'dump',
-        'latest',
-        `/${CONTROL_ARCHIVE_NAME}`,
-        '--host',
-        CONTROL_HOST,
-        '--tag',
-        CONTROL_TAG,
-      ],
+      ['restic', 'dump', snapshot, `/${CONTROL_ARCHIVE_NAME}`, ...SNAPSHOT_FILTER],
       destination,
       'read',
     );
     if (dump.code !== 0) {
       await rm(destination, { force: true });
       throw new ControlBackupError(
-        `could not read the latest control backup: ${lastLines(dump.err)}`,
+        `could not read ${snapshot === 'latest' ? 'the latest' : `snapshot ${snapshot} of the`} control backup: ${lastLines(dump.err)}`,
       );
     }
   });

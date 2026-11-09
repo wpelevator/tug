@@ -285,6 +285,7 @@ const SAMPLES: Record<string, { path: string; body?: unknown }> = {
   },
   'POST /api/v1/nodes/:name/ingress': { path: '/api/v1/nodes/ghost/ingress', body: {} },
   'POST /api/v1/control/backups/run': { path: '/api/v1/control/backups/run', body: {} },
+  'GET /api/v1/control/backups': { path: '/api/v1/control/backups' },
   'GET /api/v1/control/backups/:id/download': {
     path: '/api/v1/control/backups/cbak_none/download',
   },

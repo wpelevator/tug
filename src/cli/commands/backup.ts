@@ -27,6 +27,8 @@ interface BackupListing {
     lastSuccessAt: string | null;
     lastStatus: string | null;
     problem: string | null;
+    /** A local path is for development: it is not protection against losing the host. */
+    scope?: 'shared' | 'local';
   } | null;
   targets: {
     target: string;
@@ -40,7 +42,7 @@ interface BackupListing {
   }[];
   runs: BackupRunRecord[];
 }
-const formatBytes = (bytes: number | null): string =>
+export const formatBytes = (bytes: number | null): string =>
   bytes === null
     ? '-'
     : bytes < 1024 ** 2
@@ -163,7 +165,7 @@ export function registerBackup(program: Command): void {
         console.log('no backup targets; add x-tug.backup to a database service or volume');
       if (!o.json && listing.control)
         console.log(
-          `control\t-\tnightly\tlast success ${listing.control.lastSuccessAt ?? 'never'}${listing.control.problem ? `\t${listing.control.problem}` : ''}`,
+          `control\t-\tnightly\tlast success ${listing.control.lastSuccessAt ?? 'never'}${listing.control.scope === 'local' ? '\tlocal path only: not off-host' : ''}${listing.control.problem ? `\t${listing.control.problem}` : ''}`,
         );
       if (!o.json)
         for (const t of listing.targets)

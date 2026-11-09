@@ -7,6 +7,7 @@ import { createApp } from './control.ts';
 import { json, testImageResolver, testControlUrl, testIdentity } from '../../tests/helpers.ts';
 import { FakeDocker } from '../../tests/fake-docker.ts';
 import { DatabaseSync } from 'node:sqlite';
+import type { ActivationStep } from './restore-activation.ts';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
@@ -25,8 +26,12 @@ const DESTINATION = {
   env: { AWS_ACCESS_KEY_ID: 'AKIAEXAMPLE', AWS_SECRET_ACCESS_KEY: 'sekret-value-1' },
 };
 
-async function server(docker: FakeDocker, env: Record<string, string> = {}) {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-ctlbak-'));
+async function server(
+  docker: FakeDocker,
+  env: Record<string, string> = {},
+  extra: { dir?: string; restoreAfterStep?: (step: ActivationStep) => void } = {},
+) {
+  const dir = extra.dir ?? (await fs.mkdtemp(path.join(os.tmpdir(), 'tug-ctlbak-')));
   const saved: Record<string, string | undefined> = {};
   for (const [key, value] of Object.entries({
     TUG_DATA_DIR: dir,
@@ -36,13 +41,15 @@ async function server(docker: FakeDocker, env: Record<string, string> = {}) {
     ...env,
   })) {
     saved[key] = process.env[key];
-    process.env[key] = value;
+    // '@data' points a setting at the data directory itself, the misconfiguration some tests need.
+    process.env[key] = value === '@data' ? dir : value;
   }
   const app = await createApp({
     identity: testIdentity,
     controlUrl: testControlUrl,
     images: { resolve: testImageResolver },
     docker,
+    restoreAfterStep: extra.restoreAfterStep,
   });
   const srv = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));
@@ -50,12 +57,13 @@ async function server(docker: FakeDocker, env: Record<string, string> = {}) {
   return {
     dir,
     base: `http://127.0.0.1:${(srv.address() as AddressInfo).port}`,
-    close: async () => {
+    /** `keepDir` leaves the data directory for a second control to start on, as after a crash or a restore. */
+    close: async (keepDir = false) => {
       await new Promise((resolve) => srv.close(resolve));
       for (const [key, value] of Object.entries(saved))
         if (value === undefined) delete process.env[key];
         else process.env[key] = value;
-      await fs.rm(dir, { recursive: true, force: true });
+      if (!keepDir) await fs.rm(dir, { recursive: true, force: true });
     },
   };
 }
@@ -291,8 +299,9 @@ test('restore from the destination reads the newest control snapshot with the su
         created[0].Env?.includes('AWS_ACCESS_KEY_ID=AKIAEXAMPLE'),
       'the helper uses the credentials supplied with the restore',
     );
-    await assert.rejects(
-      () => fs.stat(path.join(target.dir, 'control-restore')),
+    assert.deepEqual(
+      await fs.readdir(path.join(target.dir, 'control-restore')),
+      [],
       'the extracted keys are not left on disk after a restore',
     );
     assert.deepEqual(
@@ -308,7 +317,10 @@ test('restore from the destination reads the newest control snapshot with the su
 test('restore from the destination reports an empty destination without touching control', async () => {
   const docker = resticDocker((cmd) =>
     cmd[1] === 'cat'
-      ? { code: 1, err: 'Is there a repository at the following location?' }
+      ? {
+          code: 1,
+          err: 'Fatal: unable to open config file: Stat: The specified key does not exist.\nIs there a repository at the following location?',
+        }
       : { code: 0 },
   );
   const s = await server(docker);
@@ -502,8 +514,10 @@ test('startup removes what a crash left behind and leaves recent files alone', a
   await fs.mkdir(path.join(backups, 'cbak_old-staging'), { recursive: true });
   await fs.mkdir(path.join(backups, 'cbak_new-staging'), { recursive: true });
   await fs.writeFile(path.join(dir, 'control-restore-download-old.tar.gz'), 'x');
-  await fs.mkdir(path.join(dir, 'control-restore'), { recursive: true });
-  await fs.writeFile(path.join(dir, 'control-restore', 'master.key'), 'key');
+  await fs.mkdir(path.join(dir, 'control-restore', 'r_old'), { recursive: true });
+  await fs.writeFile(path.join(dir, 'control-restore', 'r_old', '.tug-control-restore'), '');
+  await fs.writeFile(path.join(dir, 'control-restore', 'r_old', 'master.key'), 'key');
+  await fs.mkdir(path.join(dir, 'control-restore', 'someone-elses'), { recursive: true });
   const old = new Date(Date.now() - 2 * 3600_000);
   await fs.utimes(path.join(backups, 'cbak_old-staging'), old, old);
   await fs.utimes(path.join(dir, 'control-restore-download-old.tar.gz'), old, old);
@@ -530,8 +544,14 @@ test('startup removes what a crash left behind and leaves recent files alone', a
       );
       await until(
         async () =>
-          (await fs.stat(path.join(dir, 'control-restore')).catch(() => null)) ? undefined : true,
-        'the restore scratch directory to be removed',
+          (await fs.stat(path.join(dir, 'control-restore', 'r_old')).catch(() => null))
+            ? undefined
+            : true,
+        'the marked restore scratch directory to be removed',
+      );
+      assert.ok(
+        await fs.stat(path.join(dir, 'control-restore', 'someone-elses')),
+        'a directory Tug did not mark as its own is left alone, and so is the configured parent',
       );
       await assert.rejects(
         () => fs.stat(path.join(backups, 'cbak_old-staging')),
@@ -553,5 +573,414 @@ test('startup removes what a crash left behind and leaves recent files alone', a
       if (saved[key] === undefined) delete process.env[key];
       else process.env[key] = saved[key];
     await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+const archiveOf = async (base: string, images = true): Promise<string> =>
+  (await json(await call(base, 'POST', '/api/v1/control/backups/run', { images }))).artifactRef;
+const NOTHING_NIGHTLY = { TUG_BACKUP_TICK_MS: '3600000' };
+
+test('a restore directory that points at the data directory costs nothing at startup', async () => {
+  const s = await server(resticDocker(), { TUG_CONTROL_RESTORE_DIR: '@data' });
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    for (const name of ['tug.db', 'master.key', 'pki'])
+      assert.ok(
+        await fs.stat(path.join(s.dir, name)),
+        `${name} survives startup even when the restore directory is misconfigured to be the data directory`,
+      );
+    assert.equal(
+      (await call(s.base, 'GET', '/api/v1/backups')).status,
+      200,
+      'control keeps serving',
+    );
+  } finally {
+    await s.close();
+  }
+});
+
+test('switching destination starts a backup there and reports the new one on its own record', async () => {
+  const created: { Env?: string[] }[] = [];
+  const docker = resticDocker();
+  const createContainer = docker.createContainer.bind(docker);
+  docker.createContainer = async (name, body) => {
+    created.push(body);
+    return createContainer(name, body);
+  };
+  const s = await server(docker);
+  try {
+    await call(s.base, 'POST', '/api/v1/backup/destination', DESTINATION);
+    const first = await until(async () => {
+      const { control } = await listing(s.base);
+      return control?.lastSuccessAt ? control : undefined;
+    }, 'the first destination to be backed up');
+    assert.match(
+      first.repository,
+      /bucket\/tug\/_control$/,
+      'the status names the destination in use',
+    );
+    await call(s.base, 'POST', '/api/v1/backup/destination', {
+      url: 's3:https://s3.example.com/other/prefix',
+      env: { AWS_ACCESS_KEY_ID: 'AKIAOTHER', AWS_SECRET_ACCESS_KEY: 'other-secret-2' },
+    });
+    const second = await until(async () => {
+      const { control } = await listing(s.base);
+      return control?.repository?.includes('other/prefix') && control.lastSuccessAt
+        ? control
+        : undefined;
+    }, 'the new destination to be backed up');
+    assert.ok(
+      second.lastSuccessAt >= first.lastSuccessAt,
+      'the new destination has a success of its own, not the old one inherited',
+    );
+    assert.equal(created.length, 2, 'a success in the old destination does not skip the new one');
+    const pairs = created.map((body) => [
+      body.Env?.find((entry) => entry.startsWith('RESTIC_REPOSITORY=')),
+      body.Env?.find((entry) => entry.startsWith('AWS_SECRET_ACCESS_KEY=')),
+    ]);
+    assert.deepEqual(
+      pairs,
+      [
+        [
+          'RESTIC_REPOSITORY=s3:https://s3.example.com/bucket/tug/_control',
+          'AWS_SECRET_ACCESS_KEY=sekret-value-1',
+        ],
+        [
+          'RESTIC_REPOSITORY=s3:https://s3.example.com/other/prefix/_control',
+          'AWS_SECRET_ACCESS_KEY=other-secret-2',
+        ],
+      ],
+      'each push pairs one destination with its own credentials',
+    );
+  } finally {
+    await s.close();
+  }
+});
+
+test('a destination with no completed backup is reported as unprotected, not as the previous one was', async () => {
+  const docker = resticDocker((cmd) => (cmd[1] === 'backup' ? undefined : { code: 0 }));
+  const s = await server(docker, { TUG_CONTROL_BACKUP_RETRY_MS: '60' });
+  try {
+    await call(s.base, 'POST', '/api/v1/backup/destination', DESTINATION);
+    const control = await until(async () => {
+      const { control } = await listing(s.base);
+      return control?.problem ? control : undefined;
+    }, 'the unprotected destination to be reported');
+    assert.equal(control.lastSuccessAt, null, 'nothing has completed in this destination');
+    assert.match(
+      control.problem,
+      /no control backup has completed in this destination since it was set/,
+      'the report says the destination is unprotected',
+    );
+  } finally {
+    await s.close();
+  }
+});
+
+test('a local-path destination is labelled local, never off-host', async () => {
+  const s = await server(resticDocker());
+  try {
+    await call(s.base, 'POST', '/api/v1/backup/destination', { url: '/srv/backups', env: {} });
+    const control = await until(async () => {
+      const { control } = await listing(s.base);
+      return control?.lastSuccessAt ? control : undefined;
+    }, 'the local backup');
+    assert.equal(
+      control.scope,
+      'local',
+      'a backup that lives on the same host is labelled local so it is not mistaken for protection',
+    );
+    assert.match(
+      control.repository,
+      /^\/srv\/backups\/_control$/,
+      'the repository is the local path',
+    );
+  } finally {
+    await s.close();
+  }
+});
+
+test('a backup can be stored in the destination on demand and says where it went', async () => {
+  const docker = resticDocker();
+  const s = await server(docker, NOTHING_NIGHTLY);
+  try {
+    const none = await call(s.base, 'POST', '/api/v1/control/backups/run', { offsite: true });
+    assert.equal(none.status, 409, 'without a destination there is nowhere to store it');
+    await call(s.base, 'POST', '/api/v1/backup/destination', DESTINATION);
+    const res = await call(s.base, 'POST', '/api/v1/control/backups/run', { offsite: true });
+    assert.equal(res.status, 200, 'the backup is stored');
+    const result = await json(res);
+    assert.equal(result.snapshotId, 'snap1234', 'the snapshot id is returned');
+    assert.equal(
+      result.repository,
+      's3:https://s3.example.com/bucket/tug/_control',
+      'the repository it went to is returned',
+    );
+    const backup = docker.calls.find((c) => c.includes('restic backup'));
+    assert.match(
+      backup ?? '',
+      /--tag images:none --tag tug:\S+ --tag trigger:manual/,
+      'the snapshot says it has no images and that it was taken on demand',
+    );
+    assert.deepEqual(
+      await fs.readdir(path.join(s.dir, 'control-backups')),
+      [],
+      'no local archive is kept',
+    );
+    docker.execResponder = (cmd) =>
+      cmd[1] === 'backup' ? { code: 1, err: 'store is full' } : { code: 0 };
+    const failed = await call(s.base, 'POST', '/api/v1/control/backups/run', { offsite: true });
+    assert.equal(
+      failed.status,
+      502,
+      'a backup that could not be stored is an error, not a success',
+    );
+    assert.match((await json(failed)).error, /store is full/, 'the cause is reported');
+  } finally {
+    await s.close();
+  }
+});
+
+test('the control backup list shows copies on the host and the snapshots really in the destination', async () => {
+  const snapshots = JSON.stringify([
+    {
+      id: 'a'.repeat(64),
+      short_id: 'aaaaaaaa',
+      time: '2026-01-02T00:00:00Z',
+      tags: ['control', 'images:none', 'tug:1.0.0'],
+    },
+  ]);
+  const docker = resticDocker((cmd) =>
+    cmd[1] === 'snapshots' ? { code: 0, out: snapshots } : { code: 0 },
+  );
+  const s = await server(docker, NOTHING_NIGHTLY);
+  try {
+    const bare = await json(await call(s.base, 'GET', '/api/v1/control/backups'));
+    assert.equal(bare.remote, null, 'without a destination there is nothing remote to list');
+    await archiveOf(s.base, false);
+    await call(s.base, 'POST', '/api/v1/backup/destination', DESTINATION);
+    const listed = await json(await call(s.base, 'GET', '/api/v1/control/backups'));
+    assert.equal(listed.local.length, 1, 'the local archive is listed');
+    assert.equal(listed.local[0].images, false, 'it says it was taken without images');
+    assert.equal(listed.local[0].onDisk, true, 'it is on disk');
+    assert.equal(listed.remote.state, 'ok', 'the destination is readable');
+    assert.equal(
+      listed.remote.snapshots[0].shortId,
+      'aaaaaaaa',
+      'the snapshot comes from the destination itself',
+    );
+    docker.execResponder = (cmd) =>
+      cmd[1] === 'cat' ? { code: 1, err: 'The specified bucket does not exist.' } : { code: 0 };
+    const broken = await json(await call(s.base, 'GET', '/api/v1/control/backups'));
+    assert.equal(
+      broken.remote.state,
+      'error',
+      'an unreadable destination is an error, not an empty list',
+    );
+    assert.match(broken.remote.error, /cannot read the control repository/, 'the cause is shown');
+  } finally {
+    await s.close();
+  }
+});
+
+test('a restore can be verified without applying it, and a named snapshot is the one that is read', async () => {
+  const source = await server(resticDocker());
+  let archive: Buffer;
+  let artifact: string;
+  let password: string;
+  try {
+    artifact = await archiveOf(source.base);
+    archive = await fs.readFile(artifact);
+    password = await controlPassword(source.base);
+  } finally {
+    await source.close(true);
+  }
+  const id = 'abcd1234';
+  const docker = resticDocker((cmd) => {
+    if (cmd[1] === 'snapshots')
+      return {
+        code: 0,
+        out: JSON.stringify([
+          { id: id.padEnd(64, '0'), short_id: id, time: '2026-01-01T00:00:00Z', tags: ['control'] },
+        ]),
+      };
+    return cmd[1] === 'dump' ? { code: 0, out: archive } : { code: 0 };
+  });
+  const target = await server(docker);
+  try {
+    const key = await fs.readFile(path.join(target.dir, 'master.key'), 'utf8');
+    const unconfirmed = await call(target.base, 'POST', '/api/v1/control/restore', {
+      artifactRef: artifact,
+    });
+    assert.equal(
+      unconfirmed.status,
+      400,
+      'a restore still needs confirmation unless it only verifies',
+    );
+    const verified = await call(target.base, 'POST', '/api/v1/control/restore', {
+      artifactRef: artifact,
+      verify: true,
+    });
+    assert.equal(verified.status, 200, 'a backup can be verified without confirmation');
+    const summary = await json(verified);
+    assert.equal(summary.verified, true, 'the answer says it was only verified');
+    assert.equal(summary.images, true, 'it says whether the backup holds build images');
+    assert.equal(typeof summary.projects, 'number', 'it says what the backup holds');
+    assert.equal(
+      await fs.readFile(path.join(target.dir, 'master.key'), 'utf8'),
+      key,
+      'verifying changes nothing live',
+    );
+    assert.equal(
+      (await call(target.base, 'POST', '/api/v1/control/backups/run', {})).status,
+      200,
+      'verifying does not leave control waiting for a restart',
+    );
+    const named = await call(target.base, 'POST', '/api/v1/control/restore', {
+      verify: true,
+      fromDestination: { ...DESTINATION, password, snapshot: id },
+    });
+    assert.equal(
+      named.status,
+      200,
+      `a named snapshot verifies: ${JSON.stringify(await named.clone().json())}`,
+    );
+    assert.ok(
+      docker.calls.some((c) => c.includes(`restic dump ${id} /control.tar.gz`)),
+      'the named snapshot, not the latest, is read',
+    );
+    const bad = await call(target.base, 'POST', '/api/v1/control/restore', {
+      verify: true,
+      fromDestination: { ...DESTINATION, password, snapshot: '--all' },
+    });
+    assert.equal(bad.status, 400, 'a snapshot that is not an id is refused');
+  } finally {
+    await target.close();
+  }
+});
+
+test('a restore that fails between the database and the master key puts the previous state back', async () => {
+  const source = await server(resticDocker());
+  let artifact: string;
+  try {
+    artifact = await archiveOf(source.base);
+  } finally {
+    await source.close(true);
+  }
+  const first = await server(
+    resticDocker(),
+    {},
+    {
+      restoreAfterStep: (step) => {
+        if (step === 'database') throw new Error('disk full');
+      },
+    },
+  );
+  const read = (name: string) => fs.readFile(path.join(first.dir, name), 'utf8');
+  const key = await read('master.key');
+  const ca = await read('pki/ca.crt');
+  // A node that exists only in this control's own database tells the two generations of the database apart.
+  await call(first.base, 'POST', '/api/v1/nodes/register', { name: 'only-in-the-original' });
+  const dir = first.dir;
+  try {
+    const res = await call(first.base, 'POST', '/api/v1/control/restore', {
+      artifactRef: artifact,
+      confirm: true,
+    });
+    assert.equal(res.status, 500, 'the failure is reported');
+    assert.match(
+      (await json(res)).error,
+      /previous state was put back/,
+      'the operator is told nothing was lost',
+    );
+  } finally {
+    await first.close(true);
+  }
+  const again = await server(resticDocker(), {}, { dir });
+  try {
+    assert.equal(
+      await read('master.key'),
+      key,
+      'the master key is the one the database was written under',
+    );
+    assert.equal(await read('pki/ca.crt'), ca, 'the CA is the previous one');
+    assert.equal(
+      (await call(again.base, 'GET', '/api/v1/backups')).status,
+      200,
+      'control starts and serves',
+    );
+    const nodes = JSON.stringify(await json(await call(again.base, 'GET', '/api/v1/nodes')));
+    assert.ok(
+      nodes.includes('only-in-the-original'),
+      'the database is the original one, not the half-restored one the failed restore had already written',
+    );
+    const leftovers = (await fs.readdir(dir)).filter((name) => name.startsWith('restore-'));
+    assert.deepEqual(leftovers, [], 'no journal or previous generation is left behind');
+  } finally {
+    await again.close();
+  }
+});
+
+test('after a restore the commands it carried are retired, not delivered to agents again', async () => {
+  const source = await server(resticDocker());
+  let artifact: string;
+  let nodeId: string;
+  try {
+    nodeId = (await json(await call(source.base, 'POST', '/api/v1/nodes/register', { name: 'n1' })))
+      .nodeId;
+    const db = new DatabaseSync(path.join(source.dir, 'tug.db'));
+    db.prepare(
+      "INSERT INTO commands(id,node_id,project_id,type,state,payload_json,created_at,updated_at) VALUES('cmd_replay',?,'site','volume.delete','pending','{}','2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z')",
+    ).run(nodeId);
+    db.close();
+    const before = await json(
+      await fetch(`${source.base}/agent/v1/work`, { headers: { 'x-tug-test-node': nodeId } }),
+    );
+    assert.ok(
+      before.commands.some((c: { id: string }) => c.id === 'cmd_replay'),
+      'the original control would deliver the command',
+    );
+    // The first delivery marked it running; put it back to pending as it was when the backup was taken.
+    const again = new DatabaseSync(path.join(source.dir, 'tug.db'));
+    again.prepare("UPDATE commands SET state='pending' WHERE id='cmd_replay'").run();
+    again.close();
+    artifact = await archiveOf(source.base);
+  } finally {
+    await source.close(true);
+  }
+  const target = await server(resticDocker());
+  const dir = target.dir;
+  try {
+    const res = await call(target.base, 'POST', '/api/v1/control/restore', {
+      artifactRef: artifact,
+      confirm: true,
+    });
+    assert.equal(res.status, 200, 'the restore succeeds');
+  } finally {
+    await target.close(true);
+  }
+  const restored = await server(resticDocker(), {}, { dir });
+  try {
+    const work = await json(
+      await fetch(`${restored.base}/agent/v1/work`, { headers: { 'x-tug-test-node': nodeId } }),
+    );
+    assert.ok(
+      !work.commands.some((c: { id: string }) => c.id === 'cmd_replay'),
+      'a queued command carried in the backup is not delivered by the restored control',
+    );
+    const db = new DatabaseSync(path.join(dir, 'tug.db'));
+    const row = db.prepare("SELECT state FROM commands WHERE id='cmd_replay'").get() as {
+      state: string;
+    };
+    db.close();
+    assert.equal(row.state, 'cancelled', 'it stays in the history, retired');
+    assert.ok(
+      JSON.stringify(await json(await call(restored.base, 'GET', '/api/v1/events'))).includes(
+        'control.restore_activated',
+      ),
+      'the retirement is recorded as an event',
+    );
+  } finally {
+    await restored.close();
   }
 });

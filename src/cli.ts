@@ -94,8 +94,8 @@ program.hook('preAction', async (_root, command) => {
         max,
       );
   }
-  if (path === 'control restore' && !options.confirm)
-    throw new Error('control restore requires --confirm');
+  if (path === 'control restore' && !options.confirm && !options.verify)
+    throw new Error('control restore requires --confirm (or --verify to only check the backup)');
   const positional = path === 'exec' ? command.args.slice(0, 1) : command.args;
   for (const value of [...positional, ...Object.values(options), ...Object.values(program.opts())])
     if (typeof value === 'string' && /[\r\n\0]/.test(value))

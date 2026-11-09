@@ -6,6 +6,7 @@ import { withProgress } from '../progress.ts';
 export { runCapture, runLocal } from '../process.ts';
 import path from 'node:path';
 import fsp from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
@@ -356,6 +357,29 @@ export async function download(route: string, file: string): Promise<void> {
     // A failure after creation leaves a partial archive that must not be mistaken for a backup.
     if (created) await fsp.rm(file, { force: true });
     throw error;
+  } finally {
+    void transport.close();
+  }
+}
+/**
+ * Posts a local file as the request body (`application/gzip`), streamed from disk without buffering it, and returns
+ * the JSON answer. Used to hand a control archive to the control host for a restore.
+ */
+export async function upload<T>(route: string, file: string): Promise<T> {
+  markWorkStarted();
+  const c = await loadCfg();
+  // A mutation: judged against the control's version before any byte is sent.
+  const transport = await transportFor(c, 'probe');
+  try {
+    const res = await transport.http(`${transport.base}${route}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/gzip' },
+      body: Readable.toWeb(createReadStream(file)) as never,
+      duplex: 'half',
+    } as RequestInit);
+    if (!res.ok)
+      throw new Error(`POST ${route}: ${res.status} ${await res.text().catch(() => '')}`);
+    return (await res.json()) as T;
   } finally {
     void transport.close();
   }

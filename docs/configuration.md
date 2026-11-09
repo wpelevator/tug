@@ -33,7 +33,7 @@ CLI options override environment variables, which override the config files and 
 | `TUG_CONTROL_BACKUP_DIR` | `<data dir>/control-backups` | Control backup archives. |
 | `TUG_CONTROL_BACKUP_INTERVAL_MS` | `86400000` | How long a successful off-host control backup stays current before the next one is due. |
 | `TUG_CONTROL_BACKUP_RETRY_MS` | `3600000` | How long to wait before retrying a failed off-host control backup. |
-| `TUG_CONTROL_RESTORE_DIR` | `<data dir>/control-restore` | Scratch directory for restores. |
+| `TUG_CONTROL_RESTORE_DIR` | `<data dir>/control-restore` | Parent of the private scratch directories restores use. Only directories Tug created in it are ever removed, never the path itself. |
 | `TUG_SERVICE_NAMES` | `true` | Publish health-aware `serviceEndpoints` so agents inject cross-node `extra_hosts` using each node's `address`. Set `false` to opt out. See [Networking](networking.md#layer-a-cross-node-service-names). |
 | `TUG_ACME_EMAIL` | unset | Email for ACME registration in rendered Caddy configs. |
 | `TUG_INGRESS_ACCESS_LOG` | unset (off) | Set `true` and each ingress site writes a JSON access log line per request to the `tug-caddy` container's output (`docker logs tug-caddy` on the ingress node). Caddy redacts cookies and `Authorization` headers, but URLs (including query-string tokens) and client IPs are logged. Docker's log cap applies only to a newly created container; see [Networking](networking.md#edge-features). |
