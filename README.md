@@ -1,5 +1,7 @@
 # tug
 
+[![CI](https://github.com/wpelevator/tug/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/wpelevator/tug/actions/workflows/ci.yml?query=branch%3Amain) [![Release](https://github.com/wpelevator/tug/actions/workflows/release.yml/badge.svg?branch=main)](https://github.com/wpelevator/tug/actions/workflows/release.yml?query=branch%3Amain)
+
 Deploy Docker Compose apps to your own Linux VPS with one command, from your laptop or CI. Images, rollbacks, backups, HTTPS and secrets are built in, so one small server can run the whole stack.
 
 A typical VPS is a durable, always-on computer with enough CPU, memory and disk to host several sites or a medium-size application and its database. You do not need a cluster, a per-app platform plan or a pile of managed services to run that well, and a plain server often costs far less than renting the same capacity piece by piece. tug is the missing layer that makes self-hosting on one or a few servers safe and repeatable, so you keep the savings without giving up deploys, rollbacks, backups and HTTPS.
