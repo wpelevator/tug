@@ -955,6 +955,11 @@ test('after a restore the commands it carried are retired, not delivered to agen
     // The first delivery marked it running; put it back to pending as it was when the backup was taken.
     const again = new DatabaseSync(path.join(source.dir, 'tug.db'));
     again.prepare("UPDATE commands SET state='pending' WHERE id='cmd_replay'").run();
+    again
+      .prepare(
+        "INSERT INTO backup_runs(id,project_id,target,type,node_id,command_id,trigger,state,queued_at) VALUES('bkr_replay','site','volume:x','volume',?,'cmd_replay','manual','queued','2026-01-01T00:00:00.000Z')",
+      )
+      .run(nodeId);
     again.close();
     artifact = await archiveOf(source.base);
   } finally {
@@ -980,18 +985,26 @@ test('after a restore the commands it carried are retired, not delivered to agen
       !work.commands.some((c: { id: string }) => c.id === 'cmd_replay'),
       'a queued command carried in the backup is not delivered by the restored control',
     );
-    const db = new DatabaseSync(path.join(dir, 'tug.db'));
-    const row = db.prepare("SELECT state FROM commands WHERE id='cmd_replay'").get() as {
+    const db2 = new DatabaseSync(path.join(dir, 'tug.db'));
+    const row = db2.prepare("SELECT state FROM commands WHERE id='cmd_replay'").get() as {
       state: string;
     };
-    db.close();
     assert.equal(row.state, 'cancelled', 'it stays in the history, retired');
+    const run = db2.prepare("SELECT state FROM backup_runs WHERE id='bkr_replay'").get() as {
+      state: string;
+    };
+    assert.equal(
+      run.state,
+      'missed',
+      'the backup run of the retired command is closed instead of staying queued for ever',
+    );
     assert.ok(
       JSON.stringify(await json(await call(restored.base, 'GET', '/api/v1/events'))).includes(
         'control.restore_activated',
       ),
       'the retirement is recorded as an event',
     );
+    db2.close();
   } finally {
     await restored.close();
   }

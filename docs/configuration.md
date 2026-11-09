@@ -33,6 +33,7 @@ CLI options override environment variables, which override the config files and 
 | `TUG_CONTROL_BACKUP_DIR` | `<data dir>/control-backups` | Control backup archives. |
 | `TUG_CONTROL_BACKUP_INTERVAL_MS` | `86400000` | How long a successful control backup in the destination stays current before the next one is due. |
 | `TUG_CONTROL_BACKUP_RETRY_MS` | `3600000` | How long to wait before retrying a failed control backup. |
+| `TUG_CONTROL_BACKUP_STALL_MS` | `120000` | How long restic may print only backend retry notices (a missing bucket, a refused login, an unreachable store) before a control backup, listing or fetch is failed with the cause instead of running to the limit. Any other output counts as progress. |
 | `TUG_CONTROL_BACKUP_LIMIT_MS` | `1800000` | How long one control backup, listing or fetch may take before its restic helper is removed and the job fails. |
 | `TUG_CONTROL_RESTORE_DIR` | `<data dir>/control-restore` | Parent of the private scratch directories restores use. Only directories Tug created in it are ever removed, never the path itself. |
 | `TUG_SERVICE_NAMES` | `true` | Publish health-aware `serviceEndpoints` so agents inject cross-node `extra_hosts` using each node's `address`. Set `false` to opt out. See [Networking](networking.md#layer-a-cross-node-service-names). |
