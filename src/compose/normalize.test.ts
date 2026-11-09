@@ -23,6 +23,7 @@ test('normalizeCompose renders with Compose, sets each secret to its sentinel an
   let seen: { args: string[]; env: NodeJS.ProcessEnv } | undefined;
   const compose = await normalizeCompose('app.yml', ['API_KEY'], {
     project: 'site',
+    composeCli: true,
     runner: async (_cmd, args, opts) => {
       seen = { args, env: opts.env };
       return {
@@ -54,6 +55,7 @@ test('literal dollars that Compose escapes in its output reach the container as 
     '        restore: [sh, -c, "mariadb -p$$PW"]',
   ].join('\n');
   const normalized = await normalizeCompose('docker-compose.yml', [], {
+    composeCli: true,
     runner: async () => ({ out: rendered, err: '', code: 0 }),
   });
   const db = normalized.services.db as Record<string, any>;
@@ -80,6 +82,7 @@ test('literal dollars that Compose escapes in its output reach the container as 
 test('normalizeCompose explains a missing Compose plugin and rejects empty files', async () => {
   await assert.rejects(
     normalizeCompose('a.yml', [], {
+      composeCli: true,
       runner: async () => {
         throw Object.assign(new Error('spawn docker ENOENT'), { code: 'ENOENT' });
       },
@@ -87,7 +90,10 @@ test('normalizeCompose explains a missing Compose plugin and rejects empty files
     /needs Docker with the Compose plugin/,
   );
   await assert.rejects(
-    normalizeCompose('a.yml', [], { runner: async () => ({ out: 'name: x\n', err: '' }) }),
+    normalizeCompose('a.yml', [], {
+      composeCli: true,
+      runner: async () => ({ out: 'name: x\n', err: '' }),
+    }),
     /defines no services/,
   );
 });

@@ -18,8 +18,8 @@ const finding = (file: string, error: string) => `${file}: ${error}`;
 
 /**
  * Reads `file` as YAML and runs the same `x-tug` schema checks deploy makes control apply, without
- * Docker, a control connection or a credential. The file is linted as written: `docker compose
- * config` expands short syntax when deploy normalizes, so short-form volumes are not reported here.
+ * Docker, a control connection or a credential. The file is linted as written: deploy expands short
+ * syntax when it reads the file, so short-form volumes are not reported here.
  */
 export async function lintComposeFile(file: string): Promise<LintResult> {
   let text: string;

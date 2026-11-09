@@ -58,6 +58,10 @@ export function registerDeploy(program: Command): void {
     .option('-f, --file <file>', 'compose file', defaultComposeFile())
     .option('--version <version>', 'display version (default: git-<Compose hash>)')
     .option('--build-local', 'build application images locally and upload them without source')
+    .option(
+      '--compose-cli',
+      'read the Compose file with `docker compose config` (needs Docker Compose v2 on this machine) instead of Tug’s own reader, for a file that uses include, !reset or !override',
+    )
     .option('--no-wait', 'return after desired state is created')
     .option('--timeout <seconds>', 'wait timeout in seconds', '300')
     .option('--json', 'print the full result, including the desired state, as JSON')
@@ -74,6 +78,7 @@ export function registerDeploy(program: Command): void {
             file: string;
             version?: string;
             buildLocal?: boolean;
+            composeCli?: boolean;
             json?: boolean;
             move: string[];
           },
@@ -108,7 +113,10 @@ export function registerDeploy(program: Command): void {
             console.error(
               `warning: ${o.file} is named ${declared} but the Tug project is ${project}; secrets, backups and restores are scoped to the Tug project (set project: ${declared} in tug.yml, or pass --project)`,
             );
-          const compose = await normalizeCompose(o.file, secretNames, { project });
+          const compose = await normalizeCompose(o.file, secretNames, {
+            project,
+            composeCli: o.composeCli,
+          });
           for (const warning of bindMountWarnings(compose)) console.error(warning);
           const version = o.version || `git-${composeHash(compose)}`;
           let response: DeployResponse;

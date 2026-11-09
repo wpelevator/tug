@@ -11,11 +11,13 @@ import multer from 'multer';
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
+import { DockerEngine } from '../docker-api.ts';
+import type { DockerApi } from '../docker-api.ts';
 import { pipeline } from 'node:stream/promises';
 import { packageVersion } from '../images/image.ts';
 import {
   saveImageArchive,
-  inspectImage,
+  inspectEngineImage,
   validateImageArchive,
   hashArchive,
 } from '../images/artifacts.ts';
@@ -587,13 +589,15 @@ export interface ControlImageOperations {
   resolve: typeof resolveImage;
   build: typeof buildImage;
   save: typeof saveImageArchive;
-  inspect: typeof inspectImage;
+  inspect: typeof inspectEngineImage;
   validate: typeof validateImageArchive;
   run: typeof runCommand;
 }
 export async function createApp(
   options: {
     images?: Partial<ControlImageOperations>;
+    /** The Docker Engine control manages images and reports diagnostics through; defaults to the local socket. */
+    docker?: DockerApi;
     openDatabase?: typeof openDb;
     /** Minimum time between event prunes triggered by agent reports; default one hour. */ eventPruneIntervalMs?: number;
     /** Override the live open/agent startup timeout in milliseconds. */ liveStartTimeoutMs?: number;
@@ -609,11 +613,12 @@ export async function createApp(
     resolve: resolveImage,
     build: buildImage,
     save: saveImageArchive,
-    inspect: inspectImage,
+    inspect: inspectEngineImage,
     validate: validateImageArchive,
     run: runCommand,
     ...options.images,
   };
+  const docker: DockerApi = options.docker ?? new DockerEngine();
   const DATA_DIR = process.env.TUG_DATA_DIR || './data';
   const MAX_IMAGE_BYTES = Number(process.env.TUG_MAX_IMAGE_BYTES || 5 * 1024 ** 3);
   if (!Number.isSafeInteger(MAX_IMAGE_BYTES) || MAX_IMAGE_BYTES < 1)
@@ -2262,7 +2267,7 @@ export async function createApp(
         path.join(DATA_DIR, row.artifact_path || path.join('images', `${row.id}.tar.gz`)),
         { force: true },
       );
-      await images.run('docker', ['image', 'rm', row.image_ref]).catch(() => {});
+      await docker.removeImage(row.image_ref).catch(() => {});
       db.run('DELETE FROM builds WHERE id=?', row.id);
     }
     const remaining = db.all<{ id: string }>('SELECT id FROM builds');
@@ -2371,7 +2376,7 @@ export async function createApp(
         "SELECT 1 FROM builds WHERE image_ref=? AND state='complete'",
         build.image_ref,
       );
-      if (!shared) await images.run('docker', ['image', 'rm', build.image_ref]).catch(() => {});
+      if (!shared) await docker.removeImage(build.image_ref).catch(() => {});
     }
     return { pruned, freedBytes: pruned.reduce((sum, build) => sum + build.sizeBytes, 0) };
   }
@@ -2684,7 +2689,7 @@ export async function createApp(
               throw httpError(400, `${service}: local image metadata/checksum mismatch`);
             importedClientRef = item.imageRef;
             await images.run('docker', ['load', '-i', file.path]);
-            const imported = await images.inspect(item.imageRef);
+            const imported = await images.inspect(item.imageRef, docker);
             if (imported.platform !== info.platform)
               throw httpError(400, 'imported image identity mismatch');
             await images.run('docker', ['tag', item.imageRef, imageRef]);
@@ -2700,7 +2705,7 @@ export async function createApp(
           // download nothing and the running container is kept. The stored `image_id` is the archive's config
           // digest, which is not what a containerd-store daemon reports as an image ID, so compare what the
           // daemon says about the earlier tag (it stays while any retained state references it).
-          const built = await images.inspect(imageRef);
+          const built = await images.inspect(imageRef, docker);
           let prior: BuildRow | undefined;
           for (const candidate of db.all<BuildRow>(
             "SELECT * FROM builds WHERE project_id=? AND service=? AND platform=? AND state='complete' AND artifact_path IS NOT NULL ORDER BY created_at DESC LIMIT 20",
@@ -2710,7 +2715,9 @@ export async function createApp(
           )) {
             if (!(await fs.stat(path.join(DATA_DIR, candidate.artifact_path!)).catch(() => null)))
               continue;
-            const earlier = await images.inspect(candidate.image_ref).catch(() => undefined);
+            const earlier = await images
+              .inspect(candidate.image_ref, docker)
+              .catch(() => undefined);
             if (earlier?.imageId === built.imageId && earlier.platform === built.platform) {
               prior = candidate;
               break;
@@ -2727,7 +2734,7 @@ export async function createApp(
               sizeBytes: prior.size_bytes,
             };
             db.run('DELETE FROM builds WHERE id=?', buildId);
-            await images.run('docker', ['image', 'rm', imageRef]).catch(() => {});
+            await docker.removeImage(imageRef).catch(() => {});
             continue;
           }
           info = await images.save(imageRef, temporary);
@@ -2743,8 +2750,7 @@ export async function createApp(
             updated_at: now(),
           });
         } finally {
-          if (importedClientRef)
-            await images.run('docker', ['image', 'rm', importedClientRef]).catch(() => {});
+          if (importedClientRef) await docker.removeImage(importedClientRef).catch(() => {});
           await fs.rm(temporary, { force: true });
         }
       }
@@ -3479,11 +3485,7 @@ export async function createApp(
       };
     });
     await check('master_key', async () => ({ configured: Boolean(masterKey) }));
-    await check('docker', async () => ({
-      output: (
-        await runCommand('docker', ['version', '--format', '{{.Server.Version}}'])
-      ).out.trim(),
-    }));
+    await check('docker', async () => ({ output: (await docker.version()).Version }));
     const ingressNodes = db.all<Pick<NodeRow, 'name' | 'ingress_status_json'>>(
       'SELECT name,ingress_status_json FROM nodes WHERE ingress=1',
     );

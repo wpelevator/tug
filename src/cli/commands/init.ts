@@ -5,17 +5,18 @@ import type { Command } from 'commander';
 import { writeInitConfig } from '../config.ts';
 import type { ResolvedCliConfig } from '../config.ts';
 import { decodeCredential, fingerprintPem, writeFileDurable } from '../../pki.ts';
-import { loadCfg, readStdin } from './context.ts';
+import { loadCfg, print, readStdin } from './context.ts';
 
 /**
  * Store a credential document in a 0600 file under the user's config directory and point the git-ignored overlay
- * next to the tracked config at it, creating the tracked config when it is missing. Prints what it wrote.
+ * next to the tracked config at it, creating the tracked config when it is missing. Prints what it wrote unless
+ * `quiet`, and returns the files either way.
  */
 export async function importCredential(
   cfg: ResolvedCliConfig,
   text: string,
-  connection: { controlUrl?: string; project?: string },
-): Promise<void> {
+  connection: { controlUrl?: string; project?: string; quiet?: boolean },
+): Promise<{ files: string[]; credentialFile: string }> {
   const credential = decodeCredential(text);
   // Fingerprint a non-PEM `ca` once, with the credential file in the message, instead of leaking bare openssl text.
   const caFingerprint = ((ca: string) => {
@@ -61,9 +62,16 @@ export async function importCredential(
     `${new URL(credential.url).host.replace(/[^A-Za-z0-9.-]/g, '_')}.${ca}.json`,
   );
   await writeFileDurable(source, `${JSON.stringify(credential, null, 2)}\n`, 0o600);
-  for (const file of await writeInitConfig(cfg, source, connection, credential.url))
-    console.log(`wrote ${file}`);
+  const files = await writeInitConfig(
+    cfg,
+    source,
+    { controlUrl: connection.controlUrl, project: connection.project },
+    credential.url,
+  );
+  if (connection.quiet) return { files, credentialFile: source };
+  for (const file of files) console.log(`wrote ${file}`);
   console.log(`imported credential to ${source}`);
+  return { files, credentialFile: source };
 }
 
 export function registerInit(program: Command): void {
@@ -72,7 +80,7 @@ export function registerInit(program: Command): void {
     .description(
       'create the config file if missing and import a credential (a file, or - for stdin) into a 0600 user-config file that the git-ignored .local overlay points at',
     )
-    .action(async (credentialFile: string | undefined, _o: unknown, command: Command) => {
+    .action(async (credentialFile: string | undefined, o: { json?: boolean }, command: Command) => {
       const cfg = await loadCfg();
       const { controlUrl, project } = command.optsWithGlobals<{
         controlUrl?: string;
@@ -83,6 +91,7 @@ export function registerInit(program: Command): void {
       else if (credentialFile) text = await fs.readFile(credentialFile, 'utf8');
       else if (cfg.credential) text = JSON.stringify(cfg.credential);
       if (!text) throw new Error('tug init needs a credential file (or - for stdin)');
-      await importCredential(cfg, text, { controlUrl, project });
+      const result = await importCredential(cfg, text, { controlUrl, project, quiet: o.json });
+      if (o.json) print({ ok: true, ...result });
     });
 }

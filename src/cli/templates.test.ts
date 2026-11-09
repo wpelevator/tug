@@ -73,8 +73,8 @@ test('control setup uses config controlUrl, with overlay, environment and flag o
       'control setup should report the resolved installation address',
     );
     assert.ok(
-      (await fs.readFile(ssh.log, 'utf8')).includes(`TUG_CONTROL_URL: ${JSON.stringify(expected)}`),
-      'the rendered Compose environment should use the resolved installation address',
+      (await fs.readFile(ssh.log, 'utf8')).includes(`-e TUG_CONTROL_URL='${expected}'`),
+      'the control container environment should use the resolved installation address',
     );
     return result;
   };
@@ -179,14 +179,14 @@ test('install commands render the shipped templates (src in dev, dist in the ima
       !script.includes('TUG_REGISTRY'),
       'control installation must not configure a build registry',
     );
-    assert.ok(script.includes('9099'), 'control-compose.yml rendered with the port');
+    assert.ok(script.includes('9099'), 'control-install.sh rendered with the published port');
     assert.doesNotMatch(
       script,
       /TUG_MESH/,
       'control installation should not configure a WireGuard mesh',
     );
     assert.ok(
-      script.includes(`image: ${JSON.stringify(defaultImage())}`),
+      script.includes(` '${defaultImage()}' control `),
       'control setup defaults to the published image for the CLI version',
     );
     assert.ok(
@@ -194,19 +194,34 @@ test('install commands render the shipped templates (src in dev, dist in the ima
       'control setup does not build an image unless --build-local-image is set',
     );
     assert.doesNotMatch(script, unrenderedVariable, 'no unrendered template variables');
+    assert.doesNotMatch(
+      script,
+      /docker compose/,
+      'control is started with docker run, so the host needs no Compose plugin',
+    );
     assert.match(
       script,
-      /- tug-control:\/data/,
+      /-p 9099:8443 /,
+      'the control container publishes the requested host port on its mTLS port',
+    );
+    assert.match(
+      script,
+      /-e TUG_CONTROL_URL='https:\/\/control.test:9099' /,
+      'the advertised control address is passed as a quoted environment value',
+    );
+    assert.match(
+      script,
+      /-v tug-control:\/data /,
       'control keeps its data in the tug-control named volume, not a host directory',
     );
     assert.match(
       script,
       /docker volume create tug-control/,
-      'the installer creates the volume the Compose file declares external',
+      'the installer creates the volume the container mounts',
     );
     assert.ok(
       script.indexOf('tug control migrate') !== -1 &&
-        script.indexOf('tug control migrate') < script.indexOf('docker compose -f'),
+        script.indexOf('tug control migrate') < script.indexOf('docker run -d'),
       'control setup checks for unmigrated data before it writes or starts anything',
     );
 
@@ -222,7 +237,7 @@ test('install commands render the shipped templates (src in dev, dist in the ima
     );
     script = await fs.readFile(ssh.log, 'utf8');
     assert.ok(
-      script.includes('TUG_CONTROL_URL: "https://bare.test:8443"'),
+      script.includes("-e TUG_CONTROL_URL='https://bare.test:8443'"),
       'without a configured control URL the SSH target host and the default port are used',
     );
     assert.doesNotMatch(
@@ -234,10 +249,10 @@ test('install commands render the shipped templates (src in dev, dist in the ima
       script.indexOf('download.docker.com') < script.indexOf('preflight: docker.version'),
       'opt-in Docker bootstrap should run before preflight',
     );
-    assert.match(
+    assert.doesNotMatch(
       script,
       /docker-compose-plugin/,
-      'bare-host bootstrap should install the Docker Compose plugin',
+      'bare-host bootstrap installs the Docker Engine only; control runs with docker run',
     );
 
     await fs.rm(ssh.log);

@@ -3,10 +3,13 @@
 import crypto from 'node:crypto';
 import { bindPorts, crossNodeHosts } from './compose/compose.ts';
 import { sentinelNames, substituteSentinels } from './compose/normalize.ts';
+import { composeDurationMs, sizeBytes } from './compose/units.ts';
 import type { CreateContainerBody } from './docker-api.ts';
 import type { VolumeInspect } from './docker-api.ts';
 import type { ComposeService, DesiredState, ServiceEndpoint } from './protocol.ts';
 import type { PortBind } from './compose/compose.ts';
+
+export { composeDurationMs, sizeBytes };
 
 export const LABEL_PROJECT = 'tug.project';
 /** Labels helper containers (backup jobs, one-off runs) so a restarted agent can clean up after them. */
@@ -71,47 +74,10 @@ export interface ContainerSpecOptions {
 }
 
 const SECOND_NS = 1_000_000_000;
-const UNITS: Record<string, number> = {
-  ns: 1e-6,
-  us: 1e-3,
-  µs: 1e-3,
-  ms: 1,
-  s: 1000,
-  m: 60000,
-  h: 3600000,
-};
-
-/** Compose durations (`30s`, `1m30s`, `500ms`) or a number of seconds, in milliseconds. */
-export function composeDurationMs(value: unknown): number | undefined {
-  if (typeof value === 'number') return value * 1000;
-  if (typeof value !== 'string' || !value) return undefined;
-  let total = 0;
-  let rest = value;
-  while (rest) {
-    const m = rest.match(/^(\d+(?:\.\d+)?)(ns|us|µs|ms|s|m|h)/);
-    if (!m) return undefined;
-    total += Number(m[1]) * UNITS[m[2]];
-    rest = rest.slice(m[0].length);
-  }
-  return total;
-}
 const toNs = (value: unknown): number | undefined => {
   const ms = composeDurationMs(value);
   return ms === undefined ? undefined : Math.round(ms * 1e6);
 };
-
-/** Compose sizes: bytes as a number, or `64m` / `1g` style strings. */
-export function sizeBytes(value: unknown): number | undefined {
-  if (typeof value === 'number') return value;
-  if (typeof value !== 'string') return undefined;
-  const m = value
-    .trim()
-    .toLowerCase()
-    .match(/^(\d+(?:\.\d+)?)\s*([kmgt]?)b?$/);
-  if (!m) return undefined;
-  const power = { '': 0, k: 1, m: 2, g: 3, t: 4 }[m[2] as '' | 'k' | 'm' | 'g' | 't'];
-  return Math.round(Number(m[1]) * 1024 ** power);
-}
 
 const asList = (value: unknown): string[] =>
   Array.isArray(value) ? value.map(String) : value == null ? [] : [String(value)];

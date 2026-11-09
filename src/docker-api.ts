@@ -174,6 +174,7 @@ export interface DockerApi {
   /** Pulls `ref`; `auth` becomes `X-Registry-Auth`. */
   pullImage(ref: string, auth?: Record<string, string>): Promise<void>;
   loadImage(archive: Readable | Buffer): Promise<void>;
+  /** Removes (untags) `ref` without force: an image a container uses, or one that does not exist, is an error. */
   removeImage(ref: string): Promise<void>;
 }
 

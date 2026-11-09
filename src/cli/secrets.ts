@@ -46,7 +46,7 @@ export async function findMissingSecrets(
 ): Promise<string[]> {
   const known = new Set(secretNames);
   const dotEnv = await dotEnvNames(path.dirname(file));
-  // An unreadable file is reported by `docker compose config` with its own message.
+  // An unreadable file is reported by the Compose reader with its own message.
   const source = await fs.readFile(file, 'utf8').catch(() => '');
   return requiredVariables(source).filter(
     (name) => !known.has(name) && env[name] === undefined && !dotEnv.has(name),

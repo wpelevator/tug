@@ -49,7 +49,6 @@ export function registerObserve(program: Command): void {
       for (const [name, cmd, args] of [
         ['node', 'node', ['--version']],
         ['docker', 'docker', ['version', '--format', '{{.Server.Version}}']],
-        ['docker_compose', 'docker', ['compose', 'version']],
       ] as [string, string, string[]][]) {
         try {
           local.push({ name, ok: true, output: (await runCapture(cmd, args)).trim() });

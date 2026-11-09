@@ -15,17 +15,15 @@ retry() {
   done
 }
 # end helpers
-# Nodes need only the Docker Engine. The control host also runs its own install with Docker Compose,
-# which the caller asks for with TUG_INSTALL_COMPOSE=1.
-want_compose="${TUG_INSTALL_COMPOSE:-0}"
-if docker version >/dev/null 2>&1 && { [ "$want_compose" != 1 ] || docker compose version >/dev/null 2>&1; }; then
+# Neither nodes nor the control host need more than the Docker Engine: both run their containers with plain `docker run`.
+if docker version >/dev/null 2>&1; then
   echo 'Docker Engine is already available.' >&2
   exit 0
 fi
 os_release="${TUG_OS_RELEASE:-/etc/os-release}"
 [ -r "$os_release" ] || { echo 'Docker bootstrap supports Debian, Ubuntu, Fedora and RHEL-compatible distributions with systemd.' >&2; exit 20; }
 . "$os_release"
-unsupported() { echo "Unsupported Docker bootstrap $1; install Docker Engine and Compose manually." >&2; exit 20; }
+unsupported() { echo "Unsupported Docker bootstrap $1; install Docker Engine manually." >&2; exit 20; }
 major="${VERSION_ID:-}"; major="${major%%.*}"
 case "$ID" in
   ubuntu|debian)
@@ -49,7 +47,7 @@ esac
 if [ "${TUG_BOOTSTRAP_DETECT:-}" = 1 ]; then echo "$family $repo_os"; exit 0; fi
 [ "$(id -u)" = 0 ] || { echo 'Docker installation requires root; use a root SSH target.' >&2; exit 20; }
 [ -d /run/systemd/system ] || { echo 'Docker bootstrap requires systemd.' >&2; exit 20; }
-# Preserve existing Docker installations. Install only a missing Compose plugin.
+# Preserve existing Docker installations.
 if command -v docker >/dev/null 2>&1; then
   docker version >/dev/null 2>&1 || { echo 'Docker exists but is not accessible; repair/start it before installing Tug.' >&2; exit 20; }
   engine_present=true
@@ -89,12 +87,7 @@ Signed-By: /etc/apt/keyrings/docker.asc
 REPO
   aptget update >&2
   stage 'installing Docker Engine'
-  if [ "$engine_present" = true ]; then
-    [ "$want_compose" != 1 ] || aptget install -y --no-upgrade --no-remove docker-compose-plugin >&2
-  else
-    aptget install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin >&2
-    [ "$want_compose" != 1 ] || aptget install -y docker-compose-plugin >&2
-  fi
+  [ "$engine_present" = true ] || aptget install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin >&2
 else
   stage 'checking for conflicting packages'
   if [ "$engine_present" = false ]; then
@@ -107,15 +100,9 @@ else
   command -v curl >/dev/null 2>&1 || retry dnf install -y curl >&2
   fetch "https://download.docker.com/linux/$repo_os/docker-ce.repo" /etc/yum.repos.d/docker-ce.repo
   stage 'installing Docker Engine'
-  if [ "$engine_present" = true ]; then
-    [ "$want_compose" != 1 ] || retry dnf install -y docker-compose-plugin >&2
-  else
-    retry dnf install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin >&2
-    [ "$want_compose" != 1 ] || retry dnf install -y docker-compose-plugin >&2
-  fi
+  [ "$engine_present" = true ] || retry dnf install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin >&2
 fi
 stage 'starting Docker'
 [ "$engine_present" = true ] || systemctl enable --now docker >&2
 stage 'verifying Docker'
 docker version >/dev/null
-[ "$want_compose" != 1 ] || docker compose version >/dev/null

@@ -1,11 +1,13 @@
-// Operator-side Compose normalization. `docker compose config` does the interpolation, `extends`,
-// `env_file` merging and short-syntax expansion, so control and agents only ever see canonical JSON.
-// The CLI reads Compose's YAML rendering: its `--format json` drops every service-level extension
-// (`x-tug`), while the YAML rendering keeps them.
+// Operator-side Compose normalization, so control and agents only ever see the canonical definition. By default the
+// native reader (load.ts) does it without Docker; `composeCli` (`tug deploy --compose-cli`) has `docker compose
+// config` do the interpolation, `extends`, `env_file` merging and short-syntax expansion instead, for a file that
+// uses something the native reader rejects. The CLI path reads Compose's YAML rendering: its `--format json` drops
+// every service-level extension (`x-tug`), while the YAML rendering keeps them.
 // Control secrets are not resolved on the operator's lifecycle: each one is interpolated as a sentinel
 // that the agent replaces with the node's released value when it creates the container.
 import * as yaml from 'js-yaml';
 import { run } from '../images/build.ts';
+import { loadCompose } from './load.ts';
 import type { RunResult } from '../images/build.ts';
 import type { ComposeFile } from '../protocol.ts';
 
@@ -67,16 +69,19 @@ export function unescapeDollars<T>(value: T): T {
 }
 
 /**
- * Renders `file` with Compose and returns the canonical definition. Every name in `secretNames` is set to
- * its sentinel in the environment, so it wins over a same-named local variable.
+ * Reads `file` and returns the canonical definition. Every name in `secretNames` is set to its sentinel in the
+ * environment, so it wins over a same-named local variable. `composeCli` (or `TUG_COMPOSE_CLI=1`) renders it with
+ * `docker compose config` instead of the native reader.
  */
 export async function normalizeCompose(
   file: string,
   secretNames: readonly string[],
-  options: { project?: string; runner?: ComposeRunner } = {},
+  options: { project?: string; runner?: ComposeRunner; composeCli?: boolean } = {},
 ): Promise<ComposeFile> {
   const env: NodeJS.ProcessEnv = { ...process.env };
   for (const name of secretNames) env[name] = secretSentinel(name);
+  if (!(options.composeCli ?? env.TUG_COMPOSE_CLI === '1'))
+    return loadCompose(file, { project: options.project, env });
   const runner = options.runner ?? ((cmd, args, opts) => run(cmd, args, opts));
   let result: RunResult;
   try {

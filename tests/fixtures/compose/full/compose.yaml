@@ -1,0 +1,68 @@
+x-common: &common
+  restart: unless-stopped
+services:
+  web:
+    <<: *common
+    image: nginx:${TAG}
+    build: ./web
+    command: sh -c "echo $$HOME ${TAG:-9} 'a b'"
+    entrypoint: /entry.sh
+    env_file: app.env
+    environment:
+      - DEBUG
+      - X=1
+      - EMPTY=
+      - TAG
+    labels:
+      - a=b
+      - c
+    ports:
+      - '8080:80'
+      - '127.0.0.1:8081:81/udp'
+      - '9000-9001:9000-9001'
+      - '3000'
+      - '[::1]:5000:50'
+      - '0.0.0.0::6000'
+      - target: 7000
+        published: 7001
+    expose: ['1234', 99]
+    volumes:
+      - db-data:/var/lib/data:ro
+      - ./rel:/rel
+      - /abs:/abs:rw
+      - /anon
+      - type: tmpfs
+        target: /t
+    depends_on: [cache]
+    healthcheck:
+      test: curl -f localhost
+      interval: 1m30s
+    extra_hosts:
+      - 'a:1.2.3.4'
+      - 'b=5.6.7.8'
+    tmpfs: /run
+    ulimits:
+      nofile: 100
+      nproc: { soft: 1, hard: 2 }
+    cpus: 0.5
+    init: true
+    user: '1000'
+    x-tug:
+      placement: { nodes: [a] }
+  cache:
+    image: redis
+  db:
+    image: mariadb
+    profiles: [debug]
+    environment:
+      P: ${DB_PASS}
+      NUM: 5
+      BOOL: true
+      NUL:
+volumes:
+  db-data:
+  ext:
+    external: true
+  other:
+    driver: local
+    labels: [x=y]

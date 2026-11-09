@@ -112,14 +112,14 @@ test('the local image tag names the image ID, whatever the requested tag', () =>
 });
 
 test("the Docker bootstrap command hands the script this run's stage marker", async () => {
-  const command = bootstrapCommand('echo hi', true);
+  const command = bootstrapCommand('echo hi');
   assert.ok(
-    command.startsWith(`TUG_MARKER='${STAGE_MARKER}' TUG_INSTALL_COMPOSE=1 sh -eu -c `),
-    'the marker and compose switch should be set for the script, quoted for the remote shell',
+    command.startsWith(`TUG_MARKER='${STAGE_MARKER}' sh -eu -c `),
+    'the marker should be set for the script, quoted for the remote shell',
   );
   assert.ok(
-    !bootstrapCommand('echo hi', false).includes('TUG_INSTALL_COMPOSE'),
-    'a node install does not ask for Compose',
+    !/compose/i.test(command) && !/compose-plugin/.test(await dockerBootstrap()),
+    'no install asks for the Compose plugin, on a node or on the control host',
   );
   assert.match(
     await dockerBootstrap(),

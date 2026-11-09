@@ -676,7 +676,7 @@ test('Docker bootstrap selects the package family and Docker repository for each
       assert.equal(result.code, 20, `${release.split('\n')[0]} should be refused with exit 20`);
       assert.match(
         result.err,
-        /Unsupported Docker bootstrap .*install Docker Engine and Compose manually/,
+        /Unsupported Docker bootstrap .*install Docker Engine manually/,
         'refusal should tell the operator to install Docker manually',
       );
     }
@@ -694,7 +694,7 @@ test('Docker bootstrap preserves a working installation without package-manager 
     assert.match(
       result.stderr,
       /already available/,
-      'working Docker Engine and Compose should skip all installation steps',
+      'a working Docker Engine should skip all installation steps',
     );
     await exec('/bin/sh', ['-n', script]);
   } finally {

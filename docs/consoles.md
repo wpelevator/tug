@@ -22,7 +22,7 @@ Tug already has the right split. The controller is a small single writer and the
 - No machine-readable description of `/api/v1`. The types are in `src/protocol.ts`; `x-tug.schema.json` covers Compose only. The CLI has `--json` on some commands, not a global flag.
 - `GET /api/v1/events` takes `project` and `limit` (at most 500, newest first), with no cursor and no stream. `status` returns the 20 latest deployments and computes `stale` when called. Webhooks (M8) and `/metrics` (M9) are not built.
 - Dry-run exists for `restore` (without `confirm` it returns the plan) and `image prune --dry-run`. A deploy has no plan; `tug lint` is offline.
-- `deploy` needs a normalized Compose file, which the CLI produces with `docker compose config`, so a server-side deployer needs the Compose binary (no daemon) or the CLI.
+- `deploy` needs a normalized Compose file, which the CLI produces with its own reader (`src/compose/load.ts`, no Docker needed), so a server-side deployer needs the CLI or that module.
 
 ## Controller changes
 
@@ -33,7 +33,7 @@ All are additive minors and keep [the frozen contracts](releases.md#what-10-free
 3. **Idempotency keys** on mutating routes, so an agent that times out and retries does not double-apply.
 4. **Bounded, cheap reads**: pagination and ETag on `status`, `deployments` and `events`.
 5. **Agent-reported stats and `/metrics`** (M9). "Show CPU and memory" is the first dashboard anyone asks for and nothing measures it today.
-6. **Optional server-side Compose normalization**, only if bundling the Compose binary into the console image proves painful. It cuts against the current design (normalize on the operator machine, allowlist on control), so it is not first.
+6. **Optional server-side Compose normalization**, only if shipping the CLI inside the console image proves painful. It cuts against the current design (normalize on the operator machine, allowlist on control), so it is not first.
 
 Not the controller's job: users, SSO, teams, dashboards and their versions, chat history, templates, domain and git integration. The console keeps its own SQLite and its own backups. The controller gets generic project `labels` only if a concrete need appears.
 

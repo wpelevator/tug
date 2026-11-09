@@ -6,7 +6,7 @@ A typical VPS is a durable, always-on computer with enough CPU, memory and disk 
 
 ## Before you start
 
-You need a VPS with a public IP and SSH access as root, Node.js 22.18 or newer and Docker Compose v2 on your computer. The VPS must run Debian, Ubuntu, Fedora or a RHEL-compatible distribution if you want Tug to install Docker; otherwise install Docker Engine and the Compose plugin there first. The VPS needs outbound access to pull images. Allow your computer and the agent to reach control on TCP 8443, and allow your computer to reach TCP 8080 for this temporary example. Check your provider firewall as well as any host firewall.
+You need a VPS with a public IP and SSH access as root, Node.js 22.18 or newer on your computer (Docker is needed there only for `--build-local`). The VPS must run Debian, Ubuntu, Fedora or a RHEL-compatible distribution if you want Tug to install Docker; otherwise install Docker Engine there first. The VPS needs outbound access to pull images. Allow your computer and the agent to reach control on TCP 8443, and allow your computer to reach TCP 8080 for this temporary example. Check your provider firewall as well as any host firewall.
 
 Replace `203.0.113.5` below with your VPS address. These commands assume an interactive terminal, where Tug explains and confirms the installation choices. For automation see [Setup in the CLI reference](cli.md#setup).
 

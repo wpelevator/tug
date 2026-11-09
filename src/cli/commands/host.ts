@@ -17,14 +17,11 @@ export async function preflightRemote(
     controlUrl,
     ports = [],
     minDiskMb = 1024,
-    compose = false,
     progress,
   }: {
     controlUrl?: string;
     ports?: number[];
     minDiskMb?: number;
-    /** Requires the Compose plugin; only the control host runs Compose, nodes need the Docker Engine alone. */
-    compose?: boolean;
     progress?: StepProgress;
   } = {},
 ): Promise<void> {
@@ -34,15 +31,6 @@ export async function preflightRemote(
       'docker version >/dev/null',
       'Install Docker Engine and ensure the SSH user can access it.',
     ],
-    ...(compose
-      ? ([
-          [
-            'docker.compose.version',
-            'docker compose version >/dev/null',
-            'Install Docker Compose v2.',
-          ],
-        ] as [string, string, string][])
-      : []),
     [
       'disk.space',
       `[ "$(df -Pm "$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || echo /var/lib)" | tail -1 | awk '{print $4}')" -ge ${Number(minDiskMb)} ]`,
@@ -123,25 +111,23 @@ export async function dockerBootstrap(): Promise<string> {
 }
 
 /** The remote command that runs the Docker bootstrap; `TUG_MARKER` lets the script name its stage in the progress line. */
-export function bootstrapCommand(script: string, compose: boolean): string {
-  return `TUG_MARKER=${sh(STAGE_MARKER)} ${compose ? 'TUG_INSTALL_COMPOSE=1 ' : ''}sh -eu -c ${sh(script)}`;
+export function bootstrapCommand(script: string): string {
+  return `TUG_MARKER=${sh(STAGE_MARKER)} sh -eu -c ${sh(script)}`;
 }
 
-/** Installs Docker over SSH; `compose` also installs the Compose plugin, which only the control host needs. */
-export async function bootstrapDocker(
-  target: string,
-  compose = false,
-  progress?: StepProgress,
-): Promise<void> {
-  await runStep('ssh', ['--', target, bootstrapCommand(await dockerBootstrap(), compose)], {
+/** Installs Docker Engine over SSH. */
+export async function bootstrapDocker(target: string, progress?: StepProgress): Promise<void> {
+  await runStep('ssh', ['--', target, bootstrapCommand(await dockerBootstrap())], {
     progress,
   });
 }
 
-/** Whether the host already has the Docker Engine (and the Compose plugin when `compose`). */
-export function hostHasDocker(target: string, compose = false): boolean {
-  const check = `docker version >/dev/null 2>&1${compose ? ' && docker compose version >/dev/null 2>&1' : ''}`;
-  return spawnSync('ssh', ['--', target, check], { stdio: 'ignore' }).status === 0;
+/** Whether the host already has a working Docker Engine. */
+export function hostHasDocker(target: string): boolean {
+  return (
+    spawnSync('ssh', ['--', target, 'docker version >/dev/null 2>&1'], { stdio: 'ignore' })
+      .status === 0
+  );
 }
 
 /** The host's short hostname, or undefined when it cannot be read. */
