@@ -16,6 +16,7 @@ import {
   loadCfg,
   print,
   readEnvValues,
+  readStdin,
   request,
   templatesDir,
   upload,
@@ -31,6 +32,8 @@ import {
   controlMigrateScript,
 } from '../migrate.ts';
 
+const PREVIEW_NOTE =
+  'This only checked the backup and changed nothing; add --confirm to restore it.';
 /** Where `control restore --from-destination` reads the control password: this variable, else the stdin line after the credential values. */
 const CONTROL_PASSWORD_VARIABLE = 'TUG_CONTROL_BACKUP_PASSWORD';
 
@@ -256,7 +259,7 @@ export function registerControl(program: Command): void {
     )
     .option(
       '--no-images',
-      'with --local or -o, leave the retained build archives out (deploy again to rebuild them)',
+      'with --local or -o, leave the retained build archives out (deploy again to rebuild them); an error without them, because only an archive has build images',
     )
     .option(
       '--download',
@@ -270,6 +273,7 @@ export function registerControl(program: Command): void {
       async (o: { images: boolean; local?: boolean; download?: boolean; output?: string }) => {
         const archive = Boolean(o.local || o.download || o.output);
         if (!archive) {
+          // Only an archive has build images, so --no-images must not quietly turn this into one.
           if (!o.images) throw new Error('--no-images applies to an archive; add --local or -o');
           return withProgress('Storing control-plane backup in the backup destination', async () =>
             print(await request('POST', '/api/v1/control/backups/run', { toDestination: true })),
@@ -335,11 +339,11 @@ export function registerControl(program: Command): void {
   control
     .command('restore [artifactRef]')
     .description(
-      'restore a control-plane backup, from an archive path on the control-plane host or with --from-destination from the shared backup destination; requires a control restart',
+      'restore a control-plane backup, from an archive path on the control-plane host, an archive saved on this machine (--from-file) or the shared backup destination (--from-destination); requires a control restart. Without --confirm it only checks the backup (archive, database integrity, CA, secrets) and prints what it holds, changing nothing, like `tug restore run`',
     )
     .option(
       '--from-destination <url>',
-      'restore the newest control backup stored in this backup destination, such as s3:https://s3.example.com/bucket/tug-backups; the credential variables come from --env and the control password (from `tug backup password --control` on the old control) from TUG_CONTROL_BACKUP_PASSWORD, else the stdin line after the credential values',
+      'restore the newest control backup stored in this backup destination, such as s3:https://s3.example.com/bucket/tug-backups; the credential variables come from --env and the control password (from `tug backup password --control` on the old control) from --password-stdin or TUG_CONTROL_BACKUP_PASSWORD',
     )
     .option(
       '--env <name>',
@@ -356,10 +360,10 @@ export function registerControl(program: Command): void {
       'with --from-destination, restore this snapshot id from `tug control backup list` instead of the newest one',
     )
     .option(
-      '--verify',
-      'fetch and check the backup (archive, database integrity, CA, secrets) and print what it holds, without changing control and without --confirm',
+      '--password-stdin',
+      'read the control password from the first line of stdin, as `docker login --password-stdin` does; the destination credentials must then be in the environment (--env names them), so stdin has one meaning',
     )
-    .option('--confirm')
+    .option('--confirm', 'apply the restore; without it the backup is only checked')
     .action(
       async (
         artifactRef: string | undefined,
@@ -368,14 +372,12 @@ export function registerControl(program: Command): void {
           fromDestination?: string;
           env: string[];
           snapshot?: string;
-          verify?: boolean;
+          passwordStdin?: boolean;
           fromFile?: string;
         },
       ) => {
-        if (!o.confirm && !o.verify)
-          throw new Error(
-            'control restore requires --confirm (or --verify to only check the backup)',
-          );
+        // Like `tug restore run`, a restore that is not confirmed is a preview: it checks and changes nothing.
+        const verify = !o.confirm;
         if (o.fromFile) {
           if (artifactRef || o.fromDestination || o.snapshot || o.env.length)
             throw new Error(
@@ -384,14 +386,15 @@ export function registerControl(program: Command): void {
           if (!(await fsp.stat(o.fromFile).catch(() => null)))
             throw new Error(`${o.fromFile} does not exist`);
           return withProgress(
-            o.verify ? 'Verifying control-plane backup' : 'Restoring control-plane backup',
-            async () =>
-              print(
-                await upload(
-                  `/api/v1/control/restore?${o.verify ? 'verify=1' : 'confirm=1'}`,
-                  o.fromFile!,
-                ),
-              ),
+            verify ? 'Verifying control-plane backup' : 'Restoring control-plane backup',
+            async () => {
+              const result = await upload(
+                `/api/v1/control/restore?${verify ? 'verify=1' : 'confirm=1'}`,
+                o.fromFile!,
+              );
+              if (verify) console.error(PREVIEW_NOTE);
+              print(result);
+            },
           );
         }
         if (o.snapshot && !o.fromDestination)
@@ -399,10 +402,26 @@ export function registerControl(program: Command): void {
         if (Boolean(artifactRef) === Boolean(o.fromDestination))
           throw new Error('name an archive path, or use --from-file or --from-destination <url>');
         if (artifactRef && o.env.length) throw new Error('--env goes with --from-destination');
-        // The control password comes last: from the environment, else the stdin line after the credential values; never an argument.
-        const values = o.fromDestination
-          ? await readEnvValues([...o.env, CONTROL_PASSWORD_VARIABLE])
-          : undefined;
+        if (o.passwordStdin && !o.fromDestination)
+          throw new Error('--password-stdin goes with --from-destination');
+        // The password is never an argument: stdin with --password-stdin, else the environment. Without the flag a
+        // missing value is still read from stdin after the credential values, as `backup destination set` reads them.
+        let values: Record<string, string> | undefined;
+        if (o.fromDestination && o.passwordStdin) {
+          const missing = o.env.filter((name) => process.env[name] === undefined);
+          if (missing.length)
+            throw new Error(
+              `with --password-stdin, set ${missing.join(', ')} in the environment: stdin carries only the password`,
+            );
+          const password = (await readStdin()).split(/\r?\n/).find((line) => line.length > 0);
+          if (!password) throw new Error('expected the control password on stdin');
+          values = {
+            ...Object.fromEntries(o.env.map((name) => [name, process.env[name]!])),
+            [CONTROL_PASSWORD_VARIABLE]: password,
+          };
+        } else if (o.fromDestination) {
+          values = await readEnvValues([...o.env, CONTROL_PASSWORD_VARIABLE]);
+        }
         const fromDestination =
           o.fromDestination && values
             ? {
@@ -413,16 +432,17 @@ export function registerControl(program: Command): void {
               }
             : undefined;
         return withProgress(
-          o.verify ? 'Verifying control-plane backup' : 'Restoring control-plane backup',
-          async () =>
-            print(
-              await request('POST', '/api/v1/control/restore', {
-                artifactRef,
-                fromDestination,
-                confirm: Boolean(o.confirm),
-                verify: Boolean(o.verify),
-              }),
-            ),
+          verify ? 'Verifying control-plane backup' : 'Restoring control-plane backup',
+          async () => {
+            const result = await request('POST', '/api/v1/control/restore', {
+              artifactRef,
+              fromDestination,
+              confirm: Boolean(o.confirm),
+              verify,
+            });
+            if (verify) console.error(PREVIEW_NOTE);
+            print(result);
+          },
         );
       },
     );

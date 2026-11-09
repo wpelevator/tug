@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import https from 'node:https';
 import os from 'node:os';
+import { Readable } from 'node:stream';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { Command } from 'commander';
@@ -634,14 +635,25 @@ test('long-wait commands report progress on stderr and retain their results and 
       },
     );
     await t.test(
-      'control restore --verify needs no --confirm, and --snapshot goes with the destination',
+      'a control restore without --confirm only checks the backup, and --snapshot goes with the destination',
       async () => {
         routes = { 'POST /api/v1/control/restore': { verified: true, projects: 2 } };
-        await run('control', 'restore', '/data/a.tar.gz', '--verify');
+        await run('control', 'restore', '/data/a.tar.gz');
         assert.deepEqual(
           bodies['POST /api/v1/control/restore'],
           { artifactRef: '/data/a.tar.gz', confirm: false, verify: true },
-          'a verification is sent without confirmation',
+          'an unconfirmed restore is sent as a verification, like a restore run preview',
+        );
+        assert.match(
+          err.join(''),
+          /only checked the backup and changed nothing; add --confirm/,
+          'the preview says nothing changed and how to apply it',
+        );
+        await run('control', 'restore', '/data/a.tar.gz', '--confirm');
+        assert.deepEqual(
+          bodies['POST /api/v1/control/restore'],
+          { artifactRef: '/data/a.tar.gz', confirm: true, verify: false },
+          'a confirmed restore is applied',
         );
         await assert.rejects(
           run('control', 'restore', '/data/a.tar.gz', '--snapshot', 'abcd1234', '--confirm'),
@@ -672,15 +684,11 @@ test('long-wait commands report progress on stderr and retain their results and 
           'application/gzip',
           'it is marked as an archive',
         );
-        await run('control', 'restore', '--from-file', archive, '--verify');
+        await run('control', 'restore', '--from-file', archive);
         assert.ok(
-          urls.includes('/api/v1/control/restore?verify=1'),
-          'a verification of a local file asks only to verify',
-        );
-        await assert.rejects(
-          run('control', 'restore', '--from-file', archive),
-          /requires --confirm/,
-          'a restore from a file still needs confirmation',
+          urls.includes('/api/v1/control/restore?verify=1') &&
+            !urls.includes('/api/v1/control/restore?confirm=1'),
+          'an unconfirmed upload asks only to verify, so nothing is applied',
         );
         await assert.rejects(
           run('control', 'restore', '/data/a.tar.gz', '--from-file', archive, '--confirm'),
@@ -692,6 +700,84 @@ test('long-wait commands report progress on stderr and retain their results and 
           /does not exist/,
           'a missing file is refused before anything is sent',
         );
+      },
+    );
+    await t.test(
+      'control restore --password-stdin reads only the password from stdin and the credentials from the environment',
+      async () => {
+        routes = { 'POST /api/v1/control/restore': { restartRequired: true } };
+        const original = Object.getOwnPropertyDescriptor(process, 'stdin')!;
+        const feed = (text: string) =>
+          Object.defineProperty(process, 'stdin', {
+            value: Readable.from([text]),
+            configurable: true,
+          });
+        process.env.TUG_TEST_KEY = 'AKIA2';
+        process.env.TUG_TEST_SECRET = 'secret2';
+        try {
+          feed('\n' + 'b'.repeat(64) + '\nignored\n');
+          await run(
+            'control',
+            'restore',
+            '--from-destination',
+            's3:https://s3.example.com/bucket/tug',
+            '--env',
+            'TUG_TEST_KEY,TUG_TEST_SECRET',
+            '--password-stdin',
+            '--confirm',
+          );
+          assert.deepEqual(
+            bodies['POST /api/v1/control/restore'],
+            {
+              fromDestination: {
+                url: 's3:https://s3.example.com/bucket/tug',
+                env: { TUG_TEST_KEY: 'AKIA2', TUG_TEST_SECRET: 'secret2' },
+                password: 'b'.repeat(64),
+              },
+              confirm: true,
+              verify: false,
+            },
+            'the first non-empty stdin line is the password and the credentials come from the environment',
+          );
+          delete process.env.TUG_TEST_SECRET;
+          feed('b'.repeat(64) + '\n');
+          await assert.rejects(
+            run(
+              'control',
+              'restore',
+              '--from-destination',
+              's3:https://s3.example.com/bucket/tug',
+              '--env',
+              'TUG_TEST_KEY,TUG_TEST_SECRET',
+              '--password-stdin',
+              '--confirm',
+            ),
+            /with --password-stdin, set TUG_TEST_SECRET in the environment/,
+            'stdin carries only the password, so a credential missing from the environment is named',
+          );
+          feed('');
+          await assert.rejects(
+            run(
+              'control',
+              'restore',
+              '--from-destination',
+              's3:https://s3.example.com/bucket/tug',
+              '--password-stdin',
+              '--confirm',
+            ),
+            /expected the control password on stdin/,
+            'an empty stdin is an error, not an empty password',
+          );
+          await assert.rejects(
+            run('control', 'restore', '/data/a.tar.gz', '--password-stdin', '--confirm'),
+            /--password-stdin goes with --from-destination/,
+            'the flag only means something for a destination',
+          );
+        } finally {
+          Object.defineProperty(process, 'stdin', original);
+          delete process.env.TUG_TEST_KEY;
+          delete process.env.TUG_TEST_SECRET;
+        }
       },
     );
   } finally {

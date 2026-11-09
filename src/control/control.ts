@@ -3345,11 +3345,12 @@ export async function createApp(
           message: `control backup ${backupId} created by ${req.actor!.name}`,
         });
         res.json({
+          ok: true,
+          stored: 'control-host',
           backupId,
           artifactRef,
           state: 'completed',
           images: withImages,
-          stored: 'control-host',
         });
       }),
   );
@@ -3511,7 +3512,7 @@ export async function createApp(
         now(),
       );
       controlEvent('error', 'backup.failed', `control backup failed: ${error}`, { error });
-      return { ok: false, error };
+      return { ok: false, stored: 'destination', error };
     } finally {
       if (archive) await fs.rm(archive.artifactRef, { force: true });
       controlPushRunning = false;
