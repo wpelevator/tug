@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import type { Readable, Writable } from 'node:stream';
 
+import { LIVE_WINDOW_BYTES, liveOutputCost } from '../protocol.ts';
 import type { LiveRequest } from '../protocol.ts';
 export type { LiveRequest } from '../protocol.ts';
 
@@ -59,7 +60,9 @@ export type LiveClientMessage =
   | { type: 'stdin'; data: Uint8Array }
   | { type: 'stdin-end' }
   | { type: 'resize'; columns: number; rows: number }
-  | { type: 'cancel' };
+  | { type: 'cancel' }
+  /** Output credit consumed: sent once received output has been written locally (see `liveOutputCost`). */
+  | { type: 'ack'; bytes: number };
 
 export type LiveEvent =
   | { type: 'stdout' | 'stderr'; data: Uint8Array }
@@ -73,6 +76,10 @@ export interface CliLiveSession {
   events: AsyncIterable<LiveEvent>;
   send(message: LiveClientMessage): void | Promise<void>;
   close(): void | Promise<void>;
+  /** The agent paces by acknowledgements (`flow` in `live.started`): input waits for its `live.stdin-ack`. */
+  flow?: boolean;
+  /** Set by the runner; the transport calls it for each `live.stdin-ack` as it arrives, ahead of queued output. */
+  onInputAck?: (bytes: number) => void;
 }
 export interface CliLiveTransport {
   /** Respect abort during connection establishment; a late session is closed by the runner. */
@@ -135,7 +142,23 @@ export async function runCliLive(
     wake = resolve;
   });
   let queuedBytes = 0;
+  /** Input sent and not yet acknowledged by an agent that paces by acknowledgements. */
+  let unacknowledged = 0;
   let inputPaused = false;
+  const flow = (): boolean => session?.flow === true;
+  // Read input only while both the local send queue and, with flow control, the end-to-end window have room.
+  const inputFull = (): boolean =>
+    queuedBytes >= STDIN_HIGH_WATER_BYTES || (flow() && unacknowledged >= LIVE_WINDOW_BYTES);
+  const resumeInput = (): void => {
+    if (
+      inputPaused &&
+      queuedBytes <= STDIN_LOW_WATER_BYTES &&
+      (!flow() || unacknowledged <= LIVE_WINDOW_BYTES / 2)
+    ) {
+      inputPaused = false;
+      stdin.resume();
+    }
+  };
   let sending = Promise.resolve();
   const fail = (error: unknown): void => {
     failure ??= error instanceof Error ? error : new Error(String(error));
@@ -148,14 +171,13 @@ export async function runCliLive(
       .then(async () => {
         if (!complete && !controller.signal.aborted) await session!.send(message);
       })
-      .catch(fail)
+      // An acknowledgement is advisory: control closes the socket right after relaying the exit, while the output
+      // received before it may still be draining, and that must not turn a finished session into a failure.
+      .catch(message.type === 'ack' ? () => {} : fail)
       .finally(() => {
         queuedBytes -= size;
         // Resume a paused input only after most of what was queued has gone out.
-        if (inputPaused && queuedBytes <= STDIN_LOW_WATER_BYTES) {
-          inputPaused = false;
-          stdin.resume();
-        }
+        resumeInput();
       });
   };
   const cancel = (): void => {
@@ -163,9 +185,11 @@ export async function runCliLive(
     wake();
   };
   const onData = (data: Buffer | string): void => {
-    send({ type: 'stdin', data: Buffer.from(data) });
+    const bytes = Buffer.from(data);
+    if (flow()) unacknowledged += bytes.byteLength;
+    send({ type: 'stdin', data: bytes });
     // A pipe is read faster than the connection drains, so stop reading instead of queueing the whole input in memory.
-    if (queuedBytes >= STDIN_HIGH_WATER_BYTES && !inputPaused) {
+    if (inputFull() && !inputPaused) {
       inputPaused = true;
       stdin.pause();
     }
@@ -200,10 +224,10 @@ export async function runCliLive(
       if (complete || controller.signal.aborted) return 130;
       switch (event.type) {
         case 'stdout':
-          await write(stdout, event.data);
-          break;
         case 'stderr':
-          await write(stderr, event.data);
+          await write(event.type === 'stdout' ? stdout : stderr, event.data);
+          // Written locally, so the agent may read that much more from the container.
+          send({ type: 'ack', bytes: liveOutputCost(event.data.byteLength) });
           break;
         case 'result':
           result = event.value;
@@ -259,6 +283,10 @@ export async function runCliLive(
       if (failure) throw failure;
       return 130;
     }
+    session.onInputAck = (bytes) => {
+      unacknowledged = Math.max(0, unacknowledged - bytes);
+      resumeInput();
+    };
     if (request.operation === 'exec') {
       if (request.tty) {
         rawChanged = !wasRaw;

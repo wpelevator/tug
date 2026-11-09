@@ -95,6 +95,7 @@ import {
   ACTIVE_DEPLOYMENT_STATES,
   LIVE_MAX_FRAME_BYTES,
   LIVE_MAX_BUFFERED_BYTES,
+  LIVE_AGENT_MAX_BUFFERED_BYTES,
   LIVE_MAX_SESSIONS,
   LIVE_START_TIMEOUT_MS,
   BACKUP_COMMAND_TYPES,
@@ -340,6 +341,7 @@ export class LiveHub {
   private readonly agents = new Map<string, WebSocket>();
   private readonly sessions = new Map<string, LiveSession>();
   private readonly retired = new WeakMap<WebSocket, Set<string>>();
+  private readonly agentSockets = new WeakSet<WebSocket>();
   private readonly startTimeoutMs: number;
   private readonly resolve: (actor: Actor, request: LiveRequest) => Promise<NodeRow>;
   private readonly onAgentEvents: (nodeId: string, events: unknown[]) => void;
@@ -352,11 +354,17 @@ export class LiveHub {
     this.startTimeoutMs = startTimeoutMs;
     this.onAgentEvents = onAgentEvents;
   }
+  /**
+   * Sends unless the socket already holds `limit` unsent bytes. Flow control keeps a session's output under the
+   * operator limit; an agent socket carries every session on its node, so it gets the larger agent limit.
+   */
   private send(ws: WebSocket, frame: unknown): boolean {
-    if (ws.readyState !== WebSocket.OPEN || ws.bufferedAmount > LIVE_MAX_BUFFERED_BYTES)
-      return false;
+    const limit = this.agentSockets.has(ws)
+      ? LIVE_AGENT_MAX_BUFFERED_BYTES
+      : LIVE_MAX_BUFFERED_BYTES;
+    if (ws.readyState !== WebSocket.OPEN || ws.bufferedAmount > limit) return false;
     const data = JSON.stringify(frame);
-    if (Buffer.byteLength(data) + ws.bufferedAmount > LIVE_MAX_BUFFERED_BYTES) return false;
+    if (Buffer.byteLength(data) + ws.bufferedAmount > limit) return false;
     try {
       ws.send(data);
       return true;
@@ -386,6 +394,7 @@ export class LiveHub {
       for (const session of this.sessions.values())
         if (session.agent === previous) this.fail(session, 'agent connection replaced');
     this.agents.set(nodeId, ws);
+    this.agentSockets.add(ws);
     ws.on('error', () => {});
     ws.on('close', () => {
       if (this.agents.get(nodeId) === ws) this.agents.delete(nodeId);
@@ -419,7 +428,12 @@ export class LiveHub {
         if (!session && this.retired.get(ws)?.has(frame.sessionId)) return;
         if (!session || session.agent !== ws) throw new Error('foreign or unknown session');
         const keys = ['v', 'type', 'sessionId'];
-        if (frame.type === 'live.started' && frameKeys(frame, keys) && !session.started) {
+        if (
+          frame.type === 'live.started' &&
+          frameKeys(frame, [...keys, 'flow']) &&
+          (frame.flow === undefined || frame.flow === true) &&
+          !session.started
+        ) {
           session.started = true;
           clearTimeout(session.timer);
           if (
@@ -428,6 +442,26 @@ export class LiveHub {
               type: 'live.started',
               sessionId: session.id,
               node: session.node,
+              // An agent that paces by acknowledgements says so; the CLI then paces its input by the agent's.
+              ...(frame.flow === true ? { flow: true } : {}),
+            })
+          )
+            this.fail(session, 'operator buffer limit exceeded');
+        } else if (
+          frame.type === 'live.stdin-ack' &&
+          frameKeys(frame, [...keys, 'bytes']) &&
+          session.started &&
+          session.request.operation === 'exec' &&
+          Number.isSafeInteger(frame.bytes) &&
+          Number(frame.bytes) >= 1 &&
+          Number(frame.bytes) <= 65536
+        ) {
+          if (
+            !this.send(session.operator, {
+              v: 1,
+              type: 'live.stdin-ack',
+              sessionId: session.id,
+              bytes: frame.bytes,
             })
           )
             this.fail(session, 'operator buffer limit exceeded');
@@ -544,14 +578,36 @@ export class LiveHub {
             'type',
             ...(frame.type === 'live.stdin'
               ? ['data']
-              : frame.type === 'live.resize'
-                ? ['columns', 'rows']
-                : []),
+              : frame.type === 'live.ack'
+                ? ['bytes']
+                : frame.type === 'live.resize'
+                  ? ['columns', 'rows']
+                  : []),
           ])
         )
           throw new Error('invalid live input');
         if (frame.type === 'live.cancel') {
           this.finish(session, { v: 1, type: 'live.exit', sessionId: session.id, code: 130 });
+          return;
+        }
+        if (frame.type === 'live.ack') {
+          // Output credit the CLI consumed, relayed so the agent resumes reading the container.
+          if (
+            !['exec', 'logs'].includes(session.request.operation) ||
+            !Number.isSafeInteger(frame.bytes) ||
+            Number(frame.bytes) < 1 ||
+            Number(frame.bytes) > LIVE_AGENT_MAX_BUFFERED_BYTES
+          )
+            throw new Error('invalid live acknowledgement');
+          if (
+            !this.send(session.agent, {
+              v: 1,
+              type: 'live.ack',
+              sessionId: session.id,
+              bytes: frame.bytes,
+            })
+          )
+            this.fail(session, 'agent buffer limit exceeded');
           return;
         }
         if (session.request.operation !== 'exec')

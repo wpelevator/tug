@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { PassThrough } from 'node:stream';
+import { PassThrough, Writable } from 'node:stream';
 import { test } from 'node:test';
-import { LIVE_MAX_FRAME_BYTES } from '../protocol.ts';
+import { LIVE_MAX_FRAME_BYTES, LIVE_WINDOW_BYTES, liveOutputCost } from '../protocol.ts';
 import { LiveOperationEngine } from './live.ts';
 import type { LiveEvent, LiveEngineOptions } from './live.ts';
 import type {
@@ -321,6 +321,79 @@ test('stdin buffering remains bounded even if a transport ignores backpressure',
     }
   }
   assert.ok(rejected, 'a transport that ignores backpressure hits the queue limit');
+  engine.dispose();
+});
+
+test('output pauses the container streams once a window of credit is unacknowledged and resumes when acknowledgements bring it to half', async () => {
+  const { engine, events, children } = fixture();
+  await engine.start(execRequest());
+  const child = children[0];
+  const chunk = Buffer.alloc(65536, 3);
+  const cost = liveOutputCost(chunk.length);
+  let sent = 0;
+  while (sent + cost < LIVE_WINDOW_BYTES) {
+    child.stdout.write(chunk);
+    sent += cost;
+    await tick();
+  }
+  assert.equal(
+    child.stdout.isPaused() || child.stderr.isPaused(),
+    false,
+    'streams keep flowing while less than the window of credit is outstanding',
+  );
+  child.stderr.write(chunk);
+  sent += cost;
+  await tick();
+  assert.equal(events.filter((e) => e.type === 'output').length > 0, true, 'output was emitted');
+  assert.equal(
+    child.stdout.isPaused() && child.stderr.isPaused(),
+    true,
+    'stdout and stderr both pause once unacknowledged credit reaches the window',
+  );
+  engine.ack('exec-1', 1);
+  assert.equal(
+    child.stdout.isPaused(),
+    true,
+    'streams stay paused while more than half the window is still outstanding',
+  );
+  engine.ack('exec-1', sent - 1 - LIVE_WINDOW_BYTES / 2);
+  assert.equal(
+    child.stdout.isPaused() || child.stderr.isPaused(),
+    false,
+    'streams resume once acknowledgements bring the outstanding credit to half the window',
+  );
+  assert.throws(
+    () => engine.ack('exec-1', 0),
+    /Invalid live acknowledgement/,
+    'a non-positive acknowledgement is a protocol violation',
+  );
+  engine.ack('missing', 5);
+  engine.dispose();
+});
+
+test('stdin is acknowledged only once the container accepted the write', async () => {
+  const { engine, children } = fixture();
+  await engine.start(execRequest());
+  const completions: (() => void)[] = [];
+  children[0].stdin = new Writable({
+    write(_chunk, _encoding, callback) {
+      completions.push(callback);
+    },
+  }) as unknown as PassThrough;
+  let acknowledged = 0;
+  engine.stdin('exec-1', Buffer.from('hello'), () => {
+    acknowledged++;
+  });
+  await tick();
+  assert.equal(completions.length, 1, 'the bytes reached the container stdin');
+  assert.equal(
+    acknowledged,
+    0,
+    'no acknowledgement while the container has not consumed the write',
+  );
+  completions[0]();
+  await tick();
+  assert.equal(acknowledged, 1, 'the write callback acknowledges the bytes exactly once');
   engine.dispose();
 });
 

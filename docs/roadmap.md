@@ -83,7 +83,7 @@ Control stores built images as saved image files and agents download them over t
 
 ### M5 — Streaming channel between agent and control (mostly done)
 
-Agent-initiated WebSocket with long-poll fallback that wakes agents when work is queued and carries live sessions: non-TTY `tug exec` with stdin, `logs -f`, `ps` and `inspect` ([Architecture](architecture.md#agent-wake-channel), [Observability](observability.md#live-commands)). Remaining, at low priority: dropping the long-poll fallback (the WebSocket plus the periodic poll cover a lost socket), agent and daemon log streams, and terminating the remote process when an exec session is cancelled. PTY allocation and resize for `exec -t` shipped with [M14](#m14--engine-api-agent) through the Engine API.
+Agent-initiated WebSocket with long-poll fallback that wakes agents when work is queued and carries live sessions: non-TTY `tug exec` with stdin (credit-based flow control end to end since 2.0, so large dumps and archives pass through), `logs -f`, `ps` and `inspect` ([Architecture](architecture.md#agent-wake-channel), [Observability](observability.md#live-commands)). Remaining, at low priority: dropping the long-poll fallback (the WebSocket plus the periodic poll cover a lost socket), agent and daemon log streams, and terminating the remote process when an exec session is cancelled. PTY allocation and resize for `exec -t` shipped with [M14](#m14--engine-api-agent) through the Engine API.
 
 ### M6 — Placement and scheduling (done)
 
@@ -247,7 +247,7 @@ The test layers, the metrics milestones are held to and the backlog of mocked te
 - [x] M11 `backup list --check` also fails when nothing is protected: no destination, or no enabled targets unless `--allow-empty` (2.0.0)
 - [ ] M11 `backup list` shows each target's protection level: local only, off-host, verified, restore-tested
 - [ ] Control recovery drill on disposable hosts for the PR #123 paths (`control backup --download`, `control restore --from-file`, the activation journal): a damaged repository, a crash during activation, and agents reconnecting after an older snapshot is restored
-- [ ] Bulk `exec`/`run` input and output with end-to-end backpressure, verified at 100 MB in both directions with a slow reader and a hash check
+- [x] Bulk `exec`/`run` input and output with end-to-end backpressure, verified at 100 MB in both directions with a slow reader and a hash check (2.0.0; in-process end-to-end test, not yet on real hosts)
 - [ ] Operator scope cues: control-wide views labelled, the resolved control and project shown before high-impact commands, compact human output for `ps`, `events` and `doctor`
 - [x] M11 `memory` under `x-tug.backup` for the restic helper's memory limit
 - [x] A failed health check says when the agent runs outside a container (`doctor` does not check it separately)

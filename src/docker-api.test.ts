@@ -78,6 +78,41 @@ test('demux splits the multiplexed stream into stdout and stderr across chunk bo
   assert.deepEqual([o.join(''), e.join('')], ['hello', 'oops']);
 });
 
+test('demux pauses the source while a target is full and resumes once every full target drained', async () => {
+  const frame = (type: number, size: number) => {
+    const head = Buffer.alloc(8);
+    head[0] = type;
+    head.writeUInt32BE(size, 4);
+    return Buffer.concat([head, Buffer.alloc(size, 1)]);
+  };
+  const src = new PassThrough();
+  const out = new PassThrough({ highWaterMark: 16 });
+  const err = new PassThrough({ highWaterMark: 16 });
+  demux(src, out, err);
+  await new Promise((r) => setImmediate(r));
+  src.write(frame(1, 1000));
+  await new Promise((r) => setImmediate(r));
+  assert.equal(src.isPaused(), true, 'a stdout target that refuses more data pauses the source');
+  src.write(frame(2, 1000));
+  src.resume();
+  await new Promise((r) => setImmediate(r));
+  assert.equal(
+    src.isPaused(),
+    true,
+    'the source pauses again when stderr fills too, since both targets are considered',
+  );
+  out.resume();
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(
+    src.isPaused(),
+    true,
+    'the source stays paused while stderr, a target that is still full, has not drained',
+  );
+  err.resume();
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(src.isPaused(), false, 'the source resumes after every full target drained');
+});
+
 test('digest pulls strip display tags, preserve registry ports and carry credentials in the Engine header', async () => {
   const credential = { username: 'user', password: 'private-password' };
   const digest = `sha256:${'a'.repeat(64)}`;

@@ -38,7 +38,9 @@ import type { ContainerSummary, DockerApi } from '../docker-api.ts';
 import type { PortBind } from '../compose/compose.ts';
 import { JobRunner, defaultJobConcurrency } from './jobs.ts';
 import {
+  LIVE_AGENT_MAX_BUFFERED_BYTES,
   LIVE_MAX_FRAME_BYTES,
+  LIVE_WINDOW_BYTES,
   LIVE_START_TIMEOUT_MS,
   CLIENT_VERSION_HEADER,
   skewRefusalMessage,
@@ -371,7 +373,8 @@ export class AgentWakeChannel {
   send(frame: AgentLiveOutputFrame | AgentEventFrame): boolean {
     const socket = this.socket;
     if (!socket || socket.readyState !== WebSocket.OPEN) return false;
-    if (socket.bufferedAmount > 1048576) {
+    // Flow control bounds each session's output; this only catches a control that stopped reading altogether.
+    if (socket.bufferedAmount > LIVE_AGENT_MAX_BUFFERED_BYTES) {
       this.close();
       socket.terminate();
       return false;
@@ -486,6 +489,14 @@ export class AgentLiveOperations {
     }
     const entry = this.sessions.get(frame.sessionId);
     if (!entry) return;
+    if (frame.type === 'live.ack') {
+      try {
+        this.engine.ack(frame.sessionId, frame.bytes);
+      } catch (error) {
+        this.fail(frame.sessionId, entry, error);
+      }
+      return;
+    }
     if (frame.type === 'live.cancel') {
       this.engine.cancel(frame.sessionId);
       if (this.sessions.delete(frame.sessionId))
@@ -510,12 +521,20 @@ export class AgentLiveOperations {
           throw new Error('Invalid base64 stdin');
         queued = input.length;
         entry.queuedBytes += queued;
-        if (entry.queuedBytes > 262144) throw new Error('Live stdin queue exceeds size limit');
+        if (entry.queuedBytes > LIVE_WINDOW_BYTES)
+          throw new Error('Live stdin queue exceeds size limit');
       }
       await entry.ready;
       if (this.sessions.get(frame.sessionId) !== entry) return;
-      if (frame.type === 'live.stdin' && input) this.engine.stdin(frame.sessionId, input);
-      else if (frame.type === 'live.stdin-end') this.engine.endStdin(frame.sessionId);
+      if (frame.type === 'live.stdin' && input) {
+        const bytes = input.length;
+        const sessionId = frame.sessionId;
+        // Acknowledged once written into the container, so a slow reader there slows the CLI's upload.
+        this.engine.stdin(sessionId, input, () => {
+          if (this.sessions.get(sessionId) === entry)
+            this.emit({ v: 1, type: 'live.stdin-ack', sessionId, bytes });
+        });
+      } else if (frame.type === 'live.stdin-end') this.engine.endStdin(frame.sessionId);
       else if (frame.type === 'live.resize')
         this.engine.resize(frame.sessionId, frame.columns, frame.rows);
     } catch (error) {
@@ -554,7 +573,8 @@ export class AgentLiveOperations {
   }
   private async open(request: LiveAgentRequest, entry: PendingLiveSession): Promise<void> {
     const current = () => this.sessions.get(request.sessionId) === entry;
-    const started = () => this.emit({ v: 1, type: 'live.started', sessionId: request.sessionId });
+    const started = () =>
+      this.emit({ v: 1, type: 'live.started', sessionId: request.sessionId, flow: true });
     try {
       if (this.sessions.size > 16) throw new Error('Live session limit reached');
       if (!this.ctx.apply) throw new Error('Live operations require an applying agent');
