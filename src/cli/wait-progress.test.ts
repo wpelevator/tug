@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import https from 'node:https';
 import os from 'node:os';
+import { Readable } from 'node:stream';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { Command } from 'commander';
@@ -28,9 +29,13 @@ test('long-wait commands report progress on stderr and retain their results and 
   );
   let routes: Record<string, unknown> = {};
   const requested: string[] = [];
+  const bodies: Record<string, unknown> = {};
+  const urls: string[] = [];
+  const raw: Record<string, { type: string | undefined; bytes: Buffer }> = {};
   const server = https.createServer(serverTlsOptions({ ...issued, ca: pki.caPem }), (req, res) => {
     const route = `${req.method} ${req.url?.split('?')[0]}`;
     requested.push(route);
+    urls.push(req.url ?? '');
     // The CLI's version preflight runs before any API request route inside the same process.
     res.setHeader('x-tug-version', packageVersion());
     if (route === 'GET /api/v1/version') {
@@ -38,8 +43,15 @@ test('long-wait commands report progress on stderr and retain their results and 
       res.end(JSON.stringify({ v: packageVersion() }));
       return;
     }
-    req.resume();
+    const chunks: Buffer[] = [];
+    req.on('data', (chunk: Buffer) => chunks.push(chunk));
     req.on('end', () => {
+      raw[route] = { type: req.headers['content-type'], bytes: Buffer.concat(chunks) };
+      try {
+        bodies[route] = JSON.parse(Buffer.concat(chunks).toString());
+      } catch {
+        delete bodies[route];
+      }
       const body = routes[route];
       res.writeHead(body === undefined ? 500 : 200, { 'content-type': 'application/json' });
       res.end(
@@ -73,6 +85,7 @@ test('long-wait commands report progress on stderr and retain their results and 
     out.length = 0;
     err.length = 0;
     requested.length = 0;
+    urls.length = 0;
     // One CLI process is one new module state: forget the remembered version agreement between runs.
     resetVersionChecks();
     const program = new Command();
@@ -353,7 +366,7 @@ test('long-wait commands report progress on stderr and retain their results and 
         'POST /api/v1/control/backups/run': { artifactRef: 'backup.tgz' },
         'POST /api/v1/control/restore': { restartRequired: true },
       };
-      await run('control', 'backup');
+      await run('control', 'backup', '--local');
       assert.equal(
         JSON.parse(out.join('')).artifactRef,
         'backup.tgz',
@@ -376,6 +389,397 @@ test('long-wait commands report progress on stderr and retain their results and 
         'control restore must report its active operation',
       );
     });
+    await t.test(
+      'control backup --download saves a private copy and never overwrites',
+      async () => {
+        routes = {
+          'POST /api/v1/control/backups/run': {
+            backupId: 'cbak_x',
+            artifactRef: '/data/x.tar.gz',
+            images: false,
+          },
+          'GET /api/v1/control/backups/cbak_x/download': { archive: true },
+        };
+        const file = path.join(dir, 'saved.tar.gz');
+        await run('control', 'backup', '--download', '-o', file);
+        assert.equal(
+          JSON.parse(out.join('')).downloadedTo,
+          file,
+          'the result names where the archive was saved',
+        );
+        assert.equal(
+          JSON.parse(out.join('')).serverCopy,
+          '/data/x.tar.gz',
+          'the result names the copy that stays on control',
+        );
+        assert.match(
+          err.join(''),
+          /Saved .*saved\.tar\.gz: without build images, no workload volumes\. It contains the master key and the CA private key.*A copy also stays on control at \/data\/x\.tar\.gz/s,
+          'the message says what was saved, what it contains and where the server copy remains',
+        );
+        assert.equal(
+          await fs.readFile(file, 'utf8'),
+          JSON.stringify({ archive: true }),
+          'the downloaded bytes are written to the chosen file',
+        );
+        assert.equal(
+          (await fs.stat(file)).mode & 0o777,
+          0o600,
+          'the archive holds the master key and the CA key, so only its owner may read it',
+        );
+        await assert.rejects(
+          run('control', 'backup', '-o', file),
+          /already exists/,
+          'an existing file is never overwritten',
+        );
+        assert.equal(
+          await fs.readFile(file, 'utf8'),
+          JSON.stringify({ archive: true }),
+          'a refused overwrite leaves the earlier archive intact',
+        );
+        assert.deepEqual(
+          requested.filter((route) => route === 'POST /api/v1/control/backups/run'),
+          [],
+          'a taken output name is refused before a backup is created on control',
+        );
+        const previous = process.cwd();
+        process.chdir(dir);
+        try {
+          await run('control', 'backup', '--download');
+        } finally {
+          process.chdir(previous);
+        }
+        assert.ok(
+          await fs.stat(path.join(dir, 'tug-control-backup-cbak_x.tar.gz')),
+          '--download without -o saves ./tug-control-backup-<id>.tar.gz',
+        );
+        await run('control', 'backup', '--local');
+        assert.ok(
+          !requested.includes('GET /api/v1/control/backups/cbak_x/download'),
+          'without --download nothing is downloaded',
+        );
+      },
+    );
+    await t.test(
+      'control restore --from-destination sends the login and rejects mixed targets',
+      async () => {
+        routes = { 'POST /api/v1/control/restore': { restartRequired: true } };
+        await assert.rejects(
+          run('control', 'restore', '--confirm'),
+          /name an archive path, or use --from-file or --from-destination/,
+          'a restore must name its source',
+        );
+        await assert.rejects(
+          run('control', 'restore', 'a.tgz', '--from-destination', 's3:https://h/b', '--confirm'),
+          /name an archive path, or use --from-file or --from-destination/,
+          'a restore has one source',
+        );
+        await assert.rejects(
+          run('control', 'restore', 'a.tgz', '--env', 'AWS_ACCESS_KEY_ID', '--confirm'),
+          /--env goes with --from-destination/,
+          'credential variables only make sense for a destination',
+        );
+        process.env.TUG_TEST_KEY = 'AKIA1';
+        process.env.TUG_TEST_SECRET = 'secret1';
+        process.env.TUG_CONTROL_BACKUP_PASSWORD =
+          'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+        try {
+          await run(
+            'control',
+            'restore',
+            '--from-destination',
+            's3:https://s3.example.com/bucket/tug',
+            '--env',
+            'TUG_TEST_KEY,TUG_TEST_SECRET',
+            '--confirm',
+          );
+        } finally {
+          delete process.env.TUG_TEST_KEY;
+          delete process.env.TUG_TEST_SECRET;
+          delete process.env.TUG_CONTROL_BACKUP_PASSWORD;
+        }
+        assert.deepEqual(
+          bodies['POST /api/v1/control/restore'],
+          {
+            fromDestination: {
+              url: 's3:https://s3.example.com/bucket/tug',
+              env: { TUG_TEST_KEY: 'AKIA1', TUG_TEST_SECRET: 'secret1' },
+              password: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+            },
+            confirm: true,
+            verify: false,
+          },
+          'the destination, its credential values and the control password are sent to control',
+        );
+      },
+    );
+    await t.test('backup password --control asks for the control repository', async () => {
+      routes = {
+        'GET /api/v1/backup/repository-password': {
+          control: true,
+          repository: 's3:x/_control',
+          password: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        },
+      };
+      await run('backup', 'password', '--control');
+      assert.equal(
+        JSON.parse(out.join('')).control,
+        true,
+        'the control password is printed as JSON on stdout',
+      );
+    });
+    await t.test(
+      'control backup stores the backup in the destination by default and says where',
+      async () => {
+        routes = {
+          'POST /api/v1/control/backups/run': {
+            ok: true,
+            stored: 'destination',
+            snapshotId: 'abc12345',
+            repository: 's3:x/_control',
+          },
+        };
+        await run('control', 'backup');
+        assert.deepEqual(
+          bodies['POST /api/v1/control/backups/run'],
+          { toDestination: true },
+          'a plain control backup is asked to go to the destination, like tug backup run',
+        );
+        const printed = JSON.parse(out.join(''));
+        assert.equal(printed.snapshotId, 'abc12345', 'the snapshot id is printed');
+        assert.equal(printed.stored, 'destination', 'the result says where the backup is');
+        await assert.rejects(
+          run('control', 'backup', '--no-images'),
+          /--no-images applies to an archive; add --local or -o/,
+          'a destination backup never holds images, so asking to leave them out is a mistake',
+        );
+      },
+    );
+    await t.test(
+      '--local makes an archive on the control host, and -o or --download imply it',
+      async () => {
+        routes = {
+          'POST /api/v1/control/backups/run': {
+            backupId: 'cbak_l',
+            artifactRef: '/data/l.tar.gz',
+            images: true,
+            stored: 'control-host',
+          },
+        };
+        await run('control', 'backup', '--local');
+        assert.deepEqual(
+          bodies['POST /api/v1/control/backups/run'],
+          { images: true },
+          '--local asks for an archive with the retained images',
+        );
+        await run('control', 'backup', '--local', '--no-images');
+        assert.deepEqual(
+          bodies['POST /api/v1/control/backups/run'],
+          { images: false },
+          '--no-images leaves them out of an archive',
+        );
+        assert.equal(
+          JSON.parse(out.join('')).stored,
+          'control-host',
+          'the result says the archive is on the control host',
+        );
+      },
+    );
+    await t.test(
+      'control backup list shows what is on the host and what is really in the destination',
+      async () => {
+        routes = {
+          'GET /api/v1/control/backups': {
+            destinationConfigured: true,
+            repository: 's3:x/_control',
+            local: [
+              {
+                id: 'cbak_1',
+                createdAt: '2026-01-01T00:00:00Z',
+                path: '/data/c.tar.gz',
+                onDisk: true,
+                sizeBytes: 2048,
+                images: true,
+              },
+            ],
+            remote: {
+              state: 'ok',
+              snapshots: [
+                {
+                  shortId: 'abcd1234',
+                  time: '2026-01-02T00:00:00Z',
+                  tags: ['control', 'images:none', 'tug:1.0.0'],
+                  sizeBytes: 4096,
+                },
+              ],
+            },
+          },
+        };
+        await run('control', 'backup', 'list');
+        const text = out.join('\n');
+        assert.match(
+          text,
+          /cbak_1.*with images.*\/data\/c\.tar\.gz/,
+          'the copy on the host says it holds images',
+        );
+        assert.match(
+          text,
+          /abcd1234.*no images.*tug:1\.0\.0/,
+          'the snapshot id and its exclusions are shown',
+        );
+        assert.match(
+          text,
+          /never workload volumes/,
+          'the listing says workload volumes are never included',
+        );
+      },
+    );
+    await t.test(
+      'a control restore without --confirm only checks the backup, and --snapshot goes with the destination',
+      async () => {
+        routes = { 'POST /api/v1/control/restore': { verified: true, projects: 2 } };
+        await run('control', 'restore', '/data/a.tar.gz');
+        assert.deepEqual(
+          bodies['POST /api/v1/control/restore'],
+          { artifactRef: '/data/a.tar.gz', confirm: false, verify: true },
+          'an unconfirmed restore is sent as a verification, like a restore run preview',
+        );
+        assert.match(
+          err.join(''),
+          /only checked the backup and changed nothing; add --confirm/,
+          'the preview says nothing changed and how to apply it',
+        );
+        await run('control', 'restore', '/data/a.tar.gz', '--confirm');
+        assert.deepEqual(
+          bodies['POST /api/v1/control/restore'],
+          { artifactRef: '/data/a.tar.gz', confirm: true, verify: false },
+          'a confirmed restore is applied',
+        );
+        await assert.rejects(
+          run('control', 'restore', '/data/a.tar.gz', '--snapshot', 'abcd1234', '--confirm'),
+          /--snapshot goes with --from-destination/,
+          'a snapshot id only means something for a destination',
+        );
+      },
+    );
+    await t.test(
+      'control restore --from-file uploads the archive instead of naming a server path',
+      async () => {
+        routes = { 'POST /api/v1/control/restore': { restartRequired: true } };
+        const archive = path.join(dir, 'recovery.tar.gz');
+        const bytes = Buffer.from([0x1f, 0x8b, 0x08, 0x00, 0xde, 0xad, 0xbe, 0xef]);
+        await fs.writeFile(archive, bytes);
+        await run('control', 'restore', '--from-file', archive, '--confirm');
+        assert.ok(
+          urls.includes('/api/v1/control/restore?confirm=1'),
+          'the upload asks for the restore to be confirmed',
+        );
+        assert.deepEqual(
+          raw['POST /api/v1/control/restore'].bytes,
+          bytes,
+          'the archive is sent byte for byte as the request body',
+        );
+        assert.equal(
+          raw['POST /api/v1/control/restore'].type,
+          'application/gzip',
+          'it is marked as an archive',
+        );
+        await run('control', 'restore', '--from-file', archive);
+        assert.ok(
+          urls.includes('/api/v1/control/restore?verify=1') &&
+            !urls.includes('/api/v1/control/restore?confirm=1'),
+          'an unconfirmed upload asks only to verify, so nothing is applied',
+        );
+        await assert.rejects(
+          run('control', 'restore', '/data/a.tar.gz', '--from-file', archive, '--confirm'),
+          /--from-file takes no archive path/,
+          'an archive is either local or on the control host',
+        );
+        await assert.rejects(
+          run('control', 'restore', '--from-file', path.join(dir, 'missing.tar.gz'), '--confirm'),
+          /does not exist/,
+          'a missing file is refused before anything is sent',
+        );
+      },
+    );
+    await t.test(
+      'control restore --password-stdin reads only the password from stdin and the credentials from the environment',
+      async () => {
+        routes = { 'POST /api/v1/control/restore': { restartRequired: true } };
+        const original = Object.getOwnPropertyDescriptor(process, 'stdin')!;
+        const feed = (text: string) =>
+          Object.defineProperty(process, 'stdin', {
+            value: Readable.from([text]),
+            configurable: true,
+          });
+        process.env.TUG_TEST_KEY = 'AKIA2';
+        process.env.TUG_TEST_SECRET = 'secret2';
+        try {
+          feed('\n' + 'b'.repeat(64) + '\nignored\n');
+          await run(
+            'control',
+            'restore',
+            '--from-destination',
+            's3:https://s3.example.com/bucket/tug',
+            '--env',
+            'TUG_TEST_KEY,TUG_TEST_SECRET',
+            '--password-stdin',
+            '--confirm',
+          );
+          assert.deepEqual(
+            bodies['POST /api/v1/control/restore'],
+            {
+              fromDestination: {
+                url: 's3:https://s3.example.com/bucket/tug',
+                env: { TUG_TEST_KEY: 'AKIA2', TUG_TEST_SECRET: 'secret2' },
+                password: 'b'.repeat(64),
+              },
+              confirm: true,
+              verify: false,
+            },
+            'the first non-empty stdin line is the password and the credentials come from the environment',
+          );
+          delete process.env.TUG_TEST_SECRET;
+          feed('b'.repeat(64) + '\n');
+          await assert.rejects(
+            run(
+              'control',
+              'restore',
+              '--from-destination',
+              's3:https://s3.example.com/bucket/tug',
+              '--env',
+              'TUG_TEST_KEY,TUG_TEST_SECRET',
+              '--password-stdin',
+              '--confirm',
+            ),
+            /with --password-stdin, set TUG_TEST_SECRET in the environment/,
+            'stdin carries only the password, so a credential missing from the environment is named',
+          );
+          feed('');
+          await assert.rejects(
+            run(
+              'control',
+              'restore',
+              '--from-destination',
+              's3:https://s3.example.com/bucket/tug',
+              '--password-stdin',
+              '--confirm',
+            ),
+            /expected the control password on stdin/,
+            'an empty stdin is an error, not an empty password',
+          );
+          await assert.rejects(
+            run('control', 'restore', '/data/a.tar.gz', '--password-stdin', '--confirm'),
+            /--password-stdin goes with --from-destination/,
+            'the flag only means something for a destination',
+          );
+        } finally {
+          Object.defineProperty(process, 'stdin', original);
+          delete process.env.TUG_TEST_KEY;
+          delete process.env.TUG_TEST_SECRET;
+        }
+      },
+    );
   } finally {
     process.exitCode = originalExitCode;
     await new Promise<void>((resolve) => server.close(() => resolve()));

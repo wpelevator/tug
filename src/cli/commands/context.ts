@@ -5,6 +5,10 @@ import type { ServiceChoice } from './selection.ts';
 import { withProgress } from '../progress.ts';
 export { runCapture, runLocal } from '../process.ts';
 import path from 'node:path';
+import fsp from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 import {
   VERSION_STAMP_HEADER,
@@ -328,6 +332,73 @@ export async function request<T = any>(
 /** The project a project-scoped command works on: `--project`, then the resolved config, then `site`. */
 export async function projectOf(o: CommonOpts): Promise<string> {
   return o.project || (await loadCfg()).project || 'site';
+}
+/**
+ * Saves a control response body to `file` (mode 0600, never overwriting) without buffering it. The archive holds
+ * the master key and the CA key, so it is never created readable by others.
+ */
+export async function download(route: string, file: string): Promise<void> {
+  markWorkStarted();
+  const transport = await transportFor(await loadCfg(), 'stamp');
+  let created = false;
+  try {
+    const res = await transport.http(`${transport.base}${route}`, { method: 'GET' });
+    if (!res.ok) throw new Error(`GET ${route}: ${res.status} ${await res.text().catch(() => '')}`);
+    if (!res.body) throw new Error(`GET ${route}: the response has no body`);
+    // Exclusive creation first: if the file exists this throws before `created` is set, so cleanup below can only ever
+    // remove a file this command made.
+    const handle = await fsp.open(file, 'wx', 0o600);
+    created = true;
+    await pipeline(
+      Readable.fromWeb(res.body as import('node:stream/web').ReadableStream),
+      handle.createWriteStream(),
+    );
+  } catch (error) {
+    // A failure after creation leaves a partial archive that must not be mistaken for a backup.
+    if (created) await fsp.rm(file, { force: true });
+    throw error;
+  } finally {
+    void transport.close();
+  }
+}
+/**
+ * Posts a local file as the request body (`application/gzip`), streamed from disk without buffering it, and returns
+ * the JSON answer. Used to hand a control archive to the control host for a restore.
+ */
+export async function upload<T>(route: string, file: string): Promise<T> {
+  markWorkStarted();
+  const c = await loadCfg();
+  // A mutation: judged against the control's version before any byte is sent.
+  const transport = await transportFor(c, 'probe');
+  try {
+    const res = await transport.http(`${transport.base}${route}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/gzip' },
+      body: Readable.toWeb(createReadStream(file)) as never,
+      duplex: 'half',
+    } as RequestInit);
+    if (!res.ok)
+      throw new Error(`POST ${route}: ${res.status} ${await res.text().catch(() => '')}`);
+    return (await res.json()) as T;
+  } finally {
+    void transport.close();
+  }
+}
+/**
+ * Values for the named variables: from the environment, else from stdin lines, one per name that the environment
+ * does not provide, in the order the names are given (a repeated name counts once).
+ */
+export async function readEnvValues(names: string[]): Promise<Record<string, string>> {
+  const unique = [...new Set(names)];
+  const missing = unique.filter((name) => process.env[name] === undefined);
+  const lines = missing.length
+    ? (await readStdin()).split(/\r?\n/).filter((line) => line.length > 0)
+    : [];
+  if (lines.length < missing.length)
+    throw new Error(`expected a value on stdin for ${missing.slice(lines.length).join(', ')}`);
+  return Object.fromEntries(
+    unique.map((name) => [name, process.env[name] ?? lines[missing.indexOf(name)]]),
+  );
 }
 export const print = (value: unknown): void => console.log(JSON.stringify(value, null, 2));
 export async function waitForDeployment(

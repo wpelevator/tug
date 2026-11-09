@@ -94,8 +94,10 @@ program.hook('preAction', async (_root, command) => {
         max,
       );
   }
-  if (path === 'control restore' && !options.confirm)
-    throw new Error('control restore requires --confirm');
+  if (path === 'control restore' && options.snapshot && !options.fromDestination)
+    throw new Error('--snapshot goes with --from-destination');
+  if (path === 'control restore' && options.passwordStdin && !options.fromDestination)
+    throw new Error('--password-stdin goes with --from-destination');
   const positional = path === 'exec' ? command.args.slice(0, 1) : command.args;
   for (const value of [...positional, ...Object.values(options), ...Object.values(program.opts())])
     if (typeof value === 'string' && /[\r\n\0]/.test(value))

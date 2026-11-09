@@ -11,7 +11,7 @@ Workload snapshots contain application data; control-plane archives contain Tug 
 | Database | Back up a logical dump from the running service with `x-tug.backup.command`; copying a live database volume is generally not consistent. | Repository password, storage credentials, a suitable restore command and application configuration. |
 | Files in a named volume | Mark the volume with `x-tug.backup`; live files are crash-consistent, not necessarily application-consistent. | Repository password and storage credentials; test a scratch restore. |
 | External object storage | Configure separate protection with the storage provider. | Provider credentials and a way to restore objects to a compatible point in time with the database. |
-| Control state, secrets, private CA and master key | Run `tug control backup` and copy the archive off-host encrypted; it does not include workload data. | The archive and an original operator credential; see [control recovery](control-plane.md#recover-control-on-another-host). |
+| Control state, secrets, private CA and master key | Automatic once a backup destination is set: control stores itself in the same destination every night. `tug control backup` stores one in the destination on demand, and `tug control backup -o <file>` saves an archive on your machine. None of them includes workload data. | The control password (`tug backup password --control`) and the destination's credentials; see [control recovery](control-plane.md#recover-control-on-another-host). |
 | Compose file and source | Keep them in version control. | Access to the repository and any external dependencies. |
 
 Tug backs up each target separately. If your application needs a consistent point-in-time copy, plan how to stop writes and coordinate external storage. [The WordPress example](../examples/wordpress/README.md) illustrates a database and files on one node.
@@ -32,7 +32,7 @@ tug backup password
 
 Replace the endpoint and bucket with your own. `backup run` waits for the configured targets and reports failure; inspect `backup list --check` to confirm each target succeeded. Store the printed repository password and storage credentials securely off-host. The password is derived from control's master key; losing both the password and master key makes the repository unreadable. `tug backup destination show` shows the destination without credential values. Credentials are encrypted on control and released to a node running a backup. Each project has its own restic repository under `<destination>/<project>`; commands use the [resolved project](cli.md#arguments-options-and-configuration).
 
-Also [back up control](#control-plane-backup), copy the archive off-host, and practice a [restore drill](#restore-drill). No backup notification is pushed automatically; monitor `tug backup list --check`.
+Control also backs itself up to the same destination every night (see [Control plane backup](#control-plane-backup)); practice a [restore drill](#restore-drill). No backup notification is pushed automatically; monitor `tug backup list --check`.
 
 ## Backup destination
 
@@ -128,13 +128,36 @@ This does not restore data that was never backed up, external services, DNS, or 
 
 ## Control plane backup
 
-`tug control backup` covers the control plane only, not workload data. Take it with an `admin` operator credential and copy the archive off the control-plane host. The archive holds the master key, every secret and the private CA key (which can issue credentials for the whole installation), so treat it like a password vault and store it encrypted. Create a dedicated credential for the job: `tug credential create backup --role admin` and store it at `/etc/tug/backup.credential.json` (mode `0600`). Example `/etc/cron.d/tug-control-backup` on the control-plane host (the runtime image runs the CLI; adjust to how you invoke `tug` there):
+Control has two kinds of backup, for two needs. The automatic one covers losing the control host when nobody took a manual copy. The manual one gives you a portable archive to keep in your own encrypted storage, take before an upgrade or carry through a migration. Neither includes workload volumes, which are covered by the project backups above.
 
-```cron
-15 2 * * * root TUG_CONTROL_URL=https://127.0.0.1:8443 TUG_CREDENTIAL_FILE=/etc/tug/backup.credential.json tug control backup > /var/log/tug-control-backup.json 2>&1 && restic -r s3:https://s3.eu-central-1.amazonaws.com/acme-backups/control backup "$(docker volume inspect --format '{{.Mountpoint}}' tug-control)/control-backups" --password-file /etc/tug/restic.pass
+### Automatic backup to the destination
+
+Control backs itself up as soon as a backup destination exists, with nothing more to configure. Every night (and again an hour after a failure) it takes a consistent snapshot of its database, the private CA and the master key, leaves out the retained build images (a deploy rebuilds them) and stores the archive in a restic repository named `_control` next to the project repositories. It keeps the last 3 snapshots plus 7 daily, 4 weekly and 6 monthly ones. Control runs the restic helper itself on its own Docker socket, so the control host needs no node and no cron job. The cadence can be changed with `TUG_CONTROL_BACKUP_INTERVAL_MS` and `TUG_CONTROL_BACKUP_RETRY_MS` ([Configuration](configuration.md)).
+
+`tug backup list` shows a `control` line with the last success in the destination that is in use now. Switching the destination starts a first backup there and reports it as unprotected until that backup completes, whatever the previous destination had. A local-path destination (meant for development) is labelled `local path only: not off-host`, because it does not survive losing the host. `tug backup list --check` fails when the last control backup failed, when none succeeded for twice the interval (two days by default), or when a destination has had no completed backup an hour after it was set. `tug events --project _control` shows `backup.completed` and `backup.failed`.
+
+The control repository has its own password, derived from the master key like each project's. Nodes only ever receive the passwords of the projects they run, so a node that holds the destination credentials can delete or overwrite control snapshots but cannot read or forge one. The master key is inside the archive, so keep the derived password off the server: `tug backup password --control` prints it with the repository. It is the one value to escrow, together with the destination credentials you already keep: it opens the `_control` repository, and the restored archive brings back the master key from which every project password (`tug backup password`) derives again. `tug backup destination set` reminds you. The password never changes while the installation keeps its master key. Enable bucket versioning if you want snapshots to survive a compromised node; do not rely on object lock without testing it with restic, because control prunes old snapshots.
+
+**Test your setup** before you need it:
+
+1. Run `tug control backup`. Like `tug backup run`, it stores a backup in the destination now and prints the repository and the snapshot id.
+2. Run `tug control backup list`. It reads the destination itself, so it shows what is actually stored (snapshot ids, times, sizes and what each holds: build images are never in these, workload volumes never in any), next to the archives on the control host.
+3. Save the output of `tug backup password --control` somewhere that does not depend on the server.
+4. Run `tug control restore --from-destination <url> --env AWS_ACCESS_KEY_ID --env AWS_SECRET_ACCESS_KEY` with that password (`TUG_CONTROL_BACKUP_PASSWORD`, or `--password-stdin`). Without `--confirm` a restore is a preview, like `tug restore run`: it fetches the newest snapshot and checks the archive, the database integrity, the CA and that every secret decrypts, then prints what the backup holds, without changing control. Add `--snapshot <id>` to check a specific one.
+
+To recover on a fresh host, see [Recover control on another host](control-plane.md#recover-control-on-another-host); `--snapshot <id>` restores the snapshot you chose instead of the newest, and a restore to an older one forgets what happened after it (see [Backups and authorization history](control-plane.md#backups-and-authorization-history)).
+
+### Manual archives
+
+`tug control backup --local` needs an `admin` credential and writes an archive on the control host, in `TUG_CONTROL_BACKUP_DIR`, with the retained build images unless you pass `--no-images`. (A plain `tug control backup` stores a backup in the destination instead and, with no destination configured, fails and says how to make an archive.) Images are worth keeping when some deployments exist only in Tug's build store. To get the archive onto your machine, use the form most operators want:
+
+```bash
+tug control backup -o recovery.tar.gz
 ```
 
-Put the S3 credentials in the crontab environment or a `restic.env` file with mode `0600`. Archives accumulate in `TUG_CONTROL_BACKUP_DIR`; prune old files with `find ... -mtime +14 -delete`. The cron line has not been run on a real control-plane host; verify that `tug` is on the cron `PATH` and that the data directory matches your install (`TUG_CONTROL_BACKUP_DIR`, see [Configuration](configuration.md)). `TUG_CONTROL_URL` is a connect target only; the certificate is still verified against the public URL in the credential. Restore with `tug control restore <path> --confirm` and restart control ([Control plane](control-plane.md#backup-and-restore)).
+`-o <file>` implies `--local` and `--download` (`--download` on its own picks a generated name), refuses to overwrite an existing file, and creates the copy `0600`. It prints what was saved: the path, whether build images are included, and where the copy on control remains, because the download does not remove it. The archive holds the master key, every secret and the private CA key (which can issue credentials for the whole installation), so store it encrypted. Archives accumulate in `TUG_CONTROL_BACKUP_DIR`; delete old ones yourself.
+
+The other half is restoring the exact file you kept: `tug control restore --from-file recovery.tar.gz --confirm` uploads it to the control being restored, so it does not have to be copied into that host's volume first. Without `--confirm` it only checks the file the same way and applies nothing. A path on the control host still works as a positional argument: `tug control restore <path> --confirm`. After a restore, restart control ([Control plane](control-plane.md#backup-and-restore)); commands that were queued or in flight when the backup was taken are retired rather than delivered again, and unfinished workload restores are marked failed or interrupted so you can resume or release them.
 
 ## Restore drill
 

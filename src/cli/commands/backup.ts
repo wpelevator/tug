@@ -2,7 +2,7 @@ import { selectBackups } from './selection.ts';
 import { withProgress } from '../progress.ts';
 import type { Command } from 'commander';
 import { backupCheckProblems } from '../../backup/check.ts';
-import { collectList, loadCfg, print, readStdin, request } from './context.ts';
+import { collectList, loadCfg, print, readEnvValues, request } from './context.ts';
 
 interface BackupRunRecord {
   id: string;
@@ -22,6 +22,14 @@ interface BackupRunRecord {
 }
 interface BackupListing {
   destinationConfigured: boolean;
+  /** Control's own backup in the destination; null while there is no destination. */
+  control?: {
+    lastSuccessAt: string | null;
+    lastStatus: string | null;
+    problem: string | null;
+    /** A local path is for development: it is not protection against losing the host. */
+    scope?: 'shared' | 'local';
+  } | null;
   targets: {
     target: string;
     node: string | null;
@@ -34,7 +42,7 @@ interface BackupListing {
   }[];
   runs: BackupRunRecord[];
 }
-const formatBytes = (bytes: number | null): string =>
+export const formatBytes = (bytes: number | null): string =>
   bytes === null
     ? '-'
     : bytes < 1024 ** 2
@@ -155,6 +163,10 @@ export function registerBackup(program: Command): void {
       if (o.json) print(listing);
       else if (!listing.targets.length)
         console.log('no backup targets; add x-tug.backup to a database service or volume');
+      if (!o.json && listing.control)
+        console.log(
+          `control\t-\tnightly\tlast success ${listing.control.lastSuccessAt ?? 'never'}${listing.control.scope === 'local' ? '\tlocal path only: not off-host' : ''}${listing.control.problem ? `\t${listing.control.problem}` : ''}`,
+        );
       if (!o.json)
         for (const t of listing.targets)
           console.log(
@@ -185,9 +197,15 @@ export function registerBackup(program: Command): void {
   backup
     .command('password')
     .description(
-      "print the project's repository and its password for offline escrow; anyone holding the password and destination credentials can read the project's backups",
+      "print the project's repository and its password for offline escrow; anyone holding the password and destination credentials can read the project's backups. With --control it prints control's own repository and password instead",
     )
-    .action(async () => {
+    .option(
+      '--control',
+      "print the control-plane repository and its password: the one value to keep off the server besides the destination credentials, because the control backup restores the master key every project's password derives from",
+    )
+    .action(async (o: { control?: boolean }) => {
+      if (o.control)
+        return print(await request('GET', '/api/v1/backup/repository-password?control=1'));
       const project = (await loadCfg()).project || 'site';
       print(
         await request(
@@ -212,17 +230,12 @@ export function registerBackup(program: Command): void {
       [],
     )
     .action(async (url: string, o: { env: string[] }) => {
-      const missing = o.env.filter((name) => process.env[name] === undefined);
-      const lines = missing.length
-        ? (await readStdin()).split(/\r?\n/).filter((line) => line.length > 0)
-        : [];
-      if (lines.length < missing.length)
-        throw new Error(`expected a value on stdin for ${missing.slice(lines.length).join(', ')}`);
-      const env = Object.fromEntries(
-        o.env.map((name) => [name, process.env[name] ?? lines[missing.indexOf(name)]]),
-      );
+      const env = await readEnvValues(o.env);
       console.log(
         JSON.stringify(await request('POST', '/api/v1/backup/destination', { url, env })),
+      );
+      console.error(
+        'Control now backs itself up here every night. Keep its password with these credentials: tug backup password --control',
       );
     });
   destination

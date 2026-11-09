@@ -39,3 +39,25 @@ test('disabled targets and projects without targets are not problems', () => {
   );
   assert.deepEqual(backupCheckProblems({ destinationConfigured: false, targets: [] }), []);
 });
+
+test('a failed or stale control backup is a problem, and a healthy one is not', () => {
+  assert.deepEqual(
+    backupCheckProblems({
+      destinationConfigured: true,
+      targets: [],
+      control: { problem: 'the last control backup failed: boom' },
+    }),
+    ['control: the last control backup failed: boom'],
+    'the control backup problem is reported even when the project has no targets',
+  );
+  assert.deepEqual(
+    backupCheckProblems({ destinationConfigured: true, targets: [], control: { problem: null } }),
+    [],
+    'a healthy control backup adds nothing',
+  );
+  assert.deepEqual(
+    backupCheckProblems({ destinationConfigured: false, targets: [], control: null }),
+    [],
+    'no destination means no control backup to judge',
+  );
+});

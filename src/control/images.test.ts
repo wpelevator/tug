@@ -498,7 +498,9 @@ test('requests during restore file replacement return 503 without touching the c
   const s = await server();
   try {
     const backup = await json(await s.post('/api/v1/control/backups/run', {}));
-    const held = filesystemGate(t, 'copyFile', (file) => file.endsWith('/control-restore/tug.db'));
+    const held = filesystemGate(t, 'copyFile', (file) =>
+      /\/control-restore\/r_[^/]+\/tug\.db$/.test(file),
+    );
     const restore = s.post('/api/v1/control/restore', {
       artifactRef: backup.artifactRef,
       confirm: true,

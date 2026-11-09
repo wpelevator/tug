@@ -285,6 +285,10 @@ const SAMPLES: Record<string, { path: string; body?: unknown }> = {
   },
   'POST /api/v1/nodes/:name/ingress': { path: '/api/v1/nodes/ghost/ingress', body: {} },
   'POST /api/v1/control/backups/run': { path: '/api/v1/control/backups/run', body: {} },
+  'GET /api/v1/control/backups': { path: '/api/v1/control/backups' },
+  'GET /api/v1/control/backups/:id/download': {
+    path: '/api/v1/control/backups/cbak_none/download',
+  },
   'POST /api/v1/holds/release': { path: '/api/v1/holds/release', body: {} },
   'POST /api/v1/images/prune': { path: '/api/v1/images/prune', body: { dryRun: true } },
   'POST /api/v1/control/restore': { path: '/api/v1/control/restore', body: {} },
@@ -755,6 +759,29 @@ test('whoami tells each credential its own name, role and project scope', async 
       'an unscoped credential reports no project limit',
     );
     assert.ok(!read.text.includes(viewer), 'the answer never echoes the secret');
+  } finally {
+    await s.close();
+  }
+});
+
+test('a project-scoped credential does not see control-wide backup status', async () => {
+  const s = await makeServer();
+  try {
+    await s.call(OPERATOR, 'POST', '/api/v1/backup/destination', {
+      url: 's3:https://s3.example.com/bucket/tug',
+      env: { AWS_ACCESS_KEY_ID: 'AKIAEXAMPLE', AWS_SECRET_ACCESS_KEY: 'sekret-value-1' },
+    });
+    const viewer = await s.mint('view-a', 'read', ['a']);
+    const unscoped = await s.mint('view-all', 'read');
+    const scoped = await s.call(viewer, 'GET', '/api/v1/backups?project=a');
+    assert.equal(scoped.status, 200, 'a scoped viewer may list its own project backups');
+    assert.equal(
+      scoped.body.control,
+      null,
+      'control failure text names the bucket, so a scoped credential gets no control status',
+    );
+    const all = await s.call(unscoped, 'GET', '/api/v1/backups?project=a');
+    assert.ok(all.body.control, 'an unscoped credential sees the control backup status');
   } finally {
     await s.close();
   }

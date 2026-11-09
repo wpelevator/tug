@@ -10,7 +10,7 @@ import type { NextFunction, Request, RequestHandler, Response } from 'express';
 import multer from 'multer';
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
-import { createReadStream } from 'node:fs';
+import { createReadStream, createWriteStream } from 'node:fs';
 import { DockerEngine } from '../docker-api.ts';
 import type { DockerApi } from '../docker-api.ts';
 import { pipeline } from 'node:stream/promises';
@@ -112,7 +112,22 @@ import {
   repositoryPassword,
   redactSecrets,
 } from '../backup/destination.ts';
-import { createBackupService } from '../backup/scheduler.ts';
+import {
+  CONTROL_SNAPSHOT_ID,
+  controlRepository,
+  controlRepositoryPassword,
+  fetchControlArchive,
+  listControlSnapshots,
+  pushControlArchive,
+} from '../backup/control-backup.ts';
+import { DEFAULT_RESTIC_IMAGE, createBackupService } from '../backup/scheduler.ts';
+import {
+  activateRestore,
+  finishActivation,
+  recoverActivation,
+  retireAfterRestore,
+} from './restore-activation.ts';
+import type { ActivationStep } from './restore-activation.ts';
 import { createRestoreService, discoverWriters } from '../backup/restore.ts';
 import {
   AUTO_ROLLBACK_ACTOR,
@@ -638,6 +653,8 @@ export async function createApp(
     /** The Docker Engine control manages images and reports diagnostics through; defaults to the local socket. */
     docker?: DockerApi;
     openDatabase?: typeof openDb;
+    /** Test hook: runs after each step of putting a restored backup in place and may throw to simulate a crash. */
+    restoreAfterStep?: (step: ActivationStep) => void | Promise<void>;
     /** Minimum time between event prunes triggered by agent reports; default one hour. */ eventPruneIntervalMs?: number;
     /** Override the live open/agent startup timeout in milliseconds. */ liveStartTimeoutMs?: number;
     /** Credential-free HTTPS origin clients connect to by default; defaults to `TUG_CONTROL_URL`. */ controlUrl?: string;
@@ -677,7 +694,20 @@ export async function createApp(
   await fs.mkdir(DATA_DIR, { recursive: true, mode: 0o700 });
   await fs.chmod(DATA_DIR, 0o700);
 
+  // A restore that was interrupted between replacing the database, the master key and the CA is rolled back here,
+  // before any of them is opened; a committed one is finished once the database is open.
+  const activation = await recoverActivation(DATA_DIR);
   const db = await (options.openDatabase || openDb)(dbFile);
+  if (activation) {
+    const retired = retireAfterRestore(db);
+    await finishActivation(DATA_DIR, activation);
+    recordEvent(db, {
+      actor: 'control',
+      type: 'control.restore_activated',
+      message: `control started from a restored backup: ${retired.commands} queued or running commands and ${retired.restores} workload restores from the backup were retired`,
+      metadata: { ...retired },
+    });
+  }
   const wakeHub = new WakeHub(() => watch.mark('nodes'));
 
   // Events are an operator-facing log, not a record of truth, so keep them bounded. `0` turns a limit off; anything that is
@@ -1954,9 +1984,12 @@ export async function createApp(
   const restores = createRestoreService({ db, backups, wake: (project) => wakeAll(project) });
   app.locals.restores = restores;
   const backupTickMs = Number(process.env.TUG_BACKUP_TICK_MS) || 30_000;
+  /** Assigned with the control backup code below; control's own nightly backup into the destination. */
+  let controlDestinationTick: () => void = () => {};
   const backupTimer = setInterval(() => {
     try {
       backups.tick();
+      controlDestinationTick();
       restores.advance();
     } catch (e) {
       console.error(`backup scheduler failed: ${errMessage(e)}`);
@@ -2053,6 +2086,8 @@ export async function createApp(
     res.json({
       project,
       destinationConfigured: Boolean(backupDestination()),
+      // Failure text names the bucket, so a credential limited to some projects does not get control-wide detail.
+      control: req.actor!.projects === null ? controlDestinationStatus() : null,
       ...backups.list(project, limit),
     });
   });
@@ -2105,6 +2140,18 @@ export async function createApp(
     res.json({ ok: true, removed });
   });
   api('get', '/api/v1/backup/repository-password', null, async (req, res) => {
+    if (req.query.control !== undefined) {
+      const destination = backupDestination();
+      audit(req.actor!, {
+        type: 'backup.key_read',
+        message: `control repository password read by ${req.actor!.name}`,
+      });
+      return res.json({
+        control: true,
+        repository: destination ? controlRepository(destination.url) : null,
+        password: controlRepositoryPassword(masterKey),
+      });
+    }
     const project = String(req.query.project || '');
     if (!PROJECT_NAME_PATTERN.test(project) || isReservedProject(project))
       return res.status(400).json({ error: 'project is required' });
@@ -3162,164 +3209,628 @@ export async function createApp(
       });
     }),
   );
-  api('post', '/api/v1/control/backups/run', null, async (req, res) =>
-    withWriter(async () => {
-      const backupDir =
-        process.env.TUG_CONTROL_BACKUP_DIR || path.join(DATA_DIR, 'control-backups');
-      // The archive holds the master key and the CA key, so nothing here is ever readable beyond the control user.
-      await fs.mkdir(backupDir, { recursive: true, mode: 0o700 });
-      await fs.chmod(backupDir, 0o700);
-      const ts = now();
-      const backupId = id('cbak');
-      const staging = path.join(backupDir, `${backupId}-staging`);
-      const artifactRef = path.resolve(backupDir, `${backupId}.tar.gz`);
-      try {
-        await fs.rm(staging, { recursive: true, force: true });
-        await fs.mkdir(staging, { mode: 0o700 });
-        const snapshotPath = path.join(staging, 'tug.db');
-        db.run('VACUUM INTO ?', snapshotPath);
-        await fs.chmod(snapshotPath, 0o600);
-        await fs.copyFile(masterKeyFile, path.join(staging, 'master.key'));
-        await fs.chmod(path.join(staging, 'master.key'), 0o600);
-        await fs.cp(path.join(DATA_DIR, 'pki'), path.join(staging, 'pki'), {
-          recursive: true,
-          filter: (src) => path.basename(src) !== 'server.json',
-        });
-        const withImages = req.body?.images !== false;
-        if (withImages) await fs.cp(artifactDir, path.join(staging, 'images'), { recursive: true });
-        await fs.writeFile(
-          path.join(staging, 'metadata.json'),
-          JSON.stringify({ backupId, createdAt: ts, type: 'control', images: withImages }, null, 2),
-          { mode: 0o600 },
-        );
-        await tar.c({ gzip: true, file: artifactRef, cwd: staging, mode: 0o600 }, [
-          'tug.db',
-          'master.key',
-          'metadata.json',
-          'pki',
-          ...(withImages ? ['images'] : []),
-        ]);
-      } catch (error) {
-        await fs.rm(artifactRef, { force: true });
-        throw error;
-      } finally {
-        await fs.rm(staging, { recursive: true, force: true });
+  const RESTORE_MARKER = '.tug-control-restore';
+  const restoreRoot = () =>
+    process.env.TUG_CONTROL_RESTORE_DIR || path.join(DATA_DIR, 'control-restore');
+  const controlBackupDir = () =>
+    process.env.TUG_CONTROL_BACKUP_DIR || path.join(DATA_DIR, 'control-backups');
+  /**
+   * Removes what a crash left behind. Files and directories control never recorded are removed once they are old
+   * enough that nothing is still writing them: archives and staging copies in the backup directory (both hold keys),
+   * and downloads of a restore source. The restore scratch directory and restic helper containers cannot belong to
+   * anything running at startup, so they go at once.
+   */
+  async function sweepControlLeftovers(): Promise<void> {
+    const old = async (target: string) => {
+      const stat = await fs.stat(target).catch(() => null);
+      return Boolean(stat && Date.now() - stat.mtimeMs > 3600_000);
+    };
+    const dir = controlBackupDir();
+    for (const name of await fs.readdir(dir).catch(() => [] as string[])) {
+      const target = path.resolve(dir, name);
+      if (/^cbak_[A-Za-z0-9_-]+-staging$/.test(name)) {
+        if (await old(target)) await fs.rm(target, { recursive: true, force: true });
+      } else if (/^cbak_[A-Za-z0-9_-]+\.tar\.gz$/.test(name)) {
+        if (!db.get('SELECT 1 FROM backups WHERE artifact_ref=?', target) && (await old(target)))
+          await fs.rm(target, { force: true });
       }
+    }
+    for (const name of await fs.readdir(DATA_DIR).catch(() => [] as string[]))
+      if (
+        /^control-restore-(download|upload)-.+\.tar\.gz$/.test(name) &&
+        (await old(path.join(DATA_DIR, name)))
+      )
+        await fs.rm(path.join(DATA_DIR, name), { force: true });
+    // Only directories a restore made and marked: the configured path is a parent and is never removed itself.
+    for (const name of await fs.readdir(restoreRoot()).catch(() => [] as string[])) {
+      const target = path.join(restoreRoot(), name);
+      if (
+        /^r_[A-Za-z0-9]+$/.test(name) &&
+        (await fs.stat(path.join(target, RESTORE_MARKER)).catch(() => null))
+      )
+        await fs.rm(target, { recursive: true, force: true });
+    }
+    for (const helper of await docker
+      .listContainers({ label: ['tug.job=control-backup'] })
+      .catch(() => []))
+      await docker.removeContainer(helper.Id).catch(() => undefined);
+  }
+  /** Writes a consistent control archive into the control backup directory; the caller records it and decides how long it stays. */
+  async function createControlArchive(
+    withImages: boolean,
+  ): Promise<{ backupId: string; artifactRef: string; createdAt: string }> {
+    const backupDir = controlBackupDir();
+    // The archive holds the master key and the CA key, so nothing here is ever readable beyond the control user.
+    await fs.mkdir(backupDir, { recursive: true, mode: 0o700 });
+    await fs.chmod(backupDir, 0o700);
+    const ts = now();
+    const backupId = id('cbak');
+    const staging = path.join(backupDir, `${backupId}-staging`);
+    const artifactRef = path.resolve(backupDir, `${backupId}.tar.gz`);
+    try {
+      await fs.rm(staging, { recursive: true, force: true });
+      await fs.mkdir(staging, { mode: 0o700 });
+      const snapshotPath = path.join(staging, 'tug.db');
+      db.run('VACUUM INTO ?', snapshotPath);
+      await fs.chmod(snapshotPath, 0o600);
+      await fs.copyFile(masterKeyFile, path.join(staging, 'master.key'));
+      await fs.chmod(path.join(staging, 'master.key'), 0o600);
+      await fs.cp(path.join(DATA_DIR, 'pki'), path.join(staging, 'pki'), {
+        recursive: true,
+        filter: (src) => path.basename(src) !== 'server.json',
+      });
+      if (withImages) await fs.cp(artifactDir, path.join(staging, 'images'), { recursive: true });
+      await fs.writeFile(
+        path.join(staging, 'metadata.json'),
+        JSON.stringify({ backupId, createdAt: ts, type: 'control', images: withImages }, null, 2),
+        { mode: 0o600 },
+      );
+      await tar.c({ gzip: true, file: artifactRef, cwd: staging, mode: 0o600 }, [
+        'tug.db',
+        'master.key',
+        'metadata.json',
+        'pki',
+        ...(withImages ? ['images'] : []),
+      ]);
+    } catch (error) {
+      await fs.rm(artifactRef, { force: true });
+      throw error;
+    } finally {
+      await fs.rm(staging, { recursive: true, force: true });
+    }
+    return { backupId, artifactRef, createdAt: ts };
+  }
+  api(
+    'post',
+    '/api/v1/control/backups/run',
+    null,
+    // `toDestination` stores a backup in the destination now and returns where it went, instead of a local archive.
+    async (req, res, next) => {
+      if (!req.body?.toDestination) return next();
+      if (!backupDestination())
+        return res.status(409).json({
+          error:
+            'no backup destination is configured; run tug backup destination set <url>, or use tug control backup --local for an archive on the control host, or -o <file> to save one on this machine',
+        });
+      if (controlPushRunning)
+        return res.status(409).json({ error: 'a control backup is already running' });
+      const result = await runControlDestination('manual');
+      if (!result)
+        return res.status(409).json({ error: 'control cannot back up right now; restart it' });
+      audit(req.actor!, {
+        type: 'control.backup',
+        message: `control backup stored in the backup destination by ${req.actor!.name}`,
+        metadata: { snapshotId: result.snapshotId },
+      });
+      return res.status(result.ok ? 200 : 502).json(result);
+    },
+    async (req, res) =>
+      withWriter(async () => {
+        const withImages = req.body?.images !== false;
+        const { backupId, artifactRef, createdAt } = await createControlArchive(withImages);
+        db.run(
+          'INSERT INTO backups(id,project_id,target,node_id,state,artifact_ref,metadata_json,created_at,completed_at) VALUES(?,?,?,?,?,?,?,?,?)',
+          backupId,
+          '_control',
+          'control-plane',
+          null,
+          'completed',
+          artifactRef,
+          JSON.stringify({ type: 'control', images: withImages }),
+          createdAt,
+          now(),
+        );
+        audit(req.actor!, {
+          type: 'control.backup',
+          message: `control backup ${backupId} created by ${req.actor!.name}`,
+        });
+        res.json({
+          ok: true,
+          stored: 'control-host',
+          backupId,
+          artifactRef,
+          state: 'completed',
+          images: withImages,
+        });
+      }),
+  );
+  const controlIntervalMs = () =>
+    Number(process.env.TUG_CONTROL_BACKUP_INTERVAL_MS) || 24 * 3600_000;
+  const controlRetryMs = () => Number(process.env.TUG_CONTROL_BACKUP_RETRY_MS) || 3600_000;
+  const resticImage = () => process.env.TUG_RESTIC_IMAGE || DEFAULT_RESTIC_IMAGE;
+  /** How long one control backup, listing or fetch may take before its helper is removed; the module default is 30 minutes. */
+  const controlJobLimitMs = () => Number(process.env.TUG_CONTROL_BACKUP_LIMIT_MS) || undefined;
+  const controlEvent = (level: 'info' | 'error', type: string, message: string, meta: object) =>
+    db.run(
+      'INSERT INTO events(id,project_id,deployment_id,node_id,level,type,message,metadata_json,created_at) VALUES(?,?,?,?,?,?,?,?,?)',
+      id('evt'),
+      '_control',
+      null,
+      null,
+      level,
+      type,
+      message,
+      JSON.stringify(meta),
+      now(),
+    );
+  /**
+   * Which destination an outcome belongs to. Success in one destination says nothing about another, so status and
+   * scheduling only look at outcomes for the destination in use now, and a switch starts a first backup there.
+   */
+  const destinationKey = (url: string) =>
+    crypto.createHash('sha256').update(url).digest('hex').slice(0, 16);
+  const lastControlDestination = (key: string, onlyCompleted: boolean) =>
+    db.get<{ state: string; created_at: string; metadata_json: string }>(
+      `SELECT state,created_at,metadata_json FROM backups WHERE project_id='_control' AND target='control-destination' AND json_extract(metadata_json,'$.destination')=?${onlyCompleted ? " AND state='completed'" : ''} ORDER BY created_at DESC LIMIT 1`,
+      key,
+    );
+  /** What `tug backup list` shows about control's own backup in the current destination; null while there is none. */
+  function controlDestinationStatus(): {
+    lastSuccessAt: string | null;
+    lastStatus: string | null;
+    problem: string | null;
+    scope: 'shared' | 'local';
+    repository: string;
+  } | null {
+    const destination = backupDestination();
+    if (!destination) return null;
+    const key = destinationKey(destination.url);
+    const ok = lastControlDestination(key, true);
+    const last = lastControlDestination(key, false);
+    const failure =
+      last?.state === 'failed'
+        ? `the last control backup failed: ${(JSON.parse(last.metadata_json) as { error?: string }).error ?? 'unknown error'}`
+        : null;
+    const stale =
+      ok && Date.now() - Date.parse(ok.created_at) > 2 * controlIntervalMs()
+        ? `no successful control backup since ${ok.created_at}`
+        : null;
+    // A destination that is new, or was switched to, is unprotected until its first backup completes.
+    const unprotected =
+      !ok && Date.now() - Date.parse(destination.updated_at) > controlRetryMs()
+        ? `no control backup has completed in this destination since it was set (${destination.updated_at})`
+        : null;
+    return {
+      lastSuccessAt: ok?.created_at ?? null,
+      lastStatus: last?.state ?? null,
+      problem: failure ?? stale ?? unprotected,
+      // A local path is for development: it does not survive losing the host, so it is never shown as off-host.
+      scope: destination.url.startsWith('/') ? 'local' : 'shared',
+      repository: controlRepository(destination.url),
+    };
+  }
+  let controlPushRunning = false;
+  /** Backs control up into the shared destination: a consistent archive without images, streamed into restic. */
+  interface ControlDestinationResult {
+    ok: boolean;
+    stored?: 'destination';
+    backupId?: string;
+    repository?: string;
+    snapshotId?: string;
+    sizeBytes?: number;
+    warning?: string;
+    error?: string;
+  }
+  async function runControlDestination(
+    trigger: 'schedule' | 'manual',
+  ): Promise<ControlDestinationResult | null> {
+    // The URL and its credentials are read together, before anything awaits: a destination changed meanwhile
+    // must not pair the old URL with the new credentials.
+    const destination = backupDestination();
+    if (!destination || controlPushRunning) return null;
+    const env = backupEnv();
+    const key = destinationKey(destination.url);
+    controlPushRunning = true;
+    const startedAt = now();
+    let archive: { backupId: string; artifactRef: string } | undefined;
+    try {
+      archive = await withWriter(() => createControlArchive(false));
+      const size = (await fs.stat(archive.artifactRef)).size;
+      if (restartRequired) return null;
+      const push = await pushControlArchive(
+        docker,
+        {
+          url: destination.url,
+          env,
+          password: controlRepositoryPassword(masterKey),
+          resticImage: resticImage(),
+          limitMs: controlJobLimitMs(),
+        },
+        archive.artifactRef,
+        // What the snapshot holds, visible when choosing one: no images and, always, no workload data.
+        { tags: ['images:none', `tug:${ownVersion}`, `trigger:${trigger}`] },
+      );
+      if (restartRequired) return null;
+      const meta = {
+        type: 'control',
+        destination: key,
+        snapshotId: push.snapshotId,
+        sizeBytes: size,
+        ...push,
+      };
       db.run(
         'INSERT INTO backups(id,project_id,target,node_id,state,artifact_ref,metadata_json,created_at,completed_at) VALUES(?,?,?,?,?,?,?,?,?)',
-        backupId,
+        archive.backupId,
         '_control',
-        'control-plane',
+        'control-destination',
         null,
         'completed',
-        artifactRef,
-        JSON.stringify({ type: 'control' }),
-        ts,
+        push.snapshotId ?? null,
+        JSON.stringify(meta),
+        startedAt,
         now(),
       );
-      res.json({ backupId, artifactRef, state: 'completed' });
-    }),
-  );
-  api('post', '/api/v1/control/restore', null, async (req, res) =>
-    withWriter(async () => {
-      if (!req.body.confirm)
-        return res.status(400).json({
-          error: 'confirm=true is required; restore overwrites control data then requires restart',
-        });
-      const artifactRef = req.body.artifactRef;
-      if (typeof artifactRef !== 'string' || !artifactRef)
-        return res.status(400).json({ error: 'artifactRef required' });
-      const restoreDir =
-        process.env.TUG_CONTROL_RESTORE_DIR || path.join(DATA_DIR, 'control-restore');
-      let snapshot;
+      controlEvent(
+        'info',
+        'backup.completed',
+        'control backup stored in the backup destination',
+        meta,
+      );
+      return {
+        ok: true,
+        stored: 'destination',
+        backupId: archive.backupId,
+        repository: controlRepository(destination.url),
+        snapshotId: push.snapshotId,
+        sizeBytes: size,
+        ...(push.warning ? { warning: push.warning } : {}),
+      };
+    } catch (e) {
+      // A restore replaced the database while this push ran; there is nothing left to record it in.
+      if (restartRequired) return null;
+      const error = errMessage(e);
+      db.run(
+        'INSERT INTO backups(id,project_id,target,node_id,state,artifact_ref,metadata_json,created_at,completed_at) VALUES(?,?,?,?,?,?,?,?,?)',
+        id('cbak'),
+        '_control',
+        'control-destination',
+        null,
+        'failed',
+        null,
+        JSON.stringify({ type: 'control', destination: key, error }),
+        startedAt,
+        now(),
+      );
+      controlEvent('error', 'backup.failed', `control backup failed: ${error}`, { error });
+      return { ok: false, stored: 'destination', error };
+    } finally {
+      if (archive) await fs.rm(archive.artifactRef, { force: true });
+      controlPushRunning = false;
+    }
+  }
+  controlDestinationTick = () => {
+    const destination = backupDestination();
+    if (controlPushRunning || restartRequired || !destination) return;
+    const key = destinationKey(destination.url);
+    const at = Date.now();
+    const ok = lastControlDestination(key, true);
+    if (ok && at - Date.parse(ok.created_at) < controlIntervalMs()) return;
+    const last = lastControlDestination(key, false);
+    if (last?.state === 'failed' && at - Date.parse(last.created_at) < controlRetryMs()) return;
+    void runControlDestination('schedule').catch((e) =>
+      console.error(`control backup failed: ${errMessage(e)}`),
+    );
+  };
+  api('get', '/api/v1/control/backups', null, async (_req, res) => {
+    const destination = backupDestination();
+    const rows = db.all<{
+      id: string;
+      created_at: string;
+      artifact_ref: string | null;
+      metadata_json: string;
+    }>(
+      "SELECT id,created_at,artifact_ref,metadata_json FROM backups WHERE project_id='_control' AND target='control-plane' ORDER BY created_at DESC LIMIT 50",
+    );
+    // Copies on the control host, from the catalog; a file that was deleted by hand shows as gone.
+    const local = await Promise.all(
+      rows.map(async (row) => {
+        const stat = row.artifact_ref ? await fs.stat(row.artifact_ref).catch(() => null) : null;
+        const meta = JSON.parse(row.metadata_json || '{}') as { images?: boolean };
+        return {
+          id: row.id,
+          createdAt: row.created_at,
+          path: row.artifact_ref,
+          onDisk: Boolean(stat),
+          sizeBytes: stat?.size ?? null,
+          images: meta.images ?? null,
+        };
+      }),
+    );
+    // Copies in the destination, read from the destination itself: what is actually there, not what control remembers.
+    let remote: { state: 'ok' | 'missing' | 'error'; snapshots: unknown[]; error?: string } | null =
+      null;
+    if (destination)
       try {
-        await fs.rm(restoreDir, { recursive: true, force: true });
-        await ensureDir(restoreDir);
-        await scanArchive(artifactRef, (entry) => {
-          if (
-            path.isAbsolute(entry.path) ||
-            entry.path.split('/').includes('..') ||
-            !['File', 'Directory'].includes(entry.type)
-          )
-            throw new Error('unsafe control backup entry');
+        remote = await listControlSnapshots(docker, {
+          url: destination.url,
+          env: backupEnv(),
+          password: controlRepositoryPassword(masterKey),
+          resticImage: resticImage(),
+          limitMs: controlJobLimitMs(),
         });
-        await tar.x({ file: artifactRef, cwd: restoreDir, strict: true });
-        const key = (await fs.readFile(path.join(restoreDir, 'master.key'), 'utf8')).trim();
-        if (!/^[A-Za-z0-9+/]{43}=$/.test(key)) throw new Error('invalid backup master key');
-        snapshot = openSnapshotDb(path.join(restoreDir, 'tug.db'));
-        const integrity = snapshot.get('PRAGMA integrity_check');
-        if (integrity?.integrity_check !== 'ok')
-          throw new Error('backup database failed integrity check');
-        await Pki.load(path.join(restoreDir, 'pki'), false).catch((e) => {
-          throw new Error(`backup PKI is not usable: ${errMessage(e)}`, { cause: e });
-        });
-        for (const secret of snapshot.all<SecretRow>('SELECT * FROM secrets'))
-          decrypt(secret.encrypted_value, key);
-        const states = snapshot.all<DesiredStateRow>('SELECT * FROM desired_states');
-        const meta = JSON.parse(
-          await fs.readFile(path.join(restoreDir, 'metadata.json'), 'utf8').catch(() => '{}'),
-        ) as { images?: boolean };
-        // A backup taken without images restores the archive-less builds as pruned on the next start.
-        for (const stateRow of meta.images === false ? [] : states) {
-          const state: DesiredState = JSON.parse(stateRow.state_json);
-          for (const service of Object.values(state.services)) {
-            if (!service.artifact) continue;
-            // `image prune` already removed this one before the backup.
-            if (
-              snapshot.get(
-                "SELECT 1 FROM builds WHERE id=? AND state='pruned'",
-                service.artifact.buildId,
-              )
-            )
-              continue;
-            const build = snapshot.get<BuildRow>(
-              'SELECT * FROM builds WHERE id=? AND state=?',
-              service.artifact.buildId,
-              'complete',
-            );
-            if (
-              !build?.artifact_path ||
-              !/^images\/build_[a-zA-Z0-9_-]+\.tar\.gz$/.test(build.artifact_path)
-            )
-              throw new Error('backup contains an unsafe or missing image reference');
-            const actual = await hashArchive(path.join(restoreDir, build.artifact_path));
-            if (
-              actual.sha256 !== build.sha256 ||
-              actual.sizeBytes !== build.size_bytes ||
-              actual.sha256 !== service.artifact.sha256 ||
-              actual.sizeBytes !== service.artifact.sizeBytes
-            )
-              throw new Error('backup image archive checksum mismatch');
-          }
-        }
-        snapshot.close();
-        snapshot = undefined;
-        await ensureDir(path.join(restoreDir, 'images'));
-        // Validation completes before changing any live file. Stop DB-dependent work until restart.
-        restartRequired = true;
-        db.close();
-        await fs.rm(`${dbFile}-wal`, { force: true });
-        await fs.rm(`${dbFile}-shm`, { force: true });
-        await fs.cp(path.join(restoreDir, 'images'), artifactDir, { recursive: true });
-        await fs.copyFile(path.join(restoreDir, 'tug.db'), dbFile);
-        await fs.copyFile(path.join(restoreDir, 'master.key'), masterKeyFile);
-        await fs.cp(path.join(restoreDir, 'pki'), path.join(DATA_DIR, 'pki'), {
-          recursive: true,
-          filter: (src) => path.basename(src) !== 'server.json',
-        });
-        // Authorization follows the restored database: older snapshots forget later principals and revive revoked ones.
-        // Close every session, including this one, but only after the response has been delivered.
-        res.once('finish', closeAllSockets);
-        res.json({ ok: true, restored: true, restartRequired: true });
       } catch (e) {
-        try {
-          snapshot?.close();
-        } catch {
-          /* Preserve the restore error. */
-        }
-        res.status(restartRequired ? 500 : 400).json({ error: errMessage(e), restartRequired });
+        remote = { state: 'error', snapshots: [], error: errMessage(e) };
       }
-    }),
+    res.json({
+      destinationConfigured: Boolean(destination),
+      repository: destination ? controlRepository(destination.url) : null,
+      local,
+      remote,
+    });
+  });
+  void sweepControlLeftovers().catch((e) =>
+    console.error(`startup cleanup failed: ${errMessage(e)}`),
+  );
+  api('get', '/api/v1/control/backups/:id/download', null, async (req, res) => {
+    const row = db.get<{ artifact_ref: string | null }>(
+      "SELECT artifact_ref FROM backups WHERE id=? AND project_id='_control' AND target='control-plane'",
+      String(req.params.id),
+    );
+    if (!row?.artifact_ref) return res.status(404).json({ error: 'no such control backup' });
+    if (!(await fs.stat(row.artifact_ref).catch(() => null)))
+      return res.status(404).json({ error: 'the control backup is no longer on disk' });
+    audit(req.actor!, {
+      type: 'control.backup_download',
+      message: `control backup ${String(req.params.id)} downloaded by ${req.actor!.name}`,
+    });
+    res.setHeader('cache-control', 'no-store');
+    res.setHeader('content-type', 'application/gzip');
+    res.setHeader(
+      'content-disposition',
+      `attachment; filename="${path.basename(row.artifact_ref)}"`,
+    );
+    res.sendFile(row.artifact_ref, { dotfiles: 'allow' });
+  });
+  /**
+   * Reads the newest control snapshot of a destination into a private file before the restore takes the writer queue:
+   * a slow or hung bucket must not block deploys and every other write for the length of the fetch.
+   */
+  const fetchRestoreSource: RequestHandler = async (req, res, next) => {
+    const from = req.body?.fromDestination;
+    if (!from) return next();
+    if (!req.body.confirm && !req.body.verify)
+      return res.status(400).json({
+        error: 'confirm=true is required; restore overwrites control data then requires restart',
+      });
+    if (restartRequired)
+      return res.status(503).json({ error: 'control restored; restart required' });
+    let source;
+    try {
+      source = parseBackupDestination(from);
+    } catch (e) {
+      return res.status(400).json({ error: errMessage(e) });
+    }
+    if (source.url.startsWith('/'))
+      return res.status(400).json({
+        error: 'a restore reads a shared destination (s3:, sftp: or rest:), not a local path',
+      });
+    const snapshot = (from as { snapshot?: unknown }).snapshot;
+    if (
+      snapshot !== undefined &&
+      (typeof snapshot !== 'string' || !CONTROL_SNAPSHOT_ID.test(snapshot))
+    )
+      return res.status(400).json({
+        error: 'snapshot must be an id from tug control backup list (8 to 64 hex digits)',
+      });
+    const password = (from as { password?: unknown }).password;
+    if (typeof password !== 'string' || !/^[0-9a-f]{64}$/.test(password))
+      return res.status(400).json({
+        error:
+          'the control password is required; it is the one printed by `tug backup password --control` on the old control',
+      });
+    const fetched = path.join(DATA_DIR, `control-restore-download-${id('dl')}.tar.gz`);
+    res.locals.fetched = fetched;
+    // A client that gives up must not leave a restore running: abort the fetch and drop the file.
+    const abort = new AbortController();
+    res.once('close', () => {
+      if (!res.writableEnded) abort.abort();
+      void fs.rm(fetched, { force: true });
+    });
+    try {
+      await fetchControlArchive(
+        docker,
+        {
+          url: source.url,
+          env: source.env,
+          password,
+          resticImage: resticImage(),
+          limitMs: controlJobLimitMs(),
+          signal: abort.signal,
+        },
+        fetched,
+        snapshot as string | undefined,
+      );
+    } catch (e) {
+      return res.status(400).json({ error: errMessage(e) });
+    }
+    next();
+  };
+  /**
+   * `tug control restore --from-file`: the archive arrives as the request body (`application/gzip`, with
+   * `confirm=1` or `verify=1` in the query) and is streamed to a private file, so the operator never has to copy it
+   * into the control host's volume. From there it takes exactly the path of a server-side archive.
+   */
+  const receiveRestoreUpload: RequestHandler = async (req, res, next) => {
+    if (!req.is('application/gzip')) return next();
+    const confirm = req.query.confirm === '1';
+    const verify = req.query.verify === '1';
+    if (!confirm && !verify)
+      return res.status(400).json({
+        error: 'confirm=1 is required; restore overwrites control data then requires restart',
+      });
+    if (restartRequired)
+      return res.status(503).json({ error: 'control restored; restart required' });
+    const uploaded = path.join(DATA_DIR, `control-restore-upload-${id('ul')}.tar.gz`);
+    res.locals.fetched = uploaded;
+    res.once('close', () => void fs.rm(uploaded, { force: true }));
+    try {
+      await pipeline(req, createWriteStream(uploaded, { flags: 'wx', mode: 0o600 }));
+    } catch (e) {
+      return res.status(400).json({ error: `the archive upload failed: ${errMessage(e)}` });
+    }
+    req.body = { confirm, verify };
+    next();
+  };
+  api(
+    'post',
+    '/api/v1/control/restore',
+    null,
+    receiveRestoreUpload,
+    fetchRestoreSource,
+    async (req, res) =>
+      withWriter(async () => {
+        if (!req.body.confirm && !req.body.verify)
+          return res.status(400).json({
+            error:
+              'confirm=true is required; restore overwrites control data then requires restart',
+          });
+        let artifactRef = req.body.artifactRef;
+        const fetched = res.locals.fetched as string | undefined;
+        if (fetched) artifactRef = fetched;
+        if (typeof artifactRef !== 'string' || !artifactRef)
+          return res
+            .status(400)
+            .json({ error: 'artifactRef, fromDestination or an uploaded archive required' });
+        // The configured path is only a parent: every restore gets a private directory of its own, marked as Tug's, so
+        // neither this cleanup nor the startup one can ever remove anything but what a restore made.
+        const restoreDir = path.join(restoreRoot(), id('r'));
+        let snapshot;
+        try {
+          await fs.mkdir(restoreDir, { recursive: true, mode: 0o700 });
+          await fs.writeFile(path.join(restoreDir, RESTORE_MARKER), '', { mode: 0o600 });
+          await scanArchive(artifactRef, (entry) => {
+            if (
+              path.isAbsolute(entry.path) ||
+              entry.path.split('/').includes('..') ||
+              !['File', 'Directory'].includes(entry.type)
+            )
+              throw new Error('unsafe control backup entry');
+          });
+          await tar.x({ file: artifactRef, cwd: restoreDir, strict: true });
+          // The fetched copy is extracted; do not leave a second copy of the keys on disk while the restore runs.
+          if (fetched) await fs.rm(fetched, { force: true });
+          const key = (await fs.readFile(path.join(restoreDir, 'master.key'), 'utf8')).trim();
+          if (!/^[A-Za-z0-9+/]{43}=$/.test(key)) throw new Error('invalid backup master key');
+          snapshot = openSnapshotDb(path.join(restoreDir, 'tug.db'));
+          const integrity = snapshot.get('PRAGMA integrity_check');
+          if (integrity?.integrity_check !== 'ok')
+            throw new Error('backup database failed integrity check');
+          await Pki.load(path.join(restoreDir, 'pki'), false).catch((e) => {
+            throw new Error(`backup PKI is not usable: ${errMessage(e)}`, { cause: e });
+          });
+          for (const secret of snapshot.all<SecretRow>('SELECT * FROM secrets'))
+            decrypt(secret.encrypted_value, key);
+          const states = snapshot.all<DesiredStateRow>('SELECT * FROM desired_states');
+          const meta = JSON.parse(
+            await fs.readFile(path.join(restoreDir, 'metadata.json'), 'utf8').catch(() => '{}'),
+          ) as { images?: boolean; backupId?: string; createdAt?: string };
+          // A backup taken without images restores the archive-less builds as pruned on the next start.
+          for (const stateRow of meta.images === false ? [] : states) {
+            const state: DesiredState = JSON.parse(stateRow.state_json);
+            for (const service of Object.values(state.services)) {
+              if (!service.artifact) continue;
+              // `image prune` already removed this one before the backup.
+              if (
+                snapshot.get(
+                  "SELECT 1 FROM builds WHERE id=? AND state='pruned'",
+                  service.artifact.buildId,
+                )
+              )
+                continue;
+              const build = snapshot.get<BuildRow>(
+                'SELECT * FROM builds WHERE id=? AND state=?',
+                service.artifact.buildId,
+                'complete',
+              );
+              if (
+                !build?.artifact_path ||
+                !/^images\/build_[a-zA-Z0-9_-]+\.tar\.gz$/.test(build.artifact_path)
+              )
+                throw new Error('backup contains an unsafe or missing image reference');
+              const actual = await hashArchive(path.join(restoreDir, build.artifact_path));
+              if (
+                actual.sha256 !== build.sha256 ||
+                actual.sizeBytes !== build.size_bytes ||
+                actual.sha256 !== service.artifact.sha256 ||
+                actual.sizeBytes !== service.artifact.sizeBytes
+              )
+                throw new Error('backup image archive checksum mismatch');
+            }
+          }
+          if (req.body.verify) {
+            // Everything above ran against the archive alone: nothing live was touched, and nothing needs a restart.
+            const count = (query: string) =>
+              Number(Object.values(snapshot!.get(query) ?? {})[0] ?? 0);
+            const summary = {
+              ok: true,
+              verified: true,
+              backupId: meta.backupId ?? null,
+              createdAt: meta.createdAt ?? null,
+              images: meta.images !== false,
+              projects: count('SELECT COUNT(DISTINCT project_id) FROM desired_states'),
+              nodes: count('SELECT COUNT(*) FROM nodes'),
+              secrets: count('SELECT COUNT(*) FROM secrets'),
+            };
+            snapshot.close();
+            snapshot = undefined;
+            return res.json(summary);
+          }
+          snapshot.close();
+          snapshot = undefined;
+          await ensureDir(path.join(restoreDir, 'images'));
+          // Validation completes before changing any live file. Stop DB-dependent work until restart.
+          restartRequired = true;
+          db.close();
+          // Images are only added, so they go first; the database, master key and CA change together or not at all.
+          await fs.cp(path.join(restoreDir, 'images'), artifactDir, { recursive: true });
+          await activateRestore({
+            dataDir: DATA_DIR,
+            restoreDir,
+            afterStep: options.restoreAfterStep,
+          });
+          // Authorization follows the restored database: older snapshots forget later principals and revive revoked ones.
+          // Close every session, including this one, but only after the response has been delivered.
+          // The extracted copy holds the master key, the CA key and every secret; the live files now have them.
+          await fs.rm(restoreDir, { recursive: true, force: true });
+          res.once('finish', closeAllSockets);
+          res.json({ ok: true, restored: true, restartRequired: true });
+        } catch (e) {
+          try {
+            snapshot?.close();
+          } catch {
+            /* Preserve the restore error. */
+          }
+          res.status(restartRequired ? 500 : 400).json({
+            error: restartRequired
+              ? `${errMessage(e)}; the previous state was put back, restart control`
+              : errMessage(e),
+            restartRequired,
+          });
+        } finally {
+          if (fetched) await fs.rm(fetched, { force: true });
+          await fs.rm(restoreDir, { recursive: true, force: true }).catch(() => undefined);
+        }
+      }),
   );
   function commandForService({
     project,

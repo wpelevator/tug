@@ -1,4 +1,7 @@
+import fsp from 'node:fs/promises';
+import path from 'node:path';
 import { withProgress } from '../progress.ts';
+import { formatBytes } from './backup.ts';
 import { runProcess, runStep, STAGE_MARKER } from '../process.ts';
 import type { Command } from 'commander';
 import { canPrompt, confirm } from '../prompt.ts';
@@ -7,7 +10,17 @@ import { assertImagePublished, resolveImage } from '../../images/image.ts';
 import { decodeCredential, fingerprintPem, writeFileDurable } from '../../pki.ts';
 import { loadTemplate } from '../load-template.ts';
 import { errMessage } from '../../errors.ts';
-import { collectList, loadCfg, print, request, templatesDir } from './context.ts';
+import {
+  collectList,
+  download,
+  loadCfg,
+  print,
+  readEnvValues,
+  readStdin,
+  request,
+  templatesDir,
+  upload,
+} from './context.ts';
 import type { InstallOpts } from './context.ts';
 import { bootstrapDocker, hostHasDocker, preflightRemote, transferTugImage } from './host.ts';
 import { importCredential } from './init.ts';
@@ -18,6 +31,29 @@ import {
   controlGuardScript,
   controlMigrateScript,
 } from '../migrate.ts';
+
+const PREVIEW_NOTE =
+  'This only checked the backup and changed nothing; add --confirm to restore it.';
+/** Where `control restore --from-destination` reads the control password: this variable, else the stdin line after the credential values. */
+const CONTROL_PASSWORD_VARIABLE = 'TUG_CONTROL_BACKUP_PASSWORD';
+
+interface ControlBackupListing {
+  destinationConfigured: boolean;
+  repository: string | null;
+  local: {
+    id: string;
+    createdAt: string;
+    path: string | null;
+    onDisk: boolean;
+    sizeBytes: number | null;
+    images: boolean | null;
+  }[];
+  remote: {
+    state: 'ok' | 'missing' | 'error';
+    snapshots: { shortId: string; time: string; tags: string[]; sizeBytes?: number }[];
+    error?: string;
+  } | null;
+}
 
 interface SetupOpts extends InstallOpts {
   extraSan: string[];
@@ -212,31 +248,202 @@ export function registerControl(program: Command): void {
       }),
     );
   addSetup(program, 'shortcut for `tug control setup`');
-  control
+  const backup = control
     .command('backup')
     .description(
-      'create a control-plane backup (state, PKI, master key and retained image archives; not workload volumes)',
+      'back the control plane up into the backup destination (state, PKI and master key; never build images or workload volumes) and print the snapshot id. --local or -o make an archive instead. It is also the parent of `list`',
     )
-    .option('--no-images', 'leave the retained build archives out (deploy again to rebuild them)')
-    .action(async (o: { images: boolean }) =>
-      withProgress('Creating control-plane backup', async () =>
-        print(await request('POST', '/api/v1/control/backups/run', { images: o.images })),
-      ),
+    .option(
+      '--local',
+      'make an archive on the control host (in its backup directory) instead of storing a backup in the destination: state, PKI, master key and the retained build archives, which --no-images leaves out',
+    )
+    .option(
+      '--no-images',
+      'with --local or -o, leave the retained build archives out (deploy again to rebuild them); an error without them, because only an archive has build images',
+    )
+    .option(
+      '--download',
+      'also save the archive on this machine; implies --local. It holds the master key and the CA key, so store it encrypted. The copy on control stays in its backup directory',
+    )
+    .option(
+      '-o, --output <file>',
+      'save the archive on this machine as <file>; implies --local and --download. An existing file is never overwritten; without -o, --download uses ./tug-control-backup-<id>.tar.gz',
+    )
+    .action(
+      async (o: { images: boolean; local?: boolean; download?: boolean; output?: string }) => {
+        const archive = Boolean(o.local || o.download || o.output);
+        if (!archive) {
+          // Only an archive has build images, so --no-images must not quietly turn this into one.
+          if (!o.images) throw new Error('--no-images applies to an archive; add --local or -o');
+          return withProgress('Storing control-plane backup in the backup destination', async () =>
+            print(await request('POST', '/api/v1/control/backups/run', { toDestination: true })),
+          );
+        }
+        return withProgress('Creating control-plane backup', async (progress) => {
+          // Refuse before the backup exists on control when the chosen file is already there.
+          if (o.output && (await fsp.stat(o.output).catch(() => null)))
+            throw new Error(`${o.output} already exists; choose another file with -o`);
+          const result = await request<{
+            backupId: string;
+            artifactRef: string;
+            state: string;
+            images: boolean;
+          }>('POST', '/api/v1/control/backups/run', { images: o.images });
+          if (!o.download && !o.output) return print(result);
+          const file = path.resolve(o.output ?? `tug-control-backup-${result.backupId}.tar.gz`);
+          progress.stage(`Downloading the archive to ${file}`);
+          await download(
+            `/api/v1/control/backups/${encodeURIComponent(result.backupId)}/download`,
+            file,
+          );
+          console.error(
+            `Saved ${file}: ${result.images ? 'with' : 'without'} build images, no workload volumes. It contains the master key and the CA private key, so store it encrypted. A copy also stays on control at ${result.artifactRef}; delete it there when you no longer need it.`,
+          );
+          print({ ...result, downloadedTo: file, serverCopy: result.artifactRef });
+        });
+      },
     );
-  control
-    .command('restore <artifactRef>')
+  backup
+    .command('list')
     .description(
-      'restore a control-plane backup on the control-plane host; requires a control restart',
+      'show the control backups on the control host and the ones actually stored in the backup destination, with the snapshot ids that `control restore --snapshot` takes',
     )
-    .option('--confirm')
-    .action(async (artifactRef: string, o: { confirm?: boolean }) =>
-      withProgress('Restoring control-plane backup', async () =>
-        print(
-          await request('POST', '/api/v1/control/restore', {
-            artifactRef,
-            confirm: Boolean(o.confirm),
-          }),
-        ),
-      ),
+    .option('--json', 'print the full result as JSON')
+    .action(async (o: { json?: boolean }) => {
+      const listing = await request<ControlBackupListing>('GET', '/api/v1/control/backups');
+      if (o.json) return print(listing);
+      console.log(
+        `repository: ${listing.repository ?? 'none (no backup destination is configured)'}`,
+      );
+      console.log(listing.local.length ? 'on the control host:' : 'on the control host: none');
+      for (const copy of listing.local)
+        console.log(
+          `  ${copy.id}\t${copy.createdAt}\t${copy.onDisk ? formatBytes(copy.sizeBytes) : 'gone from disk'}\t${copy.images === false ? 'no images' : copy.images ? 'with images' : '-'}\t${copy.path ?? '-'}`,
+        );
+      if (!listing.remote) return;
+      if (listing.remote.state === 'error') {
+        console.log(`in the destination: unreadable: ${listing.remote.error}`);
+        process.exitCode = 1;
+        return;
+      }
+      console.log(
+        listing.remote.snapshots.length
+          ? 'in the destination (newest first; each holds the database, CA and master key, never workload volumes):'
+          : 'in the destination: none yet',
+      );
+      for (const snapshot of listing.remote.snapshots)
+        console.log(
+          `  ${snapshot.shortId}\t${snapshot.time}\t${formatBytes(snapshot.sizeBytes ?? null)}\t${snapshot.tags.includes('images:none') ? 'no images' : 'images not recorded'}\t${snapshot.tags.filter((tag) => tag !== 'control' && tag !== 'images:none').join(' ')}`,
+        );
+    });
+  control
+    .command('restore [artifactRef]')
+    .description(
+      'restore a control-plane backup, from an archive path on the control-plane host, an archive saved on this machine (--from-file) or the shared backup destination (--from-destination); requires a control restart. Without --confirm it only checks the backup (archive, database integrity, CA, secrets) and prints what it holds, changing nothing, like `tug restore run`',
+    )
+    .option(
+      '--from-destination <url>',
+      'restore the newest control backup stored in this backup destination, such as s3:https://s3.example.com/bucket/tug-backups; the credential variables come from --env and the control password (from `tug backup password --control` on the old control) from --password-stdin or TUG_CONTROL_BACKUP_PASSWORD',
+    )
+    .option(
+      '--env <name>',
+      'credential variable of the destination, such as AWS_ACCESS_KEY_ID (repeat or comma-separate for several); each value is read from the variable of that name in your environment, else from a line on stdin',
+      collectList,
+      [],
+    )
+    .option(
+      '--from-file <file>',
+      'restore an archive saved on this machine (for example by `control backup -o`): it is uploaded to the control host, so it does not have to be copied there first',
+    )
+    .option(
+      '--snapshot <id>',
+      'with --from-destination, restore this snapshot id from `tug control backup list` instead of the newest one',
+    )
+    .option(
+      '--password-stdin',
+      'read the control password from the first line of stdin, as `docker login --password-stdin` does; the destination credentials must then be in the environment (--env names them), so stdin has one meaning',
+    )
+    .option('--confirm', 'apply the restore; without it the backup is only checked')
+    .action(
+      async (
+        artifactRef: string | undefined,
+        o: {
+          confirm?: boolean;
+          fromDestination?: string;
+          env: string[];
+          snapshot?: string;
+          passwordStdin?: boolean;
+          fromFile?: string;
+        },
+      ) => {
+        // Like `tug restore run`, a restore that is not confirmed is a preview: it checks and changes nothing.
+        const verify = !o.confirm;
+        if (o.fromFile) {
+          if (artifactRef || o.fromDestination || o.snapshot || o.env.length)
+            throw new Error(
+              '--from-file takes no archive path, --from-destination, --snapshot or --env',
+            );
+          if (!(await fsp.stat(o.fromFile).catch(() => null)))
+            throw new Error(`${o.fromFile} does not exist`);
+          return withProgress(
+            verify ? 'Verifying control-plane backup' : 'Restoring control-plane backup',
+            async () => {
+              const result = await upload(
+                `/api/v1/control/restore?${verify ? 'verify=1' : 'confirm=1'}`,
+                o.fromFile!,
+              );
+              if (verify) console.error(PREVIEW_NOTE);
+              print(result);
+            },
+          );
+        }
+        if (o.snapshot && !o.fromDestination)
+          throw new Error('--snapshot goes with --from-destination');
+        if (Boolean(artifactRef) === Boolean(o.fromDestination))
+          throw new Error('name an archive path, or use --from-file or --from-destination <url>');
+        if (artifactRef && o.env.length) throw new Error('--env goes with --from-destination');
+        if (o.passwordStdin && !o.fromDestination)
+          throw new Error('--password-stdin goes with --from-destination');
+        // The password is never an argument: stdin with --password-stdin, else the environment. Without the flag a
+        // missing value is still read from stdin after the credential values, as `backup destination set` reads them.
+        let values: Record<string, string> | undefined;
+        if (o.fromDestination && o.passwordStdin) {
+          const missing = o.env.filter((name) => process.env[name] === undefined);
+          if (missing.length)
+            throw new Error(
+              `with --password-stdin, set ${missing.join(', ')} in the environment: stdin carries only the password`,
+            );
+          const password = (await readStdin()).split(/\r?\n/).find((line) => line.length > 0);
+          if (!password) throw new Error('expected the control password on stdin');
+          values = {
+            ...Object.fromEntries(o.env.map((name) => [name, process.env[name]!])),
+            [CONTROL_PASSWORD_VARIABLE]: password,
+          };
+        } else if (o.fromDestination) {
+          values = await readEnvValues([...o.env, CONTROL_PASSWORD_VARIABLE]);
+        }
+        const fromDestination =
+          o.fromDestination && values
+            ? {
+                url: o.fromDestination,
+                env: Object.fromEntries(o.env.map((name) => [name, values[name]])),
+                password: values[CONTROL_PASSWORD_VARIABLE],
+                ...(o.snapshot ? { snapshot: o.snapshot } : {}),
+              }
+            : undefined;
+        return withProgress(
+          verify ? 'Verifying control-plane backup' : 'Restoring control-plane backup',
+          async () => {
+            const result = await request('POST', '/api/v1/control/restore', {
+              artifactRef,
+              fromDestination,
+              confirm: Boolean(o.confirm),
+              verify,
+            });
+            if (verify) console.error(PREVIEW_NOTE);
+            print(result);
+          },
+        );
+      },
     );
 }

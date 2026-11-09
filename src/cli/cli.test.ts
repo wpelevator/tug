@@ -185,7 +185,7 @@ test('CLI exposes flat commands and rejects malformed invocations before side ef
       ['node', 'enroll', '--name', 'n1', '--mesh'],
       ['node', 'enroll', '--uses', 'NaN'],
       ['events', '--limit', '501'],
-      ['control', 'restore', '/backup.tgz'],
+      ['control', 'restore', '--snapshot', 'abcd1234'],
     ]) {
       await assert.rejects(
         exec(process.execPath, [entry, ...args], { env, cwd: dir }),
