@@ -513,3 +513,24 @@ test('structured results larger than a protocol frame fail instead of being emit
     'a result at or under the frame limit is delivered',
   );
 });
+
+test('a one-off run replays its whole log, so output written before the attach is not cut to a tail', async () => {
+  const { FakeDocker } = await import('../../tests/fake-docker.ts');
+  const { startOneOff } = await import('./live.ts');
+  const docker = new FakeDocker();
+  docker.addImage('app');
+  const template = await docker.createContainer('tug-demo-web-1', {
+    Image: 'app',
+    Labels: { 'tug.project': 'demo', 'tug.service': 'web' },
+  });
+  await docker.startContainer(template);
+  const proc = await startOneOff(docker, template, ['seq', '1', '5000']);
+  try {
+    assert.ok(
+      docker.calls.some((call) => /^logs tug-run-\w+ tail=all$/.test(call)),
+      `the one-off container's logs are requested with tail=all, got: ${docker.calls.filter((c) => c.startsWith('logs')).join(', ')}`,
+    );
+  } finally {
+    proc.kill();
+  }
+});
