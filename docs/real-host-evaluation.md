@@ -370,3 +370,19 @@ Setup: merged `main` at `322cb38` (PR 119), one Ubuntu 24.04 arm64 VM under QEMU
 | What `tug status` says in those cases | **Misleading.** A crash-looping service and a site whose home page returns 500 (health path `wp-includes/version.php` still 200) both show `serving`, and the deployment stays `succeeded` |
 
 Not exercised: the operator watch channel and `tug tui` push over a real network (covered by unit tests only), public DNS, Let's Encrypt, NAT, a second node, multi-hundred-megabyte data, AWS S3, amd64, and outbound alerts (none exist).
+
+### Job queue on the same VM, branch build, 9 November 2026
+
+The VM was upgraded to the branch (control and agent, `--build-local-image`); it reports 4 GB, so the agent ran two jobs at a time. The RustFS store was paused with `docker pause` so connections hang instead of failing.
+
+| Check | Result |
+| --- | --- |
+| Hung backup of `shop` `wp-content`, then a manual backup of `shop` `db`, then a manual backup of project `shop-staging` | The first showed `running (checking)`, the second `queued behind bkr_…` (same project, so it shares the repository), and staging's ran at the same time in the second slot |
+| `tug backup cancel` of the queued run | `failed`, error `cancelled by an operator`, a `backup.cancelled` warning, nothing queued as a retry |
+| `tug backup cancel` of the running run | Same result within 15 s, and its restic helper container was gone |
+| Cancelling a run that already finished | `409 already failed` |
+| In-place restore of `shop` with the store paused, then `tug restore cancel` while it waited on its safety backup | The safety backup was cancelled, the restore ended `failed … nothing was changed`, and the held `wordpress` container was running again |
+| Staging's hung backup left alone | After 600 s it failed on its own with `restic made no progress for 600s (0 bytes so far); the repository may be unreadable or the backup store unreachable`, a `backup.failed` event, and no helper containers left |
+
+Not run: lane order on a real node (a restore ahead of a manual backup ahead of a scheduled one is covered by tests with a fake Docker), cancelling a restore that is already restoring, and a host with under 3 GiB of memory (one job at a time).
+
