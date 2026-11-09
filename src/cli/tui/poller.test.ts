@@ -154,3 +154,97 @@ test('starting and stopping leaves no timers behind', async () => {
   assert.ok(after > 3, 'polling repeats while started');
   assert.equal(changes, after, 'nothing is fetched after stop');
 });
+
+test('pushed events are merged by id, newest first, and the list stays bounded', () => {
+  const { api } = fakeApi(baseRoutes());
+  const snapshot = emptySnapshot();
+  const poller = new Poller(api, snapshot, () => {});
+  const row = (id: string, at: number) => ({
+    seq: at,
+    id,
+    project_id: 'site',
+    deployment_id: null,
+    node_id: null,
+    level: 'info',
+    type: 't',
+    message: id,
+    metadata_json: null,
+    created_at: new Date(at * 1000).toISOString(),
+    actor: null,
+  });
+  poller.onWatch({ v: 1, type: 'watch.events', cursor: 2, events: [row('a', 1), row('b', 2)] });
+  poller.onWatch({ v: 1, type: 'watch.events', cursor: 2, events: [row('b', 2), row('c', 3)] });
+  assert.deepEqual(
+    snapshot.events.data?.map((event) => event.id),
+    ['c', 'b', 'a'],
+    'a repeated event is not duplicated and the newest is first',
+  );
+  poller.onWatch({
+    v: 1,
+    type: 'watch.events',
+    cursor: 300,
+    events: Array.from({ length: 150 }, (_, i) => row(`n${i}`, 100 + i)),
+  });
+  assert.equal(snapshot.events.data?.length, 100, 'only the newest 100 are kept');
+  assert.equal(snapshot.events.data?.[0].id, 'n149', 'and they are the newest');
+});
+
+test('a change hint refetches only the feed it names', async () => {
+  const { api, asked } = fakeApi(baseRoutes());
+  const snapshot = emptySnapshot();
+  snapshot.status = { data: healthyStatus(), fetchedAt: Date.now() };
+  const poller = new Poller(api, snapshot, () => {});
+  poller.onWatch({ v: 1, type: 'watch.changed', changes: [{ topic: 'backups', project: 'site' }] });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.ok(
+    asked.every((route) => route.includes('/backups?')),
+    `only backups are refetched, not ${asked.join(', ')}`,
+  );
+  asked.length = 0;
+  poller.onWatch({ v: 1, type: 'watch.changed', changes: [{ topic: 'status', project: 'site' }] });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.deepEqual(
+    asked,
+    ['GET /api/v1/status'],
+    'a status hint refetches status and nothing else',
+  );
+});
+
+test('while the push channel is open polling slows to a backstop, and returns to normal when it closes', async () => {
+  const count = async (connected: boolean) => {
+    const { api, asked } = fakeApi(baseRoutes());
+    const snapshot = emptySnapshot();
+    snapshot.watch = { connected };
+    const poller = new Poller(api, snapshot, () => {}, {
+      status: 20,
+      events: 1e6,
+      slow: 1e6,
+      diagnostics: 1e6,
+      lists: 1e6,
+    });
+    poller.start();
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    poller.stop();
+    return asked.filter((route) => route === 'GET /api/v1/status').length;
+  };
+  const polling = await count(false);
+  const pushing = await count(true);
+  assert.ok(polling >= 4, `without push it polls at the normal rate (${polling} times)`);
+  assert.ok(pushing <= polling / 2, `with push it polls far less (${pushing} against ${polling})`);
+});
+
+test('opening the push channel refetches everything, since changes may have been missed', async () => {
+  const { api, asked } = fakeApi(baseRoutes());
+  const snapshot = emptySnapshot();
+  snapshot.status = { data: healthyStatus(), fetchedAt: Date.now() };
+  const poller = new Poller(api, snapshot, () => {});
+  poller.onWatchState(true);
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.equal(snapshot.watch.connected, true, 'the snapshot records the channel as open');
+  assert.ok(
+    asked.includes('GET /api/v1/status') && asked.includes('GET /api/v1/events?limit=100'),
+    'status and events are fetched again',
+  );
+  poller.onWatchState(false);
+  assert.equal(snapshot.watch.connected, false, 'and as closed when it drops');
+});

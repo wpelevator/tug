@@ -20,7 +20,7 @@ Tug already has the right split. The controller is a small single writer and the
 - Three cumulative roles and project scope, fixed at creation, created only by `admin` ([Access control](access-control.md)). `deploy` includes live `exec`, `run` and `inspect`, so it is effectively access to the workload's secrets and nodes.
 - The audit `actor` is the credential name, so a dashboard acting for a person records only the dashboard.
 - No machine-readable description of `/api/v1`. The types are in `src/protocol.ts`; `x-tug.schema.json` covers Compose only. The CLI has `--json` on some commands, not a global flag.
-- `GET /api/v1/events` takes `project` and `limit` (at most 500, newest first), with no cursor and no stream. `status` returns the 20 latest deployments and computes `stale` when called. Webhooks (M8) and `/metrics` (M9) are not built.
+- `GET /api/v1/events` takes `project`, `limit` (at most 500, newest first) and `after=<seq>` (oldest first, to follow the log), and `GET /api/v1/watch` is a WebSocket that pushes change hints and new events ([Architecture](architecture.md#operator-watch-channel)). `status` returns the 20 latest deployments and computes `stale` when called. Webhooks (M8) and `/metrics` (M9) are not built.
 - Dry-run exists for `restore` (without `confirm` it returns the plan) and `image prune --dry-run`. A deploy has no plan; `tug lint` is offline.
 - `deploy` needs a normalized Compose file, which the CLI produces with its own reader (`src/compose/load.ts`, no Docker needed), so a server-side deployer needs the CLI or that module.
 
@@ -29,7 +29,7 @@ Tug already has the right split. The controller is a small single writer and the
 All are additive minors and keep [the frozen contracts](releases.md#what-10-freezes). Operations, grants, sessions, attribution, plans and approvals are designed in [Capabilities](capabilities.md). The remaining controller work specific to consumers:
 
 1. **A machine-readable API.** Generate OpenAPI 3.1 from the operation table and the `protocol.ts` types, serve it at `GET /api/v1/openapi.json` and ship it in the npm package. Each operation carries its role, project check, effect class and idempotence. An MCP server and a typed SDK are built from it.
-2. **A change feed.** `GET /api/v1/events?after=<cursor>` plus a streaming `GET /api/v1/watch` (WebSocket or SSE) for deployment transitions, node status changes (including `stale` as an event, not computed on read) and backup results. Live dashboards and reactive agents need it. Webhooks (M8) are the server-to-server form of the same thing.
+2. **A change feed.** Built: `GET /api/v1/events?after=<seq>` and a streaming `GET /api/v1/watch` (WebSocket) for deployment, node (including `stale`, found by a once-a-second sweep), backup and restore changes and new events. It sends hints and events, not state, so a console refetches what a hint names. Webhooks (M8) are the server-to-server form of the same thing and are not built.
 3. **Idempotency keys** on mutating routes, so an agent that times out and retries does not double-apply.
 4. **Bounded, cheap reads**: pagination and ETag on `status`, `deployments` and `events`.
 5. **Agent-reported stats and `/metrics`** (M9). "Show CPU and memory" is the first dashboard anyone asks for and nothing measures it today.

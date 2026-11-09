@@ -4,6 +4,7 @@ import { healthyStatus, unhealthyStatus } from '../../../tests/tui-fixtures.ts';
 import { fakeTerminal, fakeTransport, fakeApi, start, until } from '../../../tests/tui-harness.ts';
 import type { LiveRequest } from '../../protocol.ts';
 import { LineSplitter, runTui } from './app.ts';
+import type { TuiOptions } from './app.ts';
 
 test('it refuses to run without a terminal and points at --once', async () => {
   const term = fakeTerminal();
@@ -202,6 +203,66 @@ test('s hands the terminal to a TTY exec session, then takes it back and redraws
   assert.equal(term.stdin.isRaw, true, 'raw mode is back on for the screen');
   term.stdin.write('q');
   assert.equal(await done, 0, 'the screen still quits normally after a shell');
+});
+
+test('with the push channel open the header says so, new events appear without a poll, and a hint refetches', async () => {
+  let handlers: Parameters<NonNullable<TuiOptions['watch']>>[0] | undefined;
+  const stopped: boolean[] = [];
+  const slow = { status: 1e6, events: 1e6, slow: 1e6, diagnostics: 1e6, lists: 1e6 };
+  const { term, calls, done } = start({
+    intervals: slow,
+    watch: (h) => {
+      handlers = h;
+      return { start: () => {}, stop: () => void stopped.push(true) };
+    },
+  });
+  await until(() => term.output().includes('failed to apply'), 'the first frame');
+  assert.ok(term.output().includes('● live'), 'without the channel the header shows the data age');
+  assert.ok(!term.output().includes('live · push'), 'and does not claim push');
+  handlers!.onState(true);
+  await until(() => term.output().includes('● live · push'), 'the push marker');
+  const before = calls.filter((call) => call.route === '/api/v1/status').length;
+  handlers!.onFrame({
+    v: 1,
+    type: 'watch.events',
+    cursor: 9,
+    events: [
+      {
+        seq: 9,
+        id: 'evt_pushed',
+        project_id: 'site',
+        deployment_id: null,
+        node_id: null,
+        level: 'error',
+        type: 'container.crashloop',
+        message: 'web on app2 crashed 3 times',
+        metadata_json: '{}',
+        created_at: new Date().toISOString(),
+        actor: null,
+      },
+    ],
+  });
+  await until(
+    () => term.output().includes('web on app2 crashed 3 times'),
+    'the pushed event to be drawn',
+  );
+  assert.equal(
+    calls.filter((call) => call.route === '/api/v1/status').length,
+    before,
+    'a pushed event needs no request',
+  );
+  handlers!.onFrame({
+    v: 1,
+    type: 'watch.changed',
+    changes: [{ topic: 'status', project: 'site' }],
+  });
+  await until(
+    () => calls.filter((call) => call.route === '/api/v1/status').length > before,
+    'the hint to refetch status',
+  );
+  term.stdin.write('q');
+  assert.equal(await done, 0, 'quits cleanly');
+  assert.deepEqual(stopped, [true], 'the push channel is closed with the screen');
 });
 
 test('the line splitter reassembles lines across chunks and multi-byte characters, and strips escapes', () => {

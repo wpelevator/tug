@@ -27,6 +27,7 @@ import https from 'node:https';
 import http from 'node:http';
 import path from 'node:path';
 import { WebSocketServer, WebSocket } from 'ws';
+import { WatchHub } from './watch.ts';
 import type tls from 'node:tls';
 import * as tar from 'tar';
 import { openDb, openSnapshotDb } from '../db/db.ts';
@@ -99,6 +100,7 @@ import {
   BACKUP_COMMAND_TYPES,
   CLIENT_VERSION_HEADER,
   SKEW_CLIENT_NEWER,
+  STREAM_FEATURES,
   VERSION_STAMP_HEADER,
   compareCompat,
   majorMinor,
@@ -158,6 +160,10 @@ import type {
 } from '../protocol.ts';
 
 class WakeHub {
+  private readonly onPresence: () => void;
+  constructor(onPresence: () => void = () => {}) {
+    this.onPresence = onPresence;
+  }
   private readonly cursors = new Map<string, number>();
   private readonly projects = new Map<string, string | undefined>();
   private readonly streams = new Map<string, WebSocket>();
@@ -167,14 +173,27 @@ class WakeHub {
     return this.cursors.get(nodeId) ?? 0;
   }
 
+  /** Whether the node's agent holds an open stream socket right now. */
+  connected(nodeId: string): boolean {
+    return this.streams.get(nodeId)?.readyState === WebSocket.OPEN;
+  }
+
   connect(nodeId: string, ws: WebSocket): void {
     const previous = this.streams.get(nodeId);
     if (previous && previous !== ws) previous.close(1000, 'replaced by a newer agent connection');
     this.streams.set(nodeId, ws);
-    const ready: StreamMessage = { type: 'ready', nodeId, cursor: this.cursor(nodeId) };
+    const ready: StreamMessage = {
+      type: 'ready',
+      nodeId,
+      cursor: this.cursor(nodeId),
+      features: STREAM_FEATURES,
+    };
     ws.send(JSON.stringify(ready));
+    this.onPresence();
     ws.once('close', () => {
-      if (this.streams.get(nodeId) === ws) this.streams.delete(nodeId);
+      if (this.streams.get(nodeId) !== ws) return;
+      this.streams.delete(nodeId);
+      this.onPresence();
     });
   }
 
@@ -302,18 +321,21 @@ function parseLiveRequest(value: unknown): LiveRequest {
 }
 
 /** Ephemeral sessions are bound to socket identities; reconnecting never replays work. */
-class LiveHub {
+export class LiveHub {
   private readonly agents = new Map<string, WebSocket>();
   private readonly sessions = new Map<string, LiveSession>();
   private readonly retired = new WeakMap<WebSocket, Set<string>>();
   private readonly startTimeoutMs: number;
   private readonly resolve: (actor: Actor, request: LiveRequest) => Promise<NodeRow>;
+  private readonly onAgentEvents: (nodeId: string, events: unknown[]) => void;
   constructor(
     resolve: (actor: Actor, request: LiveRequest) => Promise<NodeRow>,
     startTimeoutMs = LIVE_START_TIMEOUT_MS,
+    onAgentEvents: (nodeId: string, events: unknown[]) => void = () => {},
   ) {
     this.resolve = resolve;
     this.startTimeoutMs = startTimeoutMs;
+    this.onAgentEvents = onAgentEvents;
   }
   private send(ws: WebSocket, frame: unknown): boolean {
     if (ws.readyState !== WebSocket.OPEN || ws.bufferedAmount > LIVE_MAX_BUFFERED_BYTES)
@@ -360,6 +382,22 @@ class LiveHub {
         if (binary || Buffer.byteLength(data.toString()) > LIVE_MAX_FRAME_BYTES)
           throw new Error('invalid frame');
         const frame: unknown = JSON.parse(data.toString());
+        // Events an agent reports are not part of a live session: they go to the same log as `POST /agent/v1/events`.
+        if (
+          objectFrame(frame) &&
+          frame.v === 1 &&
+          frame.type === 'agent.event' &&
+          frameKeys(frame, ['v', 'type', 'events']) &&
+          Array.isArray(frame.events)
+        ) {
+          // Losing an event is better than dropping the socket, which also carries live exec and log sessions.
+          try {
+            this.onAgentEvents(nodeId, frame.events);
+          } catch (error) {
+            console.error(`agent events from node ${nodeId} were not stored: ${errMessage(error)}`);
+          }
+          return;
+        }
         if (!objectFrame(frame) || frame.v !== 1 || typeof frame.sessionId !== 'string')
           throw new Error('invalid frame');
         const session = this.sessions.get(frame.sessionId);
@@ -531,6 +569,7 @@ interface StreamRuntime {
   identify(request: http.IncomingMessage): Identity | null;
   resolvePrincipal(uri: string, keyHash: string): Identity | null;
   live: LiveHub;
+  watch: WatchHub;
   isRestoring(): boolean;
 }
 
@@ -639,7 +678,7 @@ export async function createApp(
   await fs.chmod(DATA_DIR, 0o700);
 
   const db = await (options.openDatabase || openDb)(dbFile);
-  const wakeHub = new WakeHub();
+  const wakeHub = new WakeHub(() => watch.mark('nodes'));
 
   // Events are an operator-facing log, not a record of truth, so keep them bounded. `0` turns a limit off; anything that is
   // not a whole number falls back to the default.
@@ -800,6 +839,11 @@ export async function createApp(
     next();
   });
   app.use(express.json({ limit: '20mb' }));
+  // Anything that wrote something may have changed what a watcher cares about; tell them soon.
+  app.use((req, res, next) => {
+    if (req.method !== 'GET' && req.method !== 'HEAD') res.on('finish', () => watch.poke());
+    next();
+  });
   // Hold the writer for the operation lifetime, including after an HTTP disconnect.
   let writer = Promise.resolve();
   async function withWriter<T>(operation: () => T | Promise<T>): Promise<T> {
@@ -1235,53 +1279,76 @@ export async function createApp(
     );
   }
 
-  const live = new LiveHub(async (actor, request) => {
-    assertProject(actor, request.project);
-    const row = currentDesired(request.project);
-    if (!row) throw httpError(404, missingProject(request.project));
-    const desired: DesiredState = JSON.parse(row.state_json);
-    const nodes = db.all<NodeRow>('SELECT * FROM nodes');
-    const eligible = new Set<string>();
-    const services =
-      request.operation === 'ps'
-        ? Object.values(desired.services)
-        : [desired.services[request.service]];
-    if (services.some((service) => !service))
-      throw httpError(
-        404,
-        missingService(request.project, 'service' in request ? request.service : ''),
-      );
-    for (const service of services)
-      for (const node of nodes)
-        if (!service.placement?.nodes?.length || service.placement.nodes.includes(node.name))
-          eligible.add(node.name);
-    if (request.node && !eligible.has(request.node))
-      throw httpError(400, 'requested node is not placed for this operation');
-    if (!request.node && eligible.size !== 1)
-      throw httpError(400, 'operation requires --node because placement is ambiguous');
-    const node = nodes.find((node) => node.name === (request.node || [...eligible][0]));
-    if (!node) throw httpError(404, 'no eligible node for this operation');
-    if (request.operation === 'exec' && request.oneOff)
-      audit(actor, {
-        type: 'job.run',
-        project: request.project,
-        message: `${actor.name} ran a one-off ${request.service} container on ${node.name}: ${request.command.join(' ').slice(0, 200)}`,
-        metadata: {
-          service: request.service,
-          node: node.name,
-          command: request.command.slice(0, 64),
-        },
-      });
-    return node;
-  }, options.liveStartTimeoutMs);
+  const live = new LiveHub(
+    async (actor, request) => {
+      assertProject(actor, request.project);
+      const row = currentDesired(request.project);
+      if (!row) throw httpError(404, missingProject(request.project));
+      const desired: DesiredState = JSON.parse(row.state_json);
+      const nodes = db.all<NodeRow>('SELECT * FROM nodes');
+      const eligible = new Set<string>();
+      const services =
+        request.operation === 'ps'
+          ? Object.values(desired.services)
+          : [desired.services[request.service]];
+      if (services.some((service) => !service))
+        throw httpError(
+          404,
+          missingService(request.project, 'service' in request ? request.service : ''),
+        );
+      for (const service of services)
+        for (const node of nodes)
+          if (!service.placement?.nodes?.length || service.placement.nodes.includes(node.name))
+            eligible.add(node.name);
+      if (request.node && !eligible.has(request.node))
+        throw httpError(400, 'requested node is not placed for this operation');
+      if (!request.node && eligible.size !== 1)
+        throw httpError(400, 'operation requires --node because placement is ambiguous');
+      const node = nodes.find((node) => node.name === (request.node || [...eligible][0]));
+      if (!node) throw httpError(404, 'no eligible node for this operation');
+      if (request.operation === 'exec' && request.oneOff)
+        audit(actor, {
+          type: 'job.run',
+          project: request.project,
+          message: `${actor.name} ran a one-off ${request.service} container on ${node.name}: ${request.command.join(' ').slice(0, 200)}`,
+          metadata: {
+            service: request.service,
+            node: node.name,
+            command: request.command.slice(0, 64),
+          },
+        });
+      return node;
+    },
+    options.liveStartTimeoutMs,
+    (nodeId, events) => ingestEvents(nodeId, events),
+  );
+  const watch = new WatchHub({
+    db,
+    version: ownVersion,
+    nodes: () =>
+      db
+        .all<Pick<NodeRow, 'id' | 'name' | 'status' | 'disabled_at' | 'last_seen_at'>>(
+          'SELECT id,name,status,disabled_at,last_seen_at FROM nodes ORDER BY name',
+        )
+        .map((row) => ({
+          id: row.id,
+          name: row.name,
+          status: statusOf(row),
+          connected: wakeHub.connected(row.id),
+        })),
+  });
   streamRuntimes.set(app, {
     hub: wakeHub,
     identify,
     resolvePrincipal,
     live,
+    watch,
     isRestoring: () => restartRequired,
   });
   api('get', '/api/v1/live', null, (_req, res) => {
+    res.status(426).json({ error: 'WebSocket upgrade required' });
+  });
+  api('get', '/api/v1/watch', null, (_req, res) => {
     res.status(426).json({ error: 'WebSocket upgrade required' });
   });
 
@@ -1721,6 +1788,7 @@ export async function createApp(
         return {
           ...rest,
           status: statusOf(row),
+          connected: wakeHub.connected(row.id),
           labels: labels_json ? (JSON.parse(labels_json) as string[]) : [],
         };
       }),
@@ -3404,6 +3472,7 @@ export async function createApp(
           name: row.name,
           status: statusOf(row),
           last_seen_at: row.last_seen_at,
+          connected: wakeHub.connected(row.id),
         })),
       statuses: db.all(
         `SELECT s.*,n.name AS node FROM node_statuses s LEFT JOIN nodes n ON n.id=s.node_id WHERE ${statuses.where}`,
@@ -3415,19 +3484,41 @@ export async function createApp(
     const project = req.query.project ? String(req.query.project) : null;
     if (project) assertProject(req.actor!, project);
     const limit = Math.min(Number(req.query.limit || 100), 500);
-    const scope = projectScope(req.actor!, 'project_id'); // scoped credentials never see node-level or other projects' events
-    const events = project
-      ? db.all(
-          'SELECT * FROM events WHERE project_id=? ORDER BY created_at DESC LIMIT ?',
-          project,
-          limit,
-        )
-      : db.all(
-          `SELECT * FROM events WHERE ${scope.where} ORDER BY created_at DESC LIMIT ?`,
-          ...scope.args,
-          limit,
-        );
-    res.json({ events });
+    const after = req.query.after === undefined ? undefined : Number(req.query.after);
+    if (after !== undefined && !(Number.isSafeInteger(after) && after >= 0))
+      throw httpError(400, 'after must be a non-negative integer (an event seq)');
+    const scope = project
+      ? { where: 'project_id=?', args: [project] }
+      : projectScope(req.actor!, 'project_id'); // scoped credentials never see node-level or other projects' events
+    // Without `after`: the newest events first. With it: the events after that seq, oldest first, so a client can follow the log.
+    const events =
+      after === undefined
+        ? db.all(
+            `SELECT rowid AS seq,* FROM events WHERE ${scope.where} ORDER BY created_at DESC LIMIT ?`,
+            ...scope.args,
+            limit,
+          )
+        : db.all(
+            `SELECT rowid AS seq,* FROM events WHERE ${scope.where} AND rowid > ? ORDER BY rowid LIMIT ?`,
+            ...scope.args,
+            after,
+            limit,
+          );
+    // The newest seq this caller can see under the same filter (never the global end, which would leak how many events
+    // other projects have). To follow the log, pass `cursor` as the next `after`: with `after` it is the last row returned,
+    // so paging with `limit` skips nothing, and it never runs ahead of the log if the log was emptied.
+    const visibleEnd =
+      db.get<{ seq: number | null }>(
+        `SELECT MAX(rowid) AS seq FROM events WHERE ${scope.where}`,
+        ...scope.args,
+      )?.seq ?? 0;
+    const cursor =
+      after === undefined
+        ? visibleEnd
+        : events.length
+          ? (events[events.length - 1] as { seq: number }).seq
+          : Math.min(after, visibleEnd);
+    res.json({ events, cursor });
   });
   api('get', '/api/v1/diagnostics', null, async (req, res) => {
     const checks: { name: string; ok: boolean; [key: string]: unknown }[] = [];
@@ -3704,13 +3795,21 @@ export async function createApp(
           ),
         }),
       };
+      const before = db.get<{ status_json: string; health: string }>(
+        'SELECT status_json,health FROM node_statuses WHERE node_id=? AND project_id=?',
+        req.node!.id,
+        st.project,
+      );
+      const stored = JSON.stringify(sanitized);
+      if (before?.status_json !== stored || before?.health !== st.health)
+        watch.mark('status', st.project);
       db.run(
         `INSERT INTO node_statuses(id,node_id,project_id,observed_version,status_json,health,updated_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(node_id,project_id) DO UPDATE SET observed_version=excluded.observed_version,status_json=excluded.status_json,health=excluded.health,updated_at=excluded.updated_at`,
         id('ns'),
         req.node!.id,
         st.project,
         st.observedVersion,
-        JSON.stringify(sanitized),
+        stored,
         st.health,
         ts,
       );
@@ -3769,27 +3868,68 @@ export async function createApp(
     }
     res.json({ ok: true });
   });
-  post('/agent/v1/events', authAgent, async (req, res) => {
-    const evs: AgentEvent[] = req.body.events || [req.body];
-    for (const ev of evs)
+  /**
+   * Events from an agent, by HTTP or over its stream socket, into the one event log. Fields are coerced and bounded, and
+   * the node is whichever one the connection belongs to. An event names a project only if that project currently places
+   * a service on this node (the rule status reports already follow); otherwise it is stored without one, as a node-level
+   * event, so an agent cannot put rows in another project's log, where that project's scoped readers and watchers would
+   * see them. A deployment id is kept only if it belongs to the project the event ends up in.
+   */
+  function ingestEvents(nodeId: string, input: unknown[]): void {
+    const text = (value: unknown, max: number): string | null =>
+      typeof value === 'string' && value ? value.slice(0, max) : null;
+    const nodeName = db.get<{ name: string }>('SELECT name FROM nodes WHERE id=?', nodeId)?.name;
+    const placed = new Map<string, boolean>();
+    const placesHere = (project: string): boolean => {
+      let known = placed.get(project);
+      if (known === undefined) {
+        const row = currentDesired(project);
+        const desired: DesiredState | undefined = row ? JSON.parse(row.state_json) : undefined;
+        known = Object.values(desired?.services ?? {}).some(
+          (service) => nodeName !== undefined && service.placement?.nodes?.includes(nodeName),
+        );
+        placed.set(project, known);
+      }
+      return known;
+    };
+    for (const raw of input.slice(0, 100)) {
+      if (!objectFrame(raw)) continue;
+      const ev = raw as AgentEvent;
+      const claimed = text(ev.projectId, 128);
+      const project = claimed && placesHere(claimed) ? claimed : null;
+      const claimedDeployment = text(ev.deploymentId, 128);
+      const deployment =
+        project &&
+        claimedDeployment &&
+        db.get<{ project_id: string }>(
+          'SELECT project_id FROM deployments WHERE id=?',
+          claimedDeployment,
+        )?.project_id === project
+          ? claimedDeployment
+          : null;
+      const metadata = JSON.stringify(objectFrame(ev.metadata) ? ev.metadata : {});
       db.run(
         'INSERT INTO events(id,project_id,deployment_id,node_id,level,type,message,metadata_json,created_at) VALUES(?,?,?,?,?,?,?,?,?)',
         id('evt'),
-        ev.projectId || null,
-        ev.deploymentId || null,
-        req.node!.id,
-        ev.level || 'info',
-        ev.type || 'event',
-        ev.message || '',
-        JSON.stringify(ev.metadata || {}),
+        project,
+        deployment,
+        nodeId,
+        text(ev.level, 16) ?? 'info',
+        text(ev.type, 100) ?? 'event',
+        text(ev.message, 8000) ?? '',
+        metadata.length <= 16_384 ? metadata : '{}',
         now(),
       );
+    }
     if (Date.now() - lastEventPrune >= eventPruneIntervalMs)
       try {
         pruneEvents();
       } catch (e) {
         console.error(`event pruning failed: ${errMessage(e)}`);
       }
+  }
+  post('/agent/v1/events', authAgent, async (req, res) => {
+    ingestEvents(req.node!.id, Array.isArray(req.body.events) ? req.body.events : [req.body]);
     res.json({ ok: true });
   });
   // Credentials for a backup helper are released only while its command is running on the calling node, and
@@ -3883,7 +4023,7 @@ export function attachAgentStream(app: express.Express, server: http.Server | ht
       socket.destroy();
     };
     const pathname = new URL(request.url || '/', 'http://localhost').pathname;
-    if (!['/agent/v1/stream', '/api/v1/live'].includes(pathname)) {
+    if (!['/agent/v1/stream', '/api/v1/live', '/api/v1/watch'].includes(pathname)) {
       reject(404, 'Not Found');
       return;
     }
@@ -3894,7 +4034,19 @@ export function attachAgentStream(app: express.Express, server: http.Server | ht
         reject(401, 'Unauthorized');
         return;
       }
-      if (pathname === '/api/v1/live') {
+      if (pathname === '/api/v1/watch') {
+        // Read-only, and open to every operator credential (the same role as `status`).
+        if (identity.klass !== 'operator' || !hasRole(identity.actor, 'read')) {
+          reject(403, 'Forbidden');
+          return;
+        }
+        const actor = identity.actor;
+        if (runtime.watch.admits(actor) !== 'ok') {
+          reject(429, 'Too Many Watchers');
+          return;
+        }
+        wss.handleUpgrade(request, socket, head, (ws) => runtime.watch.subscribe(actor, ws));
+      } else if (pathname === '/api/v1/live') {
         if (identity.klass !== 'operator') {
           reject(403, 'Forbidden');
           return;
@@ -3918,7 +4070,10 @@ export function attachAgentStream(app: express.Express, server: http.Server | ht
       }
     })().catch(() => reject(500, 'Internal Server Error'));
   });
-  server.once('close', () => wss.close());
+  server.once('close', () => {
+    runtime.watch.closeAll();
+    wss.close();
+  });
 }
 
 /** Loads the persisted server credential, or issues one when it is missing, for different names or two thirds expired. */

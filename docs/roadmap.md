@@ -222,6 +222,7 @@ The test layers, the metrics milestones are held to and the backlog of mocked te
 - [x] M8 scoped operator credentials, CI deploy example, credential names in the audit trail ([Access control](access-control.md))
 - [ ] M8 outbound webhooks
 - [x] M9 event hygiene ([Architecture](architecture.md#events)) and observability design ([Observability](observability.md))
+- [x] Streaming: Docker daemon events in the agent (crashes, OOM kills, crash loops), agent events over the stream socket, the operator watch channel (`GET /api/v1/watch`, `events?after=`) and node presence (`connected`) ([Architecture](architecture.md#operator-watch-channel))
 - [ ] M9 structured logs (`TUG_LOG_FORMAT`, `TUG_LOG_LEVEL`)
 - [ ] M9 `GET /metrics` on control (Prometheus text, `read` credential), with agent-reported node and service stats
 - [ ] M9 an authenticated `/api/v1/readyz`, sample alert rules, and the metrics documentation test gate

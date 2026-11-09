@@ -1,4 +1,5 @@
 import { errMessage } from '../../errors.ts';
+import type { WatchFrame } from '../../protocol.ts';
 import type { StatusResponse } from '../status.ts';
 import type { Api } from './actions.ts';
 import { listKey } from './tables.ts';
@@ -30,6 +31,8 @@ export const DEFAULT_INTERVALS: Intervals = {
   lists: 15_000,
 };
 const MAX_BACKOFF = 8;
+/** Polls are this many times less frequent while the push channel is open. */
+const PUSH_BACKOFF = 4;
 const LIST_VIEWS = new Set(['domains', 'volumes', 'secrets', 'credentials']);
 
 type FeedName =
@@ -85,7 +88,12 @@ export class Poller {
     this.timers.clear();
   }
 
+  /** While the push channel is open, polling is only a backstop for it, so it slows down. */
   private every(name: FeedName): number {
+    return this.base(name) * (this.snapshot.watch.connected ? PUSH_BACKOFF : 1);
+  }
+
+  private base(name: FeedName): number {
     return name === 'status'
       ? this.intervals.status
       : name === 'events'
@@ -262,6 +270,44 @@ export class Poller {
         this.guarded(name, () => this.fetch(name)),
       ),
     );
+  }
+
+  /** The push channel opened or closed. Opening means changes may have been missed, so everything is refetched. */
+  onWatchState(connected: boolean): void {
+    this.snapshot.watch = { connected };
+    this.onChange();
+    if (connected) void this.refresh();
+  }
+
+  /** A frame from control: new events are merged in, and a hint refetches only what it names. */
+  onWatch(frame: WatchFrame): void {
+    if (frame.type === 'watch.ready' || frame.type === 'watch.resync') {
+      void this.refresh();
+      return;
+    }
+    if (frame.type === 'watch.events') {
+      const merged = new Map((this.snapshot.events.data ?? []).map((event) => [event.id, event]));
+      for (const event of frame.events) merged.set(event.id, event);
+      this.snapshot.events = {
+        data: [...merged.values()]
+          .sort((a, b) => b.created_at.localeCompare(a.created_at))
+          .slice(0, 100),
+        fetchedAt: Date.now(),
+      };
+      this.onChange();
+      return;
+    }
+    const feeds = new Set<FeedName>();
+    for (const change of frame.changes) {
+      if (change.topic === 'status') feeds.add('status');
+      if (change.topic === 'nodes') {
+        feeds.add('status');
+        feeds.add('nodes');
+      }
+      if (change.topic === 'backups') feeds.add('backups');
+      if (change.topic === 'restores') feeds.add('restores');
+    }
+    for (const name of feeds) void this.guarded(name, () => this.fetch(name)).catch(() => {});
   }
 
   /** Polls everything now, for ctrl-r. */

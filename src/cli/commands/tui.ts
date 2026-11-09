@@ -1,6 +1,7 @@
 import type { Command } from 'commander';
 import { packageVersion } from '../../images/image.ts';
 import { createCliLiveTransport } from '../live-transport.ts';
+import { WatchClient } from '../watch-client.ts';
 import { emptySnapshot } from '../tui/types.ts';
 import type { ViewRef } from '../tui/types.ts';
 import { runTui } from '../tui/app.ts';
@@ -66,6 +67,12 @@ export function registerTui(program: Command): void {
         process.exitCode = await runTui({
           api,
           transport: createCliLiveTransport(cfg.credential, cfg.controlUrl),
+          watch: (handlers) =>
+            new WatchClient({
+              credential: cfg.credential!,
+              controlUrl: cfg.controlUrl,
+              ...handlers,
+            }),
           io: { stdin: process.stdin, stdout: process.stdout, stderr: process.stderr },
           readonly: Boolean(o.readonly),
           project,

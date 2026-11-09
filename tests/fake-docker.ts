@@ -13,6 +13,8 @@ import type {
   DaemonInfo,
   DaemonVersion,
   DockerApi,
+  DockerEvent,
+  EventsOptions,
   ExecOptions,
   ImageInspect,
   LogsOptions,
@@ -341,6 +343,41 @@ export class FakeDocker implements DockerApi {
     this.onLoad?.();
   }
   onLoad?: () => void;
+  /** Open `events()` streams; `emit` pushes an event to each, and `dropEventStreams` ends them with an error. */
+  eventStreams = new Set<(item: DockerEvent | 'drop') => void>();
+  /** Options of every `events()` call, in order. */
+  eventCalls: EventsOptions[] = [];
+  emit(event: DockerEvent): void {
+    for (const push of this.eventStreams) push(event);
+  }
+  dropEventStreams(): void {
+    for (const push of this.eventStreams) push('drop');
+  }
+  async *events(options: EventsOptions = {}): AsyncGenerator<DockerEvent> {
+    this.eventCalls.push(options);
+    const queue: (DockerEvent | 'drop')[] = [];
+    let wake: (() => void) | undefined;
+    const push = (item: DockerEvent | 'drop') => {
+      queue.push(item);
+      wake?.();
+    };
+    this.eventStreams.add(push);
+    const abort = () => wake?.();
+    options.signal?.addEventListener('abort', abort);
+    try {
+      for (;;) {
+        while (!queue.length && !options.signal?.aborted)
+          await new Promise<void>((resolve) => (wake = resolve));
+        if (options.signal?.aborted) return;
+        const next = queue.shift()!;
+        if (next === 'drop') throw new Error('Docker event stream ended');
+        yield next;
+      }
+    } finally {
+      this.eventStreams.delete(push);
+      options.signal?.removeEventListener('abort', abort);
+    }
+  }
   async removeImage(ref: string) {
     this.calls.push(`image-rm ${ref}`);
     this.images.delete(ref);

@@ -131,11 +131,15 @@ function nodesTable(snapshot: Snapshot, now: number): Table {
       ),
     ];
     const lastSeen = full?.last_seen_at ?? basic?.last_seen_at ?? null;
+    const connected = full?.connected ?? basic?.connected;
+    // `stream`: the agent holds its socket to control; `poll`: it does not (or uses the long-poll fallback); `-`: not reported.
+    const link = connected === undefined ? '-' : connected ? 'stream' : 'poll';
     return {
       key: name,
       cells: [
         name,
         state,
+        link,
         ...(detailed
           ? [cell(full?.address), full?.ingress ? 'yes' : 'no', cell(full?.labels?.join(','))]
           : []),
@@ -157,8 +161,8 @@ function nodesTable(snapshot: Snapshot, now: number): Table {
   });
   return {
     columns: detailed
-      ? ['NODE', 'STATUS', 'ADDRESS', 'INGRESS', 'LABELS', 'LAST SEEN', 'SERVICES']
-      : ['NODE', 'STATUS', 'LAST SEEN', 'SERVICES'],
+      ? ['NODE', 'STATUS', 'LINK', 'ADDRESS', 'INGRESS', 'LABELS', 'LAST SEEN', 'SERVICES']
+      : ['NODE', 'STATUS', 'LINK', 'LAST SEEN', 'SERVICES'],
     rows,
     empty: status ? 'No nodes' : 'Waiting for the control plane…',
   };

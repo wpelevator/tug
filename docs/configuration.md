@@ -18,6 +18,7 @@ CLI options override environment variables, which override the config files and 
 |---|---|---|
 | `PORT` | `8443` | The single mTLS port. |
 | `TUG_CONTROL_URL` | required | Credential-free `https://` origin clients connect to by default, including the port. It is written into credentials and its host is added to the server certificate, but clients verify the generated control name, not this address. |
+| `TUG_WATCH_TICK_MS` | `1000` | How often the [watch channel](architecture.md#operator-watch-channel) looks for changes nothing announced (deployment, backup and restore states, stale nodes), while at least one operator is watching. Requests that change something trigger a look at once. |
 | `TUG_EXTRA_SANS` | unset | Comma-separated extra DNS names or IPs for the server certificate. |
 | `TUG_RENEW_MIN_INTERVAL_MS` | `3600000` | Minimum time between certificate renewals per node. |
 | `TUG_DATA_DIR` | `./data` | SQLite database, master key, `pki/` (CA and server certificate), image archives, build contexts and backups. |

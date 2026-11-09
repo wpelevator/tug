@@ -10,7 +10,14 @@ export interface StatusResponse {
     created_at?: string;
     actor?: string | null;
   }[];
-  nodes: { id: string; name: string; status: string; last_seen_at: string | null }[];
+  nodes: {
+    id: string;
+    name: string;
+    status: string;
+    last_seen_at: string | null;
+    /** Whether the node's agent holds its stream socket to control right now (absent from older controls). */
+    connected?: boolean;
+  }[];
   statuses: {
     project_id: string;
     node_id: string;

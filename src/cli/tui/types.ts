@@ -83,6 +83,7 @@ export interface NodeRow {
   last_seen_at: string | null;
   disabled_at?: string | null;
   cert_not_after?: string | null;
+  connected?: boolean;
 }
 export interface Diagnostics {
   ok: boolean;
@@ -110,6 +111,8 @@ export interface Snapshot {
   diagnostics: Feed<Diagnostics>;
   version: Feed<string>;
   whoami: Feed<Who>;
+  /** Whether the push channel from control is open; when it is, polling only backs it up. */
+  watch: { connected: boolean };
   /** On-demand lists keyed by `<view>:<project>`: domains, volumes, secrets and credentials. */
   lists: Record<string, Feed<Record<string, unknown>[]>>;
 }
@@ -122,6 +125,7 @@ export const emptySnapshot = (): Snapshot => ({
   diagnostics: {},
   version: {},
   whoami: {},
+  watch: { connected: false },
   lists: {},
 });
 
