@@ -63,7 +63,9 @@ async function server(
       for (const [key, value] of Object.entries(saved))
         if (value === undefined) delete process.env[key];
         else process.env[key] = value;
-      if (!keepDir) await fs.rm(dir, { recursive: true, force: true });
+      // A nightly push still staging when the test ends can add files mid-removal.
+      if (!keepDir)
+        await fs.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     },
   };
 }
@@ -485,7 +487,10 @@ test('a control backup that never finishes shows as stale instead of silently do
       ? { code: 0, out: '{"message_type":"summary","snapshot_id":"snap1"}\n' }
       : undefined; // the second push hangs
   });
-  const s = await server(docker, { TUG_CONTROL_BACKUP_INTERVAL_MS: '80' });
+  const s = await server(docker, {
+    TUG_CONTROL_BACKUP_INTERVAL_MS: '80',
+    TUG_CONTROL_BACKUP_LIMIT_MS: '1500',
+  });
   try {
     await call(s.base, 'POST', '/api/v1/backup/destination', DESTINATION);
     const control = await until(async () => {
@@ -659,7 +664,10 @@ test('switching destination starts a backup there and reports the new one on its
 
 test('a destination with no completed backup is reported as unprotected, not as the previous one was', async () => {
   const docker = resticDocker((cmd) => (cmd[1] === 'backup' ? undefined : { code: 0 }));
-  const s = await server(docker, { TUG_CONTROL_BACKUP_RETRY_MS: '60' });
+  const s = await server(docker, {
+    TUG_CONTROL_BACKUP_RETRY_MS: '60',
+    TUG_CONTROL_BACKUP_LIMIT_MS: '1500',
+  });
   try {
     await call(s.base, 'POST', '/api/v1/backup/destination', DESTINATION);
     const control = await until(async () => {

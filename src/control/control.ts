@@ -3350,6 +3350,8 @@ export async function createApp(
     Number(process.env.TUG_CONTROL_BACKUP_INTERVAL_MS) || 24 * 3600_000;
   const controlRetryMs = () => Number(process.env.TUG_CONTROL_BACKUP_RETRY_MS) || 3600_000;
   const resticImage = () => process.env.TUG_RESTIC_IMAGE || DEFAULT_RESTIC_IMAGE;
+  /** How long one control backup, listing or fetch may take before its helper is removed; the module default is 30 minutes. */
+  const controlJobLimitMs = () => Number(process.env.TUG_CONTROL_BACKUP_LIMIT_MS) || undefined;
   const controlEvent = (level: 'info' | 'error', type: string, message: string, meta: object) =>
     db.run(
       'INSERT INTO events(id,project_id,deployment_id,node_id,level,type,message,metadata_json,created_at) VALUES(?,?,?,?,?,?,?,?,?)',
@@ -3443,6 +3445,7 @@ export async function createApp(
           env,
           password: controlRepositoryPassword(masterKey),
           resticImage: resticImage(),
+          limitMs: controlJobLimitMs(),
         },
         archive.artifactRef,
         // What the snapshot holds, visible when choosing one: no images and, always, no workload data.
@@ -3553,6 +3556,7 @@ export async function createApp(
           env: backupEnv(),
           password: controlRepositoryPassword(masterKey),
           resticImage: resticImage(),
+          limitMs: controlJobLimitMs(),
         });
       } catch (e) {
         remote = { state: 'error', snapshots: [], error: errMessage(e) };
@@ -3640,6 +3644,7 @@ export async function createApp(
           env: source.env,
           password,
           resticImage: resticImage(),
+          limitMs: controlJobLimitMs(),
           signal: abort.signal,
         },
         fetched,

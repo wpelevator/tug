@@ -104,8 +104,7 @@ async function withRestic<T>(
         reject(new ControlBackupError(`restic did not finish within ${Math.round(limit / 1000)}s`)),
       limit,
     );
-    // A limit alone must not keep a process alive.
-    timer.unref();
+    // Not unref'd: while a job is pending its limit is what ends it, and the timer is cleared as soon as it finishes.
     const cancel = () => reject(new ControlBackupError('the control backup was cancelled'));
     if (access.signal?.aborted) cancel();
     else access.signal?.addEventListener('abort', cancel, { once: true });
