@@ -416,7 +416,13 @@ test('the native reader renders what docker compose config renders (corpus compa
     }
     // What Compose adds that Tug ignores: the default network and the project prefix on volume names.
     delete compose.networks;
-    for (const service of Object.values<any>(compose.services)) delete service.networks;
+    // Compose before v2.30-ish adds `create_host_path: true` to short-syntax bind mounts and newer ones do not; the agent
+    // binds the path either way, so the field is not part of the comparison.
+    for (const service of Object.values<any>(compose.services)) {
+      delete service.networks;
+      for (const mount of service.volumes ?? [])
+        if (mount.bind?.create_host_path === true) delete mount.bind.create_host_path;
+    }
     for (const [key, volume] of Object.entries<any>(compose.volumes ?? {}))
       if (volume.name === `site_${key}`) delete volume.name;
     assert.deepEqual(
