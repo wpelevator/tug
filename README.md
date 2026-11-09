@@ -19,7 +19,7 @@ tug is free. Your Compose file stays a Compose file: `x-tug` is a standard Compo
 
 ## Try it
 
-Follow [Deploy your first service](docs/getting-started.md) to install tug, deploy nginx to one VPS and verify that it works. You need Node.js 22.18 or newer on your computer, plus SSH access to a Linux server. Neither your computer nor the server needs Docker Compose. tug can install Docker on supported servers.
+Follow [Deploy your first service](docs/getting-started.md) to install tug, deploy nginx to one VPS and verify that it works. You need Node.js 22.18 or newer on your computer, plus SSH access to a Linux server. tug can install Docker on supported servers.
 
 ```bash
 npm install -g @wpelevator/tug      # or run it with npx @wpelevator/tug

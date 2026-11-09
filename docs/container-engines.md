@@ -22,7 +22,7 @@ Tug already speaks the Engine API through the `DockerApi` interface in `src/dock
 | Supported engines | Docker Engine (default) and rootful Podman 5+ via its compat socket. Docker Desktop, Colima, OrbStack and Rancher Desktop in moby mode are Docker daemons and need no work. |
 | Engine identity | Read it from `GET /version` (`Components[].Name`), store it on the node report and show it in `tug nodes` and doctor. Behavior never branches on the engine name except where a verified gap needs a workaround, and each such branch is listed in the docs. |
 | CLI dependency | Move `save`, `load`, `tag`, `image inspect` and `image rm` in control onto the Engine API through `DockerApi`, so control needs a CLI only for `build`, `manifest inspect` and Compose. Where a CLI remains, an engine setting (`docker` or `podman`) chooses the binary. |
-| Compose | None. `tug deploy` reads the Compose file itself and the control host runs control with `docker run` (or the engine's equivalent), so no Compose renderer is involved. |
+| Compose | None. `tug deploy` reads the Compose file itself and the control host runs control with `docker run` (or the engine's equivalent), so no Compose renderer is needed. |
 | Rootless | Not supported in the first release. Host-side health checks and container-IP reachability assume a routable bridge. Revisit only after the spike shows an acceptable design. |
 | Installer | Tug keeps installing Docker only. A pre-installed Podman is accepted when its socket answers and the doctor checks pass; the installer stops rejecting `podman-docker` when Podman is the working engine. No Podman installation path is added. |
 
