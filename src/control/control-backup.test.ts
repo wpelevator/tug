@@ -55,6 +55,7 @@ async function server(
     const s = app.listen(0, () => resolve(s));
   });
   return {
+    app,
     dir,
     base: `http://127.0.0.1:${(srv.address() as AddressInfo).port}`,
     /** `keepDir` leaves the data directory for a second control to start on, as after a crash or a restore. */
@@ -135,6 +136,23 @@ test('control backup archives can be downloaded byte for byte, and only the ones
   } finally {
     await s.close();
   }
+});
+
+test('closing control stops its backup scheduler so a closed database is never ticked', async () => {
+  const s = await server(resticDocker());
+  const backups = s.app.locals.backups as { tick: () => void };
+  const tick = backups.tick.bind(backups);
+  let ticks = 0;
+  backups.tick = () => {
+    ticks++;
+    tick();
+  };
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.ok(ticks > 0, 'the scheduler ticks while control is serving');
+  await s.close();
+  const atClose = ticks;
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(ticks, atClose, 'the scheduler does not tick after control closed');
 });
 
 test('with a destination control backs itself up into it without images and keeps no archive behind', async () => {
