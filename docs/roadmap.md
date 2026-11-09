@@ -52,11 +52,14 @@ Keep the single-writer control plane rather than decentralizing it like uncloud.
 
 Alternatives considered:
 
-- **uncloud** (decentralized, WireGuard mesh, container-routable networking, unregistry image push). Closest in spirit. Tug differs by having one control plane, agents that only dial out and no Tug-owned workload overlay: multi-node traffic uses the operator's existing private network.
+- **uncloud** (decentralized, WireGuard mesh, container-routable networking, unregistry image push, rolling replacement one container at a time with health gating). Closest in spirit and the closest CLI peer. Tug differs by having one control plane, agents that only dial out and no Tug-owned workload overlay: multi-node traffic uses the operator's existing private network. Tug's edge is deployment history, scoped CI credentials and guarded data restores in one centrally operated workflow.
 - **Docker Swarm** overlaps Tug's placement, reconciliation, rolling updates, secrets and node mTLS, and adds continuous task rescheduling, service DNS/VIPs, overlay networking and replicated managers. A single manager works; three tolerate one manager failure. Manager and overlay connectivity must be available on the private network, which can be a suitable VPN behind NAT. Tug instead integrates source builds, registry-free application image delivery, managed HTTPS, actor-attributed deployment history, scoped operator access and workload backup/restore. Docker has events and supports authorization plugins, so those Tug advantages concern the built-in application workflow. Not adopted; it remains the yardstick for how much Tug should build itself. See the source-linked [Docker Swarm comparison](swarm-comparison.md) for implemented differences, failure behavior and workload fit.
-- **Kamal** pushes over SSH with no control plane. Simpler, but no reconciliation, no central audit or scoped CI credentials, and no state for scheduled jobs such as backups.
+- **Kamal** pushes over SSH with no control plane. Simpler, but no reconciliation, no central audit or scoped CI credentials, and no state for scheduled jobs such as backups. It centres on one primary app with separately managed accessories, where Tug keeps a multi-service Compose project.
+- **Coolify** and **Dokploy** are browser-first: Git integration, templates, team roles, domain management and managed backups (Dokploy's cover named volumes to S3). Both run Compose resources through Docker Compose. Dokploy is the closest browser-first peer for stateful Compose stacks. Tug's edge is a direct local CLI and CI workflow, health-gated rollout for eligible Compose services, guarded restores and retained build archives for rollback without a registry. A product layer like theirs belongs in a client of the controller, not in it ([Consoles](consoles.md)).
+- **Dokku** is a Git-push, Heroku-style path with buildpacks or Dockerfiles, deployment checks and datastore plugins. Tug starts from a Compose stack and brings placement, image delivery and data recovery into the same workflow.
+- **Docker Compose over SSH** has the fewest moving parts and exact Compose semantics, and suits a stable single-server app that already has deploy and backup scripts. Tug replaces those scripts with release history, rollback, ingress, credentials, scheduled backups and restore coordination.
 
-Re-check uncloud's releases at the start of each milestone; baseline rechecked on 2026-10-31: [v0.21.0](https://github.com/psviderski/uncloud/releases/tag/v0.21.0), adding shared Caddy certificate storage, systemd socket activation and runtime templates to the existing mesh, DNS and deployment features.
+The peer summaries above were last compared against each tool's own documentation on 2026-11-09 (Coolify, Dokploy, Dokku and Compose through an outside product review); they compare documented workflows, not measured performance or cost. Re-check uncloud's releases at the start of each milestone; baseline rechecked on 2026-11-09: [v0.22.0](https://github.com/psviderski/uncloud/releases/tag/v0.22.0) (6 November), adding cluster storage for Caddy certificates by default, service and container labels, in-place CPU and memory limit updates, image removal across machines, machine DNS names and a faster stop-first deployment.
 
 ## Milestones
 
@@ -178,9 +181,15 @@ Claims must match verified behavior. Image rollback does not undo data, schema o
 
 1. **Done:** review the security work against the trusted-operator contract. The independently useful data-safety and confidentiality fixes are in; the Docker-socket finding (SEC-01) is accepted by design and recorded as such in [Security](security.md); grants stay out, and no tenant-isolation boundary is claimed.
 2. **Done on 0.9.0, to repeat on the release candidate:** prove recovery on disposable hosts using published artifacts: install WordPress, back up database, uploads, control state, credentials and image artifacts; recover a lost workload host and then a lost control plane onto fresh storage and verify the site ([Real-host evaluation](real-host-evaluation.md#recovery-drill-with-the-published-090-release-2-november-2026)). The control and workload backups are separate and both must be recoverable.
-3. **Tag 1.0.0** when the [gate below](#road-to-100) passes.
-4. **Then:** actionable backup alerts and deployment results as outbound webhooks (the smallest slice of M8 and M9, since `backup list --check` is only an interim), the rest of observability, and the production-path hardening that remains: bounded uploads and queue occupancy (SEC-09) and build-input confidentiality (SEC-06).
-5. Reconsider flexible node roles, release hooks, scaled WordPress, additional networking, dashboards and stronger isolation only for a demonstrated need. Co-locating control is attractive for small installations but requires an independently tested off-host recovery path and an explicit host trust model.
+3. **Done:** 1.0.0 tagged once the [gate below](#road-to-100) passed; 1.x minors since.
+4. **Now, ordered by operator value** (working file `plan-operator-value.md`; a hands-on VM run and an outside product review on 9 November 2026 independently reached the same order):
+   1. **Move bulk data in and out.** End-to-end backpressure for `exec`/`run` stdin and stdout (every live-channel hop still caps at 1 MiB, and a slow reader cuts a download far sooner), tested at 100 MB in both directions with a hash check; a documented way to move a database or a directory, and a "move an existing site in" guide.
+   2. **Hear first, and say what is true.** Outbound webhooks (the M8 slice: failed, missed or stale backups, crash loops, failed or rolled-back deployments, stale nodes) and an optional external HTTP probe per ingress host.
+   3. **Backups you can trust.** `backup list --check` fails when nothing is protected, a protection level per target (local, off-host, verified, restore-tested), `restic check` and a destination test, cleanup of scratch volumes and safety snapshots, and a control-recovery drill covering a damaged repository, a crash during activation and agents reconnecting after an older snapshot.
+   4. **Staging that is more than a pattern.** `tug project delete` and a cross-project data copy.
+   5. **Show the operator's scope.** Label control-wide views, show the resolved control and project before high-impact commands, give `ps`, `events` and `doctor` a compact human default.
+   6. **Then:** `x-tug.release` hooks, structured logs and `/metrics` (demoted: webhooks and the probe come first), SEC-09 and SEC-06 as minors, and the `dnf` and two-node verification debt.
+5. Reconsider flexible node roles, scaled WordPress, additional networking, dashboards and stronger isolation only for a demonstrated need. Co-locating control is attractive for small installations but requires an independently tested off-host recovery path and an explicit host trust model.
 
 ## Road to 1.0.0
 
@@ -235,6 +244,10 @@ The test layers, the metrics milestones are held to and the backlog of mocked te
 - [x] M11 `restore` waits for the restored writers to be serving again (five minutes, then it finishes with a warning)
 - [ ] M11 list and remove scratch-restore volumes, and expire safety snapshots (they accumulate for ever and only `restic forget` removes them)
 - [x] M11 `backup list --check`: exit nonzero when any target is stale, failed or missed, as an interim for cron and monitors until webhooks (M8) exist
+- [ ] M11 `backup list --check` also fails when nothing is protected (no destination, or no enabled targets), and `backup list` shows each target's protection level: local only, off-host, verified, restore-tested
+- [ ] Control recovery drill on disposable hosts for the PR #123 paths (`control backup --download`, `control restore --from-file`, the activation journal): a damaged repository, a crash during activation, and agents reconnecting after an older snapshot is restored
+- [ ] Bulk `exec`/`run` input and output with end-to-end backpressure, verified at 100 MB in both directions with a slow reader and a hash check
+- [ ] Operator scope cues: control-wide views labelled, the resolved control and project shown before high-impact commands, compact human output for `ps`, `events` and `doctor`
 - [x] M11 `memory` under `x-tug.backup` for the restic helper's memory limit
 - [x] A failed health check says when the agent runs outside a container (`doctor` does not check it separately)
 - [x] `TUG_ROLE=agent` works in the runtime image: it no longer sets a default command
@@ -269,5 +282,5 @@ The test layers, the metrics milestones are held to and the backlog of mocked te
 - [x] Version skew checked on ordinary traffic (`x-tug-version`, `x-tug-client-version`), following semver, with a CA/credential mismatch diagnosis in `tug doctor`
 - [x] Schema versioning and migrations for control and agent databases
 - [x] Interactive selection of services and nodes, and progress reporting for long-running commands
-- [ ] 1.0.0: the [gate above](#road-to-100) passes and the release is tagged
+- [x] 1.0.0: the [gate above](#road-to-100) passes and the release is tagged
 - [ ] Each milestone: tests added, README.md and docs updated, its own plan file folded into docs and deleted when done

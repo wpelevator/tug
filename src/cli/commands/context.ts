@@ -24,7 +24,7 @@ import { createCliLiveTransport } from '../live-transport.ts';
 import { caTrustCode, describeCaMismatch } from '../../pki.ts';
 import { packageVersion } from '../../images/image.ts';
 import { parseLiveRequest, runCliLive } from '../live.ts';
-import type { LiveInput, LiveRequest } from '../live.ts';
+import type { CliLiveIO, LiveInput, LiveRequest } from '../live.ts';
 import { TERMINAL_DEPLOYMENT_STATES } from '../../protocol.ts';
 import { describeFetchError, errMessage } from '../../errors.ts';
 import type { DeploymentState } from '../../protocol.ts';
@@ -452,6 +452,7 @@ export async function waitForCommand(
 export async function runLive(
   operation: LiveRequest['operation'],
   input: Omit<LiveInput, 'project'>,
+  io: CliLiveIO = {},
 ): Promise<void> {
   const cfg = await loadCfg();
   if (!input.node && canPrompt()) {
@@ -479,5 +480,6 @@ export async function runLive(
   process.exitCode = await runCliLive(
     parseLiveRequest(operation, { ...input, project: cfg.project || 'site' }),
     createCliLiveTransport(cfg.credential, cfg.controlUrl),
+    io,
   );
 }

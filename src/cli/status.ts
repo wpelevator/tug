@@ -1,3 +1,4 @@
+import { formatTable } from './observe-format.ts';
 /** The control status endpoint returns database rows and a JSON-encoded node report. */
 export interface StatusResponse {
   projects: { id: string; current_deployment_id: string | null }[];
@@ -112,15 +113,7 @@ export function formatNodes(nodes: NodeListing[]): string {
         node.last_seen_at || 'never',
       ]),
   ];
-  const widths = rows[0].map((_, column) => Math.max(...rows.map((row) => row[column].length)));
-  return rows
-    .map((row) =>
-      row
-        .map((cell, column) => cell.padEnd(widths[column]))
-        .join('  ')
-        .trimEnd(),
-    )
-    .join('\n');
+  return formatTable(rows);
 }
 
 function serviceStateLines(serviceStates: object): string[] {

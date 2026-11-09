@@ -1,3 +1,5 @@
+import { formatDoctor, formatEvents } from '../observe-format.ts';
+import type { DoctorReport, EventRow } from '../observe-format.ts';
 import { selectNode } from './selection.ts';
 import type { Command } from 'commander';
 import { errMessage } from '../../errors.ts';
@@ -26,12 +28,15 @@ export function registerObserve(program: Command): void {
       '--all',
       'list events across all projects (limited to your projects for scoped credentials)',
     )
-    .action(async (o: CommonOpts & { limit: string; all?: boolean }) => {
+    .option('--json', 'print the raw API result as JSON for scripts')
+    .action(async (o: CommonOpts & { limit: string; all?: boolean; json?: boolean }) => {
       if (o.all && o.project) throw new Error('--all and --project cannot be combined');
       const cfg = await loadCfg();
       const project = o.all ? undefined : o.project || cfg.project;
       const query = `limit=${encodeURIComponent(o.limit)}${project ? `&project=${encodeURIComponent(project)}` : ''}`;
-      print(await request('GET', `/api/v1/events?${query}`));
+      const result = await request<{ events: EventRow[] }>('GET', `/api/v1/events?${query}`);
+      if (o.json) print(result);
+      else console.log(formatEvents(result.events, { showProject: !project }));
     });
   program
     .command('doctor')
@@ -41,86 +46,91 @@ export function registerObserve(program: Command): void {
     .option('--nodes', 'also run host diagnostics on every node through its agent and wait')
     .option('--node [name]', 'run host diagnostics on one node through its agent and wait')
     .option('--timeout <seconds>', 'wait timeout for node diagnostics', '60')
-    .action(async (o: { nodes?: boolean; node?: string | boolean; timeout: string }) => {
-      if (o.nodes && o.node) throw new Error('--nodes and --node cannot be combined');
-      if (o.node === true) o.node = await selectNode();
-      const cfg = await loadCfg();
-      const local: { name: string; ok: boolean; output?: string; error?: string }[] = [];
-      for (const [name, cmd, args] of [
-        ['node', 'node', ['--version']],
-        ['docker', 'docker', ['version', '--format', '{{.Server.Version}}']],
-      ] as [string, string, string[]][]) {
-        try {
-          local.push({ name, ok: true, output: (await runCapture(cmd, args)).trim() });
-        } catch (e) {
-          local.push({ name, ok: false, error: errMessage(e) });
-        }
-      }
-      let controlDiagnostics:
-        { ok: boolean; checks?: { name: string; warnings?: string[] }[] } | undefined;
-      try {
-        controlDiagnostics = await request('GET', '/api/v1/diagnostics');
-      } catch (error) {
-        // Name both fingerprints on a trust mismatch, so the operator can compare the credential with the server in one look.
-        const code = caTrustCode(error);
-        if (code && cfg.credential) {
-          let presented: string;
+    .option('--json', 'print the full diagnostics document as JSON for scripts')
+    .action(
+      async (o: { nodes?: boolean; node?: string | boolean; timeout: string; json?: boolean }) => {
+        if (o.nodes && o.node) throw new Error('--nodes and --node cannot be combined');
+        if (o.node === true) o.node = await selectNode();
+        const cfg = await loadCfg();
+        const local: { name: string; ok: boolean; output?: string; error?: string }[] = [];
+        for (const [name, cmd, args] of [
+          ['node', 'node', ['--version']],
+          ['docker', 'docker', ['version', '--format', '{{.Server.Version}}']],
+        ] as [string, string, string[]][]) {
           try {
-            const cert = await probeServerCertificate(cfg.credential);
-            presented = `, server presented ${cert.issuer} leaf ${cert.leafFingerprint}`;
-          } catch {
-            presented = ', no TLS answer from the control address';
+            local.push({ name, ok: true, output: (await runCapture(cmd, args)).trim() });
+          } catch (e) {
+            local.push({ name, ok: false, error: errMessage(e) });
           }
-          local.push({
-            name: 'control_server_cert',
-            ok: false,
-            error: `${describeCaMismatch(cfg.credential, cfg.controlUrl ?? cfg.credential.url)} (${code}${presented})`,
-          });
-        } else {
-          throw error;
         }
-      }
-      const warnings = (controlDiagnostics?.checks ?? []).flatMap(
-        (check: { name: string; warnings?: string[] }) =>
-          (check.warnings ?? []).map((warning) => `${check.name}: ${warning}`),
-      );
-      const output: {
-        ok: boolean;
-        warnings?: string[];
-        local: typeof local;
-        control: unknown;
-        nodeDiagnostics?: unknown;
-      } = {
-        ok:
-          local.every((c) => c.ok) &&
-          Boolean(controlDiagnostics) &&
-          (controlDiagnostics?.ok ?? false),
-        ...(warnings.length && { warnings }),
-        local,
-        ...(controlDiagnostics
-          ? { control: controlDiagnostics }
-          : {
-              control: { ok: false, error: 'control diagnostics unavailable (see local checks)' },
-            }),
-      };
-      if (o.nodes || o.node) {
-        const queued = await request<{ commands: { commandId: string; nodeId: string }[] }>(
-          'POST',
-          '/api/v1/diagnostics/nodes',
-          { node: o.node || null },
+        let controlDiagnostics:
+          { ok: boolean; checks?: { name: string; warnings?: string[] }[] } | undefined;
+        try {
+          controlDiagnostics = await request('GET', '/api/v1/diagnostics');
+        } catch (error) {
+          // Name both fingerprints on a trust mismatch, so the operator can compare the credential with the server in one look.
+          const code = caTrustCode(error);
+          if (code && cfg.credential) {
+            let presented: string;
+            try {
+              const cert = await probeServerCertificate(cfg.credential);
+              presented = `, server presented ${cert.issuer} leaf ${cert.leafFingerprint}`;
+            } catch {
+              presented = ', no TLS answer from the control address';
+            }
+            local.push({
+              name: 'control_server_cert',
+              ok: false,
+              error: `${describeCaMismatch(cfg.credential, cfg.controlUrl ?? cfg.credential.url)} (${code}${presented})`,
+            });
+          } else {
+            throw error;
+          }
+        }
+        const warnings = (controlDiagnostics?.checks ?? []).flatMap(
+          (check: { name: string; warnings?: string[] }) =>
+            (check.warnings ?? []).map((warning) => `${check.name}: ${warning}`),
         );
-        const commands = [];
-        for (const command of queued.commands) {
-          const finished = await waitForCommand(command.commandId, Number(o.timeout));
-          commands.push({
-            nodeId: command.nodeId,
-            state: finished.state,
-            result: JSON.parse(finished.result_json || '{}'),
-          });
+        const output: {
+          ok: boolean;
+          warnings?: string[];
+          local: typeof local;
+          control: unknown;
+          nodeDiagnostics?: unknown;
+        } = {
+          ok:
+            local.every((c) => c.ok) &&
+            Boolean(controlDiagnostics) &&
+            (controlDiagnostics?.ok ?? false),
+          ...(warnings.length && { warnings }),
+          local,
+          ...(controlDiagnostics
+            ? { control: controlDiagnostics }
+            : {
+                control: { ok: false, error: 'control diagnostics unavailable (see local checks)' },
+              }),
+        };
+        if (o.nodes || o.node) {
+          const queued = await request<{ commands: { commandId: string; nodeId: string }[] }>(
+            'POST',
+            '/api/v1/diagnostics/nodes',
+            { node: o.node || null },
+          );
+          const commands = [];
+          for (const command of queued.commands) {
+            const finished = await waitForCommand(command.commandId, Number(o.timeout));
+            commands.push({
+              nodeId: command.nodeId,
+              state: finished.state,
+              result: JSON.parse(finished.result_json || '{}'),
+            });
+          }
+          output.nodeDiagnostics = { commands };
+          if (commands.some((command) => command.state !== 'succeeded')) output.ok = false;
         }
-        output.nodeDiagnostics = { commands };
-        if (commands.some((command) => command.state !== 'succeeded')) output.ok = false;
-      }
-      print(output);
-    });
+        if (o.json) print(output);
+        else console.log(formatDoctor(output as DoctorReport));
+        if (!output.ok) process.exitCode = 1;
+      },
+    );
 }
