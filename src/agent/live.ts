@@ -442,7 +442,8 @@ export async function startOneOff(
   const remove = () => docker.removeContainer(id).catch(() => {});
   try {
     await docker.startContainer(id);
-    const logs = await docker.logs(id, { follow: true });
+    // The command may write before this attaches; replay the whole log so none of its output is cut to a tail.
+    const logs = await docker.logs(id, { follow: true, tail: 'all' });
     let killed = false;
     const proc = Object.assign(new EventEmitter(), {
       stdin: null,
@@ -474,11 +475,11 @@ export async function startOneOff(
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
       if (killed) return;
-      // Give the consumer a moment to read the last output before the container goes away.
-      await Promise.race([
-        Promise.all([drained(logs.stdout), drained(logs.stderr)]),
-        new Promise((resolve) => setTimeout(resolve, 1500)),
-      ]);
+      // Remove the container only once its output has been read to the end. Flow control pauses the log stream while
+      // the CLI catches up, so a fixed grace period would cut off the tail; a session that stalls for good is ended
+      // by cancellation or its time limit, whose kill() destroys the stream and removes the container.
+      await Promise.all([drained(logs.stdout), drained(logs.stderr)]);
+      if (killed) return;
       await remove();
       proc.emit('close', code, null);
     })();
