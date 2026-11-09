@@ -8,7 +8,7 @@ import { DockerEngine } from '../../src/docker-api.ts';
 import { runBackupJob } from '../../src/backup/job.ts';
 import type { BackupJobPayload } from '../../src/protocol.ts';
 
-const RESTIC = process.env.TUG_RESTIC_IMAGE || 'restic/restic:0.17.3';
+const RESTIC = process.env.TUG_RESTIC_IMAGE || 'restic/restic:0.19.1';
 const MARIADB = 'mariadb:11.4';
 const dockerUp = spawnSync('docker', ['version'], { stdio: 'ignore' }).status === 0;
 const docker = (...args: string[]) => spawnSync('docker', args, { encoding: 'utf8' });

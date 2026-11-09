@@ -46,7 +46,7 @@ Mark a service or a volume with `x-tug.backup` ([Compose extensions](compose.md#
 - **Volumes** are mounted read-only into the restic container and archived, with your `exclude` patterns. A volume that does not exist on the node fails the run instead of backing up an empty one. Live volumes are crash-consistent, which suits uploads and static files.
 - **Retention** runs after each successful backup (`restic forget --prune` per node and target). Snapshots tagged `trigger:pre-restore` are kept regardless.
 
-- **Images** for restic come from `TUG_RESTIC_IMAGE` on control (default `restic/restic:0.17.3`); a digest reference is recommended. Nodes pull it outbound like any published image.
+- **Images** for restic come from `TUG_RESTIC_IMAGE` on control (default `restic/restic:0.19.1`); a digest reference is recommended. Nodes pull it outbound like any published image.
 - **Restic runs in a helper container** with a memory limit, labelled `tug.job`, removed when it finishes. An agent that restarts mid-job removes leftovers and reports the job failed.
 
 Before mounting a managed volume, backup and restore check its project and volume ownership labels; a scratch restore checks its scratch volume's project and restore labels. A conflicting or unlabelled volume is refused instead of being read or overwritten.
