@@ -14,7 +14,7 @@ const payload = (overrides: Partial<BackupJobPayload> = {}): BackupJobPayload =>
   target: 'service:db',
   type: 'command',
   repository: 's3:https://s3.example.com/bucket/site',
-  resticImage: 'restic/restic:0.17.3',
+  resticImage: 'restic/restic:0.19.1',
   node: 'app1',
   tags: ['tug', 'project:site', 'target:service:db', 'run:bkr_1'],
   limits: { memory: '512m', timeoutSec: 60 },
@@ -45,7 +45,7 @@ const settle = async (jobs: JobRunner, expected: number) => {
 
 function dockerWith(responder: FakeDocker['execResponder']): FakeDocker {
   const docker = new FakeDocker();
-  docker.addImage('restic/restic:0.17.3');
+  docker.addImage('restic/restic:0.19.1');
   docker.execResponder = responder;
   return docker;
 }
@@ -53,7 +53,7 @@ function dockerWith(responder: FakeDocker['execResponder']): FakeDocker {
 test('a check job reports a healthy repository and removes its helper container', async () => {
   const docker = dockerWith((cmd) =>
     cmd.join(' ') === 'restic version'
-      ? { code: 0, out: 'restic 0.17.3 compiled with go1.22\n' }
+      ? { code: 0, out: 'restic 0.19.1 compiled with go1.22\n' }
       : { code: 0 },
   );
   const { jobs } = await runner(docker);
@@ -66,7 +66,7 @@ test('a check job reports a healthy repository and removes its helper container'
     'ok',
     'an existing repository is reported ok',
   );
-  assert.equal((result.result as { resticVersion?: string }).resticVersion, '0.17.3');
+  assert.equal((result.result as { resticVersion?: string }).resticVersion, '0.19.1');
   assert.deepEqual(docker.names(), [], 'the helper container is removed after the job');
 });
 
@@ -319,7 +319,7 @@ const SUMMARY =
 /** A project with a running `db` container whose command output and exit code the test scripts. */
 async function dockerWithService(command: { code: number; out?: string; err?: string }) {
   const docker = new FakeDocker();
-  docker.addImage('restic/restic:0.17.3');
+  docker.addImage('restic/restic:0.19.1');
   docker.addImage('db');
   const id = await docker.createContainer('site-db-1', {
     Image: 'db',
@@ -387,7 +387,7 @@ test('a failing command, missing output or a missing completion marker never lea
 
 test('a command backup fails clearly when the service is not running on the node', async () => {
   const docker = new FakeDocker();
-  docker.addImage('restic/restic:0.17.3');
+  docker.addImage('restic/restic:0.19.1');
   docker.execResponder = () => ({ code: 0 });
   const { jobs } = await runner(docker);
   await jobs.start(command('cmd_1', commandJob(), 'backup.run'));

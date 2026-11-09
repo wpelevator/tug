@@ -36,7 +36,7 @@ Also [back up control](#control-plane-backup), copy the archive off-host, and pr
 
 ## Backup destination
 
-The control plane uses one destination. Running `tug backup destination set` replaces it. Setting or removing a destination updates its configuration and stored credentials atomically; a database failure leaves the previous configuration and credentials intact. Each project uses its own repository. The complete command and credential options are in the [CLI reference](cli.md#backups).
+The control plane uses one destination. Running `tug backup destination set` replaces it. Setting or removing a destination updates its configuration and stored credentials atomically; a database failure leaves the previous configuration and credentials intact. Each project uses its own repository. The complete command and credential options are in the [CLI reference](cli.md#backups). On DigitalOcean Spaces, use a path-style destination URL (see [Known limits](#known-limits)).
 
 ## Scheduled backups
 
@@ -46,7 +46,7 @@ Mark a service or a volume with `x-tug.backup` ([Compose extensions](compose.md#
 - **Volumes** are mounted read-only into the restic container and archived, with your `exclude` patterns. A volume that does not exist on the node fails the run instead of backing up an empty one. Live volumes are crash-consistent, which suits uploads and static files.
 - **Retention** runs after each successful backup (`restic forget --prune` per node and target). Snapshots tagged `trigger:pre-restore` are kept regardless.
 
-- **Images** for restic come from `TUG_RESTIC_IMAGE` on control (default `restic/restic:0.17.3`); a digest reference is recommended. Nodes pull it outbound like any published image.
+- **Images** for restic come from `TUG_RESTIC_IMAGE` on control (default `restic/restic:0.19.1`); a digest reference is recommended. Nodes pull it outbound like any published image.
 - **Restic runs in a helper container** with a memory limit, labelled `tug.job`, removed when it finishes. An agent that restarts mid-job removes leftovers and reports the job failed.
 
 Before mounting a managed volume, backup and restore check its project and volume ownership labels; a scratch restore checks its scratch volume's project and restore labels. A conflicting or unlabelled volume is refused instead of being read or overwritten.
@@ -156,5 +156,6 @@ Tug does not restore a snapshot into a different project: repositories and snaps
 - Repository maintenance (`restic check`, a read-verify of the data) and SFTP destinations are not built yet.
 - A scratch restore leaves its volume (`tug_r<project-length>_<project>_<id>`) behind, and the safety snapshot of every in-place restore is kept for ever. There is no command to list or remove either yet: remove scratch volumes with `docker volume rm` on the node, and safety snapshots with `restic forget` using the repository from `tug backup password`.
 - The restic helper container defaults to a 512 MB memory limit, which is half of a 1 GB host; lower it with `memory` under `x-tug.backup`. Restic needs more memory for larger repositories, so test the limit against your data.
+- **DigitalOcean Spaces needs path-style addressing.** A destination URL in the bucket-subdomain form makes restic use virtual-host-style bucket addressing (`<bucket>.<region>.digitaloceanspaces.com`), and the Spaces gateway closes the TLS connection mid-call on those requests: every backup dies in `restic init` with `client.BucketExists: EOF`, a raw connection error rather than an S3 error, while read-only calls (`restic snapshots`, `restic cat config`) against the same URL succeed. The private-VPC endpoint hides the failure as a network fault. tcpdump on the node shows the gateway completing the handshake, sending some response data, then FIN and RST. Credentials, container context, network mode, the tug helper container and the restic image (0.17.3 and 0.19.1 behave identically) all check out, so the cause is upstream restic/MinIO behavior. Use the path-style form, the only one restic supports for S3-compatible endpoints ([Preparing a new repository](https://restic.readthedocs.io/en/stable/030_preparing_a_new_repo.html)): `s3:https://<region>.digitaloceanspaces.com/<bucket>/<prefix>`.
 - Failures are not pushed anywhere until webhooks exist. Run `tug backup list --check` from cron or a monitor: it exits nonzero when a target is stale, failed or missed.
 - Cancelling `tug exec` does not stop the remote process.

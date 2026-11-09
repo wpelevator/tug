@@ -26,6 +26,32 @@ async function freePort(): Promise<number> {
   });
 }
 
+/** Bind the upstream to `port`, or an OS-assigned one when 0, and resolve with the bound port. */
+function bind(server: http.Server, port = 0): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const onError = (error: Error) => reject(error);
+    server.once('error', onError);
+    server.listen(port, '0.0.0.0', () => {
+      server.removeListener('error', onError);
+      resolve((server.address() as net.AddressInfo).port);
+    });
+  });
+}
+
+/** Bind the upstream again after the outage, retrying while some connection holds the port. */
+async function rebind(server: http.Server, port: number): Promise<void> {
+  for (let attempt = 0; attempt < 20; attempt++) {
+    try {
+      await bind(server, port);
+      return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EADDRINUSE') throw error;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+  }
+  throw new Error(`could not rebind the upstream on port ${port}`);
+}
+
 function caddyfile(
   upstreamPort: number | null,
   mutate: (text: string) => string = (t) => t,
@@ -122,9 +148,12 @@ test(
   { skip: !HAVE_DOCKER && 'Docker is not available', timeout: 60000 },
   async (t) => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-resilience-'));
-    const upstreamPort = await freePort();
-    const edge = await startCaddy(dir, caddyfile(upstreamPort));
     const upstream = http.createServer((_req, res) => res.end('hello'));
+    // Bind before Caddy starts. freePort closes its probe socket, so a port picked there and left
+    // alone can be taken by an outbound connection's ephemeral allocation or another process
+    // while the container starts, which used to fail the test with EADDRINUSE.
+    const upstreamPort = await bind(upstream);
+    const edge = await startCaddy(dir, caddyfile(upstreamPort));
     t.after(async () => {
       edge.stop();
       upstream.closeAllConnections();
@@ -132,8 +161,11 @@ test(
       await fs.rm(dir, { recursive: true, force: true });
     });
 
-    // The service restarts: nothing listens for the first second, then it comes up.
-    setTimeout(() => upstream.listen(upstreamPort, '0.0.0.0'), 1000);
+    // The service restarts: nothing listens for the first second, then it comes up. rebind
+    // retries, because a port stolen during the outage is not listened on either: Caddy's dials
+    // stay refused and the request is served once the bind is back, within lb_try_duration.
+    upstream.close();
+    setTimeout(() => rebind(upstream, upstreamPort), 1000);
     const res = await get(edge.port, '/');
     assert.equal(
       res.status,
@@ -164,8 +196,8 @@ test(
   'a WebSocket stays open when the config is reloaded because stream_close_delay holds it',
   { skip: !HAVE_DOCKER && 'Docker is not available', timeout: 90000 },
   async (t) => {
-    const upstreamPort = await freePort();
     const upstream = http.createServer();
+    const upstreamPort = await bind(upstream);
     // A minimal upgrade endpoint: after the 101 Caddy only tunnels bytes, so raw lines stand in for frames.
     upstream.on('upgrade', (_req, socket) => {
       socket.write(
@@ -182,7 +214,6 @@ test(
       socket.on('close', () => clearInterval(timer));
       socket.on('error', () => {});
     });
-    await new Promise<void>((r) => upstream.listen(upstreamPort, '0.0.0.0', r));
     t.after(() => {
       upstream.closeAllConnections();
       upstream.close();
@@ -345,9 +376,8 @@ test(
   { skip: !HAVE_DOCKER && 'Docker is not available', timeout: 60000 },
   async (t) => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-resilience-'));
-    const upstreamPort = await freePort();
     const upstream = http.createServer((req, res) => res.end(`upstream saw ${req.headers.host}`));
-    await new Promise<void>((r) => upstream.listen(upstreamPort, '0.0.0.0', r));
+    const upstreamPort = await bind(upstream);
     const edge = await startCaddy(
       dir,
       renderCaddyfile([
