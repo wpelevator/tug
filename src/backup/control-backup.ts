@@ -14,6 +14,8 @@ const CONTROL_HOST = 'control';
 const CONTROL_TAG = 'control';
 /** One control backup or fetch may take this long before its helper container is removed. */
 export const CONTROL_JOB_LIMIT_MS = 30 * 60_000;
+/** Removing the helper gets this long; a leftover one is removed at the next control start. */
+const REMOVE_LIMIT_MS = 30_000;
 const RETENTION = [
   '--keep-last',
   '3',
@@ -24,8 +26,16 @@ const RETENTION = [
   '--keep-monthly',
   '6',
 ];
-const MISSING_REPOSITORY =
-  /Is there a repository at the following location|does not exist|no such file/i;
+/**
+ * restic appends "Is there a repository at the following location?" to every failure to open the config, so that line
+ * alone cannot tell a repository that was never created from a wrong bucket, a refused login or an unreachable store.
+ * Only the first is safe to initialize or to report as "no control backup".
+ */
+const NOT_A_MISSING_REPOSITORY =
+  /NoSuchBucket|bucket does not exist|AccessDenied|Forbidden|InvalidAccessKey|SignatureDoesNotMatch|dial tcp|no such host|timeout|timed out|connection refused|connection reset|certificate|wrong password/i;
+export const isMissingRepository = (stderr: string): boolean =>
+  /Is there a repository at the following location/i.test(stderr) &&
+  !NOT_A_MISSING_REPOSITORY.test(stderr);
 
 export interface ControlRepositoryAccess {
   /** The destination URL as stored, such as `s3:https://host/bucket/prefix`. */
@@ -37,6 +47,8 @@ export interface ControlRepositoryAccess {
   resticImage: string;
   /** Overrides {@link CONTROL_JOB_LIMIT_MS}. */
   limitMs?: number;
+  /** Cancels the job (a client that went away); the helper is removed either way. */
+  signal?: AbortSignal;
 }
 
 /** The control repository sits next to the project repositories, under a name no project can have. */
@@ -54,6 +66,11 @@ export function controlRepositoryPassword(masterKey: string): string {
 }
 
 export class ControlBackupError extends Error {}
+
+const isPipeBreak = (error: unknown): boolean =>
+  ['EPIPE', 'ERR_STREAM_PREMATURE_CLOSE', 'ERR_STREAM_DESTROYED', 'ECONNRESET'].includes(
+    (error as NodeJS.ErrnoException | undefined)?.code ?? '',
+  );
 
 const lastLines = (text: string): string => text.trim().split('\n').slice(-6).join(' | ');
 
@@ -82,13 +99,20 @@ async function withRestic<T>(
         reject(new ControlBackupError(`restic did not finish within ${Math.round(limit / 1000)}s`)),
       limit,
     );
+    // A limit alone must not keep a process alive.
+    timer.unref();
+    const cancel = () => reject(new ControlBackupError('the control backup was cancelled'));
+    if (access.signal?.aborted) cancel();
+    else access.signal?.addEventListener('abort', cancel, { once: true });
   });
   timeout.catch(() => undefined);
   try {
     await Promise.race([ensureImage(docker, access.resticImage), timeout]);
-    container = await docker.createContainer(
-      `tug-control-backup-${randomBytes(4).toString('hex')}`,
-      {
+    // The name is fixed before the helper exists, so a create that hangs and later succeeds is still removed by name.
+    const name = `tug-control-backup-${randomBytes(4).toString('hex')}`;
+    container = name;
+    await Promise.race([
+      docker.createContainer(name, {
         Image: access.resticImage,
         Entrypoint: ['sleep'],
         Cmd: ['86400'],
@@ -100,10 +124,11 @@ async function withRestic<T>(
         ],
         Labels: { 'tug.job': 'control-backup' },
         HostConfig: { Memory: 512 * 1024 ** 2, Binds: binds },
-      },
-    );
-    await docker.startContainer(container);
-    const id = container;
+      }),
+      timeout,
+    ]);
+    await Promise.race([docker.startContainer(name), timeout]);
+    const id = name;
     const finish = (result: Collected): Collected => ({
       ...result,
       out: redact(result.out),
@@ -122,8 +147,13 @@ async function withRestic<T>(
           : pipeline(proc.stdout, createWriteStream(file, { mode: 0o600 }));
       const [transfer, result] = await Promise.race([Promise.allSettled([moved, done]), timeout]);
       if (result.status === 'rejected') throw result.reason;
-      // restic that exits early (a lock timeout, a wrong repository) breaks the pipe; its own message is the cause.
-      if (transfer.status === 'rejected' && result.value.code === 0) throw transfer.reason;
+      // restic that exits early (a lock timeout, a wrong repository) breaks the pipe and its own message is the cause;
+      // any other transfer failure (a full disk, an unreadable archive) is the cause itself.
+      if (
+        transfer.status === 'rejected' &&
+        (result.value.code === 0 || !isPipeBreak(transfer.reason))
+      )
+        throw transfer.reason;
       return finish(result.value);
     };
     return await work(exec, run);
@@ -134,7 +164,12 @@ async function withRestic<T>(
     });
   } finally {
     clearTimeout(timer);
-    if (container) await docker.removeContainer(container).catch(() => undefined);
+    // Bounded, so a Docker daemon that hangs here cannot wedge the job (and with it every later control backup).
+    if (container)
+      await Promise.race([
+        docker.removeContainer(container).catch(() => undefined),
+        new Promise((resolve) => setTimeout(resolve, REMOVE_LIMIT_MS).unref()),
+      ]);
   }
 }
 
@@ -156,7 +191,7 @@ export async function pushControlArchive(
     const probe = await exec(['restic', 'cat', 'config']);
     if (probe.code !== 0) {
       // Only a missing repository is created; a wrong password or an unreachable bucket must fail the backup.
-      if (!MISSING_REPOSITORY.test(probe.err))
+      if (!isMissingRepository(probe.err))
         throw new ControlBackupError(
           `repository check failed: ${lastLines(probe.err || probe.out)}`,
         );
@@ -219,7 +254,7 @@ export async function fetchControlArchive(
     const probe = await exec(['restic', 'cat', 'config']);
     if (probe.code !== 0)
       throw new ControlBackupError(
-        MISSING_REPOSITORY.test(probe.err)
+        isMissingRepository(probe.err)
           ? `no control backup was found at ${controlRepository(access.url)}`
           : `cannot read the control repository (wrong control password or credentials, or an unreachable store): ${lastLines(probe.err || probe.out)}`,
       );

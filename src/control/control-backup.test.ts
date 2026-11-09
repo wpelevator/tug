@@ -6,6 +6,7 @@ import path from 'node:path';
 import { createApp } from './control.ts';
 import { json, testImageResolver, testControlUrl, testIdentity } from '../../tests/helpers.ts';
 import { FakeDocker } from '../../tests/fake-docker.ts';
+import { DatabaseSync } from 'node:sqlite';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
@@ -106,6 +107,17 @@ test('control backup archives can be downloaded byte for byte, and only the ones
     assert.ok(
       audit.includes('control.backup_download') && audit.includes('control.backup'),
       'creating and downloading a control backup are both audited',
+    );
+    const db = new DatabaseSync(path.join(s.dir, 'tug.db'));
+    db.prepare(
+      "INSERT INTO backups(id,project_id,target,state,artifact_ref,metadata_json,created_at) VALUES('cbak_offsite','_control','control-offsite','completed',?,'{}','2026-01-01T00:00:00.000Z')",
+    ).run(backup.artifactRef);
+    db.close();
+    const offsite = await call(s.base, 'GET', '/api/v1/control/backups/cbak_offsite/download');
+    assert.equal(
+      offsite.status,
+      404,
+      'a row that is not a control-plane archive made by control backup is never served, even when it names a real file',
     );
     const missing = await call(s.base, 'GET', '/api/v1/control/backups/cbak_nope/download');
     assert.equal(missing.status, 404, 'an unknown backup id is not found');
@@ -218,6 +230,12 @@ test('restore from the destination reads the newest control snapshot with the su
   const docker = resticDocker((cmd) =>
     cmd[1] === 'dump' ? { code: 0, out: archive } : { code: 0 },
   );
+  const created: { Env?: string[] }[] = [];
+  const createContainer = docker.createContainer.bind(docker);
+  docker.createContainer = async (name, body) => {
+    created.push(body);
+    return createContainer(name, body);
+  };
   const target = await server(docker);
   try {
     const refused = await call(target.base, 'POST', '/api/v1/control/restore', {
@@ -263,6 +281,20 @@ test('restore from the destination reads the newest control snapshot with the su
       docker.calls.some((c) => c.includes('restic dump latest /control.tar.gz')),
       'the newest snapshot of the control repository is read',
     );
+    assert.equal(created.length, 1, 'one helper reads the repository');
+    assert.ok(
+      created[0].Env?.includes(`RESTIC_PASSWORD=${password}`),
+      "the helper opens the repository with the operator's escrowed password, not one derived on the new control",
+    );
+    assert.ok(
+      created[0].Env?.includes('AWS_SECRET_ACCESS_KEY=sekret-value-1') &&
+        created[0].Env?.includes('AWS_ACCESS_KEY_ID=AKIAEXAMPLE'),
+      'the helper uses the credentials supplied with the restore',
+    );
+    await assert.rejects(
+      () => fs.stat(path.join(target.dir, 'control-restore')),
+      'the extracted keys are not left on disk after a restore',
+    );
     assert.deepEqual(
       (await fs.readdir(target.dir)).filter((name) => name.startsWith('control-restore-download')),
       [],
@@ -287,8 +319,18 @@ test('restore from the destination reports an empty destination without touching
     });
     assert.equal(res.status, 400, 'a destination without a control backup is refused');
     assert.match((await json(res)).error, /no control backup was found/, 'the reason is stated');
-    const still = await call(s.base, 'GET', '/api/v1/backups');
-    assert.equal(still.status, 200, 'control keeps serving, so nothing was restored');
+    const key = await fs.readFile(path.join(s.dir, 'master.key'), 'utf8');
+    const again = await call(s.base, 'POST', '/api/v1/control/backups/run', {});
+    assert.equal(
+      again.status,
+      200,
+      'control is not waiting for a restart, so a refused restore changed nothing',
+    );
+    assert.equal(
+      await fs.readFile(path.join(s.dir, 'master.key'), 'utf8'),
+      key,
+      'the master key is untouched by a refused restore',
+    );
   } finally {
     await s.close();
   }
@@ -393,6 +435,123 @@ test('archives a crash left behind are swept at startup, recent ones are kept', 
     ] as const)
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a failed control backup is retried after the retry delay and then reports success', async () => {
+  let attempts = 0;
+  const docker = resticDocker((cmd) => {
+    if (cmd[1] === 'backup') {
+      attempts++;
+      return attempts === 1
+        ? { code: 1, err: 'temporary store error' }
+        : { code: 0, out: '{"message_type":"summary","snapshot_id":"snap2"}\n' };
+    }
+    return { code: 0 };
+  });
+  const s = await server(docker, { TUG_CONTROL_BACKUP_RETRY_MS: '100' });
+  try {
+    await call(s.base, 'POST', '/api/v1/backup/destination', DESTINATION);
+    const control = await until(async () => {
+      const { control } = await listing(s.base);
+      return control?.lastSuccessAt ? control : undefined;
+    }, 'the retry to succeed');
+    assert.equal(attempts, 2, 'the failed backup is retried once the delay has passed');
+    assert.equal(control.problem, null, 'a success after a failure clears the problem');
+  } finally {
+    await s.close();
+  }
+});
+
+test('a control backup that never finishes shows as stale instead of silently doing nothing', async () => {
+  let attempts = 0;
+  const docker = resticDocker((cmd) => {
+    if (cmd[1] !== 'backup') return { code: 0 };
+    attempts++;
+    return attempts === 1
+      ? { code: 0, out: '{"message_type":"summary","snapshot_id":"snap1"}\n' }
+      : undefined; // the second push hangs
+  });
+  const s = await server(docker, { TUG_CONTROL_BACKUP_INTERVAL_MS: '80' });
+  try {
+    await call(s.base, 'POST', '/api/v1/backup/destination', DESTINATION);
+    const control = await until(async () => {
+      const { control } = await listing(s.base);
+      return control?.problem ? control : undefined;
+    }, 'the stale control backup to be reported');
+    assert.match(
+      control.problem,
+      /no successful control backup since/,
+      'a push that is stuck is reported once two intervals pass without a success',
+    );
+    assert.equal(attempts, 2, 'a stuck push is not started a second time');
+  } finally {
+    await s.close();
+  }
+});
+
+test('startup removes what a crash left behind and leaves recent files alone', async () => {
+  const docker = resticDocker();
+  await docker.createContainer('tug-control-backup-dead', {
+    Image: 'restic/restic:0.17.3',
+    Labels: { 'tug.job': 'control-backup' },
+  });
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-ctlbak-sweep2-'));
+  const backups = path.join(dir, 'control-backups');
+  await fs.mkdir(path.join(backups, 'cbak_old-staging'), { recursive: true });
+  await fs.mkdir(path.join(backups, 'cbak_new-staging'), { recursive: true });
+  await fs.writeFile(path.join(dir, 'control-restore-download-old.tar.gz'), 'x');
+  await fs.mkdir(path.join(dir, 'control-restore'), { recursive: true });
+  await fs.writeFile(path.join(dir, 'control-restore', 'master.key'), 'key');
+  const old = new Date(Date.now() - 2 * 3600_000);
+  await fs.utimes(path.join(backups, 'cbak_old-staging'), old, old);
+  await fs.utimes(path.join(dir, 'control-restore-download-old.tar.gz'), old, old);
+  const keys = ['TUG_DATA_DIR', 'TUG_CONTROL_BACKUP_DIR', 'TUG_CONTROL_RESTORE_DIR'] as const;
+  const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  process.env.TUG_DATA_DIR = dir;
+  process.env.TUG_CONTROL_BACKUP_DIR = backups;
+  delete process.env.TUG_CONTROL_RESTORE_DIR;
+  try {
+    const app = await createApp({
+      identity: testIdentity,
+      controlUrl: testControlUrl,
+      images: { resolve: testImageResolver },
+      docker,
+    });
+    const srv = await new Promise<Server>((resolve) => {
+      const x = app.listen(0, () => resolve(x));
+    });
+    try {
+      await until(
+        async () =>
+          docker.calls.some((c) => c.startsWith('rm tug-control-backup-dead')) ? true : undefined,
+        'the orphaned helper container to be removed',
+      );
+      await until(
+        async () =>
+          (await fs.stat(path.join(dir, 'control-restore')).catch(() => null)) ? undefined : true,
+        'the restore scratch directory to be removed',
+      );
+      await assert.rejects(
+        () => fs.stat(path.join(backups, 'cbak_old-staging')),
+        'an old staging copy of the keys is removed',
+      );
+      await assert.rejects(
+        () => fs.stat(path.join(dir, 'control-restore-download-old.tar.gz')),
+        'an old fetched download is removed',
+      );
+      assert.ok(
+        await fs.stat(path.join(backups, 'cbak_new-staging')),
+        'a recent staging copy may still be in use, so it is kept',
+      );
+    } finally {
+      await new Promise((resolve) => srv.close(resolve));
+    }
+  } finally {
+    for (const key of keys)
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
     await fs.rm(dir, { recursive: true, force: true });
   }
 });

@@ -29,7 +29,7 @@ import {
   controlMigrateScript,
 } from '../migrate.ts';
 
-/** Where `control restore --from-destination` reads the control password: this variable, else the last stdin line. */
+/** Where `control restore --from-destination` reads the control password: this variable, else the stdin line after the credential values. */
 const CONTROL_PASSWORD_VARIABLE = 'TUG_CONTROL_BACKUP_PASSWORD';
 
 interface SetupOpts extends InstallOpts {
@@ -266,7 +266,7 @@ export function registerControl(program: Command): void {
     )
     .option(
       '--from-destination <url>',
-      'restore the newest control backup stored in this backup destination, such as s3:https://s3.example.com/bucket/tug-backups; the credential variables come from --env and the control password (from `tug backup password --control` on the old control) from TUG_CONTROL_BACKUP_PASSWORD, else the last line on stdin',
+      'restore the newest control backup stored in this backup destination, such as s3:https://s3.example.com/bucket/tug-backups; the credential variables come from --env and the control password (from `tug backup password --control` on the old control) from TUG_CONTROL_BACKUP_PASSWORD, else the stdin line after the credential values',
     )
     .option(
       '--env <name>',
@@ -283,7 +283,7 @@ export function registerControl(program: Command): void {
         if (Boolean(artifactRef) === Boolean(o.fromDestination))
           throw new Error('name either an archive path or --from-destination <url>');
         if (artifactRef && o.env.length) throw new Error('--env goes with --from-destination');
-        // The control password comes last, from the environment or the last stdin line, never from an argument.
+        // The control password comes last: from the environment, else the stdin line after the credential values; never an argument.
         const values = o.fromDestination
           ? await readEnvValues([...o.env, CONTROL_PASSWORD_VARIABLE])
           : undefined;

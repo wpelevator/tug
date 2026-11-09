@@ -762,3 +762,26 @@ test('whoami tells each credential its own name, role and project scope', async 
     await s.close();
   }
 });
+
+test('a project-scoped credential does not see control-wide backup status', async () => {
+  const s = await makeServer();
+  try {
+    await s.call(OPERATOR, 'POST', '/api/v1/backup/destination', {
+      url: 's3:https://s3.example.com/bucket/tug',
+      env: { AWS_ACCESS_KEY_ID: 'AKIAEXAMPLE', AWS_SECRET_ACCESS_KEY: 'sekret-value-1' },
+    });
+    const viewer = await s.mint('view-a', 'read', ['a']);
+    const unscoped = await s.mint('view-all', 'read');
+    const scoped = await s.call(viewer, 'GET', '/api/v1/backups?project=a');
+    assert.equal(scoped.status, 200, 'a scoped viewer may list its own project backups');
+    assert.equal(
+      scoped.body.control,
+      null,
+      'control failure text names the bucket, so a scoped credential gets no control status',
+    );
+    const all = await s.call(unscoped, 'GET', '/api/v1/backups?project=a');
+    assert.ok(all.body.control, 'an unscoped credential sees the control backup status');
+  } finally {
+    await s.close();
+  }
+});

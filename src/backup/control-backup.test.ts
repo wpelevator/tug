@@ -7,6 +7,7 @@ import {
   controlRepository,
   controlRepositoryPassword,
   fetchControlArchive,
+  isMissingRepository,
   pushControlArchive,
 } from './control-backup.ts';
 import { repositoryPassword } from './destination.ts';
@@ -227,6 +228,129 @@ test('a hung restic fails at the time limit and its helper is removed', async ()
       docker.calls.filter((call) => call.startsWith('rm ')).length,
       1,
       'the helper container is removed after the timeout',
+    );
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+const BUCKET_MISSING =
+  'Fatal: unable to open config file: Stat: The specified bucket does not exist.\nIs there a repository at the following location?';
+const NEVER_CREATED =
+  'Fatal: unable to open config file: Stat: The specified key does not exist.\nIs there a repository at the following location?';
+
+test('only a repository that was never created counts as missing', () => {
+  assert.equal(
+    isMissingRepository(NEVER_CREATED),
+    true,
+    'a missing config file is a repository to create',
+  );
+  for (const [what, text] of [
+    ['a wrong bucket', BUCKET_MISSING],
+    [
+      'a refused login',
+      'Stat: AccessDenied: Access Denied.\nIs there a repository at the following location?',
+    ],
+    [
+      'an unreachable store',
+      'dial tcp: lookup s3.example.com: no such host\nIs there a repository at the following location?',
+    ],
+    ['a wrong password', 'wrong password or no key found'],
+  ] as const)
+    assert.equal(isMissingRepository(text), false, `${what} is not a missing repository`);
+});
+
+test('a wrong bucket fails a push and a fetch instead of creating or reporting an empty repository', async () => {
+  const dir = await scratch();
+  const archive = path.join(dir, 'a.tar.gz');
+  await fs.writeFile(archive, 'x');
+  const docker = dockerWith((cmd) =>
+    cmd[1] === 'cat' ? { code: 1, err: BUCKET_MISSING } : { code: 0 },
+  );
+  try {
+    await assert.rejects(
+      () => pushControlArchive(docker, S3, archive),
+      /repository check failed/,
+      'a bucket that does not exist fails the backup',
+    );
+    assert.ok(
+      !execs(docker).some((line) => line.startsWith('restic init')),
+      'a bucket typo never triggers an init attempt',
+    );
+    await assert.rejects(
+      () => fetchControlArchive(docker, S3, path.join(dir, 'out.tar.gz')),
+      /cannot read the control repository/,
+      'a restore from a wrong bucket does not claim there is no control backup',
+    );
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('restic output is redacted on the push path too', async () => {
+  const dir = await scratch();
+  const archive = path.join(dir, 'a.tar.gz');
+  await fs.writeFile(archive, 'x');
+  const docker = dockerWith((cmd) =>
+    cmd[1] === 'backup'
+      ? { code: 1, err: `failed with ${S3.password} and ${S3.env.AWS_SECRET_ACCESS_KEY}` }
+      : { code: 0 },
+  );
+  try {
+    await assert.rejects(
+      () => pushControlArchive(docker, S3, archive),
+      (error: Error) =>
+        /backup failed/.test(error.message) &&
+        !error.message.includes(S3.password) &&
+        !error.message.includes(S3.env.AWS_SECRET_ACCESS_KEY),
+      'neither the control password nor the destination secret reaches the error',
+    );
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a local write failure is reported as such, not as restic breaking its pipe', async () => {
+  const dir = await scratch();
+  const docker = dockerWith((cmd) =>
+    cmd[1] === 'dump' ? { code: 1, err: 'broken pipe' } : { code: 0 },
+  );
+  try {
+    await assert.rejects(
+      () => fetchControlArchive(docker, S3, path.join(dir, 'missing-dir', 'out.tar.gz')),
+      (error: Error) => /ENOENT/.test(error.message),
+      'an unwritable destination file is the cause, whatever restic said afterwards',
+    );
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a cancelled job stops and removes its helper, and a hung container create hits the limit', async () => {
+  const dir = await scratch();
+  const archive = path.join(dir, 'a.tar.gz');
+  await fs.writeFile(archive, 'x');
+  try {
+    const docker = dockerWith(() => undefined); // never answers
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 30);
+    await assert.rejects(
+      () => pushControlArchive(docker, { ...S3, signal: controller.signal }, archive),
+      /cancelled/,
+      'a client that went away cancels the job',
+    );
+    assert.equal(
+      docker.calls.filter((call) => call.startsWith('rm ')).length,
+      1,
+      'the helper is removed after a cancel',
+    );
+
+    const stuck = dockerWith(() => ({ code: 0 }));
+    stuck.createContainer = () => new Promise(() => undefined);
+    await assert.rejects(
+      () => pushControlArchive(stuck, { ...S3, limitMs: 50 }, archive),
+      /did not finish within/,
+      'a Docker daemon that hangs on create cannot wedge the job',
     );
   } finally {
     await fs.rm(dir, { recursive: true, force: true });

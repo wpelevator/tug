@@ -360,16 +360,20 @@ export async function download(route: string, file: string): Promise<void> {
     void transport.close();
   }
 }
-/** Credential values for the named variables: from the environment, else from lines on stdin in order. */
+/**
+ * Values for the named variables: from the environment, else from stdin lines, one per name that the environment
+ * does not provide, in the order the names are given (a repeated name counts once).
+ */
 export async function readEnvValues(names: string[]): Promise<Record<string, string>> {
-  const missing = names.filter((name) => process.env[name] === undefined);
+  const unique = [...new Set(names)];
+  const missing = unique.filter((name) => process.env[name] === undefined);
   const lines = missing.length
     ? (await readStdin()).split(/\r?\n/).filter((line) => line.length > 0)
     : [];
   if (lines.length < missing.length)
     throw new Error(`expected a value on stdin for ${missing.slice(lines.length).join(', ')}`);
   return Object.fromEntries(
-    names.map((name) => [name, process.env[name] ?? lines[missing.indexOf(name)]]),
+    unique.map((name) => [name, process.env[name] ?? lines[missing.indexOf(name)]]),
   );
 }
 export const print = (value: unknown): void => console.log(JSON.stringify(value, null, 2));

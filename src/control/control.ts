@@ -118,8 +118,7 @@ import {
   fetchControlArchive,
   pushControlArchive,
 } from '../backup/control-backup.ts';
-import { DEFAULT_RESTIC_IMAGE } from '../backup/scheduler.ts';
-import { createBackupService } from '../backup/scheduler.ts';
+import { DEFAULT_RESTIC_IMAGE, createBackupService } from '../backup/scheduler.ts';
 import { createRestoreService, discoverWriters } from '../backup/restore.ts';
 import {
   AUTO_ROLLBACK_ACTOR,
@@ -2063,7 +2062,8 @@ export async function createApp(
     res.json({
       project,
       destinationConfigured: Boolean(backupDestination()),
-      control: controlOffsiteStatus(),
+      // Failure text names the bucket, so a credential limited to some projects does not get control-wide detail.
+      control: req.actor!.projects === null ? controlOffsiteStatus() : null,
       ...backups.list(project, limit),
     });
   });
@@ -3187,16 +3187,41 @@ export async function createApp(
   );
   const controlBackupDir = () =>
     process.env.TUG_CONTROL_BACKUP_DIR || path.join(DATA_DIR, 'control-backups');
-  /** Removes archives a crash left behind: files control never recorded, old enough that nothing is still writing them. */
-  async function sweepOrphanControlArchives(): Promise<void> {
+  /**
+   * Removes what a crash left behind. Files and directories control never recorded are removed once they are old
+   * enough that nothing is still writing them: archives and staging copies in the backup directory (both hold keys),
+   * and downloads of a restore source. The restore scratch directory and restic helper containers cannot belong to
+   * anything running at startup, so they go at once.
+   */
+  async function sweepControlLeftovers(): Promise<void> {
+    const old = async (target: string) => {
+      const stat = await fs.stat(target).catch(() => null);
+      return Boolean(stat && Date.now() - stat.mtimeMs > 3600_000);
+    };
     const dir = controlBackupDir();
     for (const name of await fs.readdir(dir).catch(() => [] as string[])) {
-      if (!/^cbak_[A-Za-z0-9_-]+\.tar\.gz$/.test(name)) continue;
-      const file = path.resolve(dir, name);
-      if (db.get('SELECT 1 FROM backups WHERE artifact_ref=?', file)) continue;
-      const stat = await fs.stat(file).catch(() => null);
-      if (stat && Date.now() - stat.mtimeMs > 3600_000) await fs.rm(file, { force: true });
+      const target = path.resolve(dir, name);
+      if (/^cbak_[A-Za-z0-9_-]+-staging$/.test(name)) {
+        if (await old(target)) await fs.rm(target, { recursive: true, force: true });
+      } else if (/^cbak_[A-Za-z0-9_-]+\.tar\.gz$/.test(name)) {
+        if (!db.get('SELECT 1 FROM backups WHERE artifact_ref=?', target) && (await old(target)))
+          await fs.rm(target, { force: true });
+      }
     }
+    for (const name of await fs.readdir(DATA_DIR).catch(() => [] as string[]))
+      if (
+        /^control-restore-download-.+\.tar\.gz$/.test(name) &&
+        (await old(path.join(DATA_DIR, name)))
+      )
+        await fs.rm(path.join(DATA_DIR, name), { force: true });
+    await fs.rm(process.env.TUG_CONTROL_RESTORE_DIR || path.join(DATA_DIR, 'control-restore'), {
+      recursive: true,
+      force: true,
+    });
+    for (const helper of await docker
+      .listContainers({ label: ['tug.job=control-backup'] })
+      .catch(() => []))
+      await docker.removeContainer(helper.Id).catch(() => undefined);
   }
   /** Writes a consistent control archive into the control backup directory; the caller records it and decides how long it stays. */
   async function createControlArchive(
@@ -3384,7 +3409,9 @@ export async function createApp(
     if (last?.state === 'failed' && at - Date.parse(last.created_at) < controlRetryMs()) return;
     void runControlOffsite().catch((e) => console.error(`control backup failed: ${errMessage(e)}`));
   };
-  void sweepOrphanControlArchives().catch(() => undefined);
+  void sweepControlLeftovers().catch((e) =>
+    console.error(`startup cleanup failed: ${errMessage(e)}`),
+  );
   api('get', '/api/v1/control/backups/:id/download', null, async (req, res) => {
     const row = db.get<{ artifact_ref: string | null }>(
       "SELECT artifact_ref FROM backups WHERE id=? AND project_id='_control' AND target='control-plane'",
@@ -3436,11 +3463,22 @@ export async function createApp(
       });
     const fetched = path.join(DATA_DIR, `control-restore-download-${id('dl')}.tar.gz`);
     res.locals.fetched = fetched;
-    res.once('close', () => void fs.rm(fetched, { force: true }));
+    // A client that gives up must not leave a restore running: abort the fetch and drop the file.
+    const abort = new AbortController();
+    res.once('close', () => {
+      if (!res.writableEnded) abort.abort();
+      void fs.rm(fetched, { force: true });
+    });
     try {
       await fetchControlArchive(
         docker,
-        { url: source.url, env: source.env, password, resticImage: resticImage() },
+        {
+          url: source.url,
+          env: source.env,
+          password,
+          resticImage: resticImage(),
+          signal: abort.signal,
+        },
         fetched,
       );
     } catch (e) {
@@ -3541,6 +3579,8 @@ export async function createApp(
         });
         // Authorization follows the restored database: older snapshots forget later principals and revive revoked ones.
         // Close every session, including this one, but only after the response has been delivered.
+        // The extracted copy holds the master key, the CA key and every secret; the live files now have them.
+        await fs.rm(restoreDir, { recursive: true, force: true });
         res.once('finish', closeAllSockets);
         res.json({ ok: true, restored: true, restartRequired: true });
       } catch (e) {
@@ -3552,6 +3592,7 @@ export async function createApp(
         res.status(restartRequired ? 500 : 400).json({ error: errMessage(e), restartRequired });
       } finally {
         if (fetched) await fs.rm(fetched, { force: true });
+        await fs.rm(restoreDir, { recursive: true, force: true }).catch(() => undefined);
       }
     }),
   );
