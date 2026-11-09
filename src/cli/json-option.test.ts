@@ -115,6 +115,41 @@ test(
         Array.isArray(backups.targets) && Array.isArray(backups.runs),
         'backup list --json prints the catalog with its targets and runs',
       );
+      for (const extra of [[], ['--allow-empty']]) {
+        const check = await exec(
+          process.execPath,
+          [cliEntry, 'backup', 'list', '--check', ...extra],
+          {
+            env,
+            cwd: dir,
+          },
+        ).then(
+          () => ({ code: 0, stderr: '' }),
+          (error: { code: number; stderr: string }) => error,
+        );
+        assert.equal(
+          check.code,
+          1,
+          `backup list --check ${extra.join(' ')} exits nonzero on a control with no backup destination`,
+        );
+        assert.match(
+          check.stderr,
+          /PROBLEM no backup destination is configured/,
+          'the missing destination is reported as a PROBLEM line for monitors',
+        );
+        if (!extra.length)
+          assert.match(
+            check.stderr,
+            /PROBLEM no enabled backup targets/,
+            'a project with no targets is reported unless --allow-empty is given',
+          );
+        else
+          assert.doesNotMatch(
+            check.stderr,
+            /no enabled backup targets/,
+            '--allow-empty accepts a project with no targets',
+          );
+      }
       const init = JSON.parse(await cli('init', control.credentialFile, '--json'));
       assert.equal(init.ok, true, 'init --json reports success as JSON instead of "wrote" lines');
       assert.ok(
