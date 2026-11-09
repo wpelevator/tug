@@ -135,7 +135,8 @@ export const readLegacyControlUrlScript = `sed -n 's/^TUG_CONTROL_URL=//p' /etc/
 /**
  * Migrates the control plane's `/data` on the control host: stops control (never removes it), seeds the volume, then
  * points the existing Compose file at the volume and recreates control on it. The Compose file is edited last, so a
- * rerun after a failure finds the old mount, skips the copy (the marker is set) and finishes. Control keeps the image,
+ * rerun after a failure before that finds the old mount and skips the copy (the marker is set); a rerun after it finds
+ * the new mount and goes straight to starting control and waiting for it, so a failed start is never reported as done. Control keeps the image,
  * port, URL and SANs it was installed with.
  */
 export function controlMigrateScript(
@@ -147,8 +148,10 @@ export function controlMigrateScript(
   return [
     'set -eu',
     `[ -e ${file} ] || { echo ${sh(`${file} not found; run tug control setup instead`)} >&2; exit 1; }`,
-    `if grep -q ${sh(newMount)} ${file} && ! grep -q ${sh(oldMount)} ${file}; then echo 'control already runs on the volume'; exit 0; fi`,
-    `grep -q ${sh(oldMount)} ${file} || { echo ${sh(`${file} does not mount ${legacyDir}; cannot migrate it`)} >&2; exit 1; }`,
+    `migrated=false`,
+    `if grep -q ${sh(newMount)} ${file} && ! grep -q ${sh(oldMount)} ${file}; then migrated=true; echo 'control already runs on the volume; making sure it is up'; fi`,
+    `[ "$migrated" = true ] || grep -q ${sh(oldMount)} ${file} || { echo ${sh(`${file} does not mount ${legacyDir}; cannot migrate it`)} >&2; exit 1; }`,
+    'if [ "$migrated" = false ]; then',
     `image=$(docker inspect --format '{{.Config.Image}}' ${CONTROL_CONTAINER} 2>/dev/null || true)`,
     `[ -n "$image" ] || image=$(sed -n 's/^ *image: *"\\{0,1\\}\\([^"]*\\)"\\{0,1\\} *$/\\1/p' ${file} | head -n 1)`,
     '[ -n "$image" ] || { echo "cannot tell which image control runs" >&2; exit 1; }',
@@ -162,6 +165,7 @@ export function controlMigrateScript(
     `sed -e ${sh(`s#${oldMount}#${newMount}#`)} ${file} > ${file}.new`,
     `grep -q '^volumes:' ${file}.new || printf '\\nvolumes:\\n  ${CONTROL_VOLUME}:\\n    external: true\\n' >> ${file}.new`,
     `mv ${file}.new ${file}`,
+    'fi',
     `echo ${sh(`${marker}Starting control on the volume`)}`,
     `docker compose -f ${file} up -d`,
     `echo ${sh(`${marker}Waiting for control to start`)}`,

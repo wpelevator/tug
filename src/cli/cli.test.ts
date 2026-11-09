@@ -940,8 +940,8 @@ test('teardown stops the agent and removes Tug state, and only deletes volumes o
   assert.match(safe, /docker rm -f tug-agent tug-caddy/, 'the agent and ingress are stopped');
   assert.match(
     safe,
-    /docker volume rm tug-agent /,
-    'the agent volume holds the node key, so it is removed even without --delete-data',
+    /docker volume rm tug-agent >\/dev\/null \|\| \{ echo [^\n]*exit 4/,
+    'the agent volume holds the node key, so it is removed even without --delete-data and a failed removal fails the teardown',
   );
   assert.match(
     safe,

@@ -180,7 +180,8 @@ export function teardownScript(deleteData: boolean): string {
     'ids=$(docker ps -aq --filter label=tug.project --filter label=tug.job; docker ps -aq --filter label=tug.project)',
     '[ -z "$ids" ] || docker rm -fv $ids >/dev/null',
     "docker network ls -q --filter 'name=^tug_' | xargs -r docker network rm >/dev/null 2>&1 || true",
-    `docker volume rm ${AGENT_VOLUME} >/dev/null 2>&1 || true`,
+    // The volume holds the node key, so a volume that cannot be removed fails the teardown instead of being ignored.
+    `if docker volume inspect ${AGENT_VOLUME} >/dev/null 2>&1; then docker volume rm ${AGENT_VOLUME} >/dev/null || { echo 'could not remove the ${AGENT_VOLUME} volume, which holds the node key; remove it by hand' >&2; exit 4; }; fi`,
     // Hosts installed before the state moved into the volume still have these directories.
     'rm -rf /etc/tug /var/lib/tug',
     ...(deleteData

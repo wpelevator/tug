@@ -111,7 +111,7 @@ Control installed by an earlier release keeps its data (database, master key, CA
 tug control migrate root@control.example.com
 ```
 
-It rewrites nothing you chose: control keeps its image, URL, port and SANs. In order it stops control (never removes it), copies the directory into the volume as root with modes and SQLite files intact, writes a version marker into the volume last, points `/opt/tug-control/docker-compose.yml` at the volume, starts control again and waits for its CA. If the copy fails the old control is started again and the Compose file is untouched; rerunning after any failure finishes the job. The old directory is left in place as a fallback and holds a copy of the master key and the CA, so remove it once control is confirmed healthy. After migrating, `tug control setup` upgrades control as before.
+It rewrites nothing you chose: control keeps its image, URL, port and SANs. In order it stops control (never removes it), copies the directory into the volume as root with modes and SQLite files intact, writes a version marker into the volume last, points `/opt/tug-control/docker-compose.yml` at the volume, starts control again and waits for its CA. If the copy fails the old control is started again and the Compose file is untouched; rerunning after any failure finishes the job. The old directory is left in place as a fallback and holds a copy of the master key and the CA, so remove it once control is confirmed healthy. Control stays on the image it was running, so the `0700` restriction control now puts on its data directory applies once `tug control setup` upgrades it, which works as before after migrating.
 
 ## Moving the control plane
 

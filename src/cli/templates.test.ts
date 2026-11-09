@@ -340,6 +340,18 @@ test('install commands render the shipped templates (src in dev, dist in the ima
       'an explicit --agent-control-url wins over the old agent.env value',
     );
     assert.doesNotMatch(script, /legacy-url\.test/, 'the old value is not used when one is given');
+    await fs.rm(ssh.log);
+    env.TUG_STUB_LEGACY_URL = 'http://insecure.test';
+    await assert.rejects(
+      cli('node', 'migrate', 'n-mig', 'root@mig.test', '--no-wait'),
+      /must use https/,
+      'a legacy connect URL that cannot be reinstalled is rejected',
+    );
+    assert.doesNotMatch(
+      await fs.readFile(ssh.log, 'utf8'),
+      /old agent was started again/,
+      'node migrate must reject an unusable connect URL before it stops the old agent',
+    );
     delete env.TUG_STUB_LEGACY_URL;
 
     const privateEnroll = JSON.parse(

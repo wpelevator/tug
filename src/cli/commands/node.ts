@@ -366,6 +366,15 @@ async function migrateNode(
       o.agentControlUrl = legacy;
     }
   }
+  // Everything that can fail before the agent is reinstalled is checked first: once the old agent is stopped, a node
+  // that cannot be reinstalled (no credential, an http:// connect URL, an unreachable control) would be left down.
+  await withProgress(`Checking node ${name} before migrating`, async (progress) => {
+    const cfg = await loadCfg();
+    await transportFor(cfg, 'probe').then((t) => t.close());
+    assertImagePublished(resolveImage(o.image, o.buildLocalImage));
+    const connectUrl = o.agentControlUrl ? normalizeControlUrl(o.agentControlUrl) : undefined;
+    await preflightRemote(sshTarget, { controlUrl: connectUrl ?? cfg.credential?.url, progress });
+  });
   await withProgress(
     `Copying agent state of node ${name} into the ${AGENT_VOLUME} volume`,
     (progress) =>

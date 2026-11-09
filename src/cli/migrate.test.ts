@@ -48,6 +48,7 @@ if (cmd === 'stop' || cmd === 'start') {
 }
 if (cmd === 'rm') { fs.appendFileSync(path.join(root, 'removed.log'), args.join(' ') + '\\n'); process.exit(0); }
 if (cmd === 'compose') {
+  if (process.env.FAKE_DOCKER_FAIL_COMPOSE) process.exit(1);
   const file = args[args.indexOf('-f') + 1];
   const text = fs.readFileSync(file, 'utf8');
   writeContainer('tug-control-control-1', { image: /image: "?([^"\\n]+)"?/.exec(text)[1], running: true, composeFile: text });
@@ -408,7 +409,7 @@ test('control migration copies data, points Compose at the volume, restarts cont
     assert.match(
       again.stdout,
       /already runs on the volume/,
-      'and reports there is nothing left to do',
+      'and says control is already on the volume',
     );
   });
 });
@@ -433,6 +434,35 @@ test('control migration restarts the old control when the copy fails and leaves 
       (await host.container('tug-control-control-1')).running,
       true,
       'control keeps running on its old data',
+    );
+  });
+});
+
+test('control migration rerun after a failed restart starts control again instead of reporting success', async () => {
+  await withHost(async (host) => {
+    await fs.writeFile(path.join(host.legacy, 'tug.db'), 'db');
+    const file = path.join(host.root, 'docker-compose.yml');
+    await fs.writeFile(file, COMPOSE.replace('LEGACY', host.legacy));
+    await host.setContainer('tug-control-control-1', { image: 'tug:1', running: true });
+    const script = controlMigrateScript('', { legacyDir: host.legacy, file });
+    const failed = host.run(script, { FAKE_DOCKER_FAIL_COMPOSE: '1' });
+    assert.notEqual(failed.status, 0, 'a Compose start that fails fails the migration');
+    assert.match(
+      await fs.readFile(file, 'utf8'),
+      /- tug-control:\/data/,
+      'the Compose file already points at the volume when the start fails',
+    );
+    assert.equal(
+      (await host.container('tug-control-control-1')).running,
+      false,
+      'control is down after the failed start',
+    );
+    const rerun = host.run(script);
+    assert.equal(rerun.status, 0, `the rerun finishes the job: ${rerun.stderr}`);
+    assert.equal(
+      (await host.container('tug-control-control-1')).running,
+      true,
+      'the rerun starts control instead of reporting success while it is down',
     );
   });
 });
