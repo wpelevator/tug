@@ -43,16 +43,6 @@ export async function preflightRemote(
           ],
         ] as [string, string, string][])
       : []),
-    // Nodes write nothing to the host outside Docker; only the control host keeps its Compose file under /opt.
-    ...(compose
-      ? ([
-          [
-            'paths',
-            'mkdir -p /opt/tug-preflight && test -w /opt/tug-preflight',
-            'Ensure /opt is writable by the installer.',
-          ],
-        ] as [string, string, string][])
-      : []),
     [
       'disk.space',
       `[ "$(df -Pm "$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || echo /var/lib)" | tail -1 | awk '{print $4}')" -ge ${Number(minDiskMb)} ]`,
