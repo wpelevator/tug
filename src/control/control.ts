@@ -2031,6 +2031,16 @@ export async function createApp(
     if ('error' in result) return res.status(result.status).json({ error: result.error });
     res.json(result);
   });
+  api('post', '/api/v1/restores/:id/cancel', null, async (req, res) => {
+    const result = restores.cancel(String(req.params.id));
+    if ('error' in result) return res.status(result.status).json({ error: result.error });
+    res.json(result);
+  });
+  api('post', '/api/v1/backups/:id/cancel', bodyProject, async (req, res) => {
+    const result = backups.cancelRun(String(req.body.project || 'site'), String(req.params.id));
+    if ('error' in result) return res.status(result.status).json({ error: result.error });
+    res.json(result);
+  });
   api('post', '/api/v1/restores/:id/resume', null, async (req, res) => {
     const result = restores.resume(String(req.params.id));
     if ('error' in result) return res.status(result.status).json({ error: result.error });

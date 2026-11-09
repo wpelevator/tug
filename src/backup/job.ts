@@ -28,16 +28,28 @@ export interface JobContext {
   onPhase?: (phase: JobPhase, bytes?: number) => void;
   /** Aborts the job (timeout or cancellation); helper containers are removed either way. */
   signal?: AbortSignal;
-  /** How long a restore may go without restoring another byte before it is failed; defaults to `RESTORE_STALL_MS`. */
-  restoreStallMs?: number;
+  /** How long a restic command may go without progress before it is failed; defaults to `RESTIC_STALL_MS`. */
+  stallMs?: number;
 }
 
 /**
- * A restore that restores no further file or byte for this long is failed instead of waiting out the job limit.
- * restic retries a store that errors on every read for many minutes without printing progress, so without this a
- * damaged or unreachable repository looks like a restore that is still running.
+ * A restic command that makes no progress for this long is failed instead of waiting out the job limit. restic retries
+ * a store that errors on every read for many minutes and says little while it does, so without this a damaged or
+ * unreachable repository looks like a job that is still running.
  */
-export const RESTORE_STALL_MS = 10 * 60_000;
+export const RESTIC_STALL_MS = 10 * 60_000;
+
+/** restic's backend retry notices: output, but not progress. */
+const RETRY_NOTICE = /returned error, retrying|retrying after|connection refused|i\/o timeout/i;
+/** Numbers in restic's `--json` status lines that only grow while work is happening. */
+const PROGRESS_FIELDS = [
+  'files_restored',
+  'bytes_restored',
+  'files_done',
+  'bytes_done',
+  'total_files',
+  'total_bytes',
+] as const;
 
 /** `512m`, `2g` or a byte count. */
 export function memoryBytes(value: string): number {
@@ -267,49 +279,53 @@ export async function runBackupJob(
         work.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
       });
     };
-    const exec = async (cmd: string[]): Promise<Collected> =>
-      untilAborted(docker.execStart(restic, { cmd }).then(collect));
-    /** `restic restore`, failed when it stops making progress. */
-    const restoreWithWatchdog = async (args: string[]): Promise<Collected> => {
-      const stallMs = ctx.restoreStallMs ?? RESTORE_STALL_MS;
-      const proc = await docker.execStart(restic, {
-        cmd: ['restic', 'restore', '--json', ...args],
-      });
+    /** Fails a process that makes no progress; `extra` reports bytes moved some other way (a piped dump). */
+    const watch = async (proc: AttachedProcess, extra?: () => number): Promise<Collected> => {
+      const stallMs = ctx.stallMs ?? RESTIC_STALL_MS;
       let lastProgress = Date.now();
-      let files = 0;
-      let bytes = 0;
-      let pending = '';
-      proc.stdout.on('data', (chunk: Buffer) => {
-        pending += chunk.toString('utf8');
-        const lines = pending.split('\n');
-        pending = lines.pop() ?? '';
-        for (const line of lines) {
-          try {
-            const value = JSON.parse(line) as {
-              message_type?: string;
-              files_restored?: number;
-              bytes_restored?: number;
-            };
-            // Status lines repeat every second even when nothing moves, so only growth counts.
-            if (value.message_type !== 'status') lastProgress = Date.now();
-            else if ((value.files_restored ?? 0) > files || (value.bytes_restored ?? 0) > bytes) {
-              files = Math.max(files, value.files_restored ?? 0);
-              bytes = Math.max(bytes, value.bytes_restored ?? 0);
-              lastProgress = Date.now();
+      const seen: Record<string, number> = {};
+      let extraSeen = 0;
+      const note = (line: string): void => {
+        try {
+          const value = JSON.parse(line) as Record<string, unknown> & { message_type?: string };
+          if (value.message_type === 'error') return;
+          // Status lines repeat every second even when nothing moves, so only growth counts.
+          if (value.message_type !== 'status') lastProgress = Date.now();
+          else
+            for (const field of PROGRESS_FIELDS) {
+              const n = value[field];
+              if (typeof n === 'number' && n > (seen[field] ?? 0)) {
+                seen[field] = n;
+                lastProgress = Date.now();
+              }
             }
-          } catch {
-            lastProgress = Date.now();
-          }
+        } catch {
+          if (line.trim() && !RETRY_NOTICE.test(line)) lastProgress = Date.now();
         }
-      });
+      };
+      for (const stream of [proc.stdout, proc.stderr]) {
+        let pending = '';
+        stream.on('data', (chunk: Buffer) => {
+          pending += chunk.toString('utf8');
+          const lines = pending.split('\n');
+          pending = lines.pop() ?? '';
+          lines.forEach(note);
+        });
+      }
       let timer: NodeJS.Timeout | undefined;
       const stalled = new Promise<never>((_, reject) => {
         timer = setInterval(
           () => {
+            const moved = extra?.() ?? 0;
+            if (moved > extraSeen) {
+              extraSeen = moved;
+              lastProgress = Date.now();
+            }
             if (Date.now() - lastProgress < stallMs) return;
+            const done = seen.bytes_restored ?? seen.bytes_done ?? extraSeen;
             reject(
               new JobError(
-                `restic restored nothing for ${Math.round(stallMs / 1000)}s (${files} files, ${bytes} bytes so far); the repository may be unreadable or the backup store unreachable`,
+                `restic made no progress for ${Math.round(stallMs / 1000)}s (${done} bytes so far); the repository may be unreadable or the backup store unreachable`,
               ),
             );
           },
@@ -322,6 +338,14 @@ export async function runBackupJob(
         clearInterval(timer);
       }
     };
+    /** A restic command, failed when it stops making progress. */
+    const exec = async (cmd: string[]): Promise<Collected> =>
+      watch(await docker.execStart(restic, { cmd }));
+    /** Any other command in the helper (find, rm, mv): silent for as long as it takes, but still cancellable. */
+    const execPlain = async (cmd: string[]): Promise<Collected> =>
+      untilAborted(docker.execStart(restic, { cmd }).then(collect));
+    const restoreWithWatchdog = (args: string[]): Promise<Collected> =>
+      exec(['restic', 'restore', '--json', ...args]);
 
     const version = (await exec(['restic', 'version'])).out.match(/restic (\d+\.\d+\.\d+)/)?.[1];
 
@@ -402,7 +426,7 @@ export async function runBackupJob(
           if (!/^[A-Za-z0-9_-]+$/.test(payload.runId))
             throw new JobError('the restore run id is not safe to use as a directory name');
           const staging = `/data/.tug-restore-${payload.runId}`;
-          const dropStaging = () => exec(['rm', '-rf', staging]).catch(() => undefined);
+          const dropStaging = () => execPlain(['rm', '-rf', staging]).catch(() => undefined);
           await dropStaging();
           let staged: Collected;
           try {
@@ -424,7 +448,7 @@ export async function runBackupJob(
             );
           }
           // The snapshot holds /data, so its files are under <staging>/data. Keep the staged copy if the swap fails.
-          const swap = await exec([
+          const swap = await execPlain([
             'sh',
             '-ec',
             `find /data -mindepth 1 -maxdepth 1 ! -name '.tug-restore-${payload.runId}' -exec rm -rf {} + ; ` +
@@ -472,8 +496,11 @@ export async function runBackupJob(
         cmd: ['restic', ...backupArgs(payload, filename)],
         stdin: true,
       });
-      const uploaded = collect(proc);
       const tap = new Tail((bytes) => phase('uploading', bytes));
+      const uploaded = watch(proc, () => tap.bytes).catch((error: unknown) => {
+        producer.kill();
+        throw error;
+      });
       const commandStderr: Buffer[] = [];
       producer.stderr.on('data', (chunk: Buffer) => commandStderr.push(chunk));
       producer.stdout.pipe(tap).pipe(proc.stdin!);
@@ -524,14 +551,19 @@ export async function runBackupJob(
     const warnings: string[] = [];
     if (payload.retention) {
       phase('forgetting');
-      const forget = await exec(['restic', ...forgetArgs(payload, payload.retention)]);
-      // The snapshot is safe; failing to apply retention is reported without failing the backup.
-      if (forget.code !== 0)
-        warnings.push(
-          `retention failed: ${redact(forget.err || forget.out)
-            .trim()
-            .slice(-300)}`,
-        );
+      // The snapshot is safe; failing to apply retention, or a prune that stalls, is reported without failing the backup.
+      try {
+        const forget = await exec(['restic', ...forgetArgs(payload, payload.retention)]);
+        if (forget.code !== 0)
+          warnings.push(
+            `retention failed: ${redact(forget.err || forget.out)
+              .trim()
+              .slice(-300)}`,
+          );
+      } catch (error) {
+        if (ctx.signal?.aborted || !(error instanceof JobError)) throw error;
+        warnings.push(`retention failed: ${error.message}`);
+      }
     }
     return {
       runId: payload.runId,

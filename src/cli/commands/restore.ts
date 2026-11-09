@@ -205,4 +205,12 @@ export function registerRestore(program: Command): void {
         ),
       ),
     );
+  restore
+    .command('cancel <id>')
+    .description(
+      'stop a restore that is waiting on its safety backup (nothing has changed) or restoring (it is interrupted, its services stay stopped until resume or release)',
+    )
+    .action(async (id: string) =>
+      print(await request('POST', `/api/v1/restores/${encodeURIComponent(id)}/cancel`)),
+    );
 }

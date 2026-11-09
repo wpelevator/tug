@@ -18,7 +18,10 @@ import type {
   CommandType,
   DesiredState,
   JobStatus,
+  JobLane,
+  JobPhase,
 } from '../protocol.ts';
+import { JOB_CANCELLED } from '../protocol.ts';
 
 /** Pinned by tag; override on control with `TUG_RESTIC_IMAGE` (a digest reference is recommended for production). */
 export const DEFAULT_RESTIC_IMAGE = 'restic/restic:0.17.3';
@@ -47,6 +50,14 @@ export interface BackupServiceDeps {
   resticImage?: string;
   /** Clock override for tests. */
   clock?: () => Date;
+}
+
+export interface JobInfo {
+  /** What the node last reported for the job behind a queued or running run. */
+  phase?: JobPhase;
+  lane?: JobLane;
+  /** The run a queued job waits for. */
+  waitingFor?: string;
 }
 
 export interface TargetStatus {
@@ -123,6 +134,8 @@ export function createBackupService(deps: BackupServiceDeps) {
   const started = clock().getTime();
   const stamp = () => clock().toISOString();
   const heartbeats = new Map<string, number>();
+  /** What each node last said about its jobs: how far along one is, or what a queued one waits for. */
+  const jobInfo = new Map<string, { phase: JobPhase; lane?: JobLane; waitingFor?: string }>();
 
   const destinationQueries = backupDestinationQueries(db);
   const destination = () => destinationQueries.find();
@@ -460,10 +473,14 @@ export function createBackupService(deps: BackupServiceDeps) {
     }
 
     // A job whose agent stopped reporting for ten minutes is lost.
-    for (const run of db.all<BackupRunRow>("SELECT * FROM backup_runs WHERE state='running'")) {
+    for (const run of db.all<BackupRunRow>(
+      `SELECT r.* FROM backup_runs r JOIN commands c ON c.id=r.command_id
+       WHERE r.state='running' OR (r.state='queued' AND c.state='running')`,
+    )) {
       const last = heartbeats.get(run.command_id ?? '') ?? started;
       if (at.getTime() - last < AGENT_LOST_MS) continue;
-      advance(db, backupRunLifecycle, run.id, 'running', 'failed', {
+      jobInfo.delete(run.command_id ?? '');
+      advance(db, backupRunLifecycle, run.id, ['queued', 'running'], 'failed', {
         finished_at: iso,
         error: 'agent_lost',
       });
@@ -534,7 +551,7 @@ export function createBackupService(deps: BackupServiceDeps) {
 
     // One automatic retry, ten minutes after a scheduled run failed.
     for (const run of db.all<BackupRunRow>(
-      `SELECT r.* FROM backup_runs r WHERE r.state='failed' AND r.trigger IN ('schedule','catch-up') AND r.finished_at<=?
+      `SELECT r.* FROM backup_runs r WHERE r.state='failed' AND r.trigger IN ('schedule','catch-up') AND r.finished_at<=? AND r.error IS NOT '${JOB_CANCELLED}'
        AND NOT EXISTS (SELECT 1 FROM backup_runs x WHERE x.schedule_id=r.schedule_id AND x.trigger='retry' AND x.scheduled_for IS r.scheduled_for AND x.queued_at>=r.queued_at)`,
       new Date(at.getTime() - RETRY_DELAY_MS).toISOString(),
     )) {
@@ -577,6 +594,13 @@ export function createBackupService(deps: BackupServiceDeps) {
     const at = clock().getTime();
     for (const job of jobs) {
       heartbeats.set(job.commandId, at);
+      jobInfo.set(job.commandId, {
+        phase: job.phase,
+        ...(job.lane ? { lane: job.lane } : {}),
+        ...(job.waitingFor ? { waitingFor: job.waitingFor } : {}),
+      });
+      // A job the node has queued behind another is not running yet.
+      if (job.phase === 'queued') continue;
       const queued = db.get<Pick<BackupRunRow, 'id'>>(
         'SELECT id FROM backup_runs WHERE command_id=?',
         job.commandId,
@@ -593,6 +617,7 @@ export function createBackupService(deps: BackupServiceDeps) {
     if (!run || isTerminal(backupRunLifecycle, run.state)) return;
     const at = stamp();
     heartbeats.delete(commandId);
+    jobInfo.delete(commandId);
     if (state === 'succeeded') {
       const r = result as BackupJobResult;
       advance(db, backupRunLifecycle, run.id, ['queued', 'running'], 'succeeded', {
@@ -634,6 +659,18 @@ export function createBackupService(deps: BackupServiceDeps) {
       error,
     });
     noteOutcome(run, 'failed', at, false);
+    if (error === JOB_CANCELLED) {
+      event(
+        'warn',
+        'backup.cancelled',
+        run.project_id,
+        `backup of ${run.target} was cancelled`,
+        { runId: run.id, target: run.target },
+        nodeName(run.node_id),
+        run.actor ?? undefined,
+      );
+      return;
+    }
     event(
       'error',
       'backup.failed',
@@ -681,7 +718,10 @@ export function createBackupService(deps: BackupServiceDeps) {
     return { runs, errors };
   }
 
-  function list(project: string, limit = 50): { targets: TargetStatus[]; runs: BackupRunRow[] } {
+  function list(
+    project: string,
+    limit = 50,
+  ): { targets: TargetStatus[]; runs: (BackupRunRow & JobInfo)[] } {
     const targets = db
       .all<BackupScheduleRow>(
         'SELECT * FROM backup_schedules WHERE project_id=? ORDER BY target',
@@ -705,7 +745,45 @@ export function createBackupService(deps: BackupServiceDeps) {
       project,
       limit,
     );
-    return { targets, runs };
+    return {
+      targets,
+      runs: runs.map((run) => ({
+        ...run,
+        ...(run.command_id && ['queued', 'running'].includes(run.state)
+          ? jobInfo.get(run.command_id)
+          : undefined),
+      })),
+    };
+  }
+
+  /**
+   * Asks the node to stop the job behind a backup run or a restore (queued or running). The job then reports itself
+   * failed with `JOB_CANCELLED`; nothing here changes the run's own state.
+   */
+  function cancelJob(
+    nodeId: string | null,
+    project: string,
+    commandId: string | null,
+  ): { error: string; status: number } | { ok: true } {
+    if (!nodeId || !commandId) return { error: 'the job has no node or command yet', status: 409 };
+    deps.queueCommand(nodeId, project, 'backup.cancel', { commandId });
+    return { ok: true };
+  }
+
+  function cancelRun(
+    project: string,
+    runId: string,
+  ): { error: string; status: number } | { ok: true; runId: string; state: string } {
+    const run = db.get<BackupRunRow>(
+      'SELECT * FROM backup_runs WHERE id=? AND project_id=?',
+      runId,
+      project,
+    );
+    if (!run) return { error: `backup run ${runId} not found in project ${project}`, status: 404 };
+    if (!['queued', 'running'].includes(run.state))
+      return { error: `backup run ${runId} already ${run.state}`, status: 409 };
+    const queued = cancelJob(run.node_id, project, run.command_id);
+    return 'error' in queued ? queued : { ok: true, runId, state: run.state };
   }
 
   /** Queues the `backup.restore` job for a target on its node. */
@@ -744,7 +822,7 @@ export function createBackupService(deps: BackupServiceDeps) {
     return { commandId, nodeId: schedule.node_id };
   }
 
-  return { sync, tick, onHeartbeat, onResult, runNow, list, queueRestore };
+  return { sync, tick, onHeartbeat, onResult, runNow, list, queueRestore, cancelRun, cancelJob };
 }
 
 export type BackupService = ReturnType<typeof createBackupService>;

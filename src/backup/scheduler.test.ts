@@ -7,6 +7,7 @@ import { openDb } from '../db/db.ts';
 import { createBackupService } from './scheduler.ts';
 import { normalized } from '../../tests/fake-docker.ts';
 import type { Db } from '../db/db.ts';
+import { JOB_CANCELLED } from '../protocol.ts';
 import type { BackupJobPayload, DesiredState } from '../protocol.ts';
 
 const at = (iso: string) => new Date(iso);
@@ -397,4 +398,102 @@ test('removing a target from the Compose file disables its schedule but keeps it
   f.service.sync(at('2026-11-01T01:00:00Z'));
   assert.equal(f.schedule('volume:uploads').enabled, 0, 'the removed target stops running');
   assert.equal(f.schedule().enabled, 1, 'other targets keep running');
+});
+
+/** A scheduled run of `service:db` queued for the node, as a node would have fetched it. */
+function dueDbRun(f: Awaited<ReturnType<typeof fixture>>) {
+  f.service.tick(at('2026-11-01T00:00:00Z'));
+  f.set('2026-11-01T03:00:30Z');
+  f.service.tick(at('2026-11-01T03:00:30Z'));
+  return f.queued.find((q) => q.payload.target === 'service:db')!;
+}
+
+test('a job the node has queued behind another stays queued, and the listing says what it waits for', async () => {
+  const f = await fixture();
+  const job = dueDbRun(f);
+  f.service.onHeartbeat([
+    {
+      commandId: job.id,
+      runId: job.payload.runId,
+      phase: 'queued',
+      startedAt: '2026-11-01T03:00:31Z',
+      lane: 'scheduled',
+      waitingFor: 'bkr_other',
+    },
+  ]);
+  assert.equal(
+    f.runs().find((r) => r.id === job.payload.runId)?.state,
+    'queued',
+    'a job waiting for a free slot on the node is not running',
+  );
+  const waiting = f.service.list('site').runs.find((r) => r.id === job.payload.runId);
+  assert.deepEqual(
+    [waiting?.phase, waiting?.waitingFor, waiting?.lane],
+    ['queued', 'bkr_other', 'scheduled'],
+    'the listing carries what the node reported',
+  );
+  f.service.onHeartbeat([
+    {
+      commandId: job.id,
+      runId: job.payload.runId,
+      phase: 'uploading',
+      startedAt: '2026-11-01T03:05:00Z',
+    },
+  ]);
+  const running = f.service.list('site').runs.find((r) => r.id === job.payload.runId);
+  assert.equal(running?.state, 'running', 'once the node starts it, it is running');
+  assert.equal(running?.waitingFor, undefined, 'and no longer waits for anything');
+});
+
+test('a run the node fetched but never started is failed when the node goes silent', async () => {
+  const f = await fixture();
+  const job = dueDbRun(f);
+  f.db.run("UPDATE commands SET state='running' WHERE id=?", job.id);
+  f.service.onHeartbeat([
+    { commandId: job.id, runId: job.payload.runId, phase: 'queued', startedAt: 't' },
+  ]);
+  f.set('2026-11-01T03:30:00Z');
+  f.service.tick(at('2026-11-01T03:30:00Z'));
+  const run = f.runs().find((r) => r.id === job.payload.runId);
+  assert.deepEqual(
+    [run?.state, run?.error],
+    ['failed', 'agent_lost'],
+    'a queued-on-the-node job does not stay queued for ever when its node disappears',
+  );
+});
+
+test('cancelling a run asks its node to stop the job, and a cancelled job is a warning that is not retried', async () => {
+  const f = await fixture();
+  const job = dueDbRun(f);
+  f.service.onHeartbeat([
+    { commandId: job.id, runId: job.payload.runId, phase: 'uploading', startedAt: 't' },
+  ]);
+  assert.deepEqual(
+    f.service.cancelRun('site', 'nope'),
+    { error: 'backup run nope not found in project site', status: 404 },
+    'an unknown run is not found',
+  );
+  const cancelled = f.service.cancelRun('site', job.payload.runId);
+  assert.ok('ok' in cancelled, 'a running run can be cancelled');
+  const cancel = f.queued.at(-1)!;
+  assert.equal(cancel.type, 'backup.cancel', 'the node is told with a backup.cancel command');
+  assert.deepEqual(cancel.payload, { commandId: job.id }, 'naming the job to stop');
+  assert.equal(cancel.nodeId, job.nodeId, 'on the node that runs it');
+
+  f.service.onResult(job.id, 'failed', { error: JOB_CANCELLED });
+  assert.equal(f.events('backup.cancelled')[0]?.level, 'warn', 'a cancel is a warning');
+  assert.equal(f.events('backup.failed').length, 0, 'not a failure alert');
+  f.set('2026-11-01T04:00:00Z');
+  const runsBefore = f.queued.filter((q) => q.type === 'backup.run').length;
+  f.service.tick(at('2026-11-01T04:00:00Z'));
+  assert.equal(
+    f.queued.filter((q) => q.type === 'backup.run').length,
+    runsBefore,
+    'a cancelled scheduled run is not retried',
+  );
+  assert.deepEqual(
+    f.service.cancelRun('site', job.payload.runId),
+    { error: `backup run ${job.payload.runId} already failed`, status: 409 },
+    'a finished run cannot be cancelled again',
+  );
 });

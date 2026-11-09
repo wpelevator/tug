@@ -27,6 +27,7 @@ const JOB_PHASES = [
   'forgetting',
   'restoring',
 ];
+const JOB_LANES = ['restore', 'manual', 'scheduled'];
 const MAX_ENTRIES = 1000;
 
 export class StatusReportError extends Error {}
@@ -122,6 +123,10 @@ function job(value: unknown, path: string): JobStatus {
     phase: value.phase as JobStatus['phase'],
     startedAt: text(value.startedAt, `${path}.startedAt`)!,
     ...(typeof value.bytes === 'number' && { bytes: value.bytes }),
+    ...(JOB_LANES.includes(value.lane as string) && { lane: value.lane as JobStatus['lane'] }),
+    ...(value.waitingFor !== undefined && {
+      waitingFor: text(value.waitingFor, `${path}.waitingFor`),
+    }),
   };
 }
 
