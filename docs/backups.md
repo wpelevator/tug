@@ -11,7 +11,7 @@ Workload snapshots contain application data; control-plane archives contain Tug 
 | Database | Back up a logical dump from the running service with `x-tug.backup.command`; copying a live database volume is generally not consistent. | Repository password, storage credentials, a suitable restore command and application configuration. |
 | Files in a named volume | Mark the volume with `x-tug.backup`; live files are crash-consistent, not necessarily application-consistent. | Repository password and storage credentials; test a scratch restore. |
 | External object storage | Configure separate protection with the storage provider. | Provider credentials and a way to restore objects to a compatible point in time with the database. |
-| Control state, secrets, private CA and master key | Automatic once a backup destination is set: control stores itself in the same destination every night. `tug control backup --download` takes an offline copy. Neither includes workload data. | The control password (`tug backup password --control`) and the destination's credentials; see [control recovery](control-plane.md#recover-control-on-another-host). |
+| Control state, secrets, private CA and master key | Automatic once a backup destination is set: control stores itself in the same destination every night. `tug control backup` stores one in the destination on demand, and `tug control backup -o <file>` saves an archive on your machine. None of them includes workload data. | The control password (`tug backup password --control`) and the destination's credentials; see [control recovery](control-plane.md#recover-control-on-another-host). |
 | Compose file and source | Keep them in version control. | Access to the repository and any external dependencies. |
 
 Tug backs up each target separately. If your application needs a consistent point-in-time copy, plan how to stop writes and coordinate external storage. [The WordPress example](../examples/wordpress/README.md) illustrates a database and files on one node.
@@ -140,7 +140,7 @@ The control repository has its own password, derived from the master key like ea
 
 **Test your setup** before you need it:
 
-1. Run `tug control backup --offsite`. It stores a backup in the destination now and prints the repository and the snapshot id.
+1. Run `tug control backup`. Like `tug backup run`, it stores a backup in the destination now and prints the repository and the snapshot id.
 2. Run `tug control backup list`. It reads the destination itself, so it shows what is actually stored (snapshot ids, times, sizes and what each holds: build images are never in these, workload volumes never in any), next to the archives on the control host.
 3. Save the output of `tug backup password --control` somewhere that does not depend on the server.
 4. Run `tug control restore --from-destination <url> --env AWS_ACCESS_KEY_ID --env AWS_SECRET_ACCESS_KEY --verify` with that password (`TUG_CONTROL_BACKUP_PASSWORD`). It fetches the newest snapshot and checks the archive, the database integrity, the CA and that every secret decrypts, then prints what the backup holds, without changing control and without `--confirm`. Add `--snapshot <id>` to check a specific one.
@@ -149,13 +149,13 @@ To recover on a fresh host, see [Recover control on another host](control-plane.
 
 ### Manual archives
 
-`tug control backup` needs an `admin` credential and writes an archive on the control host, in `TUG_CONTROL_BACKUP_DIR`, with the retained build images unless you pass `--no-images`. Images are worth keeping when some deployments exist only in Tug's build store. To get the archive onto your machine, use the form most operators want:
+`tug control backup --local` needs an `admin` credential and writes an archive on the control host, in `TUG_CONTROL_BACKUP_DIR`, with the retained build images unless you pass `--no-images`. (A plain `tug control backup` stores a backup in the destination instead and, with no destination configured, fails and says how to make an archive.) Images are worth keeping when some deployments exist only in Tug's build store. To get the archive onto your machine, use the form most operators want:
 
 ```bash
 tug control backup -o recovery.tar.gz
 ```
 
-`-o <file>` implies `--download` (which on its own picks a generated name), refuses to overwrite an existing file, and creates the copy `0600`. It prints what was saved: the path, whether build images are included, and where the copy on control remains, because the download does not remove it. The archive holds the master key, every secret and the private CA key (which can issue credentials for the whole installation), so store it encrypted. Archives accumulate in `TUG_CONTROL_BACKUP_DIR`; delete old ones yourself.
+`-o <file>` implies `--local` and `--download` (`--download` on its own picks a generated name), refuses to overwrite an existing file, and creates the copy `0600`. It prints what was saved: the path, whether build images are included, and where the copy on control remains, because the download does not remove it. The archive holds the master key, every secret and the private CA key (which can issue credentials for the whole installation), so store it encrypted. Archives accumulate in `TUG_CONTROL_BACKUP_DIR`; delete old ones yourself.
 
 The other half is restoring the exact file you kept: `tug control restore --from-file recovery.tar.gz --confirm` uploads it to the control being restored, so it does not have to be copied into that host's volume first. `--verify` checks it the same way without applying it. A path on the control host still works as a positional argument: `tug control restore <path> --confirm`. After a restore, restart control ([Control plane](control-plane.md#backup-and-restore)); commands that were queued or in flight when the backup was taken are retired rather than delivered again, and unfinished workload restores are marked failed or interrupted so you can resume or release them.
 

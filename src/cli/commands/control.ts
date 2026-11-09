@@ -248,31 +248,33 @@ export function registerControl(program: Command): void {
   const backup = control
     .command('backup')
     .description(
-      'create a control-plane backup (state, PKI, master key and retained image archives; not workload volumes). It is also the parent of `list`',
+      'back the control plane up into the backup destination (state, PKI and master key; never build images or workload volumes) and print the snapshot id. --local or -o make an archive instead. It is also the parent of `list`',
     )
-    .option('--no-images', 'leave the retained build archives out (deploy again to rebuild them)')
     .option(
-      '--offsite',
-      'store the backup in the backup destination now (without images, as the nightly one is) and print where it went and its snapshot id, instead of keeping a local archive; use it to test the setup or before moving control',
+      '--local',
+      'make an archive on the control host (in its backup directory) instead of storing a backup in the destination: state, PKI, master key and the retained build archives, which --no-images leaves out',
+    )
+    .option(
+      '--no-images',
+      'with --local or -o, leave the retained build archives out (deploy again to rebuild them)',
     )
     .option(
       '--download',
-      'also save the archive on this machine; it holds the master key and the CA key, so store it encrypted. The copy on control stays in its backup directory',
+      'also save the archive on this machine; implies --local. It holds the master key and the CA key, so store it encrypted. The copy on control stays in its backup directory',
     )
     .option(
       '-o, --output <file>',
-      'where --download saves the archive, default ./tug-control-backup-<id>.tar.gz in the working directory; an existing file is never overwritten. Implies --download',
+      'save the archive on this machine as <file>; implies --local and --download. An existing file is never overwritten; without -o, --download uses ./tug-control-backup-<id>.tar.gz',
     )
     .action(
-      async (o: { images: boolean; offsite?: boolean; download?: boolean; output?: string }) => {
-        if (o.offsite && (o.download || o.output))
-          throw new Error(
-            '--offsite stores the backup in the destination; --download saves a local archive instead',
-          );
-        if (o.offsite)
+      async (o: { images: boolean; local?: boolean; download?: boolean; output?: string }) => {
+        const archive = Boolean(o.local || o.download || o.output);
+        if (!archive) {
+          if (!o.images) throw new Error('--no-images applies to an archive; add --local or -o');
           return withProgress('Storing control-plane backup in the backup destination', async () =>
-            print(await request('POST', '/api/v1/control/backups/run', { offsite: true })),
+            print(await request('POST', '/api/v1/control/backups/run', { toDestination: true })),
           );
+        }
         return withProgress('Creating control-plane backup', async (progress) => {
           // Refuse before the backup exists on control when the chosen file is already there.
           if (o.output && (await fsp.stat(o.output).catch(() => null)))

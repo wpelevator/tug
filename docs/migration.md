@@ -18,7 +18,7 @@ Each section says what was exercised on a real host and what comes only from rea
 
 - **What lives where.** A host holds nothing a rebuild cannot recreate, except named volumes, any data you keep outside Docker (an object store on an attached disk) and, on the control host, the control state. Your Compose file, `tug.yml` and the images you build are the source of truth for everything else.
 - **Escrow the secrets that cannot be regenerated.** Keep the root credential and the control backup's master key off the servers, and keep the backup repository password (`tug backup password`). Without them a lost control host cannot be recovered. See [Backups](backups.md).
-- **Take fresh backups first.** `tug backup run` for every target you are about to move, then `tug backup list --check` to confirm they succeeded. For control, `tug control backup --no-images` is enough for a migration, because build archives are rebuilt by deploying again.
+- **Take fresh backups first.** `tug backup run` for every target you are about to move, then `tug backup list --check` to confirm they succeeded. For control, `tug control backup -o control.tar.gz --no-images` is enough for a migration, because build archives are rebuilt by deploying again.
 - **Trim old build archives** on control with `tug image prune --keep 3` (add `--dry-run` to preview) so the control backup and any transfer stay small (control already prunes to the newest 5 distinct builds after each deploy; see `TUG_IMAGE_KEEP`). Never delete files under `images/` in control's data volume by hand: the database would still list them and nodes would get a 404 when they try to download them.
 - **Bind mounts do not move.** An absolute bind mount in a Compose file is a path on one host, so the service stays tied to it: `tug deploy` warns about each one. Prefer named volumes, which move with a backup and restore, and recreate any bind-mounted path by hand on the new node.
 - **Hosts installed by an earlier release** keep the agent state in `/var/lib/tug` and the control data in `/var/lib/tug-control` until `tug node migrate` and `tug control migrate` move them into Docker volumes; `node add`, `node replace`, `node repair` and `control setup` refuse such a host until then. Do that before any move so the old hosts hold nothing outside Docker.
@@ -89,7 +89,7 @@ Whatever you choose, the buckets your applications and backups use must exist be
 
 To recover a lost control server, see [Recover control on another host](control-plane.md#recover-control-on-another-host). To change only its address, see [Moving the control plane](control-plane.md#moving-the-control-plane). For a planned move:
 
-1. Take `tug control backup --no-images` on the old control and copy the archive off the host.
+1. Take `tug control backup -o control.tar.gz --no-images` on the old control; it saves the archive on your machine. Keep it encrypted.
 2. Follow the recovery steps on the new host. Stop or isolate the old control before the new one serves, because two active control planes with divergent state are not supported.
 3. After the restore, repoint every node with `tug node replace <node> <ssh-target> --control-url … --agent-control-url …`.
 4. Deploy your projects again so control rebuilds the build archives it no longer has. Rolling back to a deployment whose archive was not restored is refused until you do.

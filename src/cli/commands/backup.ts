@@ -22,7 +22,7 @@ interface BackupRunRecord {
 }
 interface BackupListing {
   destinationConfigured: boolean;
-  /** Control's own off-host backup; null while there is no destination. */
+  /** Control's own backup in the destination; null while there is no destination. */
   control?: {
     lastSuccessAt: string | null;
     lastStatus: string | null;

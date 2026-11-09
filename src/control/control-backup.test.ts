@@ -96,6 +96,7 @@ test('control backup archives can be downloaded byte for byte, and only the ones
   const s = await server(resticDocker());
   try {
     const backup = await json(await call(s.base, 'POST', '/api/v1/control/backups/run', {}));
+    assert.equal(backup.stored, 'control-host', 'an archive says it is on the control host');
     const res = await call(s.base, 'GET', `/api/v1/control/backups/${backup.backupId}/download`);
     assert.equal(res.status, 200, 'an existing control backup downloads');
     assert.equal(
@@ -120,12 +121,12 @@ test('control backup archives can be downloaded byte for byte, and only the ones
     );
     const db = new DatabaseSync(path.join(s.dir, 'tug.db'));
     db.prepare(
-      "INSERT INTO backups(id,project_id,target,state,artifact_ref,metadata_json,created_at) VALUES('cbak_offsite','_control','control-offsite','completed',?,'{}','2026-01-01T00:00:00.000Z')",
+      "INSERT INTO backups(id,project_id,target,state,artifact_ref,metadata_json,created_at) VALUES('cbak_destination','_control','control-destination','completed',?,'{}','2026-01-01T00:00:00.000Z')",
     ).run(backup.artifactRef);
     db.close();
-    const offsite = await call(s.base, 'GET', '/api/v1/control/backups/cbak_offsite/download');
+    const stored = await call(s.base, 'GET', '/api/v1/control/backups/cbak_destination/download');
     assert.equal(
-      offsite.status,
+      stored.status,
       404,
       'a row that is not a control-plane archive made by control backup is never served, even when it names a real file',
     );
@@ -136,7 +137,7 @@ test('control backup archives can be downloaded byte for byte, and only the ones
   }
 });
 
-test('with a destination control backs itself up off-host without images and keeps no archive behind', async () => {
+test('with a destination control backs itself up into it without images and keeps no archive behind', async () => {
   const docker = resticDocker();
   const s = await server(docker);
   try {
@@ -712,13 +713,14 @@ test('a backup can be stored in the destination on demand and says where it went
   const docker = resticDocker();
   const s = await server(docker, NOTHING_NIGHTLY);
   try {
-    const none = await call(s.base, 'POST', '/api/v1/control/backups/run', { offsite: true });
+    const none = await call(s.base, 'POST', '/api/v1/control/backups/run', { toDestination: true });
     assert.equal(none.status, 409, 'without a destination there is nowhere to store it');
     await call(s.base, 'POST', '/api/v1/backup/destination', DESTINATION);
-    const res = await call(s.base, 'POST', '/api/v1/control/backups/run', { offsite: true });
+    const res = await call(s.base, 'POST', '/api/v1/control/backups/run', { toDestination: true });
     assert.equal(res.status, 200, 'the backup is stored');
     const result = await json(res);
     assert.equal(result.snapshotId, 'snap1234', 'the snapshot id is returned');
+    assert.equal(result.stored, 'destination', 'the result says it is in the destination');
     assert.equal(
       result.repository,
       's3:https://s3.example.com/bucket/tug/_control',
@@ -737,7 +739,9 @@ test('a backup can be stored in the destination on demand and says where it went
     );
     docker.execResponder = (cmd) =>
       cmd[1] === 'backup' ? { code: 1, err: 'store is full' } : { code: 0 };
-    const failed = await call(s.base, 'POST', '/api/v1/control/backups/run', { offsite: true });
+    const failed = await call(s.base, 'POST', '/api/v1/control/backups/run', {
+      toDestination: true,
+    });
     assert.equal(
       failed.status,
       502,

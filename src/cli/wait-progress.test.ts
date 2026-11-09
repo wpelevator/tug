@@ -365,7 +365,7 @@ test('long-wait commands report progress on stderr and retain their results and 
         'POST /api/v1/control/backups/run': { artifactRef: 'backup.tgz' },
         'POST /api/v1/control/restore': { restartRequired: true },
       };
-      await run('control', 'backup');
+      await run('control', 'backup', '--local');
       assert.equal(
         JSON.parse(out.join('')).artifactRef,
         'backup.tgz',
@@ -452,7 +452,7 @@ test('long-wait commands report progress on stderr and retain their results and 
           await fs.stat(path.join(dir, 'tug-control-backup-cbak_x.tar.gz')),
           '--download without -o saves ./tug-control-backup-<id>.tar.gz',
         );
-        await run('control', 'backup');
+        await run('control', 'backup', '--local');
         assert.ok(
           !requested.includes('GET /api/v1/control/backups/cbak_x/download'),
           'without --download nothing is downloaded',
@@ -528,26 +528,59 @@ test('long-wait commands report progress on stderr and retain their results and 
       );
     });
     await t.test(
-      'control backup --offsite stores the backup in the destination and says where',
+      'control backup stores the backup in the destination by default and says where',
       async () => {
         routes = {
           'POST /api/v1/control/backups/run': {
             ok: true,
+            stored: 'destination',
             snapshotId: 'abc12345',
             repository: 's3:x/_control',
           },
         };
-        await run('control', 'backup', '--offsite');
+        await run('control', 'backup');
         assert.deepEqual(
           bodies['POST /api/v1/control/backups/run'],
-          { offsite: true },
-          'the backup is asked to go to the destination',
+          { toDestination: true },
+          'a plain control backup is asked to go to the destination, like tug backup run',
         );
-        assert.equal(JSON.parse(out.join('')).snapshotId, 'abc12345', 'the snapshot id is printed');
+        const printed = JSON.parse(out.join(''));
+        assert.equal(printed.snapshotId, 'abc12345', 'the snapshot id is printed');
+        assert.equal(printed.stored, 'destination', 'the result says where the backup is');
         await assert.rejects(
-          run('control', 'backup', '--offsite', '--download'),
-          /--offsite stores the backup in the destination/,
-          'a destination backup and a local download are separate things',
+          run('control', 'backup', '--no-images'),
+          /--no-images applies to an archive; add --local or -o/,
+          'a destination backup never holds images, so asking to leave them out is a mistake',
+        );
+      },
+    );
+    await t.test(
+      '--local makes an archive on the control host, and -o or --download imply it',
+      async () => {
+        routes = {
+          'POST /api/v1/control/backups/run': {
+            backupId: 'cbak_l',
+            artifactRef: '/data/l.tar.gz',
+            images: true,
+            stored: 'control-host',
+          },
+        };
+        await run('control', 'backup', '--local');
+        assert.deepEqual(
+          bodies['POST /api/v1/control/backups/run'],
+          { images: true },
+          '--local asks for an archive with the retained images',
+        );
+        await run('control', 'backup', '--local', '--no-images');
+        assert.deepEqual(
+          bodies['POST /api/v1/control/backups/run'],
+          { images: false },
+          '--no-images leaves them out of an archive',
+        );
+        assert.equal(
+          JSON.parse(out.join('')).stored,
+          'control-host',
+          'the result says the archive is on the control host',
         );
       },
     );

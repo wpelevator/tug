@@ -1984,12 +1984,12 @@ export async function createApp(
   const restores = createRestoreService({ db, backups, wake: (project) => wakeAll(project) });
   app.locals.restores = restores;
   const backupTickMs = Number(process.env.TUG_BACKUP_TICK_MS) || 30_000;
-  /** Assigned with the control backup code below; control's own nightly off-host backup. */
-  let controlOffsiteTick: () => void = () => {};
+  /** Assigned with the control backup code below; control's own nightly backup into the destination. */
+  let controlDestinationTick: () => void = () => {};
   const backupTimer = setInterval(() => {
     try {
       backups.tick();
-      controlOffsiteTick();
+      controlDestinationTick();
       restores.advance();
     } catch (e) {
       console.error(`backup scheduler failed: ${errMessage(e)}`);
@@ -2087,7 +2087,7 @@ export async function createApp(
       project,
       destinationConfigured: Boolean(backupDestination()),
       // Failure text names the bucket, so a credential limited to some projects does not get control-wide detail.
-      control: req.actor!.projects === null ? controlOffsiteStatus() : null,
+      control: req.actor!.projects === null ? controlDestinationStatus() : null,
       ...backups.list(project, limit),
     });
   });
@@ -3304,16 +3304,17 @@ export async function createApp(
     'post',
     '/api/v1/control/backups/run',
     null,
-    // `offsite` stores a backup in the destination now and returns where it went, instead of a local archive.
+    // `toDestination` stores a backup in the destination now and returns where it went, instead of a local archive.
     async (req, res, next) => {
-      if (!req.body?.offsite) return next();
+      if (!req.body?.toDestination) return next();
       if (!backupDestination())
-        return res
-          .status(409)
-          .json({ error: 'no backup destination is configured; run tug backup destination set' });
+        return res.status(409).json({
+          error:
+            'no backup destination is configured; run tug backup destination set <url>, or use tug control backup --local for an archive on the control host, or -o <file> to save one on this machine',
+        });
       if (controlPushRunning)
         return res.status(409).json({ error: 'a control backup is already running' });
-      const result = await runControlOffsite('manual');
+      const result = await runControlDestination('manual');
       if (!result)
         return res.status(409).json({ error: 'control cannot back up right now; restart it' });
       audit(req.actor!, {
@@ -3343,7 +3344,13 @@ export async function createApp(
           type: 'control.backup',
           message: `control backup ${backupId} created by ${req.actor!.name}`,
         });
-        res.json({ backupId, artifactRef, state: 'completed', images: withImages });
+        res.json({
+          backupId,
+          artifactRef,
+          state: 'completed',
+          images: withImages,
+          stored: 'control-host',
+        });
       }),
   );
   const controlIntervalMs = () =>
@@ -3371,13 +3378,13 @@ export async function createApp(
    */
   const destinationKey = (url: string) =>
     crypto.createHash('sha256').update(url).digest('hex').slice(0, 16);
-  const lastControlOffsite = (key: string, onlyCompleted: boolean) =>
+  const lastControlDestination = (key: string, onlyCompleted: boolean) =>
     db.get<{ state: string; created_at: string; metadata_json: string }>(
-      `SELECT state,created_at,metadata_json FROM backups WHERE project_id='_control' AND target='control-offsite' AND json_extract(metadata_json,'$.destination')=?${onlyCompleted ? " AND state='completed'" : ''} ORDER BY created_at DESC LIMIT 1`,
+      `SELECT state,created_at,metadata_json FROM backups WHERE project_id='_control' AND target='control-destination' AND json_extract(metadata_json,'$.destination')=?${onlyCompleted ? " AND state='completed'" : ''} ORDER BY created_at DESC LIMIT 1`,
       key,
     );
   /** What `tug backup list` shows about control's own backup in the current destination; null while there is none. */
-  function controlOffsiteStatus(): {
+  function controlDestinationStatus(): {
     lastSuccessAt: string | null;
     lastStatus: string | null;
     problem: string | null;
@@ -3387,8 +3394,8 @@ export async function createApp(
     const destination = backupDestination();
     if (!destination) return null;
     const key = destinationKey(destination.url);
-    const ok = lastControlOffsite(key, true);
-    const last = lastControlOffsite(key, false);
+    const ok = lastControlDestination(key, true);
+    const last = lastControlDestination(key, false);
     const failure =
       last?.state === 'failed'
         ? `the last control backup failed: ${(JSON.parse(last.metadata_json) as { error?: string }).error ?? 'unknown error'}`
@@ -3413,8 +3420,9 @@ export async function createApp(
   }
   let controlPushRunning = false;
   /** Backs control up into the shared destination: a consistent archive without images, streamed into restic. */
-  interface ControlOffsiteResult {
+  interface ControlDestinationResult {
     ok: boolean;
+    stored?: 'destination';
     backupId?: string;
     repository?: string;
     snapshotId?: string;
@@ -3422,9 +3430,9 @@ export async function createApp(
     warning?: string;
     error?: string;
   }
-  async function runControlOffsite(
+  async function runControlDestination(
     trigger: 'schedule' | 'manual',
-  ): Promise<ControlOffsiteResult | null> {
+  ): Promise<ControlDestinationResult | null> {
     // The URL and its credentials are read together, before anything awaits: a destination changed meanwhile
     // must not pair the old URL with the new credentials.
     const destination = backupDestination();
@@ -3463,7 +3471,7 @@ export async function createApp(
         'INSERT INTO backups(id,project_id,target,node_id,state,artifact_ref,metadata_json,created_at,completed_at) VALUES(?,?,?,?,?,?,?,?,?)',
         archive.backupId,
         '_control',
-        'control-offsite',
+        'control-destination',
         null,
         'completed',
         push.snapshotId ?? null,
@@ -3479,6 +3487,7 @@ export async function createApp(
       );
       return {
         ok: true,
+        stored: 'destination',
         backupId: archive.backupId,
         repository: controlRepository(destination.url),
         snapshotId: push.snapshotId,
@@ -3493,7 +3502,7 @@ export async function createApp(
         'INSERT INTO backups(id,project_id,target,node_id,state,artifact_ref,metadata_json,created_at,completed_at) VALUES(?,?,?,?,?,?,?,?,?)',
         id('cbak'),
         '_control',
-        'control-offsite',
+        'control-destination',
         null,
         'failed',
         null,
@@ -3508,16 +3517,16 @@ export async function createApp(
       controlPushRunning = false;
     }
   }
-  controlOffsiteTick = () => {
+  controlDestinationTick = () => {
     const destination = backupDestination();
     if (controlPushRunning || restartRequired || !destination) return;
     const key = destinationKey(destination.url);
     const at = Date.now();
-    const ok = lastControlOffsite(key, true);
+    const ok = lastControlDestination(key, true);
     if (ok && at - Date.parse(ok.created_at) < controlIntervalMs()) return;
-    const last = lastControlOffsite(key, false);
+    const last = lastControlDestination(key, false);
     if (last?.state === 'failed' && at - Date.parse(last.created_at) < controlRetryMs()) return;
-    void runControlOffsite('schedule').catch((e) =>
+    void runControlDestination('schedule').catch((e) =>
       console.error(`control backup failed: ${errMessage(e)}`),
     );
   };

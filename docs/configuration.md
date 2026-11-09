@@ -31,8 +31,8 @@ CLI options override environment variables, which override the config files and 
 | `TUG_EVENT_RETENTION_DAYS` | `30` | Events older than this many days are deleted; `0` keeps events regardless of age. Pruning runs at startup and then at most once an hour while agents report events. |
 | `TUG_EVENT_MAX_ROWS` | `100000` | Only this many of the newest events are kept; `0` removes the limit. A value that is not a whole number falls back to the default. |
 | `TUG_CONTROL_BACKUP_DIR` | `<data dir>/control-backups` | Control backup archives. |
-| `TUG_CONTROL_BACKUP_INTERVAL_MS` | `86400000` | How long a successful off-host control backup stays current before the next one is due. |
-| `TUG_CONTROL_BACKUP_RETRY_MS` | `3600000` | How long to wait before retrying a failed off-host control backup. |
+| `TUG_CONTROL_BACKUP_INTERVAL_MS` | `86400000` | How long a successful control backup in the destination stays current before the next one is due. |
+| `TUG_CONTROL_BACKUP_RETRY_MS` | `3600000` | How long to wait before retrying a failed control backup. |
 | `TUG_CONTROL_BACKUP_LIMIT_MS` | `1800000` | How long one control backup, listing or fetch may take before its restic helper is removed and the job fails. |
 | `TUG_CONTROL_RESTORE_DIR` | `<data dir>/control-restore` | Parent of the private scratch directories restores use. Only directories Tug created in it are ever removed, never the path itself. |
 | `TUG_SERVICE_NAMES` | `true` | Publish health-aware `serviceEndpoints` so agents inject cross-node `extra_hosts` using each node's `address`. Set `false` to opt out. See [Networking](networking.md#layer-a-cross-node-service-names). |
