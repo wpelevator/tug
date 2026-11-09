@@ -221,6 +221,7 @@ const SAMPLES: Record<string, { path: string; body?: unknown }> = {
   'GET /api/v1/holds': { path: '/api/v1/holds' },
   'GET /api/v1/status': { path: '/api/v1/status' },
   'GET /api/v1/version': { path: '/api/v1/version' },
+  'GET /api/v1/whoami': { path: '/api/v1/whoami' },
   'GET /api/v1/events': { path: '/api/v1/events' },
   'GET /api/v1/projects/:project': { path: '/api/v1/projects/site' },
   'GET /api/v1/deployments/:id': { path: '/api/v1/deployments/dep_x' },
@@ -727,5 +728,28 @@ test('control backup and restore keep tokens working', async () => {
     );
   } finally {
     await again.close();
+  }
+});
+
+test('whoami tells each credential its own name, role and project scope', async () => {
+  const s = await makeServer();
+  try {
+    const scoped = await s.mint('site-ci', 'deploy', ['site']);
+    const viewer = await s.mint('viewer', 'read');
+    const own = await s.call(scoped, 'GET', '/api/v1/whoami');
+    assert.deepEqual(
+      own.body,
+      { name: 'site-ci', role: 'deploy', projects: ['site'] },
+      'a scoped credential sees its own scope',
+    );
+    const read = await s.call(viewer, 'GET', '/api/v1/whoami');
+    assert.deepEqual(
+      read.body,
+      { name: 'viewer', role: 'read', projects: null },
+      'an unscoped credential reports no project limit',
+    );
+    assert.ok(!read.text.includes(viewer), 'the answer never echoes the secret');
+  } finally {
+    await s.close();
   }
 });

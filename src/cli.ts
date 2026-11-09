@@ -29,6 +29,7 @@ import { registerLint } from './cli/commands/lint.ts';
 import { registerDomain } from './cli/commands/domain.ts';
 import { registerSecret } from './cli/commands/secret.ts';
 import { registerService } from './cli/commands/service.ts';
+import { registerTui } from './cli/commands/tui.ts';
 import { registerVolume } from './cli/commands/volume.ts';
 
 const VERBOSE_HELP =
@@ -56,6 +57,7 @@ registerControl(program);
 registerNode(program);
 registerDeploy(program);
 registerObserve(program);
+registerTui(program);
 registerService(program);
 registerHold(program);
 registerImage(program);
