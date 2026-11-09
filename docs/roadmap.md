@@ -80,7 +80,7 @@ Control stores built images as saved image files and agents download them over t
 
 ### M5 — Streaming channel between agent and control (mostly done)
 
-Agent-initiated WebSocket with long-poll fallback that wakes agents when work is queued and carries live sessions: non-TTY `tug exec` with stdin, `logs -f`, `ps` and `inspect` ([Architecture](architecture.md#agent-wake-channel), [Observability](observability.md#live-commands)). Remaining, at low priority: dropping the long-poll fallback (the WebSocket plus the periodic poll cover a lost socket), agent and daemon log streams, and terminating the remote process when an exec session is cancelled. PTY allocation and resize for `exec -t` shipped with [M14](#m14--engine-api-agent) through the Engine API.
+Agent-initiated WebSocket with long-poll fallback that wakes agents when work is queued and carries live sessions: non-TTY `tug exec` with stdin (credit-based flow control end to end since 2.0, so large dumps and archives pass through), `logs -f`, `ps` and `inspect` ([Architecture](architecture.md#agent-wake-channel), [Observability](observability.md#live-commands)). Remaining, at low priority: dropping the long-poll fallback (the WebSocket plus the periodic poll cover a lost socket), agent and daemon log streams, and terminating the remote process when an exec session is cancelled. PTY allocation and resize for `exec -t` shipped with [M14](#m14--engine-api-agent) through the Engine API.
 
 ### M6 — Placement and scheduling (done)
 

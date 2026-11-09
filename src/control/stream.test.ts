@@ -10,7 +10,7 @@ import { FakeDocker } from '../../tests/fake-docker.ts';
 import type { AgentContext } from '../agent/agent.ts';
 import http from 'node:http';
 import { attachAgentStream, createApp } from './control.ts';
-import { LIVE_MAX_SESSIONS } from '../protocol.ts';
+import { LIVE_AGENT_MAX_BUFFERED_BYTES, LIVE_MAX_SESSIONS } from '../protocol.ts';
 import type { StreamMessage, WakeResponse } from '../protocol.ts';
 import { testImageResolver, json, testControlUrl, testIdentity } from '../../tests/helpers.ts';
 
@@ -803,6 +803,151 @@ test('a stalled operator cannot grow live output buffering without cancelling th
     operator.ws.terminate();
     s.agent.ws.terminate();
     await s.close();
+  }
+});
+
+test('flow control frames are relayed with their session binding and the agent flow capability reaches the operator', async () => {
+  const s = await liveFixture();
+  const operator = await socket(s.base, '/api/v1/live', OPERATOR);
+  try {
+    operator.send({ v: 1, type: 'live.open', request: execRequest });
+    const { sessionId } = await s.agent.next();
+    s.agent.send({ v: 1, type: 'live.started', sessionId, flow: true });
+    const started = await operator.next();
+    assert.equal(started.flow, true, 'a flow-controlled agent announces it to the operator');
+    assert.equal(started.node, 'n1', 'startup still identifies the resolved node');
+    operator.send({ v: 1, type: 'live.ack', bytes: 4096 });
+    assert.deepEqual(
+      await s.agent.next(),
+      { v: 1, type: 'live.ack', sessionId, bytes: 4096 },
+      'output credit from the operator is relayed to the agent with the session identity',
+    );
+    s.agent.send({ v: 1, type: 'live.stdin-ack', sessionId, bytes: 65536 });
+    assert.deepEqual(
+      await operator.next(),
+      { v: 1, type: 'live.stdin-ack', sessionId, bytes: 65536 },
+      'input credit from the agent is relayed to the operator',
+    );
+  } finally {
+    operator.ws.terminate();
+    s.agent.ws.terminate();
+    await s.close();
+  }
+});
+
+test('an agent without flow control starts a session whose started frame carries no flow flag', async () => {
+  const s = await liveFixture();
+  const operator = await socket(s.base, '/api/v1/live', OPERATOR);
+  try {
+    operator.send({ v: 1, type: 'live.open', request: execRequest });
+    const { sessionId } = await s.agent.next();
+    s.agent.send({ v: 1, type: 'live.started', sessionId });
+    const started = await operator.next();
+    assert.equal(
+      Object.hasOwn(started, 'flow'),
+      false,
+      'a 1.x agent must not be reported as flow-controlled, so the CLI keeps its old input behaviour',
+    );
+  } finally {
+    operator.ws.terminate();
+    s.agent.ws.terminate();
+    await s.close();
+  }
+});
+
+test('an agent live.started frame with flow other than true is rejected', async () => {
+  const s = await liveFixture();
+  const operator = await socket(s.base, '/api/v1/live', OPERATOR);
+  try {
+    operator.send({ v: 1, type: 'live.open', request: execRequest });
+    const { sessionId } = await s.agent.next();
+    const closed = new Promise<number>((resolve) => s.agent.ws.once('close', resolve));
+    s.agent.send({ v: 1, type: 'live.started', sessionId, flow: false });
+    assert.equal(
+      await closed,
+      1008,
+      'flow can only be announced as true, anything else is a protocol violation',
+    );
+  } finally {
+    operator.ws.terminate();
+    s.agent.ws.terminate();
+    await s.close();
+  }
+});
+
+test('invalid operator acknowledgements fail the session and are never forwarded to the agent', async () => {
+  const s = await liveFixture();
+  const clients: Awaited<ReturnType<typeof socket>>[] = [];
+  try {
+    for (const bytes of [1.5, 0, -1, '5', LIVE_AGENT_MAX_BUFFERED_BYTES + 1]) {
+      const operator = await socket(s.base, '/api/v1/live', OPERATOR);
+      clients.push(operator);
+      operator.send({ v: 1, type: 'live.open', request: execRequest });
+      const { sessionId } = await s.agent.next();
+      s.agent.send({ v: 1, type: 'live.started', sessionId, flow: true });
+      await operator.next();
+      operator.send({ v: 1, type: 'live.ack', bytes });
+      assert.equal(
+        (await operator.next()).type,
+        'live.error',
+        `an acknowledgement of ${JSON.stringify(bytes)} is not a positive integer within bounds and must fail the session`,
+      );
+      assert.equal(
+        (await s.agent.next()).type,
+        'live.cancel',
+        'a failed session cancels the remote operation instead of relaying the acknowledgement',
+      );
+    }
+    const operator = await socket(s.base, '/api/v1/live', OPERATOR);
+    clients.push(operator);
+    operator.send({ v: 1, type: 'live.open', request: { operation: 'ps', project: 'site' } });
+    const { sessionId } = await s.agent.next();
+    s.agent.send({ v: 1, type: 'live.started', sessionId, flow: true });
+    await operator.next();
+    operator.send({ v: 1, type: 'live.ack', bytes: 10 });
+    assert.equal(
+      (await operator.next()).type,
+      'live.error',
+      'a ps session produces no streamed output, so an acknowledgement for it is invalid',
+    );
+    assert.equal(
+      (await s.agent.next()).type,
+      'live.cancel',
+      'a ps session with an acknowledgement is cancelled, not forwarded',
+    );
+  } finally {
+    for (const client of clients) client.ws.terminate();
+    s.agent.ws.terminate();
+    await s.close();
+  }
+});
+
+test('invalid or misdirected agent stdin acknowledgements close the agent connection', async () => {
+  for (const [request, ack] of [
+    [execRequest, { bytes: 0 }],
+    [execRequest, { bytes: 65537 }],
+    [execRequest, { bytes: 1.5 }],
+    [{ operation: 'logs', project: 'site', service: 'web', follow: true, tail: 5 }, { bytes: 5 }],
+  ] as const) {
+    const s = await liveFixture();
+    const operator = await socket(s.base, '/api/v1/live', OPERATOR);
+    try {
+      operator.send({ v: 1, type: 'live.open', request });
+      const { sessionId } = await s.agent.next();
+      s.agent.send({ v: 1, type: 'live.started', sessionId, flow: true });
+      await operator.next();
+      const closed = new Promise<number>((resolve) => s.agent.ws.once('close', resolve));
+      s.agent.send({ v: 1, type: 'live.stdin-ack', sessionId, ...ack });
+      assert.equal(
+        await closed,
+        1008,
+        `a stdin acknowledgement of ${ack.bytes} on a ${request.operation} session must be rejected`,
+      );
+    } finally {
+      operator.ws.terminate();
+      s.agent.ws.terminate();
+      await s.close();
+    }
   }
 });
 

@@ -3,12 +3,17 @@ import { EventEmitter } from 'node:events';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { PassThrough } from 'node:stream';
+import { PassThrough, Writable } from 'node:stream';
 import test from 'node:test';
 import { WebSocket } from 'ws';
 import { AgentLiveOperations, AgentWakeChannel, resolveLiveContainer } from './agent.ts';
 import type { AgentContext, AgentLiveControlFrame, AgentLiveOutputFrame } from './agent.ts';
-import { LIVE_MAX_FRAME_BYTES } from '../protocol.ts';
+import {
+  LIVE_AGENT_MAX_BUFFERED_BYTES,
+  LIVE_MAX_FRAME_BYTES,
+  LIVE_WINDOW_BYTES,
+  liveOutputCost,
+} from '../protocol.ts';
 import { redactInspect } from './live.ts';
 import type { AttachedProcess, ExecOptions } from '../docker-api.ts';
 import { FakeDocker } from '../../tests/fake-docker.ts';
@@ -167,11 +172,11 @@ test('wake channel bounds outbound buffering and disposes sessions on close', as
     },
   );
   await channel.wait(1);
-  socket.bufferedAmount = 1048577;
+  socket.bufferedAmount = LIVE_AGENT_MAX_BUFFERED_BYTES + 1;
   assert.equal(
     channel.send({ v: 1, type: 'live.started', sessionId: 's' }),
     false,
-    'A backlogged socket should reject further output',
+    'A socket backlogged past the agent limit should reject further output',
   );
   assert.equal(disconnected, 1, 'A backlogged socket should dispose its live sessions once');
 });
@@ -275,8 +280,8 @@ test('agent exec acknowledges startup, preserves argv and binary input/output, a
   );
   assert.deepEqual(
     events[0],
-    { v: 1, type: 'live.started', sessionId: 'session-1' },
-    'Agent should acknowledge successful startup explicitly',
+    { v: 1, type: 'live.started', sessionId: 'session-1', flow: true },
+    'Agent should acknowledge successful startup explicitly and announce that it paces by acknowledgements',
   );
   const bytes = Buffer.from([0, 255, 10]);
   await live.handle({
@@ -324,7 +329,11 @@ test('TTY exec is allocated a terminal of the requested size', async (t) => {
     { cmd: ['printf', 'hello; $HOME'], stdin: true, tty: true, columns: 100, rows: 30 },
     'the Engine API exec is created with a TTY and its console size',
   );
-  assert.deepEqual(events[0], { v: 1, type: 'live.started', sessionId: 'session-1' });
+  assert.deepEqual(
+    events[0],
+    { v: 1, type: 'live.started', sessionId: 'session-1', flow: true },
+    'a TTY exec announces flow control like any exec',
+  );
 });
 
 test('ps lists the selected project from the Engine and inspect returns structured results', async (t) => {
@@ -406,6 +415,55 @@ test('stdin arriving during resolution is delivered after startup in order', asy
     Buffer.concat(chunks).toString(),
     'ab',
     'Early stdin frames should wait for startup and preserve arrival order',
+  );
+});
+
+test('agent acknowledges stdin only after the container wrote it and resumes output on live.ack', async (t) => {
+  const { live, children, events } = await fixture(t);
+  await live.handle(open());
+  const completions: (() => void)[] = [];
+  children[0].stdin = new Writable({
+    write(_chunk, _encoding, callback) {
+      completions.push(callback);
+    },
+  }) as unknown as PassThrough;
+  await live.handle({ v: 1, type: 'live.stdin', sessionId: 'session-1', data: 'YWJj' });
+  await settle();
+  assert.equal(completions.length, 1, 'the decoded input reached the container stdin');
+  assert.equal(
+    events.some((event) => event.type === 'live.stdin-ack'),
+    false,
+    'no stdin acknowledgement is sent while the container has not accepted the bytes',
+  );
+  completions[0]();
+  await settle();
+  assert.deepEqual(
+    events.filter((event) => event.type === 'live.stdin-ack'),
+    [{ v: 1, type: 'live.stdin-ack', sessionId: 'session-1', bytes: 3 }],
+    'once written, exactly one acknowledgement carries the decoded byte count',
+  );
+  const chunk = Buffer.alloc(65536, 1);
+  for (let sent = 0; sent < LIVE_WINDOW_BYTES; sent += liveOutputCost(chunk.length)) {
+    children[0].stdout.write(chunk);
+    await settle();
+  }
+  assert.equal(children[0].stdout.isPaused(), true, 'unacknowledged output pauses the container');
+  await live.handle({
+    v: 1,
+    type: 'live.ack',
+    sessionId: 'session-1',
+    bytes: LIVE_WINDOW_BYTES,
+  });
+  assert.equal(
+    children[0].stdout.isPaused(),
+    false,
+    'a live.ack frame reaches the engine and resumes the container output',
+  );
+  await live.handle({ v: 1, type: 'live.ack', sessionId: 'session-1', bytes: 0 });
+  assert.equal(
+    events.at(-1)?.type,
+    'live.exit',
+    'an invalid acknowledgement fails the session instead of being ignored',
   );
 });
 

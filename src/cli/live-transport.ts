@@ -16,9 +16,12 @@ import type { Credential } from '../pki.ts';
 import {
   LIVE_MAX_FRAME_BYTES as MAX_FRAME,
   LIVE_MAX_BUFFERED_BYTES as MAX_BUFFERED,
+  LIVE_FRAME_COST,
   LIVE_START_TIMEOUT_MS,
+  LIVE_WINDOW_BYTES,
 } from '../protocol.ts';
-const MAX_EVENTS = 1024;
+/** Flow control charges `LIVE_FRAME_COST` per frame, so a window holds at most this many tiny frames; double it. */
+const MAX_EVENTS = 2 * Math.ceil(LIVE_WINDOW_BYTES / LIVE_FRAME_COST);
 
 /** The client certificate authenticates the upgrade; `controlUrl` only picks the connect target, the credential's public URL is verified. */
 export function createCliLiveTransport(
@@ -32,6 +35,31 @@ export function createCliLiveTransport(
     throw new CliLiveError('live control URL must not contain credentials, query or fragment');
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
   url.pathname = `${url.pathname.replace(/\/$/, '')}/api/v1/live`;
+  return liveSocketTransport(
+    url,
+    {
+      ...(clientTlsOptions(credential) as object),
+      // The control only parses this header on its HTTP routes (express middleware does not run on upgrades);
+      // `runLive` runs the explicit version preflight for live commands instead.
+      headers: { [CLIENT_VERSION_HEADER]: packageVersion() },
+    },
+    (error) =>
+      // A bare openssl string teaches nothing; a CA mismatch names both fixes at once.
+      caTrustCode(error)
+        ? `live connection failed: ${describeCaMismatch(credential, new URL(credential.url).origin)}`
+        : `live connection failed: ${error.message}`,
+  );
+}
+
+/**
+ * The live protocol over a WebSocket at `url`, whatever authenticates it. `createCliLiveTransport` supplies mTLS;
+ * tests use it directly against a plain-HTTP control with the identity seam.
+ */
+export function liveSocketTransport(
+  url: URL,
+  socketOptions: WebSocket.ClientOptions,
+  describeError: (error: Error) => string = (error) => `live connection failed: ${error.message}`,
+): CliLiveTransport {
   return {
     open(request: LiveRequest, signal: AbortSignal): Promise<CliLiveSession> {
       return new Promise((resolve, reject) => {
@@ -40,10 +68,7 @@ export function createCliLiveTransport(
           return;
         }
         const socket = new WebSocket(url, {
-          ...(clientTlsOptions(credential) as object),
-          // The control only parses this header on its HTTP routes (express middleware does not run on upgrades);
-          // `runLive` runs the explicit version preflight for live commands instead.
-          headers: { [CLIENT_VERSION_HEADER]: packageVersion() },
+          ...socketOptions,
           followRedirects: false,
           maxPayload: MAX_FRAME,
           handshakeTimeout: LIVE_START_TIMEOUT_MS,
@@ -104,7 +129,9 @@ export function createCliLiveTransport(
                   'base64',
                 ),
               });
-          } else if (message.type === 'resize')
+          } else if (message.type === 'ack')
+            await sendFrame({ type: 'live.ack', bytes: message.bytes });
+          else if (message.type === 'resize')
             await sendFrame({ type: 'live.resize', columns: message.columns, rows: message.rows });
           else
             await sendFrame({ type: message.type === 'cancel' ? 'live.cancel' : 'live.stdin-end' });
@@ -138,10 +165,7 @@ export function createCliLiveTransport(
           socket.terminate();
         };
         const onError = (error: Error): void => {
-          // A bare openssl string teaches nothing; a CA mismatch names both fixes at once.
-          const message = caTrustCode(error)
-            ? `live connection failed: ${describeCaMismatch(credential!, new URL(credential.url).origin)}`
-            : `live connection failed: ${error.message}`;
+          const message = describeError(error);
           if (!opened) reject(new CliLiveError(message));
           enqueue({ type: 'error', message });
         };
@@ -179,7 +203,10 @@ export function createCliLiveTransport(
                 if (typeof frame.node !== 'string' || !frame.node)
                   throw new Error('invalid live started frame');
                 if (opened) throw new Error('duplicate live started frame');
+                if (frame.flow !== undefined && frame.flow !== true)
+                  throw new Error('invalid live started frame');
                 opened = true;
+                session.flow = frame.flow === true;
                 resolve(session);
                 break;
               case 'live.output': {
@@ -198,6 +225,17 @@ export function createCliLiveTransport(
                 enqueue({ type: frame.stream, data: decoded }, bytes.byteLength);
                 break;
               }
+              case 'live.stdin-ack':
+                if (!opened) throw new Error('live input acknowledgement arrived before startup');
+                if (
+                  !Number.isSafeInteger(frame.bytes) ||
+                  Number(frame.bytes) < 1 ||
+                  Number(frame.bytes) > 65536
+                )
+                  throw new Error('invalid live input acknowledgement');
+                // Not queued: input pacing must not wait behind output the runner is still writing.
+                session.onInputAck?.(Number(frame.bytes));
+                break;
               case 'live.result':
                 if (!opened) throw new Error('live result arrived before startup');
                 if (!Object.hasOwn(frame, 'value')) throw new Error('invalid live result frame');

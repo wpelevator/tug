@@ -222,13 +222,24 @@ export function splitImageRef(ref: string): { fromImage: string; tag: string } {
  */
 export function demux(source: Readable, stdout: Writable, stderr: Writable): void {
   let buffer: Buffer = Buffer.alloc(0);
+  // A consumer that stops reading (a paused live session) must stop the daemon socket too, or output piles up here.
+  const full = new Set<Writable>();
+  const drained = (target: Writable) => () => {
+    full.delete(target);
+    if (!full.size) source.resume();
+  };
   source.on('data', (chunk: Buffer) => {
     buffer = buffer.length ? Buffer.concat([buffer, chunk]) : chunk;
     while (buffer.length >= 8) {
       const size = buffer.readUInt32BE(4);
       if (buffer.length < 8 + size) break;
       const frame = buffer.subarray(8, 8 + size);
-      (buffer[0] === 2 ? stderr : stdout).write(frame);
+      const target = buffer[0] === 2 ? stderr : stdout;
+      if (!target.write(frame) && !full.has(target)) {
+        full.add(target);
+        target.once('drain', drained(target));
+        source.pause();
+      }
       buffer = buffer.subarray(8 + size);
     }
   });

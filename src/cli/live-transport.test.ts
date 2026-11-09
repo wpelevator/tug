@@ -128,6 +128,62 @@ test('WebSocket transport authenticates the upgrade with the client certificate 
   }
 });
 
+test('transport exposes flow control: flow flag, input acknowledgements ahead of output, and output acknowledgements on the wire', async () => {
+  const f = await serverFixture();
+  const received: Record<string, unknown>[] = [];
+  f.server.on('connection', (socket) => {
+    socket.on('message', (data) => {
+      const message = JSON.parse(data.toString());
+      received.push(message);
+      if (message.type === 'live.open')
+        socket.send(
+          JSON.stringify({ v: 1, type: 'live.started', sessionId: 's', node: 'n', flow: true }),
+        );
+    });
+  });
+  try {
+    const session = await createCliLiveTransport(f.credential, f.url).open(
+      request,
+      new AbortController().signal,
+    );
+    assert.equal(session.flow, true, 'live.started with flow marks the session flow-controlled');
+    const acked: number[] = [];
+    session.onInputAck = (bytes) => acked.push(bytes);
+    const remote = [...f.server.clients][0];
+    frame(remote, { type: 'live.output', stream: 'stdout', data: 'AA==' });
+    frame(remote, { type: 'live.stdin-ack', bytes: 7 });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(
+      acked,
+      [7],
+      'a stdin acknowledgement reaches the runner hook without queueing',
+    );
+    await session.send({ type: 'ack', bytes: 300 });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(
+      received.at(-1),
+      { v: 1, type: 'live.ack', bytes: 300 },
+      'an output acknowledgement is sent as a live.ack frame',
+    );
+    frame(remote, { type: 'live.stdin-ack', bytes: 0 });
+    const iterator = session.events[Symbol.asyncIterator]();
+    const types: string[] = [];
+    for (let event = await iterator.next(); !event.done; event = await iterator.next()) {
+      types.push(event.value.type);
+      if (event.value.type === 'error') break;
+    }
+    assert.deepEqual(
+      types,
+      ['stdout', 'error'],
+      'an invalid stdin acknowledgement is a protocol error after the output already received',
+    );
+    assert.deepEqual(acked, [7], 'an invalid stdin acknowledgement is not delivered');
+    await session.close();
+  } finally {
+    await f.close();
+  }
+});
+
 test('transport rejects malformed, binary, unknown and oversized remote frames', async () => {
   for (const invalid of [
     '{',
@@ -193,7 +249,7 @@ test('event queue bounds a remote sender while the consumer is paused', async ()
       socket.once('close', () => resolve());
       socket.once('message', () => {
         frame(socket, { type: 'live.started', node: 'n' });
-        for (let index = 0; index < 1100; index++)
+        for (let index = 0; index < 4300; index++)
           frame(socket, { type: 'live.result', value: index });
       });
     }),

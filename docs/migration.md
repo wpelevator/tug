@@ -75,6 +75,17 @@ While a writer is held, a sibling service whose health check depends on it (an n
 
 Before relying on this procedure, rehearse it on throwaway servers with a copy of your data.
 
+### Copy data through exec
+
+To load a dump or a directory from your own machine, or to take a copy out, pipe it through `tug exec`. Input and output are flow-controlled end to end, so size is not a limit. A SQL dump into the database service, and the uploads directory out of the WordPress service (service names as in `examples/wordpress`):
+
+```sh
+tug exec -i db -- sh -c 'mariadb -u root -p"$MARIADB_ROOT_PASSWORD" wordpress' < dump.sql
+tug exec wordpress -- tar -C /var/www/html/wp-content -cf - uploads > uploads.tar
+```
+
+The reverse direction works the same way: `tug exec -i wordpress -- tar -C /var/www/html/wp-content -xf - < uploads.tar`. Agents older than 2.0 keep a bounded buffer and fail large inputs with `agent buffer limit exceeded`; upgrade them first.
+
 ## Move the object store
 
 An object store such as SeaweedFS or MinIO is a plain Docker volume to Tug. Tug does not copy volumes between nodes, so you choose how the data travels:

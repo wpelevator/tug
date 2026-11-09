@@ -386,20 +386,39 @@ export type LiveRequest =
   | { operation: 'ps'; project: string; node?: string }
   | { operation: 'inspect'; project: string; service: string; node?: string };
 export const LIVE_MAX_FRAME_BYTES = 256 * 1024;
+/** What one operator socket may hold unsent; the flow-control window keeps a session's output well below it. */
 export const LIVE_MAX_BUFFERED_BYTES = 1024 * 1024;
+/**
+ * Credit, per session and direction, for bytes in flight end to end. Output: the agent stops reading a container's
+ * stdout and stderr once this much `liveOutputCost` is unacknowledged, and resumes when the CLI's `live.ack` frames
+ * bring it under half. Input: the CLI stops reading its stdin once this many bytes are unacknowledged by the agent's
+ * `live.stdin-ack`, sent once the bytes are written into the container. Base64 and framing make 512 KiB of output at
+ * most about 700 KB on the wire, under `LIVE_MAX_BUFFERED_BYTES`.
+ */
+export const LIVE_WINDOW_BYTES = 512 * 1024;
+/** Fixed credit charged per output frame on top of its bytes, so many tiny frames cannot exceed the frame limits. */
+export const LIVE_FRAME_COST = 256;
+/** The credit one output frame carrying `bytes` decoded bytes consumes; the CLI acknowledges the same amount. */
+export const liveOutputCost = (bytes: number): number => bytes + LIVE_FRAME_COST;
+/** What an agent stream socket (shared by every session on the node) may hold unsent before it is dropped. */
+export const LIVE_AGENT_MAX_BUFFERED_BYTES = 16 * 1024 * 1024;
 export const LIVE_MAX_SESSIONS = 64;
 export const LIVE_START_TIMEOUT_MS = 10_000;
 export type LiveInput =
   | { v: 1; type: 'live.stdin'; data: string }
   | { v: 1; type: 'live.stdin-end' }
   | { v: 1; type: 'live.resize'; columns: number; rows: number }
-  | { v: 1; type: 'live.cancel' };
+  | { v: 1; type: 'live.cancel' }
+  /** The CLI consumed this much output credit (see `liveOutputCost`). */
+  | { v: 1; type: 'live.ack'; bytes: number };
 export type OperatorLiveFrame = { v: 1; type: 'live.open'; request: LiveRequest } | LiveInput;
 export type AgentLiveCommand =
   | { v: 1; type: 'live.open'; sessionId: string; request: LiveRequest }
   | (LiveInput & { sessionId: string });
 export type AgentLiveFrame =
-  | { v: 1; type: 'live.started'; sessionId: string }
+  /** `flow`: the agent acknowledges stdin with `live.stdin-ack` and paces output by `live.ack` (2.0 agents). */
+  | { v: 1; type: 'live.started'; sessionId: string; flow?: true }
+  | { v: 1; type: 'live.stdin-ack'; sessionId: string; bytes: number }
   | { v: 1; type: 'live.output'; sessionId: string; stream: 'stdout' | 'stderr'; data: string }
   | { v: 1; type: 'live.result'; sessionId: string; result: unknown }
   | {
@@ -412,7 +431,8 @@ export type AgentLiveFrame =
       error?: string;
     };
 export type OperatorLiveMessage =
-  | { v: 1; type: 'live.started'; sessionId: string; node: string }
+  | { v: 1; type: 'live.started'; sessionId: string; node: string; flow?: true }
+  | { v: 1; type: 'live.stdin-ack'; sessionId: string; bytes: number }
   | { v: 1; type: 'live.output'; sessionId: string; stream: 'stdout' | 'stderr'; data: string }
   | { v: 1; type: 'live.result'; sessionId: string; value: unknown }
   | { v: 1; type: 'live.exit'; sessionId: string; code: number }

@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { LIVE_MAX_FRAME_BYTES } from '../protocol.ts';
+import { LIVE_MAX_FRAME_BYTES, LIVE_WINDOW_BYTES, liveOutputCost } from '../protocol.ts';
 import { LABEL_JOB } from '../container-spec.ts';
 import type { DockerApi } from '../docker-api.ts';
 import type { Readable, Writable } from 'node:stream';
@@ -61,6 +61,10 @@ interface Session {
   cleanup: (awaitClose?: boolean) => void;
   /** Releases a query that is still waiting on the Engine when the session is closed early. */
   abort?: () => void;
+  /** Output credit emitted and not yet acknowledged by the CLI (see `liveOutputCost`). */
+  outstanding: number;
+  /** Whether stdout and stderr are paused because `outstanding` reached the window. */
+  paused: boolean;
 }
 const identifier = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,255}$/;
 function object(value: unknown): value is Record<string, unknown> {
@@ -205,6 +209,8 @@ export class LiveOperationEngine {
       request,
       child: live,
       timer,
+      outstanding: 0,
+      paused: false,
       cleanup: (awaitClose = false) => {
         clearTimeout(timer);
         if (!awaitClose) stopErrors();
@@ -224,7 +230,13 @@ export class LiveOperationEngine {
     timer: ReturnType<typeof setTimeout>,
   ): Promise<void> {
     const id = request.sessionId;
-    const session: Session = { request, timer, cleanup: () => clearTimeout(timer) };
+    const session: Session = {
+      request,
+      timer,
+      cleanup: () => clearTimeout(timer),
+      outstanding: 0,
+      paused: false,
+    };
     const aborted = new Promise<void>((resolve) => {
       session.abort = resolve;
     });
@@ -287,17 +299,35 @@ export class LiveOperationEngine {
     });
     return proc;
   }
-  /** Returns the writable backpressure signal; callers must pause transport input on false. */
-  stdin(sessionId: string, data: Uint8Array): boolean {
+  /**
+   * Writes input into the container; `written` runs once the bytes have left this process (the container's stdin
+   * accepted them), which is when the agent acknowledges them to the CLI. The CLI keeps at most `LIVE_WINDOW_BYTES`
+   * unacknowledged, so more than that queued here is a protocol violation.
+   */
+  stdin(sessionId: string, data: Uint8Array, written?: () => void): boolean {
     const session = this.requireExec(sessionId);
     if (!(data instanceof Uint8Array) || data.byteLength > 65536)
       throw new Error('Invalid stdin frame');
     const stdin = session.child?.stdin;
     if (!stdin || stdin.destroyed || stdin.writableEnded)
       throw new Error('Session stdin is closed');
-    if (stdin.writableLength + data.byteLength > 262144)
+    if (stdin.writableLength + data.byteLength > LIVE_WINDOW_BYTES)
       throw new Error('Live stdin queue exceeds size limit');
-    return stdin.write(data);
+    return stdin.write(data, (error) => {
+      if (!error) written?.();
+    });
+  }
+  /** The CLI consumed `bytes` of output credit; resume reading once less than half the window is outstanding. */
+  ack(sessionId: string, bytes: number): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    if (!Number.isSafeInteger(bytes) || bytes < 1) throw new Error('Invalid live acknowledgement');
+    session.outstanding = Math.max(0, session.outstanding - bytes);
+    if (session.paused && session.outstanding <= LIVE_WINDOW_BYTES / 2) {
+      session.paused = false;
+      session.child?.stdout?.resume();
+      session.child?.stderr?.resume();
+    }
   }
   endStdin(sessionId: string): void {
     this.requireExec(sessionId).child?.stdin?.end();
@@ -324,16 +354,27 @@ export class LiveOperationEngine {
     return session as Session & { request: Extract<LiveRequest, { operation: 'exec' }> };
   }
   private output(id: string, stream: 'stdout' | 'stderr', data: Buffer | string): void {
-    if (!this.sessions.has(id)) return;
+    const session = this.sessions.get(id);
+    if (!session) return;
     const bytes = Buffer.isBuffer(data) ? data : Buffer.from(data);
-    for (let offset = 0; offset < bytes.length && this.sessions.has(id); offset += 65536)
+    for (let offset = 0; offset < bytes.length && this.sessions.has(id); offset += 65536) {
+      const chunk = bytes.subarray(offset, offset + 65536);
+      session.outstanding += liveOutputCost(chunk.length);
       this.options.emit({
         sessionId: id,
         type: 'output',
         stream,
-        data: bytes.subarray(offset, offset + 65536).toString('base64'),
+        data: chunk.toString('base64'),
         encoding: 'base64',
       });
+    }
+    // Stop reading the container until the CLI has consumed some of what is in flight; the Engine stream then
+    // backs up to the daemon, and the process blocks on a full pipe instead of the agent buffering its output.
+    if (!session.paused && session.outstanding >= LIVE_WINDOW_BYTES && this.sessions.has(id)) {
+      session.paused = true;
+      session.child?.stdout?.pause();
+      session.child?.stderr?.pause();
+    }
   }
   private finish(
     id: string,

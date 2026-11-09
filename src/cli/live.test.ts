@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
+import type { Writable } from 'node:stream';
 import { test } from 'node:test';
+import { LIVE_WINDOW_BYTES, liveOutputCost } from '../protocol.ts';
 import { CliLiveError, formatLiveResult, parseLiveRequest, runCliLive } from './live.ts';
 import type {
   CliLiveSession,
@@ -175,8 +177,11 @@ test('exec preserves binary channels and returns the remote process exit code', 
   );
   assert.deepEqual(
     f.sent,
-    [],
-    'noninteractive exec must not send input frames that control rejects',
+    [
+      { type: 'ack', bytes: liveOutputCost(3) },
+      { type: 'ack', bytes: liveOutputCost(7) },
+    ],
+    'noninteractive exec must send no input frames, only output acknowledgements',
   );
   assert.equal(f.closed(), 1, 'successful execution must close its transport');
   assert.equal(f.signals.listenerCount('SIGINT'), 0, 'execution must remove its SIGINT listener');
@@ -385,7 +390,11 @@ test('followed logs forward channels and support cancellation without stdin list
     'log\n',
     'followed logs must preserve log bytes',
   );
-  assert.deepEqual(f.sent, [], 'followed logs must not send stdin messages');
+  assert.deepEqual(
+    f.sent,
+    [{ type: 'ack', bytes: liveOutputCost(4) }],
+    'followed logs must send no stdin messages, only the output acknowledgement',
+  );
   assert.equal(f.stdin.listenerCount('data'), 0, 'followed logs must leave local stdin untouched');
 });
 
@@ -508,4 +517,139 @@ test('piped input larger than any buffer is delivered in full while only a bound
     peak < 4 * 1024 * 1024,
     `the unsent input stays bounded instead of growing to the size of the file (peak ${peak} bytes)`,
   );
+});
+
+/** Keeps a fixture's session open until `release` is called, so a test can drive input while the run is live. */
+function hold(f: ReturnType<typeof fixture>) {
+  let release!: () => void;
+  const finished = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  f.session.events = {
+    [Symbol.asyncIterator]: () => {
+      let done = false;
+      return {
+        next: () =>
+          done
+            ? new Promise<IteratorResult<LiveEvent>>(() => {})
+            : finished.then(() => {
+                done = true;
+                return { done: false, value: { type: 'exit', code: 0 } as LiveEvent };
+              }),
+      };
+    },
+  };
+  return release;
+}
+
+test('with flow control stdin pauses once a window of input is unacknowledged and resumes as the agent acknowledges it', async () => {
+  const f = fixture();
+  const release = hold(f);
+  f.session.flow = true;
+  const running = runCliLive(exec({ interactive: true }), f.transport, f.io);
+  await tick();
+  const chunk = Buffer.alloc(64 * 1024, 1);
+  const chunks = LIVE_WINDOW_BYTES / chunk.length;
+  for (let index = 0; index < chunks - 1; index++) {
+    f.stdin.write(chunk);
+    await tick();
+  }
+  assert.equal(
+    f.stdin.isPaused(),
+    false,
+    'input stays flowing while less than a window is unacknowledged',
+  );
+  f.stdin.write(chunk);
+  await tick();
+  assert.equal(
+    f.stdin.isPaused(),
+    true,
+    'stdin pauses when unacknowledged input reaches the window even though every frame was sent',
+  );
+  assert.equal(typeof f.session.onInputAck, 'function', 'the runner registers the input ack hook');
+  f.session.onInputAck!(chunk.length);
+  assert.equal(
+    f.stdin.isPaused(),
+    true,
+    'stdin stays paused while more than half a window is unacknowledged',
+  );
+  f.session.onInputAck!(chunk.length * (chunks / 2 - 1));
+  assert.equal(
+    f.stdin.isPaused(),
+    false,
+    'stdin resumes once acknowledgements bring unacknowledged input to half the window',
+  );
+  release();
+  assert.equal(await running, 0, 'the operation finishes normally');
+});
+
+test('without flow control stdin is not limited by acknowledgements', async () => {
+  const f = fixture();
+  const release = hold(f);
+  const running = runCliLive(exec({ interactive: true }), f.transport, f.io);
+  await tick();
+  const chunk = Buffer.alloc(64 * 1024, 1);
+  for (let index = 0; index < (LIVE_WINDOW_BYTES / chunk.length) * 2; index++) {
+    f.stdin.write(chunk);
+    await tick();
+    assert.equal(
+      f.stdin.isPaused(),
+      false,
+      'an agent that does not announce flow control never acknowledges input, so stdin must not wait for it',
+    );
+  }
+  release();
+  assert.equal(await running, 0, 'the operation finishes normally');
+});
+
+test('each output event is acknowledged with its credit only after it was written locally', async () => {
+  const f = fixture([
+    { type: 'stdout', data: Buffer.from('out') },
+    { type: 'stderr', data: Buffer.from('error') },
+    { type: 'exit', code: 0 },
+  ]);
+  let written = 0;
+  const acknowledgedAfter: boolean[] = [];
+  // A slow local consumer: the write callback runs well after the data was handed over.
+  const slow = (stream: Writable) => {
+    const write = stream.write.bind(stream) as (...args: unknown[]) => boolean;
+    stream.write = ((data: unknown, callback: () => void) =>
+      write(data, () => setTimeout(() => (written++, callback()), 20))) as typeof stream.write;
+  };
+  slow(f.stdout);
+  slow(f.stderr);
+  f.session.send = (message) => {
+    f.sent.push(message);
+    if (message.type === 'ack') acknowledgedAfter.push(written === f.sent.length);
+  };
+  assert.equal(await runCliLive(exec(), f.transport, f.io), 0, 'the operation finishes normally');
+  assert.deepEqual(
+    f.sent,
+    [
+      { type: 'ack', bytes: liveOutputCost(3) },
+      { type: 'ack', bytes: liveOutputCost(5) },
+    ],
+    'every stdout and stderr event is acknowledged with liveOutputCost of its decoded size, in order',
+  );
+  assert.deepEqual(
+    acknowledgedAfter,
+    [true, true],
+    'an acknowledgement is sent only after the local write completed, so a slow reader slows the remote command',
+  );
+});
+
+test('an output acknowledgement that cannot be sent does not fail a session that exited normally', async () => {
+  const f = fixture([
+    { type: 'stdout', data: Buffer.from('tail') },
+    { type: 'exit', code: 5 },
+  ]);
+  f.session.send = async (message) => {
+    if (message.type === 'ack') throw new Error('live connection is closed');
+  };
+  assert.equal(
+    await runCliLive(exec(), f.transport, f.io),
+    5,
+    'the remote exit code is returned even when control already closed the socket before the acknowledgement',
+  );
+  assert.equal(Buffer.concat(f.output).toString(), 'tail', 'the output is still written');
 });
