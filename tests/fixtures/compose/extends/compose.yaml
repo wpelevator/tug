@@ -1,0 +1,29 @@
+name: custom
+services:
+  w:
+    image: nginx:${UNSETVAR}
+    extends:
+      file: base.yaml
+      service: base
+    environment:
+      B: '3'
+      NOTSET:
+      FROMENV: ${HOME_X-foo}
+    ports: ['81:81']
+    volumes: ['v2:/other']
+    labels: ['z=1']
+    command: tail -f
+    healthcheck: { disable: true }
+    stop_grace_period: 30s
+    build:
+      context: .
+      args: [FOO=bar, BAZ]
+  f:
+    image: ${REQ:-dflt}-${NEST:-${NEST2:-deep}}-${ALT:+yes}
+    env_file:
+      - path: missing.env
+        required: false
+volumes:
+  v:
+  v2:
+    name: custom-name

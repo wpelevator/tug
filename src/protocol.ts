@@ -85,7 +85,7 @@ export type BackupConfig = boolean | string | BackupSpec;
 
 export type RolloutStrategy = 'recreate' | 'rolling';
 
-/** `x-tug.rollout`: how a service is replaced on a new deployment. `recreate` (default) is `docker compose up -d`. */
+/** `x-tug.rollout`: how a service is replaced on a new deployment. `recreate` (default) stops the old container and starts the new one. */
 export interface RolloutSpec {
   strategy?: RolloutStrategy;
   /** How long the previous revision keeps running after the new one takes over (default `30s`); covers the ingress switch. */

@@ -122,7 +122,7 @@ async function installNodeIdentity(
     assertImagePublished(resolveImage(o.image, o.buildLocalImage));
     if (o.installDocker) {
       progress.stage(`Installing Docker on node ${name}`);
-      await bootstrapDocker(sshTarget, false, progress);
+      await bootstrapDocker(sshTarget, progress);
     }
     progress.stage(`Checking host ${name}`);
     await preflightRemote(sshTarget, {

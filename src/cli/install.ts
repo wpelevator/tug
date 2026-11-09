@@ -42,7 +42,11 @@ export function enrollmentCloudInit(bootstrap: string, command: string): string 
   );
 }
 
-/** Name of the container `control setup` creates (Compose project `tug-control`, service `control`). */
+/**
+ * Name of the container `control setup` creates. It is the name Compose gave it (project `tug-control`, service
+ * `control`) when control was a Compose project; keeping it lets an upgrade replace that container and keeps
+ * `control migrate`, the port check and the credential commands addressing the same container.
+ */
 export const CONTROL_CONTAINER = 'tug-control-control-1';
 
 /** A TCP port is free, or is held by the control container this install would replace, so installing again upgrades in place. */

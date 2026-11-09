@@ -22,7 +22,7 @@ Tug already speaks the Engine API through the `DockerApi` interface in `src/dock
 | Supported engines | Docker Engine (default) and rootful Podman 5+ via its compat socket. Docker Desktop, Colima, OrbStack and Rancher Desktop in moby mode are Docker daemons and need no work. |
 | Engine identity | Read it from `GET /version` (`Components[].Name`), store it on the node report and show it in `tug nodes` and doctor. Behavior never branches on the engine name except where a verified gap needs a workaround, and each such branch is listed in the docs. |
 | CLI dependency | Move `save`, `load`, `tag`, `image inspect` and `image rm` in control onto the Engine API through `DockerApi`, so control needs a CLI only for `build`, `manifest inspect` and Compose. Where a CLI remains, an engine setting (`docker` or `podman`) chooses the binary. |
-| Compose | Normalization needs a Compose renderer only. The control host uses whichever of `docker compose`, `podman compose` or `docker-compose` it finds, and doctor reports which. |
+| Compose | None. `tug deploy` reads the Compose file itself and the control host runs control with `docker run` (or the engine's equivalent), so no Compose renderer is involved. |
 | Rootless | Not supported in the first release. Host-side health checks and container-IP reachability assume a routable bridge. Revisit only after the spike shows an acceptable design. |
 | Installer | Tug keeps installing Docker only. A pre-installed Podman is accepted when its socket answers and the doctor checks pass; the installer stops rejecting `podman-docker` when Podman is the working engine. No Podman installation path is added. |
 
@@ -44,9 +44,9 @@ The spike (step 1) answers each before any code is written.
 
 1. [ ] Spike: on a rootful Podman 5 host (Fedora or Alma VM), run the existing integration tier by hand against the compat socket, record every failure against [Risks to verify](#risks-to-verify) and update this plan's scope with the results.
 2. [ ] Detect and report the engine: parse `/version`, add it to the node report and protocol, show it in `tug nodes` and doctor. A protocol addition is additive; choose the bump by [Releases](releases.md#choosing-the-bump).
-3. [ ] Replace the control-side `docker save`, `load`, `tag`, `image inspect` and `image rm` shell-outs with `DockerApi` methods (`saveImage`, `tagImage` and friends), implement them in `DockerEngine` and `FakeDocker`, and keep the artifact validation tests passing.
+3. [~] Replace the control-side `docker` shell-outs with `DockerApi` methods and keep the artifact validation tests passing. Done: `docker version` (the diagnostics check now asks the socket, so it proves the engine answers rather than that the CLI binary is present), `docker image inspect` and `docker image rm`; `createApp` takes a `docker` option that tests fill with `FakeDocker`. Remaining: `docker load` and `docker tag` of the local-image import (checksum and identity checks make it a separate review; needs a `tagImage` method), `docker save` (the output format is a Podman spike question), `docker build` and `docker manifest inspect` (need the CLI), and `docker builder prune` (BuildKit only).
 4. [ ] Add an engine setting that selects the CLI binary for `build`, `manifest inspect` and version checks; default `docker`.
-5. [ ] Make Compose rendering discover `docker compose`, `podman compose` or `docker-compose`, with a clear doctor message when none is present.
+5. [x] Compose rendering needs no engine tooling: the native reader replaced `docker compose config`.
 6. [ ] Extend doctor with Podman-specific checks: restart service enabled, rootless detected (unsupported, clear error), socket mount and SELinux hint.
 7. [ ] Apply each workaround the spike requires, each with a test whose assertion message states the expected behavior.
 8. [ ] Add a Podman variant of the `tools/docker/fake-vps` integration tier and run it in the same tier as the Docker one; add the fixes for findings it surfaces to [Testing](testing.md)'s regression table.

@@ -131,7 +131,7 @@ Each deploy still transfers whole Tug-built images; a control-hosted image store
 
 The agent stops running the `docker compose` CLI and reconciles containers through the Docker Engine API. The agent already works around Compose: rolling revisions are separate Compose projects with hand-made networks and volumes carrying copied Compose labels, `depends_on` is stripped across them, and secret changes need forced recreates.
 
-- The CLI normalizes the Compose file with `docker compose config` (Compose does interpolation, `extends`, profiles and `env_file`; secret variables are left as sentinels for the agent to substitute) and sends the canonical definition (read from Compose's YAML rendering, since its JSON rendering drops `x-tug`); control validates an explicit allowlist of supported keys, including resource limits; agents never parse Compose YAML. Nodes need only the Docker Engine, not the Compose plugin. The control-plane host keeps using Compose for its own install unless that moves to `docker run`.
+- The CLI normalizes the Compose file (interpolation, `extends`, profiles and `env_file`; secret variables are left as sentinels for the agent to substitute) and sends the canonical definition; this was `docker compose config` and is now Tug's own reader, with `--compose-cli` as the fallback; control validates an explicit allowlist of supported keys, including resource limits; agents never parse Compose YAML. Nodes need only the Docker Engine, not the Compose plugin. The control-plane host keeps using Compose for its own install unless that moves to `docker run`.
 - One reconciler for every service: containers carry `tug.*` labels with a hash of their resolved configuration, including the image reference and the versions of the secrets they use, and are recreated when it changes. `recreate` and `rolling` become two strategies of the same loop. Tug names its own networks, volumes and containers; service names are network aliases.
 - Secrets are substituted into the container environment by the agent; no `.env` file on disk. Health checks stay agent-run, because images often lack the tools a Docker `HEALTHCHECK` would need.
 - `exec -t` with a real PTY and resize, and `logs`, `ps` and `inspect` from the API instead of CLI output.
@@ -244,7 +244,7 @@ The test layers, the metrics milestones are held to and the backlog of mocked te
 - [x] M14 Compose normalized on the operator machine; allowlist validation on control
 - [x] M14 Engine API reconciler with config-hash recreation, `recreate` and `rolling` strategies, no `.env` on disk
 - [x] M14 `exec -t` with PTY and resize; `logs`, `ps`, `inspect` and ingress on the Engine API
-- [x] M14 Compose plugin no longer required on nodes (the runtime image no longer ships it; the control-plane host still uses Compose to run the control container)
+- [x] M14 Compose plugin no longer required on nodes (the runtime image no longer ships it); the control-plane host runs control with `docker run` and `tug deploy` has its own Compose reader, so Compose is needed nowhere by default
 - [x] One mutual-TLS port for operators, CI and nodes, certificates from control's private CA, immutable node IDs, and `tug doctor` certificate expiry and clock skew ([Control plane](control-plane.md#authentication-and-pki), [Nodes](nodes.md))
 - [ ] M15 control on a runtime node behind the managed Caddy, with a break-glass control port
 - [ ] M15 builds on `builder`-labelled nodes, uploaded to control as saved images

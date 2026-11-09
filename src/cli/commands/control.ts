@@ -77,10 +77,10 @@ function addSetup(parent: Command, description: string): void {
       );
       const interactive = canPrompt();
       let missingDocker = false;
-      if (!o.installDocker && interactive && !hostHasDocker(sshTarget, true)) {
+      if (!o.installDocker && interactive && !hostHasDocker(sshTarget)) {
         missingDocker = true;
         o.installDocker = await confirm(
-          `Docker with the Compose plugin is not installed on ${sshTarget}. Install it now (needs root)?`,
+          `Docker is not installed on ${sshTarget}. Install it now (needs root)?`,
         );
       }
       const image = resolveImage(o.image, o.buildLocalImage);
@@ -92,7 +92,7 @@ function addSetup(parent: Command, description: string): void {
           `  control URL: ${controlUrl}`,
           `  mTLS port:   ${o.port}`,
           `  image:       ${image}`,
-          `  docker:      ${o.installDocker ? 'install Engine and Compose' : missingDocker ? 'not installed (the preflight will fail)' : 'must already be installed'}`,
+          `  docker:      ${o.installDocker ? 'install Engine' : missingDocker ? 'not installed (the preflight will fail)' : 'must already be installed'}`,
           `  credential:  ${[o.import ? 'imported into the local config' : '', o.credentialOut ? `written to ${o.credentialOut}` : ''].filter(Boolean).join(' and ')}`,
         ].join('\n'),
       );
@@ -101,13 +101,12 @@ function addSetup(parent: Command, description: string): void {
       return withProgress(`Preparing control on ${sshTarget}`, async (progress) => {
         if (o.installDocker) {
           progress.stage(`Installing Docker on ${sshTarget}`);
-          await bootstrapDocker(sshTarget, true, progress);
+          await bootstrapDocker(sshTarget, progress);
         }
         progress.stage(`Checking control host ${sshTarget}`);
         await preflightRemote(sshTarget, {
           ports: [Number(o.port)],
           minDiskMb: 2048,
-          compose: true,
           progress,
         });
         const runImage = o.buildLocalImage
@@ -117,15 +116,11 @@ function addSetup(parent: Command, description: string): void {
         // or a fresh control would create a second CA on an empty volume (--recover-root included).
         progress.stage(`Checking control data on ${sshTarget}`);
         await runStep('ssh', ['--', sshTarget, controlGuardScript(runImage)], { progress });
-        const yamlValue = (value: string) => JSON.stringify(value);
-        const compose = await loadTemplate(templatesDir, 'control-compose.yml', {
-          IMAGE: yamlValue(runImage),
-          CONTROL_URL: yamlValue(new URL(controlUrl).origin),
-          EXTRA_SANS: yamlValue(o.extraSan.join(',')),
-          PORT: o.port,
-        });
         const remote = await loadTemplate(templatesDir, 'control-install.sh', {
-          COMPOSE: compose,
+          IMAGE_SH: sh(runImage),
+          CONTROL_URL_SH: sh(new URL(controlUrl).origin),
+          EXTRA_SANS_SH: sh(o.extraSan.join(',')),
+          PORT: String(Number(o.port)),
           MARKER: STAGE_MARKER,
           CONTAINER_SH: sh(CONTROL_CONTAINER),
         });

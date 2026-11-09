@@ -8,6 +8,7 @@ import { Transform } from 'node:stream';
 import { run } from './build.ts';
 import { scanArchive } from './archive.ts';
 import type { RunResult } from './build.ts';
+import type { DockerApi } from '../docker-api.ts';
 
 export type ImageRunner = (cmd: string, args: string[]) => Promise<RunResult>;
 export interface ImageInfo {
@@ -18,15 +19,28 @@ export interface ArchiveInfo extends ImageInfo {
   sha256: string;
   sizeBytes: number;
 }
+/** The identity of an image from an engine's inspect record, or an error when the record lacks one. */
+function imageIdentity(
+  imageRef: string,
+  image: { Id?: string; Os?: string; Architecture?: string } | undefined,
+): ImageInfo {
+  if (!image?.Id || !/^sha256:[a-f0-9]{64}$/.test(image.Id) || !image.Os || !image.Architecture)
+    throw new Error(`invalid Docker image metadata for ${imageRef}`);
+  return { imageId: image.Id, platform: `${image.Os}/${image.Architecture}` };
+}
+/** Inspects an image with the `docker` CLI, which `tug deploy --build-local` runs against the operator's own daemon. */
 export async function inspectImage(
   imageRef: string,
   runner: ImageRunner = run,
 ): Promise<ImageInfo> {
   const images = JSON.parse((await runner('docker', ['image', 'inspect', imageRef])).out);
-  const image = images[0];
-  if (!/^sha256:[a-f0-9]{64}$/.test(image?.Id) || !image.Os || !image.Architecture)
-    throw new Error(`invalid Docker image metadata for ${imageRef}`);
-  return { imageId: image.Id, platform: `${image.Os}/${image.Architecture}` };
+  return imageIdentity(imageRef, images[0]);
+}
+/** Inspects an image through the Engine API, which is how control reads its own daemon. */
+export async function inspectEngineImage(imageRef: string, docker: DockerApi): Promise<ImageInfo> {
+  const image = await docker.inspectImage(imageRef);
+  if (!image) throw new Error(`no such image: ${imageRef}`);
+  return imageIdentity(imageRef, image);
 }
 export async function hashArchive(file: string): Promise<{ sha256: string; sizeBytes: number }> {
   const hash = createHash('sha256');

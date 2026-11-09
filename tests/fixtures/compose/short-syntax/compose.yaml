@@ -1,0 +1,15 @@
+services:
+  b:
+    image: x
+    command: echo "q \" r" 'it''s' $$x tail\ ing
+  c:
+    image: x
+    command: ['a', '1']
+    volumes:
+      - './x:/y:ro,z'
+      - 'named:/n:nocopy'
+    ports: ['80', '8080:80', '5000-5002:6000-6002/udp']
+    labels: { n: '1', b: 'true' }
+    environment: [A=1, 'B', 'C=a=b']
+volumes:
+  named:

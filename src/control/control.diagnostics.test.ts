@@ -4,15 +4,17 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createApp } from './control.ts';
+import { FakeDocker } from '../../tests/fake-docker.ts';
 import { testImageResolver, testControlUrl, testIdentity } from '../../tests/helpers.ts';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { json } from '../../tests/helpers.ts';
 
-async function makeServer() {
+async function makeServer(docker = new FakeDocker()) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-diag-'));
   process.env.TUG_DATA_DIR = dir;
   const app = await createApp({
+    docker,
     identity: testIdentity,
     controlUrl: testControlUrl,
     images: { resolve: testImageResolver },
@@ -141,6 +143,32 @@ test('node diagnostics separate observed clock skew from unknown for offline nod
   } finally {
     if (stale === undefined) delete process.env.TUG_STALE_SECONDS;
     else process.env.TUG_STALE_SECONDS = stale;
+    await s.close();
+  }
+});
+
+test('the docker diagnostics check reports the engine version from the Engine API and fails when the socket does not answer', async () => {
+  const docker = new FakeDocker();
+  docker.version_ = { Version: '28.1.1', ApiVersion: '1.49', MinAPIVersion: '1.24' };
+  const s = await makeServer(docker);
+  try {
+    const check = async () =>
+      (await json(await fetch(`${s.base}/api/v1/diagnostics`, { headers: op }))).checks.find(
+        (c: { name: string }) => c.name === 'docker',
+      );
+    const ok = await check();
+    assert.deepEqual(
+      [ok.ok, ok.output],
+      [true, '28.1.1'],
+      'the check reports the server version the engine returns, without running the docker CLI',
+    );
+    docker.version = async () => {
+      throw new Error('connect ENOENT /var/run/docker.sock');
+    };
+    const down = await check();
+    assert.equal(down.ok, false, 'an unreachable engine socket fails the check');
+    assert.match(down.error, /ENOENT/, 'the failure names why the socket did not answer');
+  } finally {
     await s.close();
   }
 });

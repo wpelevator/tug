@@ -12,6 +12,8 @@ import * as tar from 'tar';
 import { createApp } from './control.ts';
 import { openDb } from '../db/db.ts';
 import { json, testControlUrl, testIdentity } from '../../tests/helpers.ts';
+import { FakeDocker } from '../../tests/fake-docker.ts';
+import { inspectEngineImage } from '../images/artifacts.ts';
 
 async function server(openDatabase?: typeof openDb) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-images-'));
@@ -31,7 +33,10 @@ async function server(openDatabase?: typeof openDb) {
   let identical = false;
   let failMaintenance = false;
   let buildGate: Promise<void> | undefined;
+  // Control reaches its daemon through the Engine API; the fake records every mutation as `verb subject`.
+  const docker = new FakeDocker();
   const app = await createApp({
+    docker,
     identity: testIdentity,
     controlUrl: testControlUrl,
     openDatabase,
@@ -125,6 +130,7 @@ async function server(openDatabase?: typeof openDb) {
     bytes,
     info,
     calls,
+    docker,
     post,
     node,
     deploy,
@@ -242,7 +248,9 @@ test('local uploads import without a remote build and failed builds keep the pre
       'local uploads must import their verified archive',
     );
     assert.ok(
-      s.calls.includes('image rm tug-build/00000000-0000-4000-8000-000000000000/image-0:local'),
+      s.docker.calls.includes(
+        'image-rm tug-build/00000000-0000-4000-8000-000000000000/image-0:local',
+      ),
       'control must remove only the validated generated client tag after retagging its immutable image',
     );
     assert.ok(
@@ -794,7 +802,7 @@ test('an unchanged rebuild reuses the existing archive instead of saving another
       'no second archive may be written for an identical image',
     );
     assert.ok(
-      s.calls.includes(`image rm tug-build/app/app:${second.desiredState.revision}`),
+      s.docker.calls.includes(`image-rm tug-build/app/app:${second.desiredState.revision}`),
       'the unused per-deployment tag must be removed from the daemon',
     );
     const download = await fetch(`${s.base}/agent/v1/images/${b.artifact.buildId}`, {
@@ -1048,4 +1056,55 @@ test('nodes stop being told to keep the image of a pruned archive', async () => 
   } finally {
     await s.close();
   }
+});
+
+test('a refused image removal does not fail the deployment that triggered it', async () => {
+  const s = await server();
+  try {
+    s.docker.removeImage = async (ref: string) => {
+      s.docker.calls.push(`image-rm ${ref}`);
+      throw new Error('conflict: image is being used by a running container');
+    };
+    const n1 = await s.node('n1');
+    const first = await json(await s.deploy('v1'));
+    await s.report(n1.nodeId, first.desiredState);
+    s.identicalImages();
+    const second = await s.deploy('v2');
+    assert.equal(
+      second.status,
+      200,
+      'a daemon that refuses to remove the unused per-deployment tag must not fail the deploy',
+    );
+    assert.ok(
+      s.docker.calls.some((call) => call.startsWith('image-rm tug-build/app/app:')),
+      'control still asked the engine to remove the tag, through the Engine API',
+    );
+    assert.ok(
+      !s.calls.some((call) => call.startsWith('image rm')),
+      'image removal does not run the docker CLI',
+    );
+  } finally {
+    await s.close();
+  }
+});
+
+test('an image the engine does not know or cannot describe is rejected with a clear message', async () => {
+  const docker = new FakeDocker();
+  await assert.rejects(
+    inspectEngineImage('missing:1', docker),
+    /no such image: missing:1/,
+    'an unknown reference names the image',
+  );
+  docker.images.set('odd:1', { Id: 'sha256:' + 'a'.repeat(64) });
+  await assert.rejects(
+    inspectEngineImage('odd:1', docker),
+    /invalid Docker image metadata for odd:1/,
+    'an image without an OS or architecture is not accepted as a build result',
+  );
+  docker.addImage('ok:1', 'sha256:' + 'b'.repeat(64));
+  assert.deepEqual(
+    await inspectEngineImage('ok:1', docker),
+    { imageId: 'sha256:' + 'b'.repeat(64), platform: 'linux/amd64' },
+    'a complete record yields the image ID and platform',
+  );
 });

@@ -1,0 +1,7 @@
+services:
+  base:
+    image: b
+    environment: { A: '1', B: '2' }
+    ports: ['80:80']
+    command: ['x']
+    labels: { k: v }

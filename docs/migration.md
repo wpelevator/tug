@@ -102,7 +102,7 @@ Workload data is not part of the control backup. Back it up and restore it separ
 
 Plain `tug node remove <name>` only deletes the record and leaves the host running.
 
-On a former control host remove the control stack and its data, which includes the master key and the private CA: take the backup first, then `docker compose -p tug-control down`, `docker volume rm tug-control` and `rm -rf /opt/tug-control` (plus `/var/lib/tug-control` if the host was never migrated). Remove Docker itself only if nothing else uses it.
+On a former control host remove the control stack and its data, which includes the master key and the private CA: take the backup first, then `docker rm -f tug-control-control-1`, `docker volume rm tug-control` and `rm -rf /opt/tug-control` (plus `/var/lib/tug-control` if the host was never migrated). Remove Docker itself only if nothing else uses it.
 
 Locally, delete the host from `tug.yml`, and remove stale credentials under `~/.config/tug/credentials/` and any `TUG_CONTROL_URL` you exported.
 
