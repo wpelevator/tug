@@ -10,9 +10,21 @@ You need a VPS with a public IP and SSH access as root, Node.js 22.18 or newer o
 
 Replace `203.0.113.5` below with your VPS address. These commands assume an interactive terminal, where Tug explains and confirms the installation choices. For automation see [Setup in the CLI reference](cli.md#setup).
 
+## Optional: check your own app first
+
+If you already have a Compose app, you can check whether Tug supports it before you touch a server. `tug lint` reads the file offline and needs no control plane, credential or Docker:
+
+```sh
+npm install -g @wpelevator/tug
+cd path/to/your-app
+tug lint
+```
+
+It lists unsupported Compose keys (such as custom networks or Compose `secrets`) and invalid `x-tug` settings, and exits nonzero when anything is wrong. See [what Tug accepts](compose.md#not-supported). Existing Compose volumes are not reused: Tug names its volumes differently, so data moves in explicitly.
+
 ## 1. Install Tug and control
 
-On your computer, create a directory for this project and install the CLI:
+On your computer, create a directory for this project and install the CLI (skip the install if you already did):
 
 ```sh
 mkdir my-first-tug && cd my-first-tug

@@ -91,6 +91,8 @@ export interface CliLiveIO {
   stderr?: Writable;
   signals?: EventEmitter;
   signal?: AbortSignal;
+  /** Renders a `ps` or `inspect` result; defaults to indented JSON. */
+  formatResult?: (value: unknown) => string;
 }
 export class CliLiveError extends Error {
   readonly exitCode: number;
@@ -216,7 +218,7 @@ export async function runCliLive(
             throw new CliLiveError('remote operation returned an invalid exit code');
           if (event.code === 0 && (request.operation === 'ps' || request.operation === 'inspect')) {
             if (!hasResult) throw new CliLiveError('remote operation exited without a JSON result');
-            await write(stdout, formatLiveResult(result));
+            await write(stdout, (io.formatResult ?? formatLiveResult)(result));
           }
           return event.code;
       }

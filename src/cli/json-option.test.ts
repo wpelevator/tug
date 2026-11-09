@@ -150,6 +150,13 @@ test(
             '--allow-empty accepts a project with no targets',
           );
       }
+      const events = JSON.parse(await cli('events', '--all', '--json'));
+      assert.ok(Array.isArray(events.events), 'events --json prints the API document');
+      assert.match(
+        await cli('events', '--all'),
+        /^(TIME\s+LEVEL\s+TYPE\s+PROJECT\s+ACTOR\s+MESSAGE\n|No events\n$)/,
+        'events without --json prints a table (with PROJECT for --all) instead of JSON',
+      );
       const init = JSON.parse(await cli('init', control.credentialFile, '--json'));
       assert.equal(init.ok, true, 'init --json reports success as JSON instead of "wrote" lines');
       assert.ok(
