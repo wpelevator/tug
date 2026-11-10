@@ -98,11 +98,14 @@ async function warnWhenSetupChangesInstall(
   sshTarget: string,
   plan: { controlUrl: string; port: number; extraSans: string[] },
 ): Promise<void> {
-  const existing = await runCapture('ssh', ['--', sshTarget, inspectControlScript]).then(
-    parseControlInspect,
-    () => undefined,
-  );
-  if (!existing) return;
+  let existing: ControlInstall;
+  try {
+    existing = parseControlInspect(
+      await runCapture('ssh', ['--', sshTarget, inspectControlScript]),
+    );
+  } catch {
+    return; // nothing installed yet (or not by setup): there is nothing to compare
+  }
   const changes = [
     ...(existing.port !== plan.port ? [`port ${existing.port} -> ${plan.port}`] : []),
     ...(new URL(existing.controlUrl).origin !== new URL(plan.controlUrl).origin
@@ -179,10 +182,7 @@ export async function runControlUpgrade(
         { cause: e },
       );
     }
-    if (o.rollback)
-      await runCapture('ssh', ['--', sshTarget, rollbackImageScript]).catch((e: unknown) => {
-        throw new Error(errMessage(e), { cause: e });
-      });
+    if (o.rollback) await runCapture('ssh', ['--', sshTarget, rollbackImageScript]);
     if (alreadyRunning(current.image, image, o.force) && !o.buildLocalImage) {
       console.error(
         `control on ${sshTarget} already runs ${image}; nothing to do (--force recreates it)`,
