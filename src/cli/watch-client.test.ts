@@ -9,6 +9,7 @@ import type WebSocket from 'ws';
 import type { Credential } from '../pki.ts';
 import type { WatchFrame } from '../protocol.ts';
 import { WatchClient, parseWatchFrame } from './watch-client.ts';
+import { until } from '../../tests/wait.ts';
 
 class FakeSocket extends EventEmitter {
   terminated = false;
@@ -44,13 +45,6 @@ function client(over: { initialBackoffMs?: number } = {}) {
   });
   return { instance, sockets, urls, frames, states };
 }
-const until = async (condition: () => boolean, what: string) => {
-  const deadline = Date.now() + 2000;
-  while (!condition()) {
-    if (Date.now() > deadline) assert.fail(`timed out waiting for ${what}`);
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
-};
 
 test('frames are validated: unknown, malformed and unversioned frames are dropped', () => {
   assert.deepEqual(parseWatchFrame(JSON.stringify(ready)), ready, 'a ready frame parses');
