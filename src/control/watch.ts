@@ -4,6 +4,7 @@ import type { Db } from '../db/db.ts';
 import { LIVE_MAX_BUFFERED_BYTES } from '../protocol.ts';
 import type { WatchChange, WatchEvent, WatchFrame, WatchTopic } from '../protocol.ts';
 import type { Actor } from './credentials.ts';
+import { eventForRole } from './event-redaction.ts';
 
 /** A node as the watch channel sees it: its derived status (never stored) and whether its stream socket is open. */
 export interface WatchNode {
@@ -300,7 +301,12 @@ export class WatchHub {
     const cursor = rows[rows.length - 1].seq;
     if (
       visible.length &&
-      !this.send(subscriber, { v: 1, type: 'watch.events', events: visible, cursor })
+      !this.send(subscriber, {
+        v: 1,
+        type: 'watch.events',
+        events: visible.map((event) => eventForRole(event, subscriber.actor.role)),
+        cursor,
+      })
     )
       return false;
     subscriber.cursor = cursor;

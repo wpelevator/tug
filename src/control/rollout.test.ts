@@ -224,6 +224,34 @@ test('the edge on the app node itself reaches a rolling service on loopback and 
   }
 });
 
+test("control routes to the port an agent reports, whatever range the node chose, except the node's management ports", async () => {
+  const s = await server();
+  try {
+    const app = await s.register('app', { address: '192.168.1.5' });
+    await s.post('/api/v1/nodes/app/ingress', { enabled: true });
+    await s.deploy(stack('web:1'), 'v1');
+    const upstreams = async () =>
+      (await json(await fetch(`${s.base}/agent/v1/work`, { headers: s.agent(app.nodeId) }))).ingress
+        .routes[0].upstreams;
+    await s.report(app.nodeId, 'app', 'serving', serving(30000));
+    assert.deepEqual(
+      await upstreams(),
+      ['127.0.0.1:30000'],
+      'a node with a custom TUG_ROLLOUT_PORTS keeps its rolling endpoints: control has no range of its own to filter by',
+    );
+    for (const reserved of [2019, 2021]) {
+      await s.report(app.nodeId, 'app', 'serving', serving(reserved));
+      assert.deepEqual(
+        await upstreams(),
+        [],
+        `port ${reserved} belongs to Caddy's loopback management endpoints and is never routed to`,
+      );
+    }
+  } finally {
+    await s.close();
+  }
+});
+
 test('recreated services still route to their declared published port', async () => {
   const s = await server();
   try {

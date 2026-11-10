@@ -28,20 +28,25 @@ async function server() {
   const reg = await json(await call('POST', '/api/v1/nodes/register', { name: 'n1' }));
   const node = { 'x-tug-test-node': reg.nodeId, 'content-type': 'application/json' };
   return {
-    deploy: (project: string, version: string, host: string) =>
-      call('POST', '/api/v1/deployments', {
-        project,
-        version,
-        compose: {
-          services: {
-            web: {
-              image: 'nginx',
-              ports: ['8080:80'],
-              'x-tug': { placement: { nodes: ['n1'] }, ingress: { host, port: 80 } },
+    deploy: (project: string, version: string, host: string, headers = operator) =>
+      call(
+        'POST',
+        '/api/v1/deployments',
+        {
+          project,
+          version,
+          compose: {
+            services: {
+              web: {
+                image: 'nginx',
+                ports: ['8080:80'],
+                'x-tug': { placement: { nodes: ['n1'] }, ingress: { host, port: 80 } },
+              },
             },
           },
         },
-      }),
+        headers,
+      ),
     serve: (project: string, version: string, revision: string) =>
       call(
         'POST',
@@ -53,7 +58,22 @@ async function server() {
         },
         node,
       ),
-    rollback: (project: string) => call('POST', '/api/v1/rollback', { project, force: true }),
+    rollback: (project: string, headers = operator) =>
+      call('POST', '/api/v1/rollback', { project, force: true }, headers),
+    map: (project: string, host: string, headers = operator) =>
+      call('POST', '/api/v1/domains', { project, host, service: 'web' }, headers),
+    scoped: async (project: string) => {
+      const response = await call('POST', '/api/v1/credentials', {
+        name: `ci-${project}`,
+        role: 'deploy',
+        projects: [project],
+      });
+      assert.equal(response.status, 200, 'the scoped credential must be created');
+      return {
+        'x-tug-test-credential': (await json(response)).credential as string,
+        'content-type': 'application/json',
+      };
+    },
     close: () => new Promise((resolve) => srv.close(resolve)),
   };
 }
@@ -132,6 +152,36 @@ test('wildcard hostnames overlap exact hosts owned by another project', async ()
       409,
       "a wildcard covering another project's exact host is refused",
     );
+  } finally {
+    await s.close();
+  }
+});
+
+test('scoped deploy, rollback and domain mapping report a conflict without exposing its owner', async () => {
+  const s = await server();
+  try {
+    const scope = await s.scoped('alpha');
+    const old = await json(await s.deploy('alpha', 'v1', 'shop.example.com'));
+    await s.serve('alpha', 'v1', old.desiredState.revision);
+    const current = await json(await s.deploy('alpha', 'v2', 'shop.example.net'));
+    await s.serve('alpha', 'v2', current.desiredState.revision);
+    assert.equal(
+      (await s.deploy('other', 'v1', '*.example.com')).status,
+      200,
+      'another project owns the wildcard',
+    );
+    for (const response of [
+      await s.deploy('alpha', 'v3', 'shop.example.com', scope),
+      await s.rollback('alpha', scope),
+      await s.map('alpha', 'shop.example.com', scope),
+    ]) {
+      assert.equal(response.status, 409, 'scoped callers still see hostname conflicts');
+      assert.equal(
+        (await json(response)).error,
+        'shop.example.com is already claimed by another project',
+        'the response names only the requested hostname',
+      );
+    }
   } finally {
     await s.close();
   }

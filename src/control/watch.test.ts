@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import net from 'node:net';
 import fs from 'node:fs/promises';
 import { EventEmitter } from 'node:events';
 import http from 'node:http';
@@ -164,7 +165,12 @@ test('the watch upgrade needs an operator credential of any role, and says WebSo
       426,
       'a plain GET explains that an upgrade is required',
     );
-    const watcher = await open(s, '/api/v1/watch', read);
+    assert.equal(
+      await rejected(s.base, '/api/v1/unknown', read),
+      404,
+      'an unknown upgrade path is refused',
+    );
+    const watcher = await open(s, '/api/v1/watch?client=test', read);
     const ready = (await watcher.next('watch.ready')) as unknown as Extract<
       WatchFrame,
       { type: 'watch.ready' }
@@ -421,6 +427,168 @@ test('events can be followed by seq: after returns the newer ones oldest first, 
       400,
       'a bad cursor is a 400',
     );
+  } finally {
+    await s.close();
+  }
+});
+
+test('an event limit is clamped into 1-500 and a missing or non-numeric one is the default', async () => {
+  const s = await server();
+  try {
+    await s.call(
+      'POST',
+      '/agent/v1/events',
+      { events: Array.from({ length: 120 }, () => event({ message: 'ready' })) },
+      s.registered.nodeId,
+    );
+    const count = async (limit: string, after = '') =>
+      (await eventsAfter(s, `?limit=${limit}${after}`)).events.length;
+    for (const after of ['', '&after=0']) {
+      assert.equal(await count('-1', after), 1, 'a negative limit is clamped up to one row');
+      assert.equal(await count('0', after), 1, 'zero is clamped up to one row');
+      assert.equal(await count('2.9', after), 2, 'a fraction is truncated');
+      assert.equal(
+        await count('abc', after),
+        100,
+        'a non-numeric limit is the default, not an error',
+      );
+      assert.equal(await count('', after), 100, 'an empty limit is the default');
+    }
+    assert.equal(
+      (await eventsAfter(s, '')).events.length,
+      100,
+      'a missing limit is the default of 100',
+    );
+  } finally {
+    await s.close();
+  }
+});
+
+test('a read credential gets one-off run events without the command, and deploy and admin keep it', async () => {
+  const s = await server();
+  try {
+    assert.equal((await deployWeb(s)).status, 200, 'the project places a service on the node');
+    const read = await s.mint('reader', 'read');
+    const deploy = await s.mint('deployer', 'deploy');
+    await s.call(
+      'POST',
+      '/agent/v1/events',
+      event({
+        type: 'job.run',
+        message: 'ci ran a one-off web container on n1: wp user create --user_pass=hunter2',
+        metadata: {
+          service: 'web',
+          node: 'n1',
+          command: ['wp', 'user', 'create', '--user_pass=hunter2'],
+        },
+      }),
+      s.registered.nodeId,
+    );
+    const eventsAs = async (token: string) =>
+      (
+        await json(
+          await fetch(`${s.base}/api/v1/events?project=site`, { headers: idHeaders(token) }),
+        )
+      ).events as { type: string; message: string; metadata_json: string }[];
+    const asRead = (await eventsAs(read)).find((e) => e.type === 'job.run');
+    assert.ok(asRead, 'the reader still sees that a one-off container ran');
+    assert.equal(
+      asRead.message,
+      'ci ran a one-off web container on n1',
+      'the message keeps who ran what where and drops the command',
+    );
+    assert.deepEqual(
+      JSON.parse(asRead.metadata_json),
+      { service: 'web', node: 'n1' },
+      'the metadata keeps the service and node and drops the command',
+    );
+    for (const token of [deploy, OPERATOR]) {
+      const full = (await eventsAs(token)).find((e) => e.type === 'job.run');
+      assert.match(
+        full?.message ?? '',
+        /hunter2/,
+        'deploy and admin can already exec, so they see the command',
+      );
+      assert.deepEqual(
+        JSON.parse(full?.metadata_json ?? '{}').command,
+        ['wp', 'user', 'create', '--user_pass=hunter2'],
+        'the stored record is complete',
+      );
+    }
+    const watcher = await open(s, '/api/v1/watch', read);
+    await watcher.next('watch.ready');
+    await s.call(
+      'POST',
+      '/agent/v1/events',
+      event({
+        type: 'job.run',
+        message: 'ci ran a one-off web container on n1: second --secret=abc',
+        metadata: { service: 'web', node: 'n1', command: ['second', '--secret=abc'] },
+      }),
+      s.registered.nodeId,
+    );
+    const pushed = (await watcher.next('watch.events')) as {
+      events: { message: string; metadata_json: string }[];
+    };
+    assert.doesNotMatch(
+      JSON.stringify(pushed),
+      /secret=abc/,
+      'a read watcher is not pushed the command either',
+    );
+    assert.equal(
+      pushed.events[0].message,
+      'ci ran a one-off web container on n1',
+      'the pushed message is redacted',
+    );
+  } finally {
+    await s.close();
+  }
+});
+
+test('a malformed upgrade request target is refused without taking control down', async () => {
+  const s = await server();
+  try {
+    const { port, hostname } = new URL(s.base);
+    for (const target of ['//[', '//', '/api/v1/watch/../x', 'http://[']) {
+      const answer = await new Promise<string>((resolve, reject) => {
+        const socket = net.connect(Number(port), hostname);
+        let received = '';
+        socket.setTimeout(3000, () => reject(new Error(`no answer to an upgrade for ${target}`)));
+        socket.on('data', (chunk) => (received += chunk));
+        socket.on('close', () => resolve(received));
+        socket.on('error', reject);
+        socket.write(
+          `GET ${target} HTTP/1.1\r\nHost: x\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n`,
+        );
+      });
+      assert.match(answer, /^HTTP\/1\.1 404 /, `an upgrade for ${target} is a plain 404`);
+    }
+    assert.equal(
+      (await s.call('GET', '/api/v1/status')).status,
+      200,
+      'control is still serving after the malformed upgrades',
+    );
+  } finally {
+    await s.close();
+  }
+});
+
+test('event pages enforce the server row cap for either sort order', async () => {
+  const s = await server();
+  try {
+    for (let batch = 0; batch < 6; batch++) {
+      const response = await s.call(
+        'POST',
+        '/agent/v1/events',
+        { events: Array.from({ length: 100 }, () => event({ message: 'ready' })) },
+        s.registered.nodeId,
+      );
+      assert.equal(response.status, 200, 'a normal batch of events is stored');
+    }
+    for (const query of ['?limit=1000', '?after=0&limit=1000']) {
+      const page = await eventsAfter(s, query);
+      assert.equal(page.events.length, 500, 'the server never returns more than 500 rows per page');
+    }
   } finally {
     await s.close();
   }

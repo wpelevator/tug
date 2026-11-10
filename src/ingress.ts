@@ -66,11 +66,14 @@ export function resolveServiceEndpoints(
           service
         ];
         if (serviceState?.rolloutState !== 'serving') continue;
-        // Rolling services publish each revision on its own host port; the report names the serving one.
+        // Rolling services publish each revision on its own host port; the report names the serving one. A valid port that
+        // belongs to Caddy's loopback management endpoints is never an upstream, so that endpoint is withdrawn.
+        const reportedPort = serviceState.port;
+        if (isPort(reportedPort) && !isRolloutPort(reportedPort)) continue;
         endpoints.push({
           node: nodeName,
           address,
-          ...(isPort(serviceState.port) ? { port: serviceState.port } : {}),
+          ...(isPort(reportedPort) ? { port: reportedPort } : {}),
         });
       }
       if (endpoints.length)
@@ -281,6 +284,14 @@ export interface RenderOptions {
 export const ASK_PORT = 2021;
 /** Caddy's admin endpoint (`caddy reload`, metrics), also on the node's loopback. */
 export const CADDY_ADMIN_PORT = 2019;
+
+/**
+ * A host port a rolling revision may be published on or routed to: a real port that is not one of the node's loopback
+ * management ports. There is deliberately no range: `TUG_ROLLOUT_PORTS` is each agent's own setting, and a node
+ * already controls its own host, so control has nothing to gain by second-guessing the range it chose.
+ */
+export const isRolloutPort = (value: unknown): value is number =>
+  isPort(value) && value !== CADDY_ADMIN_PORT && value !== ASK_PORT;
 
 const isWildcard = (host: string) => host.startsWith('*.');
 /** The wildcard zone `example.com` of `*.example.com`; only host-name characters ever reach a Caddy expression. */

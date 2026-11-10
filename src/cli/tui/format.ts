@@ -1,18 +1,7 @@
-import { clipToColumns, columnWidth, plainText } from '../width.ts';
+import { clipToColumns, columnWidth } from '../width.ts';
 import type { Tone } from './types.ts';
 
-// A terminal escape sequence: CSI (ESC [ ... final), OSC (ESC ] ... BEL or ST), and two-character escapes.
-// eslint-disable-next-line no-control-regex
-const ESCAPES = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?|\x1b[@-Z\\-_]|\x1b/g;
-
-/**
- * Text that came from a workload, an event or an error message, made safe to draw: escape sequences removed (a
- * container must not be able to retitle the window, move the cursor or write to the clipboard) and every remaining
- * control character replaced by a space. Tabs and newlines flatten to spaces too; callers split lines first.
- */
-export function sanitize(text: string): string {
-  return plainText(text.replace(ESCAPES, ''));
-}
+export { sanitizeTerminalText as sanitize } from '../width.ts';
 
 /** "3s", "12m", "2h", "3d": the largest whole unit, for a table cell. */
 export function ageOf(iso: string | null | undefined, now: number): string {
