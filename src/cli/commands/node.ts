@@ -17,7 +17,14 @@ import { terminalPicker } from '../pick.ts';
 import { runStep, STAGE_MARKER } from '../process.ts';
 import type { Prompter } from '../prompt.ts';
 import { isNodeHost } from '../../node-address.ts';
-import { assertImagePublished, resolveImage } from '../../images/image.ts';
+import { assertImagePublished, defaultImage, resolveImage } from '../../images/image.ts';
+import {
+  alreadyRunning,
+  assertNotAheadOfControl,
+  inspectAgentScript,
+  parseAgentInspect,
+} from '../upgrade.ts';
+import type { AgentInstall } from '../upgrade.ts';
 import type { EnrollmentCredentialResponse, IdentityResponse, JoinKey } from '../../protocol.ts';
 import { loadTemplate } from '../load-template.ts';
 import {
@@ -398,6 +405,127 @@ async function migrateNode(
   return reporting;
 }
 
+export interface NodeUpgradeOpts {
+  name?: string;
+  all?: boolean;
+  select?: boolean;
+  to?: string;
+  image?: string;
+  buildLocalImage?: boolean;
+  agentControlUrl?: string;
+  force?: boolean;
+  wait: boolean;
+}
+
+type UpgradeResult = {
+  node: string;
+  ok: boolean;
+  upgraded?: boolean;
+  reporting?: boolean;
+  error?: string;
+};
+
+/**
+ * Replaces one enrolled node's agent with another image over SSH, with its key, address, labels and connect-only URL
+ * (read from the running container) unchanged. A node already on the target image is skipped.
+ */
+async function upgradeNode(
+  sshTarget: string,
+  name: string,
+  o: NodeUpgradeOpts,
+  registered: ReadonlySet<string>,
+): Promise<UpgradeResult> {
+  if (!registered.has(name))
+    throw new Error(`node ${name} is not registered with control; \`tug node add\` enrolls it`);
+  let current: AgentInstall;
+  try {
+    current = parseAgentInspect(await runCapture('ssh', ['--', sshTarget, inspectAgentScript]));
+  } catch (e) {
+    throw new Error(
+      `no agent container on ${sshTarget} (${errMessage(e)}); \`tug node add\` installs one`,
+      { cause: e },
+    );
+  }
+  const image = resolveImage(o.image ?? (o.to ? defaultImage(o.to) : undefined), o.buildLocalImage);
+  if (alreadyRunning(current.image, image, o.force) && !o.buildLocalImage) {
+    console.error(`node ${name} already runs ${image}; skipped (--force reinstalls it)`);
+    return { node: name, ok: true, upgraded: false };
+  }
+  const agentControlUrl = o.agentControlUrl ?? current.controlUrl;
+  if (!o.agentControlUrl && current.controlUrl)
+    console.error(`node ${name}: keeping the agent's connect URL ${current.controlUrl}`);
+  console.error(`node ${name}: ${current.image} -> ${image}`);
+  const reporting = await installNodeIdentity(
+    sshTarget,
+    name,
+    'create',
+    {
+      label: [],
+      wait: o.wait,
+      image: o.image ?? (o.to ? defaultImage(o.to) : undefined),
+      buildLocalImage: o.buildLocalImage,
+      agentControlUrl,
+    },
+    false,
+    false,
+  );
+  return { node: name, ok: true, upgraded: true, ...(o.wait ? { reporting } : {}) };
+}
+
+/** `node upgrade`, also what `tug upgrade` runs for every configured node once control is upgraded. */
+export async function runNodeUpgrade(
+  positional: { name?: string; ssh?: string },
+  o: NodeUpgradeOpts,
+  command: Command,
+): Promise<boolean> {
+  const cfg = await loadCfg();
+  if (o.select && o.all) throw new Error('--select and --all cannot be combined');
+  if ((o.all || o.select) && (positional.name || positional.ssh))
+    throw new Error('node upgrade --all/--select cannot be combined with a node or SSH target');
+  if (o.to && (o.image || o.buildLocalImage))
+    throw new Error(
+      '--to names a published version; it cannot be combined with --image or --build-local-image',
+    );
+  if (o.agentControlUrl) normalizeControlUrl(o.agentControlUrl);
+  // Fail before touching any host: no credential, a control older than this CLI, or --to newer than the control.
+  const control = await transportFor(cfg, 'probe');
+  await control.close();
+  if (o.to)
+    assertNotAheadOfControl(o.to, (await request<{ v: string }>('GET', '/api/v1/version')).v);
+  const { nodes } = await request<{ nodes: { name: string }[] }>('GET', '/api/v1/nodes');
+  const registered = new Set(nodes.map((n) => n.name));
+  if (o.all || o.select) {
+    const names = o.select
+      ? await selectNodes(Object.keys(cfg.nodes).filter((name) => cfg.nodes[name].ssh))
+      : Object.keys(cfg.nodes);
+    const results: UpgradeResult[] = [];
+    for (const name of names) {
+      const target = cfg.nodes[name].ssh as string | undefined;
+      if (!target) continue;
+      const merged = { ...o, name };
+      applyConfigDefaults(command, merged, nodeSettings(cfg, name));
+      try {
+        results.push(await upgradeNode(target, name, merged, registered));
+      } catch (e) {
+        results.push({ node: name, ok: false, error: errMessage(e) });
+      }
+    }
+    print({ results });
+    return !results.some((r) => !r.ok || r.reporting === false);
+  }
+  const name = positional.name ?? (await selectNode());
+  o.name = name;
+  applyConfigDefaults(command, o, nodeSettings(cfg, name));
+  const sshTarget = positional.ssh ?? (nodeSettings(cfg, name).ssh as string | undefined);
+  if (!sshTarget)
+    throw new Error(
+      `node upgrade needs an SSH target: pass <ssh-target> or set nodes.${name}.ssh in ${cfg.file}`,
+    );
+  const result = await upgradeNode(sshTarget, name, o, registered);
+  print(result);
+  return result.reporting !== false;
+}
+
 async function runNodeMigrate(
   positional: { name?: string; ssh?: string },
   o: NodeIdentityOpts,
@@ -489,6 +617,39 @@ export function registerNode(program: Command): void {
         ) => runNodeIdentity({ name, ssh }, o, 'replace', command, repair),
       );
   }
+
+  node
+    .command('upgrade [name] [sshTarget]')
+    .description(
+      "replace an enrolled node's agent with another Tug image (default: this CLI's version) over SSH, keeping its key, address, labels and connect-only control URL; a node already on the image is skipped. The SSH target defaults to nodes.<name>.ssh in the config file; --all walks every configured node, continuing after failures. Upgrade the control first (tug control upgrade)",
+    )
+    .option('--all', 'walk every node with an ssh target in the config file')
+    .option('--select', 'choose registered nodes with configured SSH targets')
+    .option('--to <version>', "upgrade to this published version instead of the CLI's own")
+    .option(
+      '--image <tag>',
+      "Tug image to run (default: ghcr.io/wpelevator/tug:<this CLI's version>)",
+    )
+    .option(
+      '--build-local-image',
+      'build the image from the current checkout and copy it to the host over SSH (tags it tug:local unless --image is set); for development',
+    )
+    .option(
+      '--agent-control-url <url>',
+      'connect-only URL the agent dials; by default the one the running agent already uses',
+    )
+    .option('--force', 'reinstall the agent even when it already runs the target image')
+    .option('--no-wait', 'do not wait for the node to report after the install')
+    .action(
+      async (
+        name: string | undefined,
+        ssh: string | undefined,
+        o: NodeUpgradeOpts,
+        command: Command,
+      ) => {
+        if (!(await runNodeUpgrade({ name, ssh }, o, command))) process.exitCode = 1;
+      },
+    );
 
   node
     .command('migrate [name] [sshTarget]')

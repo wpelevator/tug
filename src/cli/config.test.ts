@@ -572,3 +572,26 @@ test('init writes the credential URL into a new tracked file when no URL was giv
     );
   });
 });
+
+test('controlSsh names the control host, and the overlay wins over the tracked file', async () => {
+  await withDir(async (dir) => {
+    await fs.writeFile(path.join(dir, 'tug.yml'), 'controlSsh: root@control.test\n');
+    assert.equal(
+      (await resolveCliConfig({}, {}, dir)).controlSsh,
+      'root@control.test',
+      'controlSsh should be read from the tracked file',
+    );
+    await fs.writeFile(path.join(dir, 'tug.local.yml'), 'controlSsh: ops@private.test\n');
+    assert.equal(
+      (await resolveCliConfig({}, {}, dir)).controlSsh,
+      'ops@private.test',
+      'the overlay should override controlSsh key by key',
+    );
+    await fs.writeFile(path.join(dir, 'tug.yml'), 'controlSsh: ""\n');
+    await assert.rejects(
+      resolveCliConfig({}, {}, dir),
+      /controlSsh must be a nonempty single-line string/,
+      'an empty controlSsh should be rejected like the other string keys',
+    );
+  });
+});

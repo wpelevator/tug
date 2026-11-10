@@ -6,7 +6,18 @@ import { runProcess, runStep, STAGE_MARKER } from '../process.ts';
 import type { Command } from 'commander';
 import { canPrompt, confirm } from '../prompt.ts';
 import { CONTROL_CONTAINER, defaultControlUrl, shellQuote as sh } from '../install.ts';
-import { assertImagePublished, resolveImage } from '../../images/image.ts';
+import type { StepProgress } from '../process.ts';
+import {
+  ROLLBACK_TAG,
+  alreadyRunning,
+  inspectControlScript,
+  parseControlInspect,
+  readControlCaScript,
+  rollbackImageScript,
+  rollbackTagScript,
+} from '../upgrade.ts';
+import type { ControlInstall } from '../upgrade.ts';
+import { assertImagePublished, defaultImage, resolveImage } from '../../images/image.ts';
 import { decodeCredential, fingerprintPem, writeFileDurable } from '../../pki.ts';
 import { loadTemplate } from '../load-template.ts';
 import { errMessage } from '../../errors.ts';
@@ -18,6 +29,7 @@ import {
   readEnvValues,
   readStdin,
   request,
+  runCapture,
   templatesDir,
   upload,
 } from './context.ts';
@@ -62,6 +74,181 @@ interface SetupOpts extends InstallOpts {
   import: boolean;
   recoverRoot?: boolean;
   yes?: boolean;
+}
+
+/** Replaces the control container with one running `image` on the same volume; the data is never touched. */
+async function installControlContainer(
+  sshTarget: string,
+  plan: { image: string; controlUrl: string; port: number; extraSans: string[] },
+  progress: StepProgress,
+): Promise<void> {
+  const remote = await loadTemplate(templatesDir, 'control-install.sh', {
+    IMAGE_SH: sh(plan.image),
+    CONTROL_URL_SH: sh(new URL(plan.controlUrl).origin),
+    EXTRA_SANS_SH: sh(plan.extraSans.join(',')),
+    PORT: String(plan.port),
+    MARKER: STAGE_MARKER,
+    CONTAINER_SH: sh(CONTROL_CONTAINER),
+  });
+  await runStep('ssh', ['--', sshTarget, remote], { progress });
+}
+
+/** Running `control setup` over an existing control rebuilds it from this run's flags alone; say what that changes. */
+async function warnWhenSetupChangesInstall(
+  sshTarget: string,
+  plan: { controlUrl: string; port: number; extraSans: string[] },
+): Promise<void> {
+  const existing = await runCapture('ssh', ['--', sshTarget, inspectControlScript]).then(
+    parseControlInspect,
+    () => undefined,
+  );
+  if (!existing) return;
+  const changes = [
+    ...(existing.port !== plan.port ? [`port ${existing.port} -> ${plan.port}`] : []),
+    ...(new URL(existing.controlUrl).origin !== new URL(plan.controlUrl).origin
+      ? [`control URL ${existing.controlUrl} -> ${new URL(plan.controlUrl).origin}`]
+      : []),
+    ...(existing.extraSans.slice().sort().join(',') !== plan.extraSans.slice().sort().join(',')
+      ? [`extra names [${existing.extraSans.join(', ')}] -> [${plan.extraSans.join(', ')}]`]
+      : []),
+  ];
+  if (changes.length)
+    console.error(
+      `note: control is already installed on ${sshTarget} and this run changes its settings (${changes.join('; ')}); to move to a new release and keep them, use \`tug control upgrade\``,
+    );
+}
+
+interface UpgradeOpts {
+  to?: string;
+  image?: string;
+  buildLocalImage?: boolean;
+  force?: boolean;
+  rollback?: boolean;
+  yes?: boolean;
+}
+
+/** The control's own version, retried while the container finishes starting; undefined without a credential or an answer. */
+async function waitForControlVersion(): Promise<string | undefined> {
+  if (!(await loadCfg()).credential) return undefined;
+  for (let i = 0; i < 15; i++) {
+    try {
+      return (await request<{ v: string }>('GET', '/api/v1/version')).v;
+    } catch {
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+  }
+  return undefined;
+}
+
+/**
+ * `control upgrade`: replaces the control container on the host with one running another image, keeping the port,
+ * the advertised URL and the extra names it was installed with (read from the running container, so nothing has to be
+ * passed again). The previous image is tagged `tug:rollback` first; the data volume and the CA are never touched, and
+ * the CA is compared before and after.
+ */
+export async function runControlUpgrade(
+  sshTargetArg: string | undefined,
+  o: UpgradeOpts,
+): Promise<boolean> {
+  const cfg = await loadCfg();
+  const sshTarget = sshTargetArg ?? cfg.controlSsh;
+  if (!sshTarget)
+    throw new Error(
+      `control upgrade needs the control host: pass <ssh-target> or set controlSsh in ${cfg.file}`,
+    );
+  if (o.rollback && (o.to || o.image || o.buildLocalImage))
+    throw new Error('--rollback cannot be combined with --to, --image or --build-local-image');
+  if (o.to && (o.image || o.buildLocalImage))
+    throw new Error(
+      '--to names a published version; it cannot be combined with --image or --build-local-image',
+    );
+  const image = o.rollback
+    ? ROLLBACK_TAG
+    : resolveImage(o.image ?? (o.to ? defaultImage(o.to) : undefined), o.buildLocalImage);
+  if (!o.rollback) assertImagePublished(image);
+  return withProgress(`Upgrading control on ${sshTarget}`, async (progress) => {
+    progress.stage(`Reading the control installation on ${sshTarget}`);
+    let current: ControlInstall;
+    try {
+      current = parseControlInspect(
+        await runCapture('ssh', ['--', sshTarget, inspectControlScript]),
+      );
+    } catch (e) {
+      throw new Error(
+        `no control installation to upgrade on ${sshTarget} (${errMessage(e)}); \`tug control setup <ssh-target>\` installs one`,
+        { cause: e },
+      );
+    }
+    if (o.rollback)
+      await runCapture('ssh', ['--', sshTarget, rollbackImageScript]).catch((e: unknown) => {
+        throw new Error(errMessage(e), { cause: e });
+      });
+    if (alreadyRunning(current.image, image, o.force) && !o.buildLocalImage) {
+      console.error(
+        `control on ${sshTarget} already runs ${image}; nothing to do (--force recreates it)`,
+      );
+      print({ ok: true, sshTarget, image, upgraded: false });
+      return true;
+    }
+    console.error(
+      [
+        o.rollback ? 'Control rollback plan' : 'Control upgrade plan',
+        `  host:        ${sshTarget}`,
+        `  image:       ${current.image} -> ${image}`,
+        `  mTLS port:   ${current.port} (kept)`,
+        `  control URL: ${current.controlUrl} (kept)`,
+        ...(current.extraSans.length
+          ? [`  extra names: ${current.extraSans.join(', ')} (kept)`]
+          : []),
+        ...(o.rollback
+          ? [
+              '  note:        a newer control may already have migrated the database; one that cannot read it',
+              '               restarts in a loop until you restore the tug.db.pre-v<N>.bak copy or a control backup',
+            ]
+          : []),
+      ].join('\n'),
+    );
+    if (
+      canPrompt() &&
+      !o.yes &&
+      !(await confirm(`${o.rollback ? 'Roll back' : 'Upgrade'} control?`))
+    )
+      throw new Error('cancelled; nothing was changed');
+    const before = fingerprintPem(await runCapture('ssh', ['--', sshTarget, readControlCaScript]));
+    progress.stage(`Checking control host ${sshTarget}`);
+    await preflightRemote(sshTarget, { ports: [current.port], minDiskMb: 2048, progress });
+    const runImage = o.buildLocalImage ? await transferTugImage(sshTarget, image, progress) : image;
+    progress.stage(`Checking control data on ${sshTarget}`);
+    await runStep('ssh', ['--', sshTarget, controlGuardScript(runImage)], { progress });
+    if (!o.rollback && current.image !== runImage) {
+      progress.stage(`Keeping ${current.image} as ${ROLLBACK_TAG}`);
+      await runStep('ssh', ['--', sshTarget, rollbackTagScript(current.imageId)], { progress });
+    }
+    progress.stage(`Replacing control on ${sshTarget}`);
+    await installControlContainer(sshTarget, { ...current, image: runImage }, progress);
+    const after = fingerprintPem(await runCapture('ssh', ['--', sshTarget, readControlCaScript]));
+    if (after !== before)
+      throw new Error(
+        `control's CA changed from ${before} to ${after} during the upgrade; inspect /data/pki on ${sshTarget} before using it`,
+      );
+    progress.stage('Waiting for control to answer');
+    const version = await waitForControlVersion();
+    if (!version)
+      console.error(
+        `control restarted but did not answer yet (or no credential is configured); check \`tug doctor\` and \`docker logs ${CONTROL_CONTAINER}\` on ${sshTarget}`,
+      );
+    console.error(
+      `control now runs ${runImage}${version ? ` (version ${version})` : ''}; match the agents next with \`tug node upgrade --all\``,
+    );
+    print({
+      ok: true,
+      sshTarget,
+      image: runImage,
+      upgraded: true,
+      ...(version ? { version } : {}),
+    });
+    return true;
+  });
 }
 
 /** `control setup`, also registered as the top-level shortcut `setup`. */
@@ -145,6 +332,11 @@ function addSetup(parent: Command, description: string): void {
           minDiskMb: 2048,
           progress,
         });
+        await warnWhenSetupChangesInstall(sshTarget, {
+          controlUrl,
+          port: Number(o.port),
+          extraSans: o.extraSan,
+        });
         const runImage = o.buildLocalImage
           ? await transferTugImage(sshTarget, image, progress)
           : image;
@@ -152,16 +344,12 @@ function addSetup(parent: Command, description: string): void {
         // or a fresh control would create a second CA on an empty volume (--recover-root included).
         progress.stage(`Checking control data on ${sshTarget}`);
         await runStep('ssh', ['--', sshTarget, controlGuardScript(runImage)], { progress });
-        const remote = await loadTemplate(templatesDir, 'control-install.sh', {
-          IMAGE_SH: sh(runImage),
-          CONTROL_URL_SH: sh(new URL(controlUrl).origin),
-          EXTRA_SANS_SH: sh(o.extraSan.join(',')),
-          PORT: String(Number(o.port)),
-          MARKER: STAGE_MARKER,
-          CONTAINER_SH: sh(CONTROL_CONTAINER),
-        });
         progress.stage(`Installing control on ${sshTarget}`);
-        await runStep('ssh', ['--', sshTarget, remote], { progress });
+        await installControlContainer(
+          sshTarget,
+          { image: runImage, controlUrl, port: Number(o.port), extraSans: o.extraSan },
+          progress,
+        );
         // Upgrades never reissue root: fresh installs create it, `--recover-root` replaces its key. Output goes straight to files.
         const issue = `docker exec ${sh(CONTROL_CONTAINER)} node dist/main.js control issue-credential --name root --role admin${o.recoverRoot ? ' --replace' : ''}`;
         progress.stage(`Issuing root credential on ${sshTarget}`);
@@ -233,6 +421,26 @@ export function registerControl(program: Command): void {
     .command('control')
     .description('install, back up and restore the control plane');
   addSetup(control, description);
+  control
+    .command('upgrade [sshTarget]')
+    .description(
+      "replace the control container with another Tug image (default: this CLI's version) over SSH, keeping the port, URL and extra names it runs with and the data volume; the previous image stays as tug:rollback. The SSH target defaults to controlSsh in the config file",
+    )
+    .option('--to <version>', "upgrade to this published version instead of the CLI's own")
+    .option(
+      '--image <tag>',
+      "Tug image to run (default: ghcr.io/wpelevator/tug:<this CLI's version>)",
+    )
+    .option(
+      '--build-local-image',
+      'build the image from the current checkout and copy it to the host over SSH (tags it tug:local unless --image is set); for development',
+    )
+    .option('--rollback', 'go back to the image kept as tug:rollback by the last upgrade')
+    .option('--force', 'recreate the container even when it already runs the target image')
+    .option('-y, --yes', 'do not ask for confirmation in a terminal')
+    .action(async (sshTarget: string | undefined, o: UpgradeOpts) => {
+      if (!(await runControlUpgrade(sshTarget, o))) process.exitCode = 1;
+    });
   control
     .command('migrate <sshTarget>')
     .description(

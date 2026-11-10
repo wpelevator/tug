@@ -164,7 +164,7 @@ test('a stale stamp or stampless control refuses the read-first command with the
     try {
       await assert.rejects(
         request('GET', '/api/v1/status'),
-        /tug control setup <control host> --yes/,
+        /tug control upgrade <control host> --yes/,
         `${label} is refused, from the response the read already paid for`,
       );
       assert.deepEqual(
@@ -212,7 +212,7 @@ test('a mutating first request is probed against the version route before it is 
       else
         await assert.rejects(
           request('POST', '/api/v1/deployments', { project: 'site' }),
-          /tug control setup <control host> --yes/,
+          /tug control upgrade <control host> --yes/,
           'an older control is refused before it received the mutation',
         );
       assert.deepEqual(
@@ -276,7 +276,7 @@ test('a refused control is judged again on the next request, never waved through
     for (const attempt of [1, 2])
       await assert.rejects(
         request('GET', '/api/v1/status'),
-        /tug control setup <control host> --yes/,
+        /tug control upgrade <control host> --yes/,
         `attempt ${attempt} against a stale control is refused: a refusal must not be remembered as agreement`,
       );
   } finally {

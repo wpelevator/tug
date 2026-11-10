@@ -96,7 +96,7 @@ test('a client declaring a newer version is refused before any handler runs', as
     );
     assert.match(
       body.error ?? '',
-      /tug control setup <control host> --yes/,
+      /tug control upgrade <control host> --yes/,
       'refusal names the upgrade command',
     );
     const stamp = res.headers.get('x-tug-version');
