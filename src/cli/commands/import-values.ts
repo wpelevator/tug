@@ -42,10 +42,12 @@ export async function importValues(
     fallback: mode,
   });
   const query = `?project=${encodeURIComponent(project)}`;
-  const [{ secrets }, { vars }] = await Promise.all([
-    request<{ secrets: { name: string }[] }>('GET', `/api/v1/secrets${query}`),
-    request<{ vars: { name: string }[] }>('GET', `/api/v1/vars${query}`),
-  ]);
+  // One request after the other: two in flight from one CLI process made control reset the second connection.
+  const { secrets } = await request<{ secrets: { name: string }[] }>(
+    'GET',
+    `/api/v1/secrets${query}`,
+  );
+  const { vars } = await request<{ vars: { name: string }[] }>('GET', `/api/v1/vars${query}`);
   const existing = new Map<string, 'secret' | 'var'>([
     ...secrets.map((row) => [row.name, 'secret'] as const),
     ...vars.map((row) => [row.name, 'var'] as const),

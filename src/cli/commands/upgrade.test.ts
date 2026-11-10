@@ -23,8 +23,18 @@ if (cmd === 'inspect') {
   process.stdout.write(fs.readFileSync(file, 'utf8'));
 } else if (cmd === 'info') {
   process.stdout.write('/');
-} else if (cmd === 'exec' && args.includes('cat')) {
+} else if (cmd === 'run' && args.includes('-d')) {
+  // Starting the replacement container ends the restart loop, as it does on a real host.
+  fs.rmSync(path.join(dir, 'restarting'), { force: true });
+} else if (cmd === 'exec' && fs.existsSync(path.join(dir, 'restarting'))) {
+  process.stderr.write('Error response from daemon: Container is restarting, wait until the container is running\\n'); process.exit(1);
+} else if ((cmd === 'exec' || cmd === 'run') && args.includes('cat')) {
   process.stdout.write(fs.readFileSync(path.join(dir, 'ca.crt'), 'utf8'));
+} else if (cmd === 'image' && sub === 'inspect' && args.includes('--format')) {
+  const ids = JSON.parse(fs.readFileSync(path.join(dir, 'image-ids.json'), 'utf8'));
+  const ref = args[args.length - 1];
+  if (!(ref in ids)) process.exit(1);
+  process.stdout.write(ids[ref] + '\\n');
 } else if (cmd === 'image' && sub === 'inspect' && args[2] === 'tug:rollback' && !fs.existsSync(path.join(dir, 'rollback-image'))) {
   process.exit(1);
 }
@@ -85,6 +95,11 @@ async function withHost(
     );
     assert.equal(ca.status, 0, `openssl should create a test CA: ${ca.stderr}`);
     if (installed) await fs.writeFile(path.join(dir, 'tug-control-control-1.json'), containerJson);
+    // The image IDs the host holds: the running container's, and nothing else unless a test adds it.
+    await fs.writeFile(
+      path.join(dir, 'image-ids.json'),
+      JSON.stringify({ [OLD_IMAGE]: 'sha256:oldimage' }),
+    );
     await fs.writeFile(path.join(dir, 'tug.yml'), config);
     await fs.writeFile(path.join(dir, 'calls.log'), '');
     const upgrade = async (...args: string[]) => {
@@ -175,13 +190,89 @@ test('control upgrade does nothing when the image already runs, unless forced', 
     assert.equal(result.code, 0, `a no-op upgrade should succeed: ${result.stderr}`);
     assert.match(result.stderr, /nothing to do/, 'the no-op should be explained');
     assert.ok(
-      !(await calls()).some((l) => l.startsWith('run ')),
+      !(await calls()).some((l) => l.startsWith('run -d')),
       'the container should not be recreated when it already runs the image',
     );
     await upgrade('--image', OLD_IMAGE, '--force', '--yes');
     assert.ok(
       (await calls()).some((l) => l.startsWith('run -d --name tug-control-control-1')),
       '--force should recreate the container',
+    );
+  });
+});
+
+test('a repeated upgrade to a rebuilt local tag is a no-op and leaves tug:rollback alone', async () => {
+  await withHost(async ({ dir, upgrade, calls }) => {
+    // The container was created from the build-id tag; `tug:local` names the same image ID.
+    const inspected = JSON.parse(containerJson);
+    inspected[0].Image = 'sha256:new';
+    inspected[0].Config.Image = 'tug:local-new';
+    await fs.writeFile(path.join(dir, 'tug-control-control-1.json'), JSON.stringify(inspected));
+    await fs.writeFile(
+      path.join(dir, 'image-ids.json'),
+      JSON.stringify({ 'tug:local': 'sha256:new', 'tug:local-new': 'sha256:new' }),
+    );
+    const result = await upgrade('--image', 'tug:local', '--yes');
+    assert.equal(result.code, 0, `the repeat should succeed: ${result.stderr}`);
+    assert.match(
+      result.stderr,
+      /nothing to do/,
+      'the same image ID is the same image, whatever the tag',
+    );
+    assert.ok(
+      !(await calls()).some((l) => /^(?:run -d|tag) /.test(l)),
+      'the container is not recreated and tug:rollback is not moved onto the image it already holds',
+    );
+  });
+});
+
+test('an upgrade to a different image keeps the running image as tug:rollback', async () => {
+  await withHost(async ({ dir, upgrade, calls }) => {
+    await fs.writeFile(
+      path.join(dir, 'image-ids.json'),
+      JSON.stringify({
+        [OLD_IMAGE]: 'sha256:oldimage',
+        'ghcr.io/wpelevator/tug:1.3.0': 'sha256:newer',
+      }),
+    );
+    const result = await upgrade('--image', 'ghcr.io/wpelevator/tug:1.3.0', '--yes');
+    assert.equal(result.code, 0, `the upgrade should succeed: ${result.stderr}`);
+    assert.ok(
+      (await calls()).includes('tag sha256:oldimage tug:rollback'),
+      'the image that was running is kept under tug:rollback before it is replaced',
+    );
+  });
+});
+
+test('a forced recreate onto the image already running does not move tug:rollback', async () => {
+  await withHost(async ({ upgrade, calls }) => {
+    const result = await upgrade('--image', OLD_IMAGE, '--force', '--yes');
+    assert.equal(result.code, 0, `the forced recreate should succeed: ${result.stderr}`);
+    const log = await calls();
+    assert.ok(
+      log.some((l) => l.startsWith('run -d --name tug-control-control-1')),
+      '--force recreates the container',
+    );
+    assert.ok(
+      !log.some((l) => l.startsWith('tag ')),
+      'tug:rollback must keep pointing at the image it already holds, not be moved onto the same image',
+    );
+  });
+});
+
+test('control rollback works while control restart-loops, because the CA is read from the volume', async () => {
+  await withHost(async ({ dir, upgrade, calls }) => {
+    await fs.writeFile(path.join(dir, 'rollback-image'), '');
+    await fs.writeFile(path.join(dir, 'restarting'), '');
+    const result = await upgrade('--rollback', '--yes');
+    assert.equal(
+      result.code,
+      0,
+      `a rollback must not need a running container (the case it exists for): ${result.stderr}`,
+    );
+    assert.ok(
+      (await calls()).some((l) => l.startsWith('run -d --name tug-control-control-1')),
+      'the kept image is started in place of the restart loop',
     );
   });
 });
@@ -199,7 +290,7 @@ test('control upgrade refuses unsupported published ports before replacing the c
       'the error explains how to retain the layout',
     );
     assert.ok(
-      !(await calls()).some((line) => /^(?:run|rm|tag) /.test(line)),
+      !(await calls()).some((line) => /^(?:run -d|rm|tag) /.test(line)),
       'the running container and rollback tag are untouched',
     );
   });
@@ -252,7 +343,7 @@ test('control upgrade needs a host and an existing installation', async () => {
       const result = await upgrade('--to', '9.9.9', '--yes');
       assert.notEqual(result.code, 0, 'a host without control should fail');
       assert.match(result.stderr, /tug control setup/, 'the failure should point at setup');
-      assert.ok(!(await calls()).some((l) => l.startsWith('run ')), 'nothing should be started');
+      assert.ok(!(await calls()).some((l) => l.startsWith('run -d')), 'nothing should be started');
     },
     { installed: false },
   );

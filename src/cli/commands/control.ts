@@ -11,10 +11,13 @@ import {
   ROLLBACK_TAG,
   alreadyRunning,
   controlPortMapping,
+  imageIdScript,
   inspectControlScript,
   parseControlInspect,
+  parseImageId,
   readControlCaScript,
   rollbackImageScript,
+  rollbackTagNeeded,
   rollbackTagScript,
 } from '../upgrade.ts';
 import type { ControlInstall } from '../upgrade.ts';
@@ -189,7 +192,8 @@ export async function runControlUpgrade(
     );
     const current = parseControlInspect(inspection);
     if (o.rollback) await runCapture('ssh', ['--', sshTarget, rollbackImageScript]);
-    if (alreadyRunning(current.image, image, o.force) && !o.buildLocalImage) {
+    const targetId = parseImageId(await runCapture('ssh', ['--', sshTarget, imageIdScript(image)]));
+    if (alreadyRunning(current.imageId, targetId, o.force) && !o.buildLocalImage) {
       console.error(
         `control on ${sshTarget} already runs ${image}; nothing to do (--force recreates it)`,
       );
@@ -220,7 +224,9 @@ export async function runControlUpgrade(
       !(await confirm(`${o.rollback ? 'Roll back' : 'Upgrade'} control?`))
     )
       throw new Error('cancelled; nothing was changed');
-    const before = fingerprintPem(await runCapture('ssh', ['--', sshTarget, readControlCaScript]));
+    const before = fingerprintPem(
+      await runCapture('ssh', ['--', sshTarget, readControlCaScript(current.image)]),
+    );
     progress.stage(`Checking control host ${sshTarget}`);
     await preflightRemote(sshTarget, {
       ports: [...new Set(current.bindings.map(({ port }) => port))],
@@ -230,13 +236,18 @@ export async function runControlUpgrade(
     const runImage = o.buildLocalImage ? await transferTugImage(sshTarget, image, progress) : image;
     progress.stage(`Checking control data on ${sshTarget}`);
     await runStep('ssh', ['--', sshTarget, controlGuardScript(runImage)], { progress });
-    if (!o.rollback && current.image !== runImage) {
+    const runImageId = parseImageId(
+      await runCapture('ssh', ['--', sshTarget, imageIdScript(runImage)]),
+    );
+    if (!o.rollback && rollbackTagNeeded(current.imageId, runImageId)) {
       progress.stage(`Keeping ${current.image} as ${ROLLBACK_TAG}`);
       await runStep('ssh', ['--', sshTarget, rollbackTagScript(current.imageId)], { progress });
     }
     progress.stage(`Replacing control on ${sshTarget}`);
     await installControlContainer(sshTarget, { ...current, image: runImage }, progress);
-    const after = fingerprintPem(await runCapture('ssh', ['--', sshTarget, readControlCaScript]));
+    const after = fingerprintPem(
+      await runCapture('ssh', ['--', sshTarget, readControlCaScript(runImage)]),
+    );
     if (after !== before)
       throw new Error(
         `control's CA changed from ${before} to ${after} during the upgrade; inspect /data/pki on ${sshTarget} before using it`,
