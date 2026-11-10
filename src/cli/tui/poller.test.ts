@@ -4,6 +4,7 @@ import { healthyStatus, staleBackup } from '../../../tests/tui-fixtures.ts';
 import type { Api } from './actions.ts';
 import { Poller } from './poller.ts';
 import { emptySnapshot } from './types.ts';
+import { until } from '../../../tests/wait.ts';
 
 /** An API that answers from a table and records every route asked, so a test can say what was and was not requested. */
 function fakeApi(routes: Record<string, (route: string) => unknown>) {
@@ -147,11 +148,10 @@ test('starting and stopping leaves no timers behind', async () => {
     lists: 20,
   });
   poller.start();
-  await new Promise((resolve) => setTimeout(resolve, 120));
+  await until(() => changes > 3, 'polling to repeat while started');
   poller.stop();
   const after = changes;
-  await new Promise((resolve) => setTimeout(resolve, 80));
-  assert.ok(after > 3, 'polling repeats while started');
+  await new Promise((resolve) => setTimeout(resolve, 80)); // several intervals in which nothing may happen
   assert.equal(changes, after, 'nothing is fetched after stop');
 });
 
@@ -195,14 +195,19 @@ test('a change hint refetches only the feed it names', async () => {
   snapshot.status = { data: healthyStatus(), fetchedAt: Date.now() };
   const poller = new Poller(api, snapshot, () => {});
   poller.onWatch({ v: 1, type: 'watch.changed', changes: [{ topic: 'backups', project: 'site' }] });
-  await new Promise((resolve) => setTimeout(resolve, 30));
+  await until(
+    () => asked.some((route) => route.includes('/backups?')),
+    'the backups feed to be refetched',
+  );
+  await new Promise((resolve) => setTimeout(resolve, 30)); // anything else would have been asked by now
   assert.ok(
     asked.every((route) => route.includes('/backups?')),
     `only backups are refetched, not ${asked.join(', ')}`,
   );
   asked.length = 0;
   poller.onWatch({ v: 1, type: 'watch.changed', changes: [{ topic: 'status', project: 'site' }] });
-  await new Promise((resolve) => setTimeout(resolve, 30));
+  await until(() => asked.includes('GET /api/v1/status'), 'status to be refetched');
+  await new Promise((resolve) => setTimeout(resolve, 30)); // anything else would have been asked by now
   assert.deepEqual(
     asked,
     ['GET /api/v1/status'],
@@ -222,15 +227,24 @@ test('while the push channel is open polling slows to a backstop, and returns to
       diagnostics: 1e6,
       lists: 1e6,
     });
+    const statusAsks = () => asked.filter((route) => route === 'GET /api/v1/status').length;
+    const started = Date.now();
     poller.start();
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    if (!connected) await until(() => statusAsks() >= 4, 'four status polls at the normal rate');
+    else await new Promise((resolve) => setTimeout(resolve, windowMs));
     poller.stop();
-    return asked.filter((route) => route === 'GET /api/v1/status').length;
+    return { asks: statusAsks(), ms: Date.now() - started };
   };
+  // Rates are compared over the same elapsed time, not a fixed one: a timer that fires late on a loaded machine
+  // stretches both windows alike instead of failing one of them.
+  let windowMs = 0;
   const polling = await count(false);
+  windowMs = polling.ms;
   const pushing = await count(true);
-  assert.ok(polling >= 4, `without push it polls at the normal rate (${polling} times)`);
-  assert.ok(pushing <= polling / 2, `with push it polls far less (${pushing} against ${polling})`);
+  assert.ok(
+    pushing.asks <= polling.asks / 2,
+    `with push it polls far less (${pushing.asks} against ${polling.asks} in ${windowMs} ms)`,
+  );
 });
 
 test('opening the push channel refetches everything, since changes may have been missed', async () => {
@@ -239,7 +253,10 @@ test('opening the push channel refetches everything, since changes may have been
   snapshot.status = { data: healthyStatus(), fetchedAt: Date.now() };
   const poller = new Poller(api, snapshot, () => {});
   poller.onWatchState(true);
-  await new Promise((resolve) => setTimeout(resolve, 40));
+  await until(
+    () => asked.includes('GET /api/v1/status') && asked.includes('GET /api/v1/events?limit=100'),
+    'status and events to be fetched again',
+  );
   assert.equal(snapshot.watch.connected, true, 'the snapshot records the channel as open');
   assert.ok(
     asked.includes('GET /api/v1/status') && asked.includes('GET /api/v1/events?limit=100'),

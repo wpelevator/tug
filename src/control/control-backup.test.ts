@@ -10,6 +10,7 @@ import { DatabaseSync } from 'node:sqlite';
 import type { ActivationStep } from './restore-activation.ts';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { until } from '../../tests/wait.ts';
 
 const op: Record<string, string> = {
   'x-tug-test-operator': 'operator',
@@ -81,14 +82,6 @@ const resticDocker = (responder?: FakeDocker['execResponder']): FakeDocker => {
         : { code: 0 });
   return docker;
 };
-async function until<T>(read: () => Promise<T | undefined>, what: string): Promise<T> {
-  for (let i = 0; i < 300; i++) {
-    const value = await read();
-    if (value) return value;
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
-  throw new Error(`timed out waiting for ${what}`);
-}
 const controlPassword = async (base: string): Promise<string> =>
   (await json(await call(base, 'GET', '/api/v1/backup/repository-password?control=1'))).password;
 const listing = async (base: string) => json(await call(base, 'GET', '/api/v1/backups'));
@@ -147,8 +140,7 @@ test('closing control stops its backup scheduler so a closed database is never t
     ticks++;
     tick();
   };
-  await new Promise((resolve) => setTimeout(resolve, 100));
-  assert.ok(ticks > 0, 'the scheduler ticks while control is serving');
+  await until(() => ticks > 0, 'the scheduler to tick while control is serving');
   await s.close();
   const atClose = ticks;
   await new Promise((resolve) => setTimeout(resolve, 100));
@@ -512,15 +504,18 @@ test('a control backup that never finishes shows as stale instead of silently do
   });
   try {
     await call(s.base, 'POST', '/api/v1/backup/destination', DESTINATION);
+    // The problem is reported once two intervals pass without a success, which on a slow machine can be before the
+    // second push has even started, so wait for the push to be stuck as well as for the report.
     const control = await until(async () => {
       const { control } = await listing(s.base);
-      return control?.problem ? control : undefined;
-    }, 'the stale control backup to be reported');
+      return attempts >= 2 && control?.problem ? control : undefined;
+    }, 'the stale control backup to be reported while the second push hangs');
     assert.match(
       control.problem,
       /no successful control backup since/,
       'a push that is stuck is reported once two intervals pass without a success',
     );
+    await new Promise((resolve) => setTimeout(resolve, 300)); // several intervals while the push hangs
     assert.equal(attempts, 2, 'a stuck push is not started a second time');
   } finally {
     await s.close();

@@ -50,7 +50,7 @@ test('a control on an older major than the CLI refuses with the upgrade command'
   const v = verdict('1.9.0', '2.0.0');
   assert.match(
     v.error ?? '',
-    /tug control setup <control host> --yes/,
+    /tug control upgrade <control host> --yes/,
     'refusal names the upgrade command',
   );
   assert.match(v.error ?? '', /1\.9\.0/, 'refusal names the control version');
@@ -68,7 +68,7 @@ test('a control on a newer major than the CLI refuses and names the CLI pin', ()
 test('before 1.0 a control on an older 0.minor refuses and a newer one warns once', () => {
   assert.match(
     verdict('0.13.0', '0.14.0').error ?? '',
-    /tug control setup/,
+    /tug control upgrade/,
     'an older 0.minor may lack routes',
   );
   const v = verdict('0.15.0', '0.14.0');

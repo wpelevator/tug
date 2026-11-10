@@ -3,6 +3,8 @@
 # Each key is the camelCase of the CLI flag it supplies a default for; a flag always wins.
 # Where control is: the CLI connects here, and control setup advertises it (--control-url overrides).
 controlUrl: https://control.example.com
+# SSH target of the control host: the default for `tug control upgrade` and `tug upgrade`.
+controlSsh: root@203.0.113.5
 project: site
 
 # Defaults for `tug deploy` (`--file`, `--build-local`, `--no-wait`) and `tug rollback` (`--no-wait`).
@@ -14,8 +16,8 @@ nodeDefaults:
   installDocker: true # --install-docker
   # image: ghcr.io/wpelevator/tug:0.5.0
 
-# Read only by node add, node replace, node repair, node register and
-# node enroll, as if typed on the command line:
+# Read only by node add, node replace, node repair, node upgrade, node register and
+# node enroll, as if typed on the command line (`tug upgrade` reads the ssh targets):
 #   tug node add --name app1
 nodes:
   app1:

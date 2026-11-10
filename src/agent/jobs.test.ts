@@ -9,6 +9,7 @@ import { backupArgs, forgetArgs, memoryBytes, parseSummary, runBackupJob } from 
 import { FakeDocker } from '../../tests/fake-docker.ts';
 import { JOB_CANCELLED } from '../protocol.ts';
 import type { BackupJobPayload, Command } from '../protocol.ts';
+import { until } from '../../tests/wait.ts';
 
 const payload = (overrides: Partial<BackupJobPayload> = {}): BackupJobPayload => ({
   runId: 'bkr_1',
@@ -40,10 +41,8 @@ async function runner(docker: FakeDocker, concurrency = 1) {
   });
   return { jobs, stateDir };
 }
-const settle = async (jobs: JobRunner, expected: number) => {
-  for (let i = 0; i < 200 && jobs.pending().length < expected; i++)
-    await new Promise((resolve) => setTimeout(resolve, 10));
-};
+const settle = (jobs: JobRunner, expected: number) =>
+  until(() => jobs.pending().length >= expected, `${expected} finished job result(s)`);
 
 function dockerWith(responder: FakeDocker['execResponder']): FakeDocker {
   const docker = new FakeDocker();
@@ -165,7 +164,7 @@ test('jobs beyond the concurrency limit wait queued and are reported as such', a
   const { jobs } = await runner(docker, 1);
   await jobs.start(command('cmd_a', payload({ runId: 'bkr_a' })));
   await jobs.start(command('cmd_b', payload({ runId: 'bkr_b' })));
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  await until(() => phaseOf(jobs, 'cmd_a') !== 'queued', 'the first job to start');
   const phases = Object.fromEntries(jobs.statuses().map((s) => [s.commandId, s.phase]));
   assert.equal(phases.cmd_b, 'queued', 'the second job waits while the first runs');
   assert.notEqual(phases.cmd_a, 'queued', 'the first job is running');
@@ -523,7 +522,12 @@ const job = (id: string, project: string, trigger: string, type = 'backup.run') 
   );
 const phaseOf = (jobs: JobRunner, id: string) =>
   jobs.statuses().find((status) => status.commandId === id)?.phase;
-const tick = () => new Promise((resolve) => setTimeout(resolve, 20));
+/** Polls until the queue shows this phase for a job; a fixed sleep here raced the runner on a loaded machine. */
+const phaseIs = (jobs: JobRunner, id: string, queued: boolean) =>
+  until(
+    () => (phaseOf(jobs, id) === 'queued') === queued,
+    `job ${id} to be ${queued ? 'queued' : 'started'}`,
+  );
 
 test('lanes: a restore starts before a manual backup, which starts before a scheduled one', () => {
   const lane = (trigger: string, type = 'backup.run') =>
@@ -542,9 +546,8 @@ test('the node runs the best lane first, one job per project, and no more than i
   await jobs.start(job('C', 'p2', 'schedule'));
   await jobs.start(job('D', 'p3', 'manual'));
   await jobs.start(job('E', 'p4', 'restore', 'backup.restore'));
-  await tick();
-  assert.equal(phaseOf(jobs, 'A') === 'queued', false, 'the first job starts at once');
-  assert.equal(phaseOf(jobs, 'C') === 'queued', false, 'a second project uses the second slot');
+  await phaseIs(jobs, 'A', false); // the first job starts at once
+  await phaseIs(jobs, 'C', false); // a second project uses the second slot
   const queued = new Map(
     jobs
       .statuses()
@@ -560,7 +563,7 @@ test('the node runs the best lane first, one job per project, and no more than i
   assert.equal(queued.get('E')?.lane, 'restore', 'the lane is reported');
 
   assert.equal(await jobs.cancel('A'), true, 'cancelling a running job finds it');
-  await tick();
+  await phaseIs(jobs, 'E', false);
   assert.equal(
     [phaseOf(jobs, 'B'), phaseOf(jobs, 'D'), phaseOf(jobs, 'E')].map((p) => p === 'queued').join(),
     'true,true,false',
@@ -568,18 +571,12 @@ test('the node runs the best lane first, one job per project, and no more than i
   );
 
   assert.equal(await jobs.cancel('C'), true);
-  await tick();
-  assert.equal(phaseOf(jobs, 'D') === 'queued', false, 'a manual backup is next');
+  await phaseIs(jobs, 'D', false); // a manual backup is next
   assert.equal(phaseOf(jobs, 'B') === 'queued', true, 'the scheduled backup still waits its turn');
 
   assert.equal(await jobs.cancel('E'), true);
   assert.equal(await jobs.cancel('D'), true);
-  await tick();
-  assert.equal(
-    phaseOf(jobs, 'B') === 'queued',
-    false,
-    'the scheduled backup runs once the lanes ahead are empty',
-  );
+  await phaseIs(jobs, 'B', false); // the scheduled backup runs once the lanes ahead are empty
   await jobs.cancel('B');
   await settle(jobs, 5);
   assert.deepEqual(
@@ -596,7 +593,7 @@ test('cancelling a queued job removes it and reports it cancelled; an unknown jo
   const { jobs } = await runner(holding(), 1);
   await jobs.start(job('A', 'p1', 'schedule'));
   await jobs.start(job('B', 'p2', 'schedule'));
-  await tick();
+  await phaseIs(jobs, 'A', false);
   assert.equal(phaseOf(jobs, 'B'), 'queued', 'the second job waits for the only slot');
   assert.equal(await jobs.cancel('B'), true, 'a queued job can be cancelled');
   assert.equal(phaseOf(jobs, 'B'), undefined, 'it never starts');
@@ -617,8 +614,7 @@ test('a job removes its helper containers when it is cancelled while running', a
   const docker = holding();
   const { jobs } = await runner(docker, 1);
   await jobs.start(job('A', 'p1', 'schedule'));
-  await tick();
-  assert.ok(docker.names().length > 0, 'the helper runs');
+  await until(() => docker.names().length > 0, 'the helper container to start');
   await jobs.cancel('A');
   await settle(jobs, 1);
   assert.equal(docker.names().length, 0, 'cancelling removes the helper containers');

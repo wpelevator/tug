@@ -31,6 +31,7 @@ export const COMMAND_SETTINGS: Record<string, Setting> = {
       'node replace',
       'node repair',
       'node migrate',
+      'node upgrade',
     ],
   },
 };
@@ -39,7 +40,7 @@ export const NODE_SETTINGS: Record<string, Setting> = {
   ssh: {
     type: 'string',
     flag: '<ssh-target>',
-    commands: ['node add', 'node replace', 'node repair', 'node migrate'],
+    commands: ['node add', 'node replace', 'node repair', 'node migrate', 'node upgrade'],
   },
   address: {
     type: 'string',
@@ -64,14 +65,23 @@ export const NODE_SETTINGS: Record<string, Setting> = {
       'node replace',
       'node repair',
       'node migrate',
+      'node upgrade',
       'node enroll',
       'control setup',
+      'control upgrade',
     ],
   },
   agentControlUrl: {
     type: 'string',
     flag: '--agent-control-url',
-    commands: ['node add', 'node replace', 'node repair', 'node migrate', 'node enroll'],
+    commands: [
+      'node add',
+      'node replace',
+      'node repair',
+      'node migrate',
+      'node upgrade',
+      'node enroll',
+    ],
   },
 };
 const NODE_SPECIFIC_KEYS = ['ssh', 'address'];
@@ -83,6 +93,8 @@ export const CONFIG_NAMES = ['tug.yml', 'tug.yaml', 'tug.json', '.tug.json'];
 export type SettingValues = Record<string, string | boolean | string[]>;
 interface ParsedConfig {
   controlUrl?: string;
+  /** SSH target of the control host, the default for `control upgrade`. */
+  controlSsh?: string;
   /** Path of a credential file; only an untracked overlay may name one. */
   credential?: string;
   project?: string;
@@ -107,6 +119,8 @@ export interface ResolvedCliConfig {
   /** Shared config address for installation, before connection-only flags, environment and credential defaults. */
   /** The control URL the operator asked for (flag, environment or config), without credential or default fallbacks. */
   requestedControlUrl?: string;
+  /** `controlSsh` from the config: where `control upgrade` and `upgrade` reach the control host. */
+  controlSsh?: string;
   credential?: Credential;
   credentialFile?: string;
   project: string;
@@ -169,6 +183,7 @@ export async function resolveCliConfig(
     localFile,
     controlUrl: normalizeControlUrl(controlUrl),
     requestedControlUrl: requestedControlUrl ? normalizeControlUrl(requestedControlUrl) : undefined,
+    controlSsh: config.controlSsh,
     credential,
     credentialFile,
     project: options.project || env.TUG_PROJECT || config.project || 'site',
@@ -352,7 +367,8 @@ function parseConfig(input: unknown, dir: string, overlay?: string): ParsedConfi
     Object.entries(NODE_SETTINGS).filter(([key]) => !NODE_SPECIFIC_KEYS.includes(key)),
   );
   for (const [key, value] of Object.entries(input)) {
-    if (key === 'controlUrl' || key === 'project') config[key] = text(value, key);
+    if (key === 'controlUrl' || key === 'controlSsh' || key === 'project')
+      config[key] = text(value, key);
     else if (key === 'credential') {
       if (overlay)
         throw new Error(
@@ -375,6 +391,7 @@ function parseConfig(input: unknown, dir: string, overlay?: string): ParsedConfi
     } else {
       const known = [
         'controlUrl',
+        'controlSsh',
         'project',
         ...(overlay ? [] : ['credential']),
         ...Object.keys(COMMAND_SETTINGS),
@@ -394,6 +411,7 @@ function mergeConfigs(base: ParsedConfig, overlay: ParsedConfig): ParsedConfig {
     nodes[name] = { ...base.nodes[name], ...overlay.nodes[name] };
   return {
     controlUrl: overlay.controlUrl ?? base.controlUrl,
+    controlSsh: overlay.controlSsh ?? base.controlSsh,
     project: overlay.project ?? base.project,
     credential: overlay.credential ?? base.credential,
     commandDefaults: { ...base.commandDefaults, ...overlay.commandDefaults },

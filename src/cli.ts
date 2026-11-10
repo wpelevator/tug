@@ -17,6 +17,7 @@ import { errMessage } from './errors.ts';
 import { CONFIG_HELP, setResolvedConfig } from './cli/commands/context.ts';
 import { registerBackup } from './cli/commands/backup.ts';
 import { registerControl } from './cli/commands/control.ts';
+import { registerUpgrade } from './cli/commands/upgrade.ts';
 import { registerCredential } from './cli/commands/credential.ts';
 import { registerDeploy } from './cli/commands/deploy.ts';
 import { registerInit } from './cli/commands/init.ts';
@@ -55,6 +56,7 @@ program
 
 registerInit(program);
 registerControl(program);
+registerUpgrade(program);
 registerNode(program);
 registerDeploy(program);
 registerObserve(program);
@@ -73,7 +75,7 @@ registerVolume(program);
 
 /** Commands that may create the config file, so a selected file need not exist yet. */
 const CREATES_CONFIG = ['init', 'control setup'];
-const NODE_NAME_FROM_ARGUMENT = ['node register', 'node replace', 'node repair'];
+const NODE_NAME_FROM_ARGUMENT = ['node register', 'node replace', 'node repair', 'node upgrade'];
 const NODE_NAME_FROM_OPTION = ['node add', 'node enroll'];
 
 program.hook('preAction', async (_root, command) => {
@@ -143,7 +145,7 @@ program.hook('preAction', async (_root, command) => {
       : undefined;
   applyConfigDefaults(command, options, {
     ...resolved.commandDefaults,
-    ...(path.startsWith('node ') || path === 'control setup'
+    ...(path.startsWith('node ') || path === 'control setup' || path === 'control upgrade'
       ? nodeSettings(resolved, nodeName)
       : {}),
   });

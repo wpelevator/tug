@@ -14,6 +14,7 @@ import { openDb } from '../db/db.ts';
 import { json, testControlUrl, testIdentity } from '../../tests/helpers.ts';
 import { FakeDocker } from '../../tests/fake-docker.ts';
 import { inspectEngineImage } from '../images/artifacts.ts';
+import { until } from '../../tests/wait.ts';
 
 async function server(openDatabase?: typeof openDb) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-images-'));
@@ -855,9 +856,6 @@ async function withEnv(values: Record<string, string>, run: () => Promise<void>)
       else process.env[key] = value;
   }
 }
-const until = async (check: () => Promise<boolean> | boolean) => {
-  for (let i = 0; i < 100 && !(await check()); i++) await new Promise((r) => setTimeout(r, 20));
-};
 
 test('a successful deploy prunes old archives to TUG_IMAGE_KEEP and caps the build cache', async () => {
   await withEnv({ TUG_IMAGE_KEEP: '1', TUG_BUILD_CACHE_KEEP: '2GB' }, async () => {
@@ -871,14 +869,20 @@ test('a successful deploy prunes old archives to TUG_IMAGE_KEEP and caps the bui
         await s.report(n1.nodeId, deployed.desiredState);
       }
       const archives = () => fs.readdir(path.join(s.dir, 'images'));
-      await until(async () => !(await archives()).includes(`${builds[0]}.tar.gz`));
+      await until(
+        async () => !(await archives()).includes(`${builds[0]}.tar.gz`),
+        'the oldest archive to be pruned',
+      );
       // The node still reported v2 when v3 was published, so v2 is kept as a lagging version.
       assert.deepEqual(
         (await archives()).sort(),
         [`${builds[1]}.tar.gz`, `${builds[2]}.tar.gz`].sort(),
         'only the archive beyond TUG_IMAGE_KEEP that no node reports should be pruned',
       );
-      await until(() => s.calls.some((call) => call.startsWith('builder prune')));
+      await until(
+        () => s.calls.some((call) => call.startsWith('builder prune')),
+        'the build cache to be capped',
+      );
       assert.ok(
         s.calls.includes('builder prune --all --force --keep-storage 2GB'),
         'the build cache must be capped at TUG_BUILD_CACHE_KEEP',
@@ -929,7 +933,10 @@ test('an empty TUG_BUILD_CACHE_KEEP uses the default cap', async () => {
     try {
       await s.node('n1');
       await json(await s.deploy('v1'));
-      await until(() => s.calls.some((call) => call.startsWith('builder prune')));
+      await until(
+        () => s.calls.some((call) => call.startsWith('builder prune')),
+        'the build cache to be capped',
+      );
       assert.ok(
         s.calls.includes('builder prune --all --force --keep-storage 10GB'),
         'an empty value must mean the 10GB default, not a startup failure',
@@ -1009,7 +1016,10 @@ test('a failing build-cache prune is logged without breaking later deploys', asy
     console.error = (...args: unknown[]) => void logged.push(args.join(' '));
     try {
       const first = await json(await s.deploy('v1'));
-      await until(() => logged.some((line) => line.includes('image maintenance failed')));
+      await until(
+        () => logged.some((line) => line.includes('image maintenance failed')),
+        'the maintenance failure to be logged',
+      );
       await s.report(n1.nodeId, first.desiredState);
     } finally {
       console.error = originalError;

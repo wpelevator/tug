@@ -905,7 +905,7 @@ export async function createApp(
     const ownPair = majorMinor(ownVersion);
     if (client && ownPair && compareCompat(client, ownPair) === 1)
       return void res.status(400).json({
-        error: `this client (${clientVersion}) is newer than the control running ${ownVersion}: upgrade the control plane with: tug control setup <control host> --yes`,
+        error: `this client (${clientVersion}) is newer than the control running ${ownVersion}: upgrade the control plane with: tug control upgrade <control host> --yes`,
         skew: SKEW_CLIENT_NEWER,
       });
     next();

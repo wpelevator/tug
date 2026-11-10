@@ -13,6 +13,7 @@ import type {
   ExecOptions,
   LogsOptions,
 } from '../docker-api.ts';
+import { until } from '../../tests/wait.ts';
 
 class FakeProcess extends EventEmitter implements AttachedProcess {
   stdin = new PassThrough();
@@ -439,7 +440,7 @@ test('query and stream timeouts terminate and clean up', async () => {
   const keepAlive = setInterval(() => {}, 5);
   await engine.start({ operation: 'ps', sessionId: 'ps', projects: ['demo'] }).catch(() => {});
   await engine.start(execRequest());
-  await new Promise((resolve) => setTimeout(resolve, 25));
+  await until(() => engine.activeSessions === 0, 'both timed-out sessions to be cleaned up');
   assert.equal(engine.activeSessions, 0, 'All operation types should have a maximum lifetime');
   assert.equal(
     events.filter((e) => e.type === 'exit').length,

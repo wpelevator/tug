@@ -12,6 +12,7 @@ import {
   newRecentEvents,
 } from './docker-events.ts';
 import type { ReportedEvent } from './docker-events.ts';
+import { until } from '../../tests/wait.ts';
 
 const event = (
   action: string,
@@ -214,14 +215,6 @@ test('oom and unhealthy are reported at most once a minute per service', () => {
     'unhealthy is a separate type with its own quiet period',
   );
 });
-
-async function until(condition: () => boolean, what: string): Promise<void> {
-  const deadline = Date.now() + 2000;
-  while (!condition()) {
-    if (Date.now() > deadline) assert.fail(`timed out waiting for ${what}`);
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
-}
 
 function watcher(docker: FakeDocker) {
   const posted: ReportedEvent[] = [];
