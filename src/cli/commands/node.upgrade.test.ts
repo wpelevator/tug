@@ -26,6 +26,7 @@ printf '\\n--END--\\n' >> "${log}"
 case "$*" in
   *"agent identity"*) cat "$TUG_STUB_CSR" ;;
   *"docker inspect 'tug-agent'"*) if [ -f "$TUG_STUB_AGENT_INSPECT" ]; then cat "$TUG_STUB_AGENT_INSPECT"; else echo 'Error: No such object: tug-agent' >&2; exit 1; fi ;;
+  *"image inspect --format"*) case "$*" in *"${defaultImage()}"*) echo 'sha256:x' ;; *) echo 'sha256:new' ;; esac ;;
 esac
 `,
     { mode: 0o755 },
@@ -33,8 +34,8 @@ esac
   return { bin, log };
 }
 
-const agentInspect = (image: string, env: string[] = []) =>
-  JSON.stringify([{ Image: 'sha256:x', Config: { Image: image, Env: env } }]);
+const agentInspect = (image: string, env: string[] = [], imageId = 'sha256:x') =>
+  JSON.stringify([{ Image: imageId, Config: { Image: image, Env: env } }]);
 
 test('node upgrade replaces an enrolled agent, keeps its connect URL, skips current nodes and refuses strangers', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-node-upgrade-'));
@@ -71,10 +72,11 @@ test('node upgrade replaces an enrolled agent, keeps its connect URL, skips curr
 
     await fs.writeFile(
       inspectFile,
-      agentInspect('ghcr.io/wpelevator/tug:0.0.1', [
-        'TUG_CONTROL_URL=https://private.test:8443',
-        'TUG_ROLLOUT_PORTS=22000-22999',
-      ]),
+      agentInspect(
+        'ghcr.io/wpelevator/tug:0.0.1',
+        ['TUG_CONTROL_URL=https://private.test:8443', 'TUG_ROLLOUT_PORTS=22000-22999'],
+        'sha256:old',
+      ),
     );
     await fs.rm(ssh.log);
     const upgraded = await cli('node', 'upgrade', 'n-up', 'root@node.test', '--no-wait');

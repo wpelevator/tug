@@ -2,6 +2,7 @@ import { isIP } from 'node:net';
 import { compareCompat, majorMinor } from '../protocol.ts';
 import { isPort } from '../node-address.ts';
 import { CONTROL_CONTAINER, shellQuote as sh } from './install.ts';
+import { CONTROL_VOLUME } from './migrate.ts';
 
 /** Tag the previous control image is kept under while an upgrade replaces it, so `control upgrade --rollback` can go back. */
 export const ROLLBACK_TAG = 'tug:rollback';
@@ -128,6 +129,8 @@ function rolloutSetting(container: InspectedContainer): { rolloutPorts?: string 
 /** What an agent container records: its image and, when it dials control at a connect-only address, that address. */
 export interface AgentInstall {
   image: string;
+  /** The image ID the container runs, which is what decides whether an upgrade changes anything. */
+  imageId: string;
   controlUrl?: string;
   rolloutPorts?: string;
 }
@@ -136,6 +139,7 @@ export function parseAgentInspect(json: string): AgentInstall {
   const container = inspected(json, 'agent container');
   return {
     image: container.Config!.Image!,
+    imageId: container.Image ?? container.Config!.Image!,
     controlUrl: envValue(container, 'TUG_CONTROL_URL') || undefined,
     ...rolloutSetting(container),
   };
@@ -154,15 +158,41 @@ export function rollbackTagScript(imageId: string): string {
 /** Fails (exit 1) when the rollback image is not on the host. */
 export const rollbackImageScript = `docker image inspect ${sh(ROLLBACK_TAG)} >/dev/null 2>&1 || { echo 'there is no ${ROLLBACK_TAG} image on this host: only an earlier \`control upgrade\` leaves one' >&2; exit 1; }`;
 
-export const readControlCaScript = `docker exec ${sh(CONTROL_CONTAINER)} cat /data/pki/ca.crt`;
+/**
+ * The control CA, read from the data volume with a throwaway container rather than `docker exec`: a control that is
+ * restarting (a newer database it cannot open, the case `control upgrade --rollback` exists for) has no running
+ * container to exec into, and the CA is on the volume either way.
+ */
+export const readControlCaScript = (image: string): string =>
+  `docker run --rm -v ${sh(`${CONTROL_VOLUME}:/data`)} --entrypoint cat ${sh(image)} /data/pki/ca.crt`;
+
+/**
+ * The image ID of a reference on the host, or undefined when the host does not have it. Image IDs, not tag names,
+ * decide sameness: a rebuilt local image keeps its tag name only on the first build, and `tug:local` and
+ * `tug:local-<id>` can name one image.
+ */
+export const imageIdScript = (ref: string): string =>
+  `docker image inspect --format '{{.Id}}' ${sh(ref)} 2>/dev/null || true`;
+export function parseImageId(output: string): string | undefined {
+  const id = output.trim();
+  return id.startsWith('sha256:') ? id : undefined;
+}
 
 /** Whether a running image already is the target: nothing to do unless the operator forces a recreate. */
 export function alreadyRunning(
-  current: string,
-  target: string,
+  currentImageId: string,
+  targetImageId: string | undefined,
   force: boolean | undefined,
 ): boolean {
-  return !force && current === target;
+  return !force && targetImageId !== undefined && currentImageId === targetImageId;
+}
+
+/**
+ * Whether an upgrade must keep the running image as the rollback image: only when the new image is a different image.
+ * Moving the tag onto the image it already names would make `--rollback` a no-op that leaves the new image running.
+ */
+export function rollbackTagNeeded(currentImageId: string, newImageId: string | undefined): boolean {
+  return currentImageId !== newImageId;
 }
 
 /**

@@ -30,6 +30,28 @@ import {
 } from './context.ts';
 import type { CommonOpts, DeployResponse, WaitOpts } from './context.ts';
 
+/**
+ * The project's secrets and variable values, read one request after the other. Two requests in flight from one CLI
+ * process made control reset the second TLS connection (`ECONNRESET`), so these are sequential on purpose.
+ */
+export async function loadDeployValues(
+  get: typeof request,
+  project: string,
+): Promise<{
+  secrets: { name: string }[];
+  vars: { name: string; version: number; value: string }[];
+}> {
+  const { secrets } = await get<{ secrets: { name: string }[] }>(
+    'GET',
+    `/api/v1/secrets?project=${encodeURIComponent(project)}`,
+  );
+  const { vars } = await get<{ vars: { name: string; version: number; value: string }[] }>(
+    'GET',
+    `/api/v1/vars/values?project=${encodeURIComponent(project)}`,
+  );
+  return { secrets, vars };
+}
+
 async function makeContext(): Promise<string> {
   const cfg = await loadCfg();
   const tmp = path.join(os.tmpdir(), `tug-${Date.now()}.tgz`);
@@ -117,16 +139,7 @@ export function registerDeploy(program: Command): void {
           // Every ${NAME} comes from control (secrets as sentinels the agent fills in, variables as their values), from
           // --var, or from the default written in the file. The shell and .env of this machine are never read.
           const flags = parseVarFlags(o.var ?? []);
-          const [{ secrets }, { vars }] = await Promise.all([
-            request<{ secrets: { name: string }[] }>(
-              'GET',
-              `/api/v1/secrets?project=${encodeURIComponent(project)}`,
-            ),
-            request<{ vars: { name: string; version: number; value: string }[] }>(
-              'GET',
-              `/api/v1/vars/values?project=${encodeURIComponent(project)}`,
-            ),
-          ]);
+          const { secrets, vars } = await loadDeployValues(request, project);
           const secretNames = secrets.map((secret) => secret.name);
           const variables = new Map(
             vars.map((row) => [row.name, { version: row.version, value: row.value }]),

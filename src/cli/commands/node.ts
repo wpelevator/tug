@@ -21,8 +21,10 @@ import { assertImagePublished, defaultImage, resolveImage } from '../../images/i
 import {
   alreadyRunning,
   assertNotAheadOfControl,
+  imageIdScript,
   inspectAgentScript,
   parseAgentInspect,
+  parseImageId,
 } from '../upgrade.ts';
 import type { AgentInstall } from '../upgrade.ts';
 import type { EnrollmentCredentialResponse, IdentityResponse, JoinKey } from '../../protocol.ts';
@@ -449,7 +451,8 @@ async function upgradeNode(
     );
   }
   const image = resolveImage(o.image ?? (o.to ? defaultImage(o.to) : undefined), o.buildLocalImage);
-  if (alreadyRunning(current.image, image, o.force) && !o.buildLocalImage) {
+  const targetId = parseImageId(await runCapture('ssh', ['--', sshTarget, imageIdScript(image)]));
+  if (alreadyRunning(current.imageId, targetId, o.force) && !o.buildLocalImage) {
     console.error(`node ${name} already runs ${image}; skipped (--force reinstalls it)`);
     return { node: name, ok: true, upgraded: false };
   }

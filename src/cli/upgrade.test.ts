@@ -4,11 +4,15 @@ import {
   ROLLBACK_TAG,
   alreadyRunning,
   assertNotAheadOfControl,
+  imageIdScript,
   inspectAgentScript,
   inspectControlScript,
   parseAgentInspect,
   parseControlInspect,
+  parseImageId,
+  readControlCaScript,
   rollbackImageScript,
+  rollbackTagNeeded,
   rollbackTagScript,
 } from './upgrade.ts';
 
@@ -91,7 +95,11 @@ test('agent inspect yields the image and the connect-only URL when there is one'
     JSON.stringify([{ Config: { Image: 'ghcr.io/wpelevator/tug:1.2.0', Env: env } }]);
   assert.deepEqual(
     parseAgentInspect(agent(['TUG_CONTROL_URL=https://10.0.0.1:8443'])),
-    { image: 'ghcr.io/wpelevator/tug:1.2.0', controlUrl: 'https://10.0.0.1:8443' },
+    {
+      image: 'ghcr.io/wpelevator/tug:1.2.0',
+      imageId: 'ghcr.io/wpelevator/tug:1.2.0',
+      controlUrl: 'https://10.0.0.1:8443',
+    },
     'an agent dialing a private address should keep it across the upgrade',
   );
   assert.equal(
@@ -120,10 +128,69 @@ test('the remote scripts address the right containers and the rollback tag', () 
   assert.match(rollbackImageScript, /exit 1/, 'a missing rollback image should fail the step');
 });
 
-test('an upgrade is skipped only when the image matches and nothing forces it', () => {
-  assert.equal(alreadyRunning('a:1', 'a:1', false), true, 'same image is already current');
-  assert.equal(alreadyRunning('a:1', 'a:1', true), false, '--force recreates');
-  assert.equal(alreadyRunning('a:1', 'a:2', false), false, 'another image is an upgrade');
+test('an upgrade is skipped only when the image ID matches and nothing forces it', () => {
+  assert.equal(
+    alreadyRunning('sha256:a', 'sha256:a', false),
+    true,
+    'same image is already current',
+  );
+  assert.equal(alreadyRunning('sha256:a', 'sha256:a', true), false, '--force recreates');
+  assert.equal(alreadyRunning('sha256:a', 'sha256:b', false), false, 'another image is an upgrade');
+  assert.equal(
+    alreadyRunning('sha256:a', undefined, false),
+    false,
+    'a target the host does not have yet is an upgrade, not a no-op',
+  );
+});
+
+test('a rebuilt local tag that names the same image is not an upgrade', () => {
+  // `tug:local` and `tug:local-<id>` both point at sha256:a after the rebuild; the container was created from the id tag.
+  assert.equal(
+    alreadyRunning('sha256:a', parseImageId('sha256:a\n'), false),
+    true,
+    'the image ID decides sameness, so a second `control upgrade --image tug:local` does nothing',
+  );
+});
+
+test('the rollback tag moves only when the upgrade changes the image', () => {
+  assert.equal(
+    rollbackTagNeeded('sha256:old', 'sha256:new'),
+    true,
+    'a different image keeps the previous one as the rollback image',
+  );
+  assert.equal(
+    rollbackTagNeeded('sha256:new', 'sha256:new'),
+    false,
+    'an upgrade to the image already running must not move tug:rollback onto it',
+  );
+  assert.equal(
+    rollbackTagNeeded('sha256:old', undefined),
+    true,
+    'a target not yet on the host is a different image',
+  );
+});
+
+test('the control CA is read from the data volume, so a restarting control can still be rolled back', () => {
+  const script = readControlCaScript('ghcr.io/wpelevator/tug:2.0.0');
+  assert.match(
+    script,
+    /^docker run --rm -v 'tug-control:\/data' --entrypoint cat 'ghcr\.io\/wpelevator\/tug:2\.0\.0' \/data\/pki\/ca\.crt$/,
+    'the CA comes from the volume through a throwaway container',
+  );
+  assert.ok(
+    !/docker exec/.test(script),
+    'docker exec needs a running container, and a control in a restart loop has none',
+  );
+});
+
+test('the image ID lookup reads only a real image ID', () => {
+  assert.equal(parseImageId('sha256:abc\n'), 'sha256:abc', 'the ID is trimmed');
+  assert.equal(parseImageId(''), undefined, 'a missing image prints nothing');
+  assert.match(
+    imageIdScript('tug:local'),
+    /docker image inspect --format '\{\{\.Id\}\}' 'tug:local'/,
+    'the lookup prints the ID',
+  );
 });
 
 test('agents may not be upgraded past the control', () => {
