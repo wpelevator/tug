@@ -37,14 +37,14 @@ const tables = (db: Db): string[] =>
     .all<{ name: string }>("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
     .map((r) => r.name);
 
-for (const release of ['v0.2.0', 'v0.14.0', 'v1.1.0']) {
+for (const release of ['v0.2.0', 'v0.14.0', 'v1.1.0', 'v2.0.0']) {
   test(`a ${release} control database upgrades in place, keeps its rows and gets the current schema`, async (t) => {
     const dir = await tmp(t);
     const file = path.join(dir, 'tug.db');
     await legacyDb(file, release);
     const db = await openDb(file);
     t.after(() => db.close());
-    assert.equal(schemaVersion(db), 2, 'the upgrade must record the current schema version');
+    assert.equal(schemaVersion(db), 3, 'the upgrade must record the current schema version');
     assert.equal(
       db.get<{ name: string }>("SELECT name FROM projects WHERE id='p1'")?.name,
       'site',
@@ -86,7 +86,7 @@ test('an upgrade of a database with data copies it aside first, and a fresh data
   const file = path.join(dir, 'tug.db');
   await legacyDb(file, 'v0.14.0');
   (await openDb(file)).close();
-  const backup = `${file}.pre-v2.bak`;
+  const backup = `${file}.pre-v3.bak`;
   const copy = new DatabaseSync(backup, { readOnly: true });
   t.after(() => copy.close());
   assert.equal(
@@ -103,7 +103,7 @@ test('an upgrade of a database with data copies it aside first, and a fresh data
   const fresh = path.join(dir, 'fresh', 'tug.db');
   (await openDb(fresh)).close();
   await assert.rejects(
-    fs.access(`${fresh}.pre-v2.bak`),
+    fs.access(`${fresh}.pre-v3.bak`),
     'a new database has nothing to copy aside',
   );
 });
@@ -119,12 +119,38 @@ test('a v1.1.0 database gains the project_domains table and its copy aside stays
     0,
     'the new table exists and starts empty after upgrading the previous release',
   );
-  const copy = new DatabaseSync(`${file}.pre-v2.bak`, { readOnly: true });
+  const copy = new DatabaseSync(`${file}.pre-v3.bak`, { readOnly: true });
   t.after(() => copy.close());
   assert.equal(
     (copy.prepare('PRAGMA user_version').get() as { user_version: number }).user_version,
     1,
     'the pre-upgrade copy stays at the release it came from, so an older Tug can still open it',
+  );
+});
+
+test('a v2.0.0 database gains project_vars and the deployment value record, and its copy aside stays at schema version 2', async (t) => {
+  const dir = await tmp(t);
+  const file = path.join(dir, 'tug.db');
+  await legacyDb(file, 'v2.0.0');
+  const db = await openDb(file);
+  t.after(() => db.close());
+  assert.equal(
+    db.all('SELECT * FROM project_vars').length,
+    0,
+    'the variables table exists and starts empty after upgrading the previous release',
+  );
+  assert.equal(
+    db.get<{ values_json: string | null }>("SELECT values_json FROM deployments WHERE id='d1'")
+      ?.values_json,
+    null,
+    'a deployment made before the upgrade has no value record, which reads as none',
+  );
+  const copy = new DatabaseSync(`${file}.pre-v3.bak`, { readOnly: true });
+  t.after(() => copy.close());
+  assert.equal(
+    (copy.prepare('PRAGMA user_version').get() as { user_version: number }).user_version,
+    2,
+    'the pre-upgrade copy stays at the 2.0.0 schema, so 2.0.0 can still open it',
   );
 });
 
@@ -135,7 +161,7 @@ test('opening a migrated database again changes nothing', async (t) => {
   (await openDb(file)).close();
   const again = await openDb(file);
   t.after(() => again.close());
-  assert.equal(schemaVersion(again), 2, 'the version stays put');
+  assert.equal(schemaVersion(again), 3, 'the version stays put');
   assert.equal(again.all('SELECT * FROM projects').length, 1, 'rows are not duplicated');
 });
 
@@ -148,12 +174,12 @@ test('a database from a newer Tug is refused untouched by writable and snapshot 
   raw.close();
   await assert.rejects(
     openDb(file),
-    /schema version 99, newer than the 2 this Tug supports/,
+    /schema version 99, newer than the 3 this Tug supports/,
     'a control rolled back below its database must stop with the remedy, not run on a schema it does not know',
   );
   assert.throws(
     () => openSnapshotDb(file),
-    /schema version 99, newer than the 2 this Tug supports/,
+    /schema version 99, newer than the 3 this Tug supports/,
     'restoring a backup from a newer Tug must be refused',
   );
   const check = new DatabaseSync(file, { readOnly: true });

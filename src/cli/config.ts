@@ -19,6 +19,7 @@ export interface Setting {
 export const COMMAND_SETTINGS: Record<string, Setting> = {
   file: { type: 'path', flag: '--file', commands: ['deploy', 'lint'] },
   buildLocal: { type: 'boolean', flag: '--build-local', commands: ['deploy'] },
+  profile: { type: 'list', flag: '--profile', commands: ['deploy'] },
   wait: {
     type: 'boolean',
     flag: '--no-wait',

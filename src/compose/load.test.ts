@@ -12,7 +12,8 @@ import {
   parseDotenv,
   shellSplit,
 } from './load.ts';
-import { normalizeCompose } from './normalize.ts';
+import * as yaml from 'js-yaml';
+import { composeConfigArgs, secretSentinel, unescapeDollars } from './normalize.ts';
 
 /** Secret names the shipped examples use, interpolated as sentinels like `tug deploy` does. */
 const SECRETS = [
@@ -409,8 +410,23 @@ test('the native reader renders what docker compose config renders (corpus compa
     process.chdir(path.dirname(file));
     let native, compose: any;
     try {
-      native = await normalizeCompose(file, SECRETS, { project: 'site' });
-      compose = await normalizeCompose(file, SECRETS, { project: 'site', composeCli: true });
+      // The reader's Compose-compatible mode (`localSources: 'read'`) against Compose itself, both with the shell,
+      // `.env` and `env_file`; `tug deploy` reads files with `ignore`, which has its own tests.
+      const env = {
+        ...process.env,
+        ...Object.fromEntries(SECRETS.map((n) => [n, secretSentinel(n)])),
+      };
+      native = await loadCompose(file, { project: 'site', env });
+      const rendered = spawnSync('docker', composeConfigArgs(file, 'site'), {
+        encoding: 'utf8',
+        env,
+      });
+      assert.equal(
+        rendered.status,
+        0,
+        `docker compose config should render ${name}: ${rendered.stderr}`,
+      );
+      compose = unescapeDollars(yaml.load(rendered.stdout));
     } finally {
       process.chdir(cwd);
     }
@@ -466,5 +482,79 @@ services:
     ),
     /mem_limit "lots" is not a size/,
     'an unreadable size is an error that names the key',
+  );
+});
+
+test("localSources 'ignore' takes values only from the given environment, never .env or the shell", async () => {
+  const { file } = await project({
+    'compose.yaml':
+      'services:\n  web:\n    image: nginx:${TAG}\n    environment:\n      REGION: ${REGION:-eu}\n',
+    '.env': 'TAG=from-dotenv\nREGION=from-dotenv\n',
+  });
+  process.env.TAG = 'from-shell';
+  try {
+    const ignored = await loadCompose(file, {
+      localSources: 'ignore',
+      env: { TAG: 'from-control' },
+    });
+    assert.equal(
+      svc(ignored, 'web').image,
+      'nginx:from-control',
+      'the value comes from the environment the caller passed',
+    );
+    assert.equal(
+      svc(ignored, 'web').environment.REGION,
+      'eu',
+      '.env is not read, so the default written in the file applies',
+    );
+    const bare = await loadCompose(file, { localSources: 'ignore' });
+    assert.equal(
+      svc(bare, 'web').image,
+      'nginx:',
+      'without an environment the shell is not consulted either',
+    );
+    const compat = await loadCompose(file, { env: { TAG: 'from-env' } });
+    assert.equal(
+      svc(compat, 'web').environment.REGION,
+      'from-dotenv',
+      "the default 'read' mode still follows Compose and reads .env",
+    );
+  } finally {
+    delete process.env.TAG;
+  }
+});
+
+test("localSources 'ignore' rejects env_file with a hint and takes profiles only from the option", async () => {
+  const withEnvFile = await project({
+    'compose.yaml': 'services:\n  web:\n    image: x\n    env_file: [app.env]\n',
+    'app.env': 'A=1\n',
+  });
+  await assert.rejects(
+    loadCompose(withEnvFile.file, { localSources: 'ignore', env: {} }),
+    /env_file app\.env is not read.*tug secret import app\.env/,
+    'an env_file is refused and the error says how to move its entries to control',
+  );
+  const profiled = await project({
+    'compose.yaml':
+      'services:\n  web:\n    image: x\n  debug:\n    image: y\n    profiles: [debug]\n',
+  });
+  const shellProfile = await loadCompose(profiled.file, {
+    localSources: 'ignore',
+    env: { COMPOSE_PROFILES: 'debug' },
+  });
+  assert.deepEqual(
+    Object.keys(shellProfile.services),
+    ['web'],
+    'COMPOSE_PROFILES in the environment does not enable a profile',
+  );
+  const explicit = await loadCompose(profiled.file, {
+    localSources: 'ignore',
+    env: {},
+    profiles: ['debug'],
+  });
+  assert.deepEqual(
+    Object.keys(explicit.services).sort(),
+    ['debug', 'web'],
+    'an explicit profile enables its services',
   );
 });

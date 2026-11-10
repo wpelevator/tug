@@ -39,7 +39,7 @@ export const selectNode = (name?: string): Promise<string> =>
   });
 export const selectResource = (
   name: string | undefined,
-  resource: 'secrets' | 'volumes' | 'credentials',
+  resource: 'secrets' | 'vars' | 'volumes' | 'credentials',
 ): Promise<string> =>
   selectOne(name, `Select a ${resource.slice(0, -1)}`, async () => {
     const listing = await request<

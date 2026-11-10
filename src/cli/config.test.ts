@@ -297,6 +297,7 @@ function demoCommand(
     .option('--agent-control-url <url>')
     .option('--no-wait')
     .option('--label <label>', 'label', (v: string, a: string[]) => [...a, v], [] as string[])
+    .option('--profile <name>', 'profile', (v: string, a: string[]) => [...a, v], [] as string[])
     .action(() => {});
   program.parse([...words, ...source], { from: 'user' });
   return { command, opts: command.opts() };
@@ -341,6 +342,11 @@ test('every supported option setting reaches its commands and explicit flags tak
   > = {
     file: { configured: '/config/compose.yml', flags: ['--file', 'cli.yml'], expected: 'cli.yml' },
     buildLocal: { configured: false, flags: ['--build-local'], expected: true },
+    profile: {
+      configured: ['config'],
+      flags: ['--profile', 'one', '--profile', 'two'],
+      expected: ['one', 'two'],
+    },
     wait: { configured: true, flags: ['--no-wait'], expected: false },
     address: { configured: '10.0.0.1', flags: ['--address', '10.0.0.2'], expected: '10.0.0.2' },
     label: {

@@ -7,7 +7,14 @@ import type { Command } from 'commander';
 import { createLocalBuildSnapshot, createSourceArchive, prepareLocalImages } from '../build.ts';
 import { createProgress, withProgress } from '../progress.ts';
 import { canPrompt } from '../prompt.ts';
-import { findMissingSecrets, promptForSecrets } from '../secrets.ts';
+import {
+  describeValues,
+  findMissingValues,
+  ignoredSourceNotes,
+  parseVarFlags,
+  promptForValues,
+} from '../values.ts';
+import { formatValuesTable, looksSensitive, summarizeValues } from '../../values.ts';
 import { bindMountWarnings, composeHash } from '../../compose/compose.ts';
 import { normalizeCompose } from '../../compose/normalize.ts';
 import {
@@ -66,6 +73,22 @@ export function registerDeploy(program: Command): void {
     .option('--timeout <seconds>', 'wait timeout in seconds', '300')
     .option('--json', 'print the full result, including the desired state, as JSON')
     .option(
+      '--var <NAME=value>',
+      'a value for this deploy only, such as TAG=$GITHUB_SHA; it wins over a stored variable, is recorded on the deployment with its value, and cannot replace a secret (repeatable)',
+      // Not collectList: a value may contain commas, so each --var is one NAME=value.
+      (value: string, previous: string[] = []) => [...previous, value],
+    )
+    .option(
+      '--profile <name>',
+      'enable a Compose profile (repeat or comma-separate); COMPOSE_PROFILES in your shell is not read',
+      collectList,
+      [],
+    )
+    .option(
+      '--dry-run',
+      'resolve every value and print where each comes from (secrets as •••), then stop without deploying',
+    )
+    .option(
       '--move <service>',
       'acknowledge that a service placed on another node starts empty (its data does not move); the services that write to it are held until you restore it or run `tug hold release` (repeat or comma-separate for several)',
       collectList,
@@ -81,6 +104,9 @@ export function registerDeploy(program: Command): void {
             composeCli?: boolean;
             json?: boolean;
             move: string[];
+            var?: string[];
+            profile: string[];
+            dryRun?: boolean;
           },
       ) => {
         const progress = createProgress();
@@ -88,25 +114,75 @@ export function registerDeploy(program: Command): void {
           progress.stage('Preparing deployment');
           const cfg = await loadCfg();
           const project = o.project || cfg.project || 'site';
-          // Control secrets are interpolated as sentinels; the agent substitutes the node's released values.
-          const { secrets } = await request<{ secrets: { name: string }[] }>(
-            'GET',
-            `/api/v1/secrets?project=${encodeURIComponent(project)}`,
-          );
+          // Every ${NAME} comes from control (secrets as sentinels the agent fills in, variables as their values), from
+          // --var, or from the default written in the file. The shell and .env of this machine are never read.
+          const flags = parseVarFlags(o.var ?? []);
+          const [{ secrets }, { vars }] = await Promise.all([
+            request<{ secrets: { name: string }[] }>(
+              'GET',
+              `/api/v1/secrets?project=${encodeURIComponent(project)}`,
+            ),
+            request<{ vars: { name: string; version: number; value: string }[] }>(
+              'GET',
+              `/api/v1/vars/values?project=${encodeURIComponent(project)}`,
+            ),
+          ]);
           const secretNames = secrets.map((secret) => secret.name);
-          const missing = await findMissingSecrets(o.file, secretNames);
-          if (missing.length) {
-            if (!canPrompt())
+          const variables = new Map(
+            vars.map((row) => [row.name, { version: row.version, value: row.value }]),
+          );
+          for (const name of Object.keys(flags)) {
+            if (secretNames.includes(name))
               throw new Error(
-                `${o.file} needs values that are not set: ${missing.join(', ')}; create each with tug secret set <name> (or run tug deploy in a terminal to be prompted)`,
+                `--var ${name} conflicts with the project secret ${name}: a secret is never overridden from the command line`,
               );
-            console.error(`Missing secrets for project ${project}: ${missing.join(', ')}`);
-            // Only names that do not exist yet are stored, so an existing secret is never overwritten.
-            for (const [name, value] of Object.entries(await promptForSecrets(missing))) {
-              await request('POST', '/api/v1/secrets', { project, name, value });
-              secretNames.push(name);
+            if (looksSensitive(name))
+              console.error(
+                `warning: --var ${name} looks like a credential, and --var values are recorded on the deployment in plain text; use tug secret set ${name} instead`,
+              );
+          }
+          for (const note of await ignoredSourceNotes(
+            o.file,
+            new Set([...secretNames, ...variables.keys()]),
+          ))
+            console.error(note);
+          const known = () => new Set([...secretNames, ...variables.keys(), ...Object.keys(flags)]);
+          const missing = await findMissingValues(o.file, known());
+          if (missing.length) {
+            if (o.dryRun || !canPrompt())
+              throw new Error(
+                `${o.file} needs values that are not set on control: ${missing.join(', ')}. Tug does not read your shell environment or .env; set each with tug secret set <name> (private) or tug var set <name> (visible), pass --var NAME=value for this deploy only, or import a file with tug secret import .env${
+                  o.dryRun ? '' : ' (or run tug deploy in a terminal to be prompted)'
+                }`,
+              );
+            console.error(
+              `Values not set on control for project ${project}: ${missing.join(', ')}`,
+            );
+            // Only names that do not exist yet are stored, so an existing value is never overwritten.
+            for (const [name, entry] of Object.entries(await promptForValues(missing))) {
+              if (entry.kind === 'secret') {
+                await request('POST', '/api/v1/secrets', { project, name, value: entry.value });
+                secretNames.push(name);
+              } else {
+                const stored = await request<{ version: number }>('POST', '/api/v1/vars', {
+                  project,
+                  name,
+                  value: entry.value,
+                });
+                variables.set(name, { version: stored.version, value: entry.value });
+              }
             }
           }
+          const values = await describeValues(o.file, {
+            secrets: new Set(secretNames),
+            vars: variables,
+            flags,
+          });
+          const referenced = new Set(values.map((value) => value.name));
+          for (const name of Object.keys(flags))
+            if (!referenced.has(name))
+              console.error(`warning: --var ${name} is not referenced in ${o.file}; it is ignored`);
+          console.error(`Values: ${summarizeValues(values)}`);
           const movePayload = o.move.length ? { moves: o.move } : {};
           const declared = await composeName(o.file);
           if (declared && declared !== project)
@@ -116,7 +192,14 @@ export function registerDeploy(program: Command): void {
           const compose = await normalizeCompose(o.file, secretNames, {
             project,
             composeCli: o.composeCli,
+            vars: { ...Object.fromEntries([...variables].map(([n, v]) => [n, v.value])), ...flags },
+            profiles: o.profile,
           });
+          if (o.dryRun) {
+            // Reading the file is part of the dry run: an env_file or an unsupported construct fails here too.
+            console.log(formatValuesTable(values));
+            return;
+          }
           for (const warning of bindMountWarnings(compose)) console.error(warning);
           const version = o.version || `git-${composeHash(compose)}`;
           let response: DeployResponse;
@@ -147,7 +230,7 @@ export function registerDeploy(program: Command): void {
                 );
               form.append(
                 'payload',
-                JSON.stringify({ project, version, compose, localImages, ...movePayload }),
+                JSON.stringify({ project, version, compose, values, localImages, ...movePayload }),
               );
               progress.stage('Uploading images and preparing deployment on control');
               response = await request<DeployResponse>('POST', '/api/v1/deployments', form, true);
@@ -159,7 +242,10 @@ export function registerDeploy(program: Command): void {
             const tarball = await makeContext();
             try {
               const form = new FormData();
-              form.append('payload', JSON.stringify({ project, version, compose, ...movePayload }));
+              form.append(
+                'payload',
+                JSON.stringify({ project, version, compose, values, ...movePayload }),
+              );
               form.append('context', await openAsBlob(tarball), 'context.tgz');
               progress.stage('Uploading source and building images on control');
               response = await request<DeployResponse>('POST', '/api/v1/deployments', form, true);
@@ -172,6 +258,7 @@ export function registerDeploy(program: Command): void {
               project,
               version,
               compose,
+              values,
               ...movePayload,
             });
           }

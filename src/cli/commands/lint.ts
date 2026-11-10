@@ -37,7 +37,17 @@ export async function lintComposeFile(file: string): Promise<LintResult> {
   }
   if (!compose?.services || typeof compose.services !== 'object')
     return { file, errors: ['compose file must define services'] };
-  return { file, errors: composeErrors(compose, [], { normalized: false }) };
+  // `tug deploy` takes values only from control and refuses env_file, so lint says so before a deploy does.
+  const envFiles = Object.entries(compose.services)
+    .filter(([, service]) => service && typeof service === 'object' && 'env_file' in service)
+    .map(
+      ([name]) =>
+        `${name}: env_file is not read by tug deploy (values come only from control); store its entries with tug secret import <file> or tug var import <file> and list them under environment`,
+    );
+  const others = composeErrors(compose, [], { normalized: false }).filter(
+    (error) => !/: env_file is not supported$/.test(error),
+  );
+  return { file, errors: [...envFiles, ...others] };
 }
 
 export function registerLint(program: Command): void {
