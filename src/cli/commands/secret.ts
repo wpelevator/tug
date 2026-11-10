@@ -25,7 +25,7 @@ export function registerSecret(program: Command): void {
   secret
     .command('import [file]')
     .description(
-      'store the entries of a dotenv file (default .env): secrets, or variables for names that do not look like credentials; values are never printed',
+      'store the entries of a dotenv file (default .env) as secrets, or as variables for the names you give --vars; nothing is guessed, and values are never printed',
     )
     .option('--vars <names>', 'store these names as variables (comma-separated)', collectList, [])
     .option('--secrets <names>', 'store these names as secrets (comma-separated)', collectList, [])

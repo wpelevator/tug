@@ -146,38 +146,29 @@ test('parseVarFlags splits on the first equals sign and rejects bad, reserved an
   assert.throws(() => parseVarFlags(['A=1', 'A=2']), /twice/, 'a repeated name is refused');
 });
 
-test('classifyEnvFile sorts credentials from configuration and honours explicit lists', () => {
-  const text = 'DB_PASSWORD=p\nAPP_ENV=prod\nAWS_ACCESS_KEY_ID=k\nBARE\nTUG_REGISTRY_AUTH=x\n';
-  const sorted = classifyEnvFile(text, { sorted: true });
+test('classifyEnvFile guesses nothing: the command decides, and explicit lists override it', () => {
+  const text =
+    'DB_PASSWORD=p\nAPP_ENV=prod\nDATABASE_URL=postgres://u:p@h/db\nBARE\nTUG_REGISTRY_AUTH=x\n';
+  const secrets = classifyEnvFile(text, { fallback: 'secret', vars: ['APP_ENV'] });
   assert.deepEqual(
-    sorted.entries.map((e) => [e.name, e.kind]),
+    secrets.entries.map((e) => [e.name, e.kind]),
     [
       ['DB_PASSWORD', 'secret'],
       ['APP_ENV', 'var'],
-      ['AWS_ACCESS_KEY_ID', 'secret'],
+      ['DATABASE_URL', 'secret'],
     ],
-    'credential-like names become secrets and the rest variables',
+    'a secret import makes every entry a secret unless it is named as a variable, whatever the name or value looks like',
   );
-  assert.equal(sorted.skipped.length, 2, 'a bare name and a reserved name are skipped');
-  const unsorted = classifyEnvFile(text, { sorted: false, fallback: 'secret', vars: ['APP_ENV'] });
-  assert.deepEqual(
-    unsorted.entries.map((e) => [e.name, e.kind]),
-    [
-      ['DB_PASSWORD', 'secret'],
-      ['APP_ENV', 'var'],
-      ['AWS_ACCESS_KEY_ID', 'secret'],
-    ],
-    'without a terminal an entry is a secret unless it is named as a variable',
-  );
-  const vars = classifyEnvFile(text, { sorted: false, fallback: 'var', secrets: ['DB_PASSWORD'] });
+  assert.equal(secrets.skipped.length, 2, 'a bare name and a reserved name are skipped');
+  const vars = classifyEnvFile(text, { fallback: 'var', secrets: ['DB_PASSWORD', 'DATABASE_URL'] });
   assert.deepEqual(
     vars.entries.map((e) => [e.name, e.kind]),
     [
       ['DB_PASSWORD', 'secret'],
       ['APP_ENV', 'var'],
-      ['AWS_ACCESS_KEY_ID', 'var'],
+      ['DATABASE_URL', 'secret'],
     ],
-    'a variable import keeps everything a variable unless it is named as a secret',
+    'a variable import keeps every entry a variable unless it is named as a secret',
   );
 });
 

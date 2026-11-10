@@ -6,13 +6,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { parseDotenv } from '../compose/load.ts';
-import {
-  MAX_VAR_BYTES,
-  RESERVED_VALUE_NAMES,
-  VALUE_NAME,
-  VALUE_NAME_MESSAGE,
-  looksSensitive,
-} from '../values.ts';
+import { MAX_VAR_BYTES, RESERVED_VALUE_NAMES, VALUE_NAME, VALUE_NAME_MESSAGE } from '../values.ts';
 import type { DeploymentValue } from '../values.ts';
 import { ask } from './prompt.ts';
 import type { Prompter } from './prompt.ts';
@@ -191,17 +185,16 @@ export interface ImportEntry {
 }
 
 /**
- * The entries of a dotenv file and where each should go. Names that look like credentials become secrets and the rest
- * variables, unless `vars` or `secrets` name them; `fallback` decides the rest when neither the name nor the
- * heuristic does (a command that imports variables passes `var`). A bare `KEY` with no value is skipped.
+ * The entries of a dotenv file and where each should go. Tug does not guess from a name or a value: an entry is
+ * whatever `fallback` says (`secret` for `secret import`, `var` for `var import`) unless `vars` or `secrets` name it.
+ * A bare `KEY` with no value is skipped.
  */
 export function classifyEnvFile(
   text: string,
   options: {
     vars?: readonly string[];
     secrets?: readonly string[];
-    sorted: boolean;
-    fallback?: 'secret' | 'var';
+    fallback: 'secret' | 'var';
   },
 ): { entries: ImportEntry[]; skipped: string[] } {
   const parsed = parseDotenv(text, () => undefined);
@@ -220,11 +213,7 @@ export function classifyEnvFile(
       ? 'secret'
       : options.vars?.includes(name)
         ? 'var'
-        : options.sorted
-          ? looksSensitive(name)
-            ? 'secret'
-            : 'var'
-          : (options.fallback ?? 'secret');
+        : options.fallback;
     entries.push({ name, value, kind });
   }
   return { entries, skipped };

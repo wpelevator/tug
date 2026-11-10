@@ -16,11 +16,11 @@ export interface ImportOpts extends CommonOpts {
 }
 
 /**
- * `secret import` and `var import`: store each entry of a dotenv file in the project. `secret import` sorts: in a
- * terminal names that look like credentials are proposed as secrets and the rest as variables, and the operator
- * confirms or edits the split; without a terminal an entry is a secret unless `--vars` names it, the safe default.
- * `var import` makes every entry a variable unless `--secrets` names it. Values are never printed, and a name that
- * already exists is skipped unless `--overwrite`.
+ * `secret import` and `var import`: store each entry of a dotenv file in the project. Nothing is guessed from names
+ * or values: `secret import` makes every entry a secret unless `--vars` names it, and `var import` makes every entry
+ * a variable unless `--secrets` names it. In a terminal the operator sees the result and confirms it, or chooses
+ * per entry with `--select`. Values are never printed, and a name that already exists is skipped unless
+ * `--overwrite`.
  */
 export async function importValues(
   file: string | undefined,
@@ -36,11 +36,9 @@ export async function importValues(
     throw new Error(`could not read ${path}: ${(error as Error).message}`, { cause: error });
   }
   const interactive = canPrompt();
-  const sorted = mode === 'secret' && interactive;
   const { entries, skipped } = classifyEnvFile(text, {
     vars: o.vars,
     secrets: o.secrets,
-    sorted,
     fallback: mode,
   });
   const query = `?project=${encodeURIComponent(project)}`;
@@ -79,7 +77,7 @@ export async function importValues(
       for (const entry of todo) {
         const answer = (
           await ask(
-            `${entry.name} → ${entry.kind}. [s]ecret, [v]ariable, e[x]clude, or Enter to keep ${entry.kind}? `,
+            `${entry.name} → ${word(entry.kind)}. [s]ecret, [v]ariable, e[x]clude, or Enter to keep ${word(entry.kind)}? `,
           )
         )
           .trim()
@@ -94,6 +92,10 @@ export async function importValues(
     } else {
       console.error(`From ${path} into project ${project}:`);
       for (const entry of todo) console.error(`  ${entry.name.padEnd(32)} ${word(entry.kind)}`);
+      if (todo.some((entry) => entry.kind === 'var'))
+        console.error(
+          'Variables are visible to anyone with a deploy credential; secrets never are.',
+        );
       const answer = (await ask(`Store these ${todo.length}? [Y/n] `)).trim().toLowerCase();
       if (answer === 'n' || answer === 'no') {
         console.error('nothing stored');

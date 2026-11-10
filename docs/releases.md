@@ -29,7 +29,7 @@ Before 1.0 semver gives no guarantees, so the whole `0.minor` is the compatibili
 `tug deploy` no longer reads the shell environment of the machine that runs it, the `.env` next to the Compose file, `env_file` entries or `COMPOSE_PROFILES`. A `${NAME}` is filled from a project secret, a project variable, `--var` or the default in the file ([Where values come from](compose.md#where-values-come-from)). Before upgrading the CLI that your laptop and CI use:
 
 1. Run `tug deploy --dry-run` with the 3.0 CLI in a copy of the project: it prints every name with its source and fails naming the ones control lacks.
-2. Move what you relied on into control: `tug secret import .env` (names that look like credentials become secrets, the rest variables, and you confirm the split), or `tug secret set` and `tug var set` one by one. In CI, set variables with `tug var set` or pass `--var TAG=$GITHUB_SHA`.
+2. Move what you relied on into control: `tug secret import .env` (every entry becomes a secret unless `--vars` names it, and in a terminal you confirm the list or choose per entry with `--select`), or `tug secret set` and `tug var set` one by one. In CI, set variables with `tug var set` or pass `--var TAG=$GITHUB_SHA`.
 3. Replace each `env_file:` with `environment:` entries (`KEY: ${KEY}`) once its values are in control, and replace `COMPOSE_PROFILES=x` with `tug deploy --profile x` or `profile: [x]` in `tug.yml`.
 
 Control 3.0 reads the database written by 2.x and adds `project_vars` and a value record to deployments; deployments made before the upgrade simply have no record. A 2.x CLI keeps working against a 3.0 control, since the value record is optional, but it still resolves values on the machine that runs it.

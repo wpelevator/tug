@@ -14,7 +14,7 @@ import {
   parseVarFlags,
   promptForValues,
 } from '../values.ts';
-import { formatValuesTable, looksSensitive, summarizeValues } from '../../values.ts';
+import { formatValuesTable, summarizeValues } from '../../values.ts';
 import { bindMountWarnings, composeHash } from '../../compose/compose.ts';
 import { normalizeCompose } from '../../compose/normalize.ts';
 import {
@@ -135,10 +135,6 @@ export function registerDeploy(program: Command): void {
             if (secretNames.includes(name))
               throw new Error(
                 `--var ${name} conflicts with the project secret ${name}: a secret is never overridden from the command line`,
-              );
-            if (looksSensitive(name))
-              console.error(
-                `warning: --var ${name} looks like a credential, and --var values are recorded on the deployment in plain text; use tug secret set ${name} instead`,
               );
           }
           for (const note of await ignoredSourceNotes(

@@ -14,7 +14,7 @@ The web service sends file bytes directly to object storage and records the obje
 
 Create a project and register an ingress-enabled node named `app` (or change every placement in the Compose file). Set up DNS for the web host. Create a private bucket with an S3-compatible provider and credentials allowed to put, get, and delete objects in that bucket. Set the host, S3 endpoint, bucket, and region in the Compose file. HTTPS is strongly recommended for the S3 endpoint. Path-style S3 requests are enabled. Each example should use its own bucket or dedicated credentials and bucket.
 
-From the chosen example directory, set the secrets listed in its README with `tug secret set NAME`; the CLI reads each value from standard input. Then configure a separate Tug backup repository and deploy:
+From the chosen example directory, set the secrets listed in its README with `tug secret set NAME`; the CLI reads each value from standard input. Settings that are not private, such as the host name, S3 endpoint, bucket and region, can stay in the Compose file or become variables (`tug var set NAME --value ...`, referenced as `${NAME}`). Tug reads values only from control, so nothing comes from your shell or a `.env` file, and `tug deploy --dry-run` shows where each one came from. Then configure a separate Tug backup repository and deploy:
 
 ```sh
 # Use separate backup credentials and storage from the application bucket.

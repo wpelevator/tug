@@ -26,20 +26,6 @@ export const RESERVED_VALUE_NAMES: readonly string[] = ['TUG_REGISTRY_AUTH'];
 /** The largest variable value, in bytes. Variables end up in the deployment record, so they stay configuration-sized. */
 export const MAX_VAR_BYTES = 64 * 1024;
 
-/**
- * Names that read like credentials (`DB_PASSWORD`, `S3_SECRET_KEY`, `AUTH_SALT`, `API_TOKEN`). A hint for imports and
- * `--var`, never a security boundary: the operator confirms the split.
- */
-export function looksSensitive(name: string): boolean {
-  return (
-    /PASSWORD|PASSWD|PASSPHRASE|SECRET|TOKEN|CREDENTIAL|PRIVATE/i.test(name) ||
-    name
-      .toUpperCase()
-      .split('_')
-      .some((part) => part === 'KEY' || part === 'SALT' || part === 'AUTH' || part === 'PASS')
-  );
-}
-
 /** The service fields in which the agent substitutes a secret and control never parses the result. */
 const SECRET_FIELDS = new Set(['environment', 'command', 'entrypoint']);
 

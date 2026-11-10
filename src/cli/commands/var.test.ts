@@ -224,7 +224,7 @@ test('deploy --dry-run says where every value comes from and ignores .env and th
   });
 });
 
-test('deploy warns about a --var that looks like a credential and refuses one that is a secret', async () => {
+test('deploy refuses a --var that is a secret, and never guesses that another name is private', async () => {
   await withControl(async ({ dir, tug, fails }) => {
     await fs.writeFile(path.join(dir, 'compose.yaml'), COMPOSE);
     await tug(['secret', 'set', 'DB_PASSWORD', '--value', 'x']);
@@ -244,17 +244,35 @@ test('deploy warns about a --var that looks like a credential and refuses one th
     );
     await tug(['var', 'set', 'TAG', '--value', 'a']);
     await tug(['var', 'set', 'REGION', '--value', 'r']);
-    const warned = await tug(['deploy', '--dry-run', '--var', 'REGION=r2']);
-    assert.ok(!/looks like a credential/.test(warned.stderr), 'a plain name draws no warning');
-    await tug(['secret', 'remove', 'DB_PASSWORD']);
-    await tug(['var', 'set', 'APP_TOKEN', '--value', 'x']);
-    await fs.writeFile(path.join(dir, 'compose.yaml'), `${COMPOSE}      T: \${APP_TOKEN}\n`);
-    await tug(['secret', 'set', 'DB_PASSWORD', '--value', 'x']);
-    const credentialLike = await tug(['deploy', '--dry-run', '--var', 'APP_TOKEN=abc']);
+    const named = await tug([
+      'deploy',
+      '--dry-run',
+      '--var',
+      'REGION=r2',
+      '--var',
+      'API_TOKEN=abc',
+    ]);
+    assert.ok(
+      !/looks like a credential/.test(named.stderr),
+      'a name is never second-guessed: the operator chose --var',
+    );
+    assert.match(named.stderr, /--var API_TOKEN is not referenced/, 'an unused --var is reported');
+  });
+});
+
+test('var set says it takes effect on the next deploy and that variables are visible', async () => {
+  await withControl(async ({ tug }) => {
+    const set = await tug(['var', 'set', 'TAG', '--value', 'v1']);
+    assert.deepEqual(
+      JSON.parse(set.stdout),
+      { ok: true, name: 'TAG', version: 1 },
+      'stdout stays JSON',
+    );
+    assert.match(set.stderr, /takes effect on the next tug deploy/, 'stderr says when it applies');
     assert.match(
-      credentialLike.stderr,
-      /--var APP_TOKEN looks like a credential/,
-      'a --var with a credential-like name is flagged as recorded in plain text',
+      set.stderr,
+      /visible to anyone with a deploy credential.*tug secret set/,
+      'and that it is not private',
     );
   });
 });

@@ -22,7 +22,16 @@ export function registerVar(program: Command): void {
     .option('--from-file <path>', 'read the exact contents of a file, newlines included')
     .action(async (name: string, o: CommonOpts & ValueInputOpts) => {
       const value = await readValue(name, o);
-      print(await request('POST', '/api/v1/vars', { project: await projectOf(o), name, value }));
+      const result = await request<{ version: number }>('POST', '/api/v1/vars', {
+        project: await projectOf(o),
+        name,
+        value,
+      });
+      print(result);
+      // On stderr, so a script reading the JSON result is unaffected.
+      console.error(
+        `variable ${name} stored (version ${result.version}); it takes effect on the next tug deploy. Variables are visible to anyone with a deploy credential: use tug secret set for private values`,
+      );
     });
   vars
     .command('list')
