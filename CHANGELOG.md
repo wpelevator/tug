@@ -1,5 +1,19 @@
 # @wpelevator/tug
 
+## 3.0.0
+
+### Major Changes
+
+- 8f681e4: `tug deploy` now takes every `${NAME}` from control and nothing from the machine that runs it. A value is a project secret (`tug secret`), a new project variable (`tug var set|list|remove|import`, for visible values such as image tags, hosts and ports, written with the `deploy` role), a per-deploy `--var NAME=value`, or the default in the Compose file. The shell environment, the `.env` next to the file, `env_file` entries and `COMPOSE_PROFILES` are no longer read (use `tug secret import .env` to move an existing file, `--profile` for profiles), and `--compose-cli` follows the same rule. A name is either a secret or a variable, and a secret is rejected outside `environment`, `command`, `entrypoint` and `healthcheck.test`. `tug deploy --dry-run` prints every referenced name with its source, each deployment records those sources (`values`, never a secret value), a rollback restores the earlier variable values, `tug secret set --from-file` stores exact contents such as a PEM key, and `tug secret import` stores a dotenv file as secrets (or as variables for the names you give `--vars`), without guessing from names or values. Database schema 3 adds `project_vars` and the deployment value record.
+
+### Minor Changes
+
+- 0acacd3: Add `tug control upgrade`, `tug node upgrade` and `tug upgrade`. `control upgrade` replaces the control container over SSH with another image and keeps the port, advertised URL and extra names it runs with (read from the container, so nothing is passed again), tags the previous image as `tug:rollback` (`--rollback` goes back), verifies the CA did not change and waits for control to answer. `node upgrade` replaces an enrolled agent in place with its key, address, labels and connect-only URL, skips nodes already on the image and refuses `--to` a version newer than control. `tug upgrade` runs both in the right order using the new `controlSsh` config key. Version-skew errors now name `tug control upgrade`, and `control setup` over an existing control notes which of its settings the run changes.
+
+### Patch Changes
+
+- 3fdbf3e: Security fixes with no change to the wire protocol or persisted formats. A malformed WebSocket upgrade target no longer crashes control; an event `limit` is clamped into 1–500 (a missing or non-numeric one is 100); the command of a one-off `tug run` is hidden from `read` credentials in `GET /api/v1/events` and the watch stream (the stored audit record is unchanged, and `deploy` and `admin` still see it); control and agents never route to or allocate Caddy's loopback management ports 2019 and 2021; terminal escape sequences are stripped from human-readable event output; and a hostname conflict no longer names a project outside the caller's scope.
+
 ## 2.0.0
 
 ### Major Changes
