@@ -7,6 +7,20 @@ import type { CommonOpts } from './context.ts';
 
 const word = (kind: 'secret' | 'var'): string => (kind === 'var' ? 'variable' : 'secret');
 
+/**
+ * The names of the project's secrets and variables, read one request after the other: two requests in flight from one
+ * CLI process made control reset the second connection (ECONNRESET).
+ */
+export async function loadExistingNames(
+  get: typeof request,
+  project: string,
+): Promise<{ secrets: { name: string }[]; vars: { name: string }[] }> {
+  const query = `?project=${encodeURIComponent(project)}`;
+  const { secrets } = await get<{ secrets: { name: string }[] }>('GET', `/api/v1/secrets${query}`);
+  const { vars } = await get<{ vars: { name: string }[] }>('GET', `/api/v1/vars${query}`);
+  return { secrets, vars };
+}
+
 export interface ImportOpts extends CommonOpts {
   vars: string[];
   secrets: string[];
@@ -41,13 +55,7 @@ export async function importValues(
     secrets: o.secrets,
     fallback: mode,
   });
-  const query = `?project=${encodeURIComponent(project)}`;
-  // One request after the other: two in flight from one CLI process made control reset the second connection.
-  const { secrets } = await request<{ secrets: { name: string }[] }>(
-    'GET',
-    `/api/v1/secrets${query}`,
-  );
-  const { vars } = await request<{ vars: { name: string }[] }>('GET', `/api/v1/vars${query}`);
+  const { secrets, vars } = await loadExistingNames(request, project);
   const existing = new Map<string, 'secret' | 'var'>([
     ...secrets.map((row) => [row.name, 'secret'] as const),
     ...vars.map((row) => [row.name, 'var'] as const),

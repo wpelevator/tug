@@ -260,6 +260,27 @@ test('a forced recreate onto the image already running does not move tug:rollbac
   });
 });
 
+test('a forced recreate onto another tag of the running image does not move tug:rollback', async () => {
+  // The name differs (tug:local names the image the container runs), the image ID does not: the tag must stay put.
+  await withHost(async ({ dir, upgrade, calls }) => {
+    await fs.writeFile(
+      path.join(dir, 'image-ids.json'),
+      JSON.stringify({ [OLD_IMAGE]: 'sha256:oldimage', 'tug:local': 'sha256:oldimage' }),
+    );
+    const result = await upgrade('--image', 'tug:local', '--force', '--yes');
+    assert.equal(result.code, 0, `the forced recreate should succeed: ${result.stderr}`);
+    const log = await calls();
+    assert.ok(
+      log.some((l) => l.startsWith('run -d --name tug-control-control-1')),
+      '--force recreates the container',
+    );
+    assert.ok(
+      !log.some((l) => l.startsWith('tag ')),
+      'the same image under another name must not move tug:rollback, which would make the rollback a no-op',
+    );
+  });
+});
+
 test('control rollback works while control restart-loops, because the CA is read from the volume', async () => {
   await withHost(async ({ dir, upgrade, calls }) => {
     await fs.writeFile(path.join(dir, 'rollback-image'), '');
