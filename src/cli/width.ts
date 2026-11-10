@@ -43,3 +43,10 @@ const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/g;
 
 /** One line of plain text: control characters would break cursor arithmetic or inject escapes into the terminal. */
 export const plainText = (text: string): string => text.replace(CONTROL_CHARACTERS, ' ');
+
+// CSI, OSC and two-character terminal escapes.
+// eslint-disable-next-line no-control-regex
+const ESCAPES = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?|\x1b[@-Z\\-_]|\x1b/g;
+
+/** Strip terminal escapes and flatten any remaining control characters to one line. */
+export const sanitizeTerminalText = (text: string): string => plainText(text.replace(ESCAPES, ''));

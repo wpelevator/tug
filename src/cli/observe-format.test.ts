@@ -71,6 +71,19 @@ test('formatContainers lists services first with state, image, published ports a
   );
 });
 
+test('human event output strips terminal styling and flattens control characters', () => {
+  const rendered = formatEvents(
+    [{ type: '\x1b[31mservice.serving\x1b[0m', message: 'Ready\nfor requests' }],
+    { showProject: false },
+  );
+  assert.match(
+    rendered,
+    /service\.serving\s+.*Ready for requests/,
+    'the event remains readable on one row',
+  );
+  assert.ok(!rendered.includes('\x1b'), 'the human output contains no terminal escape');
+});
+
 test('formatEvents shows the project column only when events from several projects can appear', () => {
   const events = [
     {

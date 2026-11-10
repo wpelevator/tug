@@ -190,7 +190,7 @@ Start with the [single-VPS tutorial](docs/getting-started.md), then choose the t
 - **Networking and access**
   - [Hostnames, HTTPS and service networking](docs/networking.md)
   - [Credentials and CI](docs/access-control.md)
-  - [Security trust boundaries](docs/security.md)
+  - [Security audit and trust boundaries](docs/security.md)
 - **Servers and data**
   - [Service placement and scaling](docs/service-placement.md)
   - [Node management](docs/nodes.md)

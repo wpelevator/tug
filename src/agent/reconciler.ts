@@ -21,6 +21,7 @@ import { parseDuration } from '../duration.ts';
 import { errMessage } from '../errors.ts';
 import { now } from '../db/row.ts';
 import { ensureDir } from '../files.ts';
+import { isRolloutPort } from '../ingress.ts';
 import type { DesiredState, ServiceState } from '../protocol.ts';
 
 export const DEFAULT_DRAIN = '30s';
@@ -218,7 +219,8 @@ async function allocatePort(
   const size = hi - lo + 1;
   for (let i = 0; i < size; i++) {
     const port = lo + ((last + 1 - lo + i) % size);
-    if (!busy.has(port)) return port;
+    // Never a loopback management port (Caddy's admin and certificate-ask ports), even inside a configured range.
+    if (!busy.has(port) && isRolloutPort(port)) return port;
   }
   throw new Error(`no free host port left in the rollout range ${lo}-${hi} (TUG_ROLLOUT_PORTS)`);
 }

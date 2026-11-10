@@ -51,7 +51,7 @@ CLI options override environment variables, which override the config files and 
 | `TUG_STATE_DIR` | `/var/lib/tug` | Identity (`agent.json`, `agent-pending.json`), applied revisions, managed-image identities, temporary image downloads, ingress config and generated project files. In the agent container this is the `tug-agent` volume. |
 | `TUG_POLL_INTERVAL_MS` | `5000` | Maximum quiet interval between reconciliations. A WebSocket or long-poll wake can start one sooner. |
 | `TUG_APPLY` | `true` | Set `false` to render files and report without touching Docker. |
-| `TUG_ROLLOUT_PORTS` | `20000-20999` | Host port range (`LOW-HIGH`) for revisions of rolling services; each running or draining revision uses one port. |
+| `TUG_ROLLOUT_PORTS` | `20000-20999` | Host port range (`LOW-HIGH`) for revisions of rolling services; each running or draining revision uses one port. It is the node's own setting: control does not filter by it. Caddy's management ports `2019` and `2021` are skipped even inside the range. |
 | `TUG_CADDY_IMAGE` | `caddy:2-alpine` | Image for the managed Caddy container on ingress nodes. |
 | `NODE_EXTRA_CA_CERTS` | unset | Extra CA for a control plane with a private certificate. |
 
