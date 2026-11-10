@@ -9,6 +9,7 @@ import { testImageResolver, testControlUrl, testIdentity } from '../../tests/hel
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { json } from '../../tests/helpers.ts';
+import { until } from '../../tests/wait.ts';
 
 async function makeServer(docker = new FakeDocker()) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-diag-'));
@@ -132,8 +133,10 @@ test('node diagnostics separate observed clock skew from unknown for offline nod
     );
 
     process.env.TUG_STALE_SECONDS = '0.001';
-    await new Promise((resolve) => setTimeout(resolve, 30));
-    check = await nodesCheck();
+    check = await until(async () => {
+      const latest = await nodesCheck();
+      return byName(latest, 'b').clockSkew?.state === 'unknown' ? latest : undefined;
+    }, 'the silent node to count as offline');
     assert.deepEqual(
       byName(check, 'b').clockSkew,
       { state: 'unknown', reason: 'offline' },

@@ -15,6 +15,7 @@ import { Pki, identityUri, serverNames } from '../pki.ts';
 import { serverTlsOptions } from '../control/tls-server.ts';
 import { createCliLiveTransport } from './live-transport.ts';
 import { parseLiveRequest, runCliLive } from './live.ts';
+import { until } from '../../tests/wait.ts';
 
 const execFileAsync = promisify(execFile);
 async function serverFixture() {
@@ -152,14 +153,17 @@ test('transport exposes flow control: flow flag, input acknowledgements ahead of
     const remote = [...f.server.clients][0];
     frame(remote, { type: 'live.output', stream: 'stdout', data: 'AA==' });
     frame(remote, { type: 'live.stdin-ack', bytes: 7 });
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await until(() => acked.length > 0, 'the stdin acknowledgement to reach the runner hook');
     assert.deepEqual(
       acked,
       [7],
       'a stdin acknowledgement reaches the runner hook without queueing',
     );
     await session.send({ type: 'ack', bytes: 300 });
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await until(
+      () => received.at(-1)?.type === 'live.ack',
+      'the output acknowledgement to reach the server',
+    );
     assert.deepEqual(
       received.at(-1),
       { v: 1, type: 'live.ack', bytes: 300 },

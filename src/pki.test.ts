@@ -27,6 +27,7 @@ import {
   writeFileDurable,
 } from './pki.ts';
 import { serverTlsOptions } from './control/tls-server.ts';
+import { until } from '../tests/wait.ts';
 
 async function tmp() {
   return fs.mkdtemp(path.join(os.tmpdir(), 'tug-pki-'));
@@ -201,7 +202,7 @@ test('mTLS: a CA-signed client connects; missing, foreign-CA and plain clients f
       'https://localhost:8443',
     );
     const ok = await connect({ port, ...clientTlsOptions(client.credential) });
-    await new Promise((r) => setTimeout(r, 100));
+    await until(() => seen.length > 0, 'the server to see the connection');
     ok.destroy();
     assert.equal(
       seen[0].identity?.uri,
@@ -258,13 +259,13 @@ test('mTLS: session resumption is refused so every connection presents its certi
     );
     const options = { port, ...clientTlsOptions(client.credential) };
     const first = await connect(options);
-    await new Promise((r) => setTimeout(r, 100));
+    await until(() => seen.length > 0, 'the server to see the first connection');
     const session = first.getSession();
     first.destroy();
     assert.equal(seen.length, 1, 'the first connection must reach the gate');
     const second = await connect({ ...options, session });
     assert.equal(second.isSessionReused(), false, 'the client must not manage to resume');
-    await new Promise((r) => setTimeout(r, 100));
+    await until(() => seen.length > 1, 'the server to see the second connection');
     second.destroy();
     assert.ok(
       seen.every((s) => !s.reused),

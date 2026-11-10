@@ -134,7 +134,7 @@ export function versionVerdict(
   cliVersion: string,
   base: string,
 ): { error?: string; warning?: string } {
-  const upgrade = 'upgrade the control plane with: tug control setup <control host> --yes';
+  const upgrade = 'upgrade the control plane with: tug control upgrade <control host> --yes';
   if (controlVersion === undefined)
     return {
       error: `the control at ${base} did not report a version; it is older than this CLI (${cliVersion}) — ${upgrade}`,
@@ -234,7 +234,7 @@ export function missingRouteHint(
   const control = stamp ? majorMinor(stamp) : null;
   const mine = majorMinor(cliVersion);
   if (!control || !mine || compareMajMin(control, mine) !== -1) return '';
-  return ` (the control at ${base} runs ${stamp}, this CLI is ${cliVersion}; this command may need a newer control: tug control setup <control host> --yes)`;
+  return ` (the control at ${base} runs ${stamp}, this CLI is ${cliVersion}; this command may need a newer control: tug control upgrade <control host> --yes)`;
 }
 
 /**

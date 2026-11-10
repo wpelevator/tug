@@ -130,6 +130,7 @@ Project commands sit at the top level; everything else reads `tug <subject> <ver
 | Run a one-off command | `tug run <service> -- wp cache flush` |
 | Change the number of replicas | `tug scale <service> 3` |
 | Add, list or replace servers | `tug node add`, `tug node list`, `tug node replace <name>` |
+| Upgrade control and nodes after a release | `tug upgrade` (or `tug control upgrade`, then `tug node upgrade --all`) |
 | Add a server I cannot SSH to | `tug node enroll`, then run the printed `docker run` on it |
 | Manage secrets | `tug secret set`, `tug secret list`, `tug secret remove` |
 | Back up now, or restore | `tug backup run`, `tug restore run <target>` |

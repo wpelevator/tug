@@ -29,13 +29,7 @@ export function fakeTerminal(columns = 100, rows = 30) {
   return { stdin, stdout, rawModes, output: () => output };
 }
 
-export async function until(condition: () => boolean, what: string, ms = 3000): Promise<void> {
-  const deadline = Date.now() + ms;
-  while (!condition()) {
-    if (Date.now() > deadline) assert.fail(`timed out waiting for ${what}`);
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-}
+export { until } from './wait.ts';
 
 export function fakeApi(status = unhealthyStatus) {
   const calls: { method: string; route: string; body?: unknown }[] = [];

@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { DockerEngine, DockerError, demux, splitImageRef } from './docker-api.ts';
+import { until } from '../tests/wait.ts';
 
 async function daemon(handler: http.RequestListener) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-sock-'));
@@ -74,7 +75,10 @@ test('demux splits the multiplexed stream into stdout and stderr across chunk bo
   const all = Buffer.concat([frame(1, 'hello'), frame(2, 'oops')]);
   src.write(all.subarray(0, 10));
   src.end(all.subarray(10));
-  await new Promise((r) => setTimeout(r, 10));
+  await until(
+    () => o.length > 0 && e.length > 0,
+    'both demultiplexed streams to receive their frames',
+  );
   assert.deepEqual([o.join(''), e.join('')], ['hello', 'oops']);
 });
 
@@ -109,7 +113,7 @@ test('demux pauses the source while a target is full and resumes once every full
     'the source stays paused while stderr, a target that is still full, has not drained',
   );
   err.resume();
-  await new Promise((r) => setTimeout(r, 10));
+  await until(() => !src.isPaused(), 'the source to resume after every full target drained');
   assert.equal(src.isPaused(), false, 'the source resumes after every full target drained');
 });
 
