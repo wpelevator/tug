@@ -36,7 +36,7 @@ test('control inspect yields the port, URL and extra names the container was ins
     {
       image: 'ghcr.io/wpelevator/tug:1.2.0',
       imageId: 'sha256:abc123',
-      port: 9443,
+      bindings: [{ port: 9443 }],
       controlUrl: 'https://control.example.com:9443',
       extraSans: ['a.example.com', '10.0.0.5'],
     },
@@ -55,6 +55,19 @@ test('control inspect without extra names yields an empty list', () => {
 });
 
 test('control inspect refuses a container that setup did not create', () => {
+  assert.throws(
+    () =>
+      parseControlInspect(
+        controlInspect({
+          HostConfig: {
+            NetworkMode: 'host',
+            PortBindings: { '8443/tcp': [{ HostIp: '127.0.0.1', HostPort: '9443' }] },
+          },
+        }),
+      ),
+    /unsupported network mode/,
+    'a configured port ignored by host networking must not turn into a published port',
+  );
   assert.throws(
     () => parseControlInspect(controlInspect({ HostConfig: { PortBindings: {} } })),
     /publishes no port 8443/,
@@ -132,5 +145,76 @@ test('agents may not be upgraded past the control', () => {
   assert.doesNotThrow(
     () => assertNotAheadOfControl('latest', '1.4.0'),
     'an unparseable tag is not judged here',
+  );
+});
+
+test('a wildcard binding is replayed as typed, not as the explicit IPv4 and IPv6 mappings the daemon published', () => {
+  const published = {
+    NetworkSettings: {
+      Ports: {
+        '8443/tcp': [
+          { HostIp: '0.0.0.0', HostPort: '9443' },
+          { HostIp: '::', HostPort: '9443' },
+        ],
+      },
+    },
+  };
+  assert.deepEqual(
+    parseControlInspect(controlInspect(published)).bindings,
+    [{ port: 9443 }],
+    'replaying `-p [::]:9443:8443` would fail on a host without IPv6 where the wildcard still works',
+  );
+});
+
+test('every requested binding is kept, and a container with extra published ports or host networking is refused', () => {
+  assert.deepEqual(
+    parseControlInspect(
+      controlInspect({
+        HostConfig: {
+          PortBindings: {
+            '8443/tcp': [
+              { HostIp: '127.0.0.1', HostPort: '9443' },
+              { HostIp: '::1', HostPort: '9443' },
+            ],
+          },
+        },
+      }),
+    ).bindings,
+    [
+      { hostIp: '127.0.0.1', port: 9443 },
+      { hostIp: '::1', port: 9443 },
+    ],
+    'a loopback-only install stays loopback-only on both address families',
+  );
+  assert.throws(
+    () =>
+      parseControlInspect(
+        controlInspect({
+          HostConfig: {
+            PortBindings: {
+              '8443/tcp': [{ HostPort: '9443' }],
+              '9000/tcp': [{ HostPort: '9000' }],
+            },
+          },
+        }),
+      ),
+    /additional container ports/,
+    'a port the upgrade would silently unpublish should stop it',
+  );
+});
+
+test('an agent keeps its rollout port range across an upgrade, and a malformed one is refused', () => {
+  const agent = (env: string[]) =>
+    JSON.stringify([{ Config: { Image: 'ghcr.io/wpelevator/tug:1.2.0', Env: env } }]);
+  assert.equal(
+    parseAgentInspect(agent(['TUG_ROLLOUT_PORTS=22000-22999'])).rolloutPorts,
+    '22000-22999',
+    'a custom range should not reset to the default',
+  );
+  assert.equal(parseAgentInspect(agent([])).rolloutPorts, undefined, 'no range stays unset');
+  assert.throws(
+    () => parseAgentInspect(agent(['TUG_ROLLOUT_PORTS=1;rm -rf /'])),
+    /is not LOW-HIGH/,
+    'a value that is not a range never reaches the install shell command',
   );
 });

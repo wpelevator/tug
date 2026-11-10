@@ -119,8 +119,16 @@ async function withHost(
   }
 }
 
-test('control upgrade keeps the running port, URL and extra names and tags the old image first', async () => {
-  await withHost(async ({ upgrade, calls }) => {
+test('control upgrade keeps the running bindings, URL and extra names and tags the old image first', async () => {
+  await withHost(async ({ dir, upgrade, calls }) => {
+    const inspected = JSON.parse(containerJson);
+    inspected[0].HostConfig.PortBindings = {
+      '8443/tcp': [
+        { HostIp: '127.0.0.1', HostPort: '9443' },
+        { HostIp: '::1', HostPort: '9443' },
+      ],
+    };
+    await fs.writeFile(path.join(dir, 'tug-control-control-1.json'), JSON.stringify(inspected));
     const result = await upgrade('--to', '9.9.9', '--yes');
     assert.equal(result.code, 0, `the upgrade should succeed: ${result.stderr}`);
     const log = await calls();
@@ -132,7 +140,12 @@ test('control upgrade keeps the running port, URL and extra names and tags the o
     );
     assert.ok(run > tag, 'the old image should be tagged before the container is replaced');
     const runLine = log[run];
-    assert.match(runLine, /-p 9443:8443/, 'the published port should be kept, not reset to 8443');
+    assert.match(
+      runLine,
+      /-p 127\.0\.0\.1:9443:8443 -p \[::1\]:9443:8443/,
+      'both effective loopback bindings survive the upgrade',
+    );
+    assert.doesNotMatch(runLine, /-p 9443:8443/, 'the upgrade does not add a wildcard binding');
     assert.match(
       runLine,
       /-e TUG_CONTROL_URL=https:\/\/control\.test:9443/,
@@ -173,6 +186,25 @@ test('control upgrade does nothing when the image already runs, unless forced', 
   });
 });
 
+test('control upgrade refuses unsupported published ports before replacing the container', async () => {
+  await withHost(async ({ dir, upgrade, calls }) => {
+    const inspected = JSON.parse(containerJson);
+    inspected[0].HostConfig.PortBindings['9000/tcp'] = [{ HostPort: '9000' }];
+    await fs.writeFile(path.join(dir, 'tug-control-control-1.json'), JSON.stringify(inspected));
+    const result = await upgrade('--to', '9.9.9', '--yes');
+    assert.notEqual(result.code, 0, 'an unsupported layout prevents the upgrade');
+    assert.match(
+      result.stderr,
+      /additional container ports.*manually/,
+      'the error explains how to retain the layout',
+    );
+    assert.ok(
+      !(await calls()).some((line) => /^(?:run|rm|tag) /.test(line)),
+      'the running container and rollback tag are untouched',
+    );
+  });
+});
+
 test('control upgrade --rollback runs the kept image and does not retag', async () => {
   await withHost(async ({ dir, upgrade, calls }) => {
     const missing = await upgrade('--rollback', '--yes');
@@ -183,9 +215,17 @@ test('control upgrade --rollback runs the kept image and does not retag', async 
       'the failure should say the image is missing',
     );
     await fs.writeFile(path.join(dir, 'rollback-image'), '');
+    const inspected = JSON.parse(containerJson);
+    inspected[0].HostConfig.PortBindings['8443/tcp'][0].HostIp = '127.0.0.1';
+    await fs.writeFile(path.join(dir, 'tug-control-control-1.json'), JSON.stringify(inspected));
     const result = await upgrade('--rollback', '--yes');
     assert.equal(result.code, 0, `the rollback should succeed: ${result.stderr}`);
     const log = await calls();
+    assert.match(
+      log.find((l) => l.startsWith('run -d ')) ?? '',
+      /-p 127\.0\.0\.1:9443:8443/,
+      'rollback keeps the explicit host binding',
+    );
     assert.ok(
       log.some((l) => /^run -d .* tug:rollback control$/.test(l)),
       'control should be started from tug:rollback',
@@ -278,7 +318,7 @@ test('control setup over an existing control says which of its settings the run 
     const changed = await setup('--control-url', 'https://control.test:9443');
     assert.match(
       changed,
-      /already installed on ops@control\.test.*port 9443 -> 8443.*extra names \[a\.example\.com, 10\.0\.0\.5\] -> \[\].*tug control upgrade/s,
+      /already installed on ops@control\.test.*bindings 9443:8443 -> 8443:8443.*extra names \[a\.example\.com, 10\.0\.0\.5\] -> \[\].*tug control upgrade/s,
       'setup should name the port and extra names that a rerun without flags would reset',
     );
     const same = await setup(

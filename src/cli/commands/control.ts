@@ -10,6 +10,7 @@ import type { StepProgress } from '../process.ts';
 import {
   ROLLBACK_TAG,
   alreadyRunning,
+  controlPortMapping,
   inspectControlScript,
   parseControlInspect,
   readControlCaScript,
@@ -79,14 +80,19 @@ interface SetupOpts extends InstallOpts {
 /** Replaces the control container with one running `image` on the same volume; the data is never touched. */
 async function installControlContainer(
   sshTarget: string,
-  plan: { image: string; controlUrl: string; port: number; extraSans: string[] },
+  plan: Omit<ControlInstall, 'imageId'>,
   progress: StepProgress,
 ): Promise<void> {
   const remote = await loadTemplate(templatesDir, 'control-install.sh', {
     IMAGE_SH: sh(plan.image),
     CONTROL_URL_SH: sh(new URL(plan.controlUrl).origin),
     EXTRA_SANS_SH: sh(plan.extraSans.join(',')),
-    PORT: String(plan.port),
+    PORT_FLAGS: plan.bindings
+      .map(
+        (binding) =>
+          `-p ${binding.hostIp ? sh(controlPortMapping(binding)) : controlPortMapping(binding)}`,
+      )
+      .join(' '),
     MARKER: STAGE_MARKER,
     CONTAINER_SH: sh(CONTROL_CONTAINER),
   });
@@ -106,8 +112,10 @@ async function warnWhenSetupChangesInstall(
   } catch {
     return; // nothing installed yet (or not by setup): there is nothing to compare
   }
+  const oldBindings = existing.bindings.map(controlPortMapping).join(', ');
+  const newBinding = controlPortMapping({ port: plan.port });
   const changes = [
-    ...(existing.port !== plan.port ? [`port ${existing.port} -> ${plan.port}`] : []),
+    ...(oldBindings !== newBinding ? [`bindings ${oldBindings} -> ${newBinding}`] : []),
     ...(new URL(existing.controlUrl).origin !== new URL(plan.controlUrl).origin
       ? [`control URL ${existing.controlUrl} -> ${new URL(plan.controlUrl).origin}`]
       : []),
@@ -171,17 +179,15 @@ export async function runControlUpgrade(
   if (!o.rollback) assertImagePublished(image);
   return withProgress(`Upgrading control on ${sshTarget}`, async (progress) => {
     progress.stage(`Reading the control installation on ${sshTarget}`);
-    let current: ControlInstall;
-    try {
-      current = parseControlInspect(
-        await runCapture('ssh', ['--', sshTarget, inspectControlScript]),
-      );
-    } catch (e) {
-      throw new Error(
-        `no control installation to upgrade on ${sshTarget} (${errMessage(e)}); \`tug control setup <ssh-target>\` installs one`,
-        { cause: e },
-      );
-    }
+    const inspection = await runCapture('ssh', ['--', sshTarget, inspectControlScript]).catch(
+      (e: unknown) => {
+        throw new Error(
+          `no control installation to upgrade on ${sshTarget} (${errMessage(e)}); \`tug control setup <ssh-target>\` installs one`,
+          { cause: e },
+        );
+      },
+    );
+    const current = parseControlInspect(inspection);
     if (o.rollback) await runCapture('ssh', ['--', sshTarget, rollbackImageScript]);
     if (alreadyRunning(current.image, image, o.force) && !o.buildLocalImage) {
       console.error(
@@ -195,7 +201,7 @@ export async function runControlUpgrade(
         o.rollback ? 'Control rollback plan' : 'Control upgrade plan',
         `  host:        ${sshTarget}`,
         `  image:       ${current.image} -> ${image}`,
-        `  mTLS port:   ${current.port} (kept)`,
+        `  mTLS ports:  ${current.bindings.map(controlPortMapping).join(', ')} (kept)`,
         `  control URL: ${current.controlUrl} (kept)`,
         ...(current.extraSans.length
           ? [`  extra names: ${current.extraSans.join(', ')} (kept)`]
@@ -216,7 +222,11 @@ export async function runControlUpgrade(
       throw new Error('cancelled; nothing was changed');
     const before = fingerprintPem(await runCapture('ssh', ['--', sshTarget, readControlCaScript]));
     progress.stage(`Checking control host ${sshTarget}`);
-    await preflightRemote(sshTarget, { ports: [current.port], minDiskMb: 2048, progress });
+    await preflightRemote(sshTarget, {
+      ports: [...new Set(current.bindings.map(({ port }) => port))],
+      minDiskMb: 2048,
+      progress,
+    });
     const runImage = o.buildLocalImage ? await transferTugImage(sshTarget, image, progress) : image;
     progress.stage(`Checking control data on ${sshTarget}`);
     await runStep('ssh', ['--', sshTarget, controlGuardScript(runImage)], { progress });
@@ -347,7 +357,12 @@ function addSetup(parent: Command, description: string): void {
         progress.stage(`Installing control on ${sshTarget}`);
         await installControlContainer(
           sshTarget,
-          { image: runImage, controlUrl, port: Number(o.port), extraSans: o.extraSan },
+          {
+            image: runImage,
+            controlUrl,
+            bindings: [{ port: Number(o.port) }],
+            extraSans: o.extraSan,
+          },
           progress,
         );
         // Upgrades never reissue root: fresh installs create it, `--recover-root` replaces its key. Output goes straight to files.

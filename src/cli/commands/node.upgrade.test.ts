@@ -71,7 +71,10 @@ test('node upgrade replaces an enrolled agent, keeps its connect URL, skips curr
 
     await fs.writeFile(
       inspectFile,
-      agentInspect('ghcr.io/wpelevator/tug:0.0.1', ['TUG_CONTROL_URL=https://private.test:8443']),
+      agentInspect('ghcr.io/wpelevator/tug:0.0.1', [
+        'TUG_CONTROL_URL=https://private.test:8443',
+        'TUG_ROLLOUT_PORTS=22000-22999',
+      ]),
     );
     await fs.rm(ssh.log);
     const upgraded = await cli('node', 'upgrade', 'n-up', 'root@node.test', '--no-wait');
@@ -85,6 +88,11 @@ test('node upgrade replaces an enrolled agent, keeps its connect URL, skips curr
     assert.ok(
       upgradeScript.includes("-e TUG_CONTROL_URL='https://private.test:8443'"),
       "the running agent's connect-only URL should survive the upgrade without --agent-control-url",
+    );
+    assert.match(
+      upgradeScript,
+      /-e TUG_ROLLOUT_PORTS='22000-22999'/,
+      'node upgrade preserves its rollout port configuration',
     );
     assert.ok(
       upgradeScript.includes("agent identity --current 'n-up'"),

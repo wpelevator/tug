@@ -9,7 +9,7 @@ echo '{{MARKER}}Starting control'
 # Replaces the running control, whether this script or an earlier Compose-based install created it. The data is in the
 # volume, so only the container is recreated.
 docker rm -f {{CONTAINER_SH}} >/dev/null 2>&1 || true
-docker run -d --name {{CONTAINER_SH}} --restart unless-stopped -p {{PORT}}:8443 -e PORT=8443 -e TUG_DATA_DIR=/data -e TUG_CONTROL_URL={{CONTROL_URL_SH}} -e TUG_EXTRA_SANS={{EXTRA_SANS_SH}} -v tug-control:/data -v /var/run/docker.sock:/var/run/docker.sock {{IMAGE_SH}} control >/dev/null
+docker run -d --name {{CONTAINER_SH}} --restart unless-stopped {{PORT_FLAGS}} -e PORT=8443 -e TUG_DATA_DIR=/data -e TUG_CONTROL_URL={{CONTROL_URL_SH}} -e TUG_EXTRA_SANS={{EXTRA_SANS_SH}} -v tug-control:/data -v /var/run/docker.sock:/var/run/docker.sock {{IMAGE_SH}} control >/dev/null
 # Control used to be a Compose project; nothing manages it through Compose any more.
 docker network rm tug-control_default >/dev/null 2>&1 || true
 rm -f /opt/tug-control/docker-compose.yml

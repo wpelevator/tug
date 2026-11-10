@@ -116,7 +116,7 @@ async function installNodeIdentity(
   sshTarget: string,
   name: string,
   mode: 'create' | 'replace',
-  o: NodeIdentityOpts,
+  o: NodeIdentityOpts & { rolloutPorts?: string },
   repair = false,
   /** False in batch mode, where only the final per-node results are printed. */
   printResult = true,
@@ -167,7 +167,9 @@ async function installNodeIdentity(
     });
     progress.stage(`Installing agent on node ${name}`);
     const remote = await loadTemplate(templatesDir, 'node-install.sh', {
-      ENV_FLAGS: connectUrl ? `-e TUG_CONTROL_URL=${sh(connectUrl)} ` : '',
+      ENV_FLAGS:
+        (connectUrl ? `-e TUG_CONTROL_URL=${sh(connectUrl)} ` : '') +
+        (o.rolloutPorts ? `-e TUG_ROLLOUT_PORTS=${sh(o.rolloutPorts)} ` : ''),
       IMAGE_SH: sh(image),
       MARKER: STAGE_MARKER,
       RUN_FLAGS: `${HOST_NETWORK_FLAG} `,
@@ -465,6 +467,7 @@ async function upgradeNode(
       image: o.image ?? (o.to ? defaultImage(o.to) : undefined),
       buildLocalImage: o.buildLocalImage,
       agentControlUrl,
+      rolloutPorts: current.rolloutPorts,
     },
     false,
     false,
