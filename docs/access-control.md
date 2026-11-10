@@ -25,11 +25,11 @@ Roles are cumulative.
 
 | Role | Can do |
 | --- | --- |
-| `read` | Status, events, project and deployment records, volume listings and secret names (never values). No mutations. |
-| `deploy` | Everything in `read`, plus create projects, deploy, roll back, cancel deployments, restart services, fetch service logs and read command results, for its allowed projects. |
+| `read` | Status, events, project and deployment records, volume listings and secret and variable names (never values). No mutations. |
+| `deploy` | Everything in `read`, plus create projects, deploy, roll back, cancel deployments, restart services, fetch service logs, read command results, and set, read and remove project variables (`tug var`), for its allowed projects. |
 | `admin` | Everything an operator can do: secrets, volumes, nodes, enrollment, backups, restore, diagnostics and credential management. Admin credentials cannot be limited to projects. |
 
-A `deploy` credential must be trusted with its workloads' secrets: live `inspect` redacts environment values to avoid accidental disclosure, but `exec` can read them, and deployed code can disclose any secret it receives. Setting and deleting secrets is `admin` only; listing secret names is `read`. The deploy role can trigger project backups, while control backups and restores require `admin`.
+A `deploy` credential must be trusted with its workloads' secrets: live `inspect` redacts environment values to avoid accidental disclosure, but `exec` can read them, and deployed code can disclose any secret it receives. Setting and deleting secrets is `admin` only; listing secret names is `read`. Variables are visible configuration that is versioned with each deployment, so `deploy` can set, read and remove them; every change is audited with the credential's name. A name is either a secret or a variable in a project. The deploy role can trigger project backups, while control backups and restores require `admin`.
 
 Project scope limits API access to project records; it does not isolate hosts or co-located projects. Current deployments can select shared nodes and request host bind mounts, external volumes, volume driver options and added capabilities. Treat deployment authors as administrators of the nodes they can select. Use separate hosts or control planes for mutually untrusted authors. See the [security audit](security.md) for the demonstrated boundaries and outstanding fixes.
 
@@ -55,6 +55,8 @@ The project column says how a scoped credential's allowed projects are checked: 
 | `GET /api/v1/deployments/:id` | `read` | Deployment's project |
 | `GET /api/v1/volumes` | `read` | Query; includes node name, persistence and referencing services |
 | `GET /api/v1/secrets` | `read` | Query (names and versions only) |
+| `GET /api/v1/vars` | `read` | Query (variable names and versions only) |
+| `GET /api/v1/vars/values` | `deploy` | Query; variable names, versions and values, which the CLI interpolates when it prepares a deployment |
 | `GET /api/v1/domains` | `read` | Query; mapped domains of the project |
 | `POST /api/v1/projects` | `deploy` | Body `name` |
 | `POST /api/v1/deployments` | `deploy` | Body or upload payload `project` |
@@ -82,6 +84,8 @@ The project column says how a scoped credential's allowed projects are checked: 
 | `GET /api/v1/backup/repository-password` | `admin` | Query `project` prints that project's repository password; `control` prints the control repository password |
 | `POST /api/v1/secrets` | `admin` | Control-wide |
 | `DELETE /api/v1/secrets/:name` | `admin` | Control-wide |
+| `POST /api/v1/vars` | `deploy` | Body `project`; refuses a name that is a secret |
+| `DELETE /api/v1/vars/:name` | `deploy` | Query `project` |
 | `DELETE /api/v1/volumes/:name` | `admin` | Control-wide |
 | `GET /api/v1/nodes` | `admin` | Control-wide |
 | `POST /api/v1/nodes/:name/identity` | `admin` | Control-wide |

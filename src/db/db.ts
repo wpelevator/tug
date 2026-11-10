@@ -86,6 +86,8 @@ export interface DeploymentRow {
   updated_at: string;
   error_message: string | null;
   actor: string | null;
+  /** JSON array of where each `${NAME}` value came from (`DeploymentValue[]`), never secret values. */
+  values_json?: string | null;
 }
 export interface DesiredStateRow {
   id: string;
@@ -308,6 +310,18 @@ const CONTROL_MIGRATIONS: readonly Migration[] = [
 CREATE TABLE IF NOT EXISTS project_domains(id TEXT PRIMARY KEY, project_id TEXT NOT NULL, service TEXT NOT NULL, host TEXT NOT NULL UNIQUE, created_at TEXT, created_by TEXT);
 CREATE INDEX IF NOT EXISTS project_domains_project ON project_domains(project_id);
 `),
+  },
+  {
+    version: 3,
+    name: 'project-vars',
+    // Variables are visible deployment values kept beside secrets (`tug var`); each deployment records where its
+    // values came from. The table is separate from `secrets` so no query that releases secrets can pick one up.
+    up: (db) => {
+      db.exec(`
+CREATE TABLE IF NOT EXISTS project_vars(id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT NOT NULL, encrypted_value TEXT NOT NULL, version INTEGER NOT NULL, created_at TEXT, updated_at TEXT, UNIQUE(project_id, name));
+`);
+      addColumnIfMissing(db, 'deployments', 'values_json', 'TEXT');
+    },
   },
 ];
 

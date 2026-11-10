@@ -5,9 +5,12 @@ One WordPress site and its MariaDB on a single node, with encrypted daily backup
 Start with a working control plane and node, a DNS name pointing to an ingress-enabled node with ports 80 and 443 reachable, and an S3-compatible backup destination. Run the commands below from this example directory with the intended Tug project selected; see [project configuration](../../docs/cli.md#arguments-options-and-configuration). The [single-VPS tutorial](../../docs/getting-started.md) covers initial setup.
 
 ```bash
-# 1. Secrets for the site
+# 1. Secrets for the site. Tug reads every ${NAME} from control, never from your shell or a .env file.
 tug secret set DB_PASSWORD
 tug secret set DB_ROOT_PASSWORD
+# Values that are fine to read, such as an image tag or the host name, can be variables instead of being
+# edited into the Compose file: tug var set SITE_HOST --value blog.example.com, then use ${SITE_HOST}.
+# To see where every value comes from before deploying: tug deploy --dry-run
 
 # 2. Where backups go (once per control plane). Values come from your environment or stdin.
 AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... \

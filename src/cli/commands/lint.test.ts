@@ -227,3 +227,28 @@ test('the tug.yml file setting defaults the file lint looks at', async () => {
     await fs.rm(dir, { recursive: true, force: true });
   }
 });
+
+test('lint reports env_file, which tug deploy no longer reads, and names the import commands', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-lint-envfile-'));
+  try {
+    const file = await writeFile(
+      dir,
+      'compose.yaml',
+      'services:\n  web:\n    image: nginx\n    env_file: app.env\n  db:\n    image: mariadb\n',
+    );
+    const result = await lintComposeFile(file);
+    assert.equal(result.errors.length, 1, 'only the service that uses env_file is reported');
+    assert.match(
+      result.errors[0],
+      /^web: env_file is not read by tug deploy/,
+      'the finding names the service',
+    );
+    assert.match(
+      result.errors[0],
+      /tug secret import <file> or tug var import <file>/,
+      'the finding says how to move the entries to control',
+    );
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});

@@ -25,7 +25,7 @@ The benefit is less accidental disclosure through `Config.Env`, `docker inspect`
 - `src/agent/agent.ts` fetches secrets before reconciling, and `src/agent/reconciler.ts` creates candidates and removes obsolete containers. Preparation must finish before an existing container is replaced, and cleanup must follow actual container removal.
 - Agents run in containers and keep their state in the `tug-agent` named volume, so a path under the state directory is not a path the Docker daemon sees on the host.
 - `src/agent/live.ts` `startOneOff` clones the selected container's mounts, so `tug run` containers become secret-file consumers that cleanup must retain.
-- `tug secret set` reads one stdin chunk and trims it, which breaks PEM files. Secret removal has no reference guard, and deleting and recreating a secret can reset its numeric version.
+- `tug secret set --from-file` (and `--from-file -` for all of stdin) now stores exact contents, so a PEM file survives; the one-line stdin form still trims. Secret removal has no reference guard, and deleting and recreating a secret can reset its numeric version.
 
 ## Proposed contract
 
@@ -50,7 +50,7 @@ This fragment shows delivery only. The project must already contain `DB_PASSWORD
 - Accept only top-level `external: true` with an optional literal `name`. Reject local `file`, `environment`, inline content, drivers, templated source names, unknown fields and use through `build.secrets` (build-time secrets are a separate feature).
 - Reject undefined declarations, missing store entries, duplicate target filenames, path traversal, absolute or nested targets, and volume or tmpfs mounts at or above `/run/secrets` or a secret target. Validate raw API submissions as strictly as CLI-normalized input, and keep `TUG_REGISTRY_AUTH` reserved on every reference path.
 - Discover references in one place: the union of sentinels and resolved service declarations feeds deploy checks, node authorization, change hashes, status and removal guards. An unused declaration releases no values and restarts nothing.
-- Add `tug secret set NAME --file PATH` with exact UTF-8 input that preserves whitespace and newlines, and make piped stdin read to EOF without trimming. `--value` and `--file` are mutually exclusive. The store stays text-only; binary secrets are deferred. Validate names and byte sizes the same way in the API and CLI, starting at 500 KiB per secret, and enforce an aggregate budget before any container changes.
+- `tug secret set NAME --from-file PATH` already stores exact UTF-8 input that preserves whitespace and newlines (`--from-file -` reads all of stdin), and it is mutually exclusive with `--value`; this proposal relies on it. The store stays text-only; binary secrets are deferred. Validate names and byte sizes the same way in the API and CLI, starting at 500 KiB per secret, and enforce an aggregate budget before any container changes.
 
 ### Rotation, deletion and rollback
 

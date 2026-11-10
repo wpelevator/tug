@@ -16,6 +16,7 @@ import { registerObserve } from './observe.ts';
 import { registerRestore } from './restore.ts';
 import { registerSecret } from './secret.ts';
 import { registerService } from './service.ts';
+import { registerVar } from './var.ts';
 import { registerVolume } from './volume.ts';
 
 test('collectList accepts repeated flags, comma-separated lists and both, trimming and dropping empty items', () => {
@@ -59,13 +60,24 @@ test('every flag that takes several values accepts a comma-separated list', () =
     registerRestore,
     registerSecret,
     registerService,
+    registerVar,
     registerVolume,
   ])
     register(program);
   const multi = everyOption(program).filter(({ option }) => Array.isArray(option.defaultValue));
   assert.deepEqual(
     [...new Set(multi.map(({ option }) => option.long))].sort(),
-    ['--env', '--extra-san', '--label', '--move', '--project', '--writers'],
+    [
+      '--env',
+      '--extra-san',
+      '--label',
+      '--move',
+      '--profile',
+      '--project',
+      '--secrets',
+      '--vars',
+      '--writers',
+    ],
     'a new multi-value flag must be added here, documented in docs/cli.md and use collectList',
   );
   for (const { path, option } of multi) {

@@ -13,7 +13,7 @@ A typical VPS is a durable, always-on computer with enough CPU, memory and disk 
 - **Scheduled, restorable backups.** Mark a volume or database with `x-tug.backup`, point tug at S3-compatible storage and it runs scheduled [restic](https://restic.net) backups; databases use a dump command. `tug restore run db` brings one back. Control backs itself up to the same destination every night, and `tug control backup --download` saves a copy on your machine.
 - **One-command rollback.** `tug rollback` returns to a previous deployment, and `x-tug: { rollback: auto }` does it when a node reports the new version unhealthy. It cannot undo database writes or schema changes.
 - **HTTPS ingress included.** Managed Caddy serves a hostname with `tls: auto`, obtains the certificate and renews it. Your DNS must point at the server and ports 80 and 443 must be reachable.
-- **Encrypted secrets, delivered where needed.** `tug secret set DB_PASSWORD` keeps them encrypted on control and delivers each one only to the nodes whose services use it, so nothing lives in your repository.
+- **Encrypted secrets, delivered where needed.** `tug secret set DB_PASSWORD` keeps them encrypted on control and delivers each one only to the nodes whose services use it, so nothing lives in your repository. Every `${NAME}` in your Compose file comes from control (`tug secret` for private values, `tug var` for visible ones such as image tags), never from the shell or `.env` of whoever runs the deploy, and `tug deploy --dry-run` shows where each value came from ([details](docs/compose.md#where-values-come-from)).
 - **Logs and shells from your laptop.** `tug logs`, `tug exec`, `tug run` (for example the `wp` CLI), `tug ps` and `tug status` go through the control plane. SSH is needed only to install and manage nodes (`tug setup`, `tug node add`); day-to-day operation goes through the control plane.
 - **Config checks before deploy.** `tug lint` checks your `x-tug` config offline in milliseconds (the same schema ships as JSON Schema for [editor autocomplete and squiggles](docs/compose.md#editor-autocomplete-and-squiggles)), and a published tag is resolved to a digest on control before anything is deployed, so a typo'd tag is a deploy-time error instead of a surprise on the live server.
 
@@ -132,7 +132,7 @@ Project commands sit at the top level; everything else reads `tug <subject> <ver
 | Add, list or replace servers | `tug node add`, `tug node list`, `tug node replace <name>` |
 | Upgrade control and nodes after a release | `tug upgrade` (or `tug control upgrade`, then `tug node upgrade --all`) |
 | Add a server I cannot SSH to | `tug node enroll`, then run the printed `docker run` on it |
-| Manage secrets | `tug secret set`, `tug secret list`, `tug secret remove` |
+| Manage secrets and variables | `tug secret set`, `tug secret import .env`, `tug var set`, `tug deploy --dry-run` |
 | Back up now, or restore | `tug backup run`, `tug restore run <target>` |
 | Give CI a deploy key | `tug credential create ci --role deploy` |
 | Check everything is healthy | `tug doctor` |

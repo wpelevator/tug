@@ -1,6 +1,7 @@
 // Native Compose reader: turns a Compose file into the canonical definition that `validateCompose`, control and the
 // agents consume, without Docker or the Compose plugin. It covers what `docker compose config --format yaml` did for
-// the keys Tug accepts: variable interpolation (process environment, then `.env`), `env_file`, `extends`, profiles,
+// the keys Tug accepts: variable interpolation (the given environment, then `.env` unless `localSources` is `ignore`),
+// `env_file`, `extends`, profiles,
 // and the expansion of short syntax into the long form. A construct it does not implement (`include`, `!reset` and
 // `!override` tags, a raw `env_file` format) is rejected with `UnsupportedComposeError` instead of being read halfway;
 // `tug deploy --compose-cli` hands such a file to `docker compose config`.
@@ -24,8 +25,17 @@ export class UnsupportedComposeError extends Error {
 export interface LoadOptions {
   /** The Tug project: it is the `name` of the result, as `docker compose -p` made it. */
   project?: string;
-  /** Variables for interpolation; defaults to `process.env`. Secret sentinels are set here by the caller. */
+  /** Variables for interpolation; defaults to `process.env` (to nothing under `localSources: 'ignore'`). Secret sentinels are set here by the caller. */
   env?: NodeJS.ProcessEnv;
+  /**
+   * `'read'` (the default) is Compose's own behaviour: `env`, then the `.env` next to the file, `env_file` entries and
+   * `COMPOSE_PROFILES`. `'ignore'` is how `tug deploy` reads a file: only `env` supplies values, `.env` is not read,
+   * an `env_file` is rejected and profiles come from `profiles`, so the result depends on control and not on the
+   * machine that runs the deploy.
+   */
+  localSources?: 'read' | 'ignore';
+  /** The active profiles, in place of `COMPOSE_PROFILES`; required to select any profile under `ignore`. */
+  profiles?: readonly string[];
 }
 
 type Lookup = (name: string) => string | undefined;
@@ -389,6 +399,8 @@ function extraHosts(value: unknown): string[] | undefined {
 interface Context {
   lookup: Lookup;
   docs: Map<string, Promise<Obj>>;
+  /** Reject `env_file`: values come only from the `env` the caller passed. */
+  rejectEnvFile: boolean;
 }
 
 async function readDocument(file: string, ctx: Context): Promise<Obj> {
@@ -461,6 +473,14 @@ async function normalizeService(name: string, raw: Obj, dir: string, ctx: Contex
   if (!isObject(raw)) throw new Error(`services.${name} must be a mapping`);
   const svc: Obj = { ...raw };
   delete svc.extends;
+  if (ctx.rejectEnvFile && svc.env_file !== undefined && svc.env_file !== null) {
+    const files = (Array.isArray(svc.env_file) ? svc.env_file : [svc.env_file]).map((entry) =>
+      String(isObject(entry) ? entry.path : entry),
+    );
+    throw new Error(
+      `${name}: env_file ${files.join(', ')} is not read: Tug takes values only from control, never from files on the deploy machine. Store its entries with tug secret import ${files[0]} (or tug var import), then list the ones the service needs under environment as ${'$'}{NAME}`,
+    );
+  }
   const fileEnv = await envFiles(svc.env_file, dir, ctx, name);
   delete svc.env_file;
   const environment = { ...fileEnv, ...(keyValues(raw.environment, ctx.lookup) ?? {}) };
@@ -586,24 +606,30 @@ const directoryProject = (dir: string): string =>
  * the `.env` next to the file; `COMPOSE_PROFILES` selects profiles as it does for Compose.
  */
 export async function loadCompose(file: string, options: LoadOptions = {}): Promise<ComposeFile> {
-  const env = options.env ?? process.env;
+  const ignoreLocal = options.localSources === 'ignore';
+  const env = options.env ?? (ignoreLocal ? {} : process.env);
   const dir = path.dirname(path.resolve(file));
   let dotenv: Record<string, string | null> = {};
-  try {
-    dotenv = parseDotenv(await fs.readFile(path.join(dir, '.env'), 'utf8'), (name) => env[name]);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
-      throw new Error(
-        `could not read .env next to ${file}: ${error instanceof Error ? error.message : String(error)}`,
-        { cause: error },
-      );
-  }
+  if (!ignoreLocal)
+    try {
+      dotenv = parseDotenv(await fs.readFile(path.join(dir, '.env'), 'utf8'), (name) => env[name]);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
+        throw new Error(
+          `could not read .env next to ${file}: ${error instanceof Error ? error.message : String(error)}`,
+          { cause: error },
+        );
+    }
   const lookup: Lookup = (name) => env[name] ?? dotenv[name] ?? undefined;
-  const ctx: Context = { lookup, docs: new Map() };
+  const ctx: Context = { lookup, docs: new Map(), rejectEnvFile: ignoreLocal };
   const doc = await readDocument(file, ctx);
   if (!isObject(doc.services) || !Object.keys(doc.services).length)
     throw new Error(`${file} defines no services`);
-  const profiles = activeProfiles(env);
+  const profiles = options.profiles
+    ? new Set(options.profiles)
+    : ignoreLocal
+      ? new Set<string>()
+      : activeProfiles(env);
   const services: Obj = {};
   for (const name of Object.keys(doc.services)) {
     const declared = isObject(doc.services[name]) ? strings(doc.services[name].profiles) : [];

@@ -60,6 +60,15 @@ import {
 } from '../compose/compose.ts';
 import { buildImage, unpackContext, run as runCommand } from '../images/build.ts';
 import { sentinelNames } from '../compose/normalize.ts';
+import {
+  MAX_VAR_BYTES,
+  RESERVED_VALUE_NAMES,
+  VALUE_NAME,
+  VALUE_NAME_MESSAGE,
+  VALUE_SOURCES,
+  misplacedSecrets,
+} from '../values.ts';
+import type { DeploymentValue, ValueSource } from '../values.ts';
 import { errMessage } from '../errors.ts';
 import { id, now } from '../db/row.ts';
 import { ensureDir } from '../files.ts';
@@ -1256,7 +1265,7 @@ export async function createApp(
       auto?: boolean;
       failedDeploymentId?: string;
     },
-  ): { deployment: DeploymentRow | undefined; desiredState: DesiredState } {
+  ): { deployment: ReturnType<typeof deploymentView<DeploymentRow>>; desiredState: DesiredState } {
     let lock;
     try {
       lock = acquireProjectLock(project, opts.auto ? 'auto-rollback' : 'rollback');
@@ -1292,8 +1301,13 @@ export async function createApp(
       const previousState: DesiredState = JSON.parse(previousDs.state_json);
       assertIngressHostsFree(project, previousState.compose, opts.viewer);
       previousState.revision = depId;
+      // A rollback restores the earlier configuration, variables included, so it carries that deployment's record.
+      const restoredValues = db.get<{ values_json: string | null }>(
+        'SELECT values_json FROM deployments WHERE id=?',
+        previousDs.deployment_id,
+      )?.values_json;
       db.run(
-        'INSERT INTO deployments(id,project_id,version,state,created_at,updated_at,actor) VALUES(?,?,?,?,?,?,?)',
+        'INSERT INTO deployments(id,project_id,version,state,created_at,updated_at,actor,values_json) VALUES(?,?,?,?,?,?,?,?)',
         depId,
         project,
         `${ROLLBACK_VERSION_PREFIX}${previousState.version}-${Date.now()}`,
@@ -1301,6 +1315,7 @@ export async function createApp(
         ts,
         ts,
         opts.actor,
+        restoredValues ?? null,
       );
       db.run(
         'INSERT INTO desired_states(id,project_id,deployment_id,version,state_json,created_at) VALUES(?,?,?,?,?,?)',
@@ -1319,7 +1334,9 @@ export async function createApp(
       );
       wakeAll(project);
       return {
-        deployment: db.get<DeploymentRow>('SELECT * FROM deployments WHERE id=?', depId),
+        deployment: deploymentView(
+          db.get<DeploymentRow>('SELECT * FROM deployments WHERE id=?', depId),
+        ),
         desiredState: previousState,
       };
     } finally {
@@ -2270,6 +2287,11 @@ export async function createApp(
     let lock;
     try {
       lock = acquireProjectLock(project, 'secret.set');
+      if (db.get('SELECT 1 FROM project_vars WHERE project_id=? AND name=?', project, name))
+        throw httpError(
+          409,
+          `${name} is a variable in project ${project}: a name is either a secret or a variable. Remove the variable first with tug var remove ${name}`,
+        );
       const old = db.get<Pick<SecretRow, 'version'>>(
         'SELECT version FROM secrets WHERE project_id=? AND name=?',
         project,
@@ -2311,6 +2333,110 @@ export async function createApp(
           ),
         }),
   );
+  /**
+   * Variables are visible deployment values (image tags, hostnames, ports): the CLI interpolates them when it
+   * prepares a deployment, so unlike a secret their value is readable with the `deploy` role. A name is either a
+   * secret or a variable in a project, because `${NAME}` resolves from one set of names.
+   */
+  api('post', '/api/v1/vars', bodyProject, async (req, res) => {
+    const { project = 'site', name, value } = req.body;
+    if (isReservedProject(String(project)))
+      return res.status(400).json({ error: `project names starting with _ are reserved` });
+    if (typeof name !== 'string' || typeof value !== 'string')
+      return res.status(400).json({ error: 'name and value (strings) required' });
+    if (!VALUE_NAME.test(name))
+      return res
+        .status(400)
+        .json({ error: `invalid variable name ${name}: ${VALUE_NAME_MESSAGE}` });
+    if (RESERVED_VALUE_NAMES.includes(name))
+      return res.status(400).json({ error: `${name} is reserved and cannot be a variable` });
+    if (Buffer.byteLength(value) > MAX_VAR_BYTES)
+      return res.status(400).json({
+        error: `variable ${name} is larger than ${MAX_VAR_BYTES} bytes; store large or private values with tug secret set`,
+      });
+    let lock;
+    try {
+      lock = acquireProjectLock(project, 'var.set');
+      if (db.get('SELECT 1 FROM secrets WHERE project_id=? AND name=?', project, name))
+        throw httpError(
+          409,
+          `${name} is a secret in project ${project}: a name is either a secret or a variable. Remove the secret first with tug secret remove ${name}`,
+        );
+      const old = db.get<{ version: number }>(
+        'SELECT version FROM project_vars WHERE project_id=? AND name=?',
+        project,
+        name,
+      );
+      const version = (old?.version || 0) + 1;
+      const ts = now();
+      db.run(
+        `INSERT INTO project_vars(id,project_id,name,encrypted_value,version,created_at,updated_at) VALUES(?,?,?,?,?,?,?)
+        ON CONFLICT(project_id,name) DO UPDATE SET encrypted_value=excluded.encrypted_value,version=excluded.version,updated_at=excluded.updated_at`,
+        id('var'),
+        project,
+        name,
+        encrypt(value, masterKey),
+        version,
+        ts,
+        ts,
+      );
+      audit(req.actor!, {
+        type: 'var.set',
+        project,
+        message: `variable ${name} set to version ${version} by ${req.actor!.name}`,
+        metadata: { name, version },
+      });
+      res.json({ ok: true, name, version });
+    } catch (e) {
+      sendError(res, e);
+    } finally {
+      releaseLock(lock);
+    }
+  });
+  api('get', '/api/v1/vars', queryProject, async (req, res) =>
+    isReservedProject(String(req.query.project || 'site'))
+      ? res.status(400).json({ error: 'project names starting with _ are reserved' })
+      : res.json({
+          vars: db.all(
+            'SELECT project_id,name,version,updated_at FROM project_vars WHERE project_id=? ORDER BY name',
+            String(req.query.project || 'site'),
+          ),
+        }),
+  );
+  api('get', '/api/v1/vars/values', queryProject, async (req, res) => {
+    const project = String(req.query.project || 'site');
+    if (isReservedProject(project))
+      return res.status(400).json({ error: 'project names starting with _ are reserved' });
+    res.json({
+      vars: db
+        .all<{ name: string; version: number; encrypted_value: string; updated_at: string }>(
+          'SELECT name,version,encrypted_value,updated_at FROM project_vars WHERE project_id=? ORDER BY name',
+          project,
+        )
+        .map((row) => ({
+          project_id: project,
+          name: row.name,
+          version: row.version,
+          updated_at: row.updated_at,
+          value: decrypt(row.encrypted_value, masterKey),
+        })),
+    });
+  });
+  api('delete', '/api/v1/vars/:name', queryProject, async (req, res) => {
+    const project = String(req.query.project || 'site');
+    if (isReservedProject(project))
+      return res.status(400).json({ error: 'project names starting with _ are reserved' });
+    const name = String(req.params.name);
+    const removed = db.run('DELETE FROM project_vars WHERE project_id=? AND name=?', project, name);
+    if (removed.changes)
+      audit(req.actor!, {
+        type: 'var.delete',
+        project,
+        message: `variable ${name} deleted by ${req.actor!.name}`,
+        metadata: { name },
+      });
+    res.json({ ok: true });
+  });
   api('get', '/api/v1/domains', queryProject, async (req, res) =>
     isReservedProject(String(req.query.project || 'site'))
       ? res.status(400).json({ error: 'project names starting with _ are reserved' })
@@ -2651,6 +2777,89 @@ export async function createApp(
     });
   });
   /**
+   * Where each referenced `${NAME}` value came from, as the CLI reported it, checked against the store: a variable
+   * must still have the version the CLI interpolated (a change in between would deploy a value the operator never
+   * saw), a `--var` cannot shadow a secret, and secret values never enter the record. Control fills versions and
+   * variable values from its own rows.
+   */
+  function checkedDeploymentValues(project: string, raw: unknown): DeploymentValue[] {
+    if (raw === undefined || raw === null) return [];
+    if (!Array.isArray(raw)) throw httpError(400, 'values must be an array');
+    const out: DeploymentValue[] = [];
+    const seen = new Set<string>();
+    for (const item of raw as Partial<DeploymentValue>[]) {
+      const name = item?.name;
+      if (typeof name !== 'string' || !VALUE_NAME.test(name))
+        throw httpError(400, `invalid value name ${String(name)}: ${VALUE_NAME_MESSAGE}`);
+      if (seen.has(name)) throw httpError(400, `value ${name} is listed twice`);
+      seen.add(name);
+      const source = item.source as ValueSource;
+      if (!VALUE_SOURCES.includes(source))
+        throw httpError(400, `value ${name} has an unknown source ${String(item.source)}`);
+      if (source === 'secret') {
+        const row = db.get<{ version: number }>(
+          'SELECT version FROM secrets WHERE project_id=? AND name=?',
+          project,
+          name,
+        );
+        if (!row)
+          throw httpError(
+            400,
+            `secret ${name} not found in project ${project}; create it with tug secret set`,
+          );
+        out.push({ name, source, version: row.version });
+      } else if (source === 'var') {
+        const row = db.get<{ version: number; encrypted_value: string }>(
+          'SELECT version,encrypted_value FROM project_vars WHERE project_id=? AND name=?',
+          project,
+          name,
+        );
+        if (!row)
+          throw httpError(
+            409,
+            `variable ${name} is no longer set in project ${project}; set it with tug var set and deploy again`,
+          );
+        if (row.version !== item.version)
+          throw httpError(
+            409,
+            `variable ${name} changed while the deployment was being prepared (version ${String(item.version)} is now ${row.version}); run tug deploy again`,
+          );
+        out.push({
+          name,
+          source,
+          version: row.version,
+          value: decrypt(row.encrypted_value, masterKey),
+        });
+      } else if (source === '--var') {
+        if (typeof item.value !== 'string')
+          throw httpError(400, `--var ${name} needs a string value`);
+        if (Buffer.byteLength(item.value) > MAX_VAR_BYTES)
+          throw httpError(400, `--var ${name} is larger than ${MAX_VAR_BYTES} bytes`);
+        if (db.get('SELECT 1 FROM secrets WHERE project_id=? AND name=?', project, name))
+          throw httpError(
+            400,
+            `--var ${name} conflicts with the project secret ${name}: a secret is never overridden from the command line`,
+          );
+        out.push({ name, source, value: item.value });
+      } else out.push({ name, source });
+    }
+    return out;
+  }
+  /** A deployment row for API responses: the stored value record is returned parsed, as `values`. */
+  function deploymentView<T extends { values_json?: string | null }>(
+    row: T | undefined,
+  ): (Omit<T, 'values_json'> & { values: DeploymentValue[] }) | undefined {
+    if (!row) return undefined;
+    const { values_json, ...rest } = row;
+    let values: DeploymentValue[] = [];
+    try {
+      values = values_json ? (JSON.parse(values_json) as DeploymentValue[]) : [];
+    } catch {
+      /* A record this release did not write is shown as having none. */
+    }
+    return { ...rest, values };
+  }
+  /**
    * Services that keep data on a node and are placed on different nodes by `compose` than by the current
    * deployment. Deploying such a change starts the service empty on the new node: the data does not move.
    */
@@ -2758,6 +2967,13 @@ export async function createApp(
       }
       assertIngressHostsFree(project, compose, req.actor);
       assertNoReservedIngressPorts(compose);
+      const misplaced = misplacedSecrets(compose);
+      if (misplaced.length)
+        throw httpError(
+          400,
+          `a secret cannot be used in ${misplaced.join('; ')}: secrets are substituted only in environment, command, entrypoint and healthcheck.test. Use tug var set for a value that is not a secret`,
+        );
+      const deploymentValues = checkedDeploymentValues(project, body.values);
       const acknowledgedMoves: string[] = Array.isArray(body.moves) ? body.moves.map(String) : [];
       const unacknowledged = movedServices(project, compose).filter(
         (name) => !acknowledgedMoves.includes(name),
@@ -2857,7 +3073,7 @@ export async function createApp(
         ts,
       );
       db.run(
-        'INSERT INTO deployments(id,project_id,version,state,created_at,updated_at,actor) VALUES(?,?,?,?,?,?,?)',
+        'INSERT INTO deployments(id,project_id,version,state,created_at,updated_at,actor,values_json) VALUES(?,?,?,?,?,?,?,?)',
         depId,
         project,
         version,
@@ -2865,6 +3081,7 @@ export async function createApp(
         ts,
         ts,
         req.actor!.name,
+        JSON.stringify(deploymentValues),
       );
       const desired = buildDesiredState({
         project,
@@ -3085,7 +3302,14 @@ export async function createApp(
       wakeAll(project);
       builtAndPublished = builtServices.length > 0;
       responseBody = {
-        deployment: { id: depId, project, version, state: 'rolling_out', actor: req.actor!.name },
+        deployment: {
+          id: depId,
+          project,
+          version,
+          state: 'rolling_out',
+          actor: req.actor!.name,
+          values: deploymentValues,
+        },
         desiredState: desired,
       };
     } catch (e) {
@@ -3151,7 +3375,11 @@ export async function createApp(
   });
 
   api('get', '/api/v1/deployments/:id', deploymentProject, async (req, res) =>
-    res.json(db.get('SELECT * FROM deployments WHERE id=?', String(req.params.id))),
+    res.json(
+      deploymentView(
+        db.get<DeploymentRow>('SELECT * FROM deployments WHERE id=?', String(req.params.id)),
+      ),
+    ),
   );
   api('post', '/api/v1/deployments/:id/cancel', deploymentProject, async (req, res) =>
     withPublication(() => {
