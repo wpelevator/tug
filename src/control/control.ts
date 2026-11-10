@@ -156,6 +156,8 @@ import {
 } from './credentials.ts';
 import { PROJECT_NAME_PATTERN } from '../roles.ts';
 import type { Actor, Identity, ProjectResolver, RouteRole } from './credentials.ts';
+import { eventForRole } from './event-redaction.ts';
+import type { RedactableEvent } from './event-redaction.ts';
 import type {
   BackupCredentialsResponse,
   LiveRequest,
@@ -1209,7 +1211,19 @@ export async function createApp(
           );
     }
   }
-  function assertIngressHostsFree(project: string, compose: ComposeFile): void {
+  function hostnameConflict(
+    host: string,
+    project: string,
+    owner: string,
+    detail: string,
+    viewer?: Actor,
+  ): HttpError {
+    const canSeeOwner =
+      project === owner || (viewer && (!viewer.projects || viewer.projects.includes(owner)));
+    return httpError(409, canSeeOwner ? detail : `${host} is already claimed by another project`);
+  }
+
+  function assertIngressHostsFree(project: string, compose: ComposeFile, viewer?: Actor): void {
     const wanted = ingressHostsOf(compose);
     if (!wanted.size) return;
     for (const domain of db.all<{ project_id: string; service: string; host: string }>(
@@ -1221,24 +1235,36 @@ export async function createApp(
             ? ingressHostsOverlap(wantedHost, domain.host)
             : wantedHost === domain.host && mine !== domain.service
         )
-          throw httpError(
-            409,
+          throw hostnameConflict(
+            wantedHost,
+            project,
+            domain.project_id,
             `${mine}: ingress.host ${wantedHost} ${wantedHost === domain.host ? 'is' : `overlaps ${domain.host},`} already mapped as a domain of ${domain.project_id}/${domain.service}`,
+            viewer,
           );
     for (const other of currentDesiredStates()) {
       if (other.project === project) continue;
       for (const [host, service] of ingressHostsOf(other.compose))
         for (const [wantedHost, mine] of wanted)
           if (ingressHostsOverlap(wantedHost, host))
-            throw httpError(
-              409,
+            throw hostnameConflict(
+              wantedHost,
+              project,
+              other.project,
               `${mine}: ingress.host ${wantedHost} ${wantedHost === host ? 'is' : `overlaps ${host},`} already routed by project ${other.project} (${service})`,
+              viewer,
             );
     }
   }
   function createRollback(
     project: string,
-    opts: { actor: string; force?: boolean; auto?: boolean; failedDeploymentId?: string },
+    opts: {
+      actor: string;
+      viewer?: Actor;
+      force?: boolean;
+      auto?: boolean;
+      failedDeploymentId?: string;
+    },
   ): { deployment: ReturnType<typeof deploymentView<DeploymentRow>>; desiredState: DesiredState } {
     let lock;
     try {
@@ -1273,7 +1299,7 @@ export async function createApp(
       const ts = now();
       const depId = id('dep');
       const previousState: DesiredState = JSON.parse(previousDs.state_json);
-      assertIngressHostsFree(project, previousState.compose);
+      assertIngressHostsFree(project, previousState.compose, opts.viewer);
       previousState.revision = depId;
       // A rollback restores the earlier configuration, variables included, so it carries that deployment's record.
       const restoredValues = db.get<{ values_json: string | null }>(
@@ -2449,9 +2475,12 @@ export async function createApp(
       for (const other of currentDesiredStates())
         for (const [declared, name] of ingressHostsOf(other.compose))
           if (other.project === project ? declared === host : ingressHostsOverlap(host, declared))
-            throw httpError(
-              409,
+            throw hostnameConflict(
+              host,
+              project,
+              other.project,
               `${host} ${declared === host ? 'is' : `overlaps ${declared},`} already the ingress.host of ${other.project}/${name}`,
+              req.actor,
             );
       const existing = db.get<{ project_id: string; service: string }>(
         'SELECT project_id,service FROM project_domains WHERE host=?',
@@ -2465,14 +2494,20 @@ export async function createApp(
         project,
       ))
         if (ingressHostsOverlap(host, row.host))
-          throw httpError(
-            409,
+          throw hostnameConflict(
+            host,
+            project,
+            row.project_id,
             `${host} overlaps ${row.host}, already mapped by project ${row.project_id}`,
+            req.actor,
           );
       if (existing)
-        throw httpError(
-          409,
+        throw hostnameConflict(
+          host,
+          project,
+          existing.project_id,
           `${host} is already mapped to ${existing.project_id}/${existing.service}`,
+          req.actor,
         );
       db.run(
         'INSERT INTO project_domains(id,project_id,service,host,created_at,created_by) VALUES(?,?,?,?,?,?)',
@@ -2930,7 +2965,7 @@ export async function createApp(
       } catch (e) {
         throw httpError(400, errMessage(e));
       }
-      assertIngressHostsFree(project, compose);
+      assertIngressHostsFree(project, compose, req.actor);
       assertNoReservedIngressPorts(compose);
       const misplaced = misplacedSecrets(compose);
       if (misplaced.length)
@@ -3192,7 +3227,7 @@ export async function createApp(
         // The first check ran before the build and image resolution, which can take minutes: another project may
         // have been published, or mapped a domain, since. Publication is the one serialized point where a hostname is
         // actually claimed, so the claim is checked again here.
-        assertIngressHostsFree(project, desired.compose);
+        assertIngressHostsFree(project, desired.compose, req.actor);
         immediateTransaction(db, () => {
           const published = advance(
             db,
@@ -3379,6 +3414,7 @@ export async function createApp(
       try {
         const out = createRollback(project, {
           actor: req.actor!.name,
+          viewer: req.actor,
           force: Boolean(req.body.force),
         });
         audit(req.actor!, {
@@ -4303,7 +4339,10 @@ export async function createApp(
   api('get', '/api/v1/events', null, async (req, res) => {
     const project = req.query.project ? String(req.query.project) : null;
     if (project) assertProject(req.actor!, project);
-    const limit = Math.min(Number(req.query.limit || 100), 500);
+    // A missing or non-numeric limit is the default; anything else is clamped into 1-500, never an error.
+    const asked =
+      typeof req.query.limit === 'string' && req.query.limit.trim() ? Number(req.query.limit) : NaN;
+    const limit = Number.isFinite(asked) ? Math.min(Math.max(Math.trunc(asked), 1), 500) : 100;
     const after = req.query.after === undefined ? undefined : Number(req.query.after);
     if (after !== undefined && !(Number.isSafeInteger(after) && after >= 0))
       throw httpError(400, 'after must be a non-negative integer (an event seq)');
@@ -4338,7 +4377,12 @@ export async function createApp(
         : events.length
           ? (events[events.length - 1] as { seq: number }).seq
           : Math.min(after, visibleEnd);
-    res.json({ events, cursor });
+    res.json({
+      events: (events as unknown as RedactableEvent[]).map((event) =>
+        eventForRole(event, req.actor!.role),
+      ),
+      cursor,
+    });
   });
   api('get', '/api/v1/diagnostics', null, async (req, res) => {
     const checks: { name: string; ok: boolean; [key: string]: unknown }[] = [];
@@ -4842,8 +4886,13 @@ export function attachAgentStream(app: express.Express, server: http.Server | ht
       socket.write(`HTTP/1.1 ${status} ${reason}\r\nConnection: close\r\n\r\n`);
       socket.destroy();
     };
-    const pathname = new URL(request.url || '/', 'http://localhost').pathname;
-    if (!['/agent/v1/stream', '/api/v1/live', '/api/v1/watch'].includes(pathname)) {
+    // Match exact origin-form paths so parsing a request target cannot throw during upgrade.
+    const pathname = request.url?.split('?', 1)[0];
+    if (
+      pathname !== '/agent/v1/stream' &&
+      pathname !== '/api/v1/live' &&
+      pathname !== '/api/v1/watch'
+    ) {
       reject(404, 'Not Found');
       return;
     }

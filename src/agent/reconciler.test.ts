@@ -432,6 +432,26 @@ test('the port range is configurable and exhaustion rejects the rollout without 
   );
 });
 
+test("a range that contains Caddy's management ports never allocates them", async () => {
+  const host = fakeHost();
+  const ctx = await makeCtx(host, { rolloutPorts: '2019-2022' });
+  const ports: unknown[] = [];
+  for (const version of ['v1', 'v2', 'v3']) {
+    ports.push(
+      (await reconcile(desired(rolling(`web:${version}`), version), ctx)).serviceStates?.web.port,
+    );
+  }
+  assert.deepEqual(
+    ports.slice(0, 2),
+    [2020, 2022],
+    'the admin port 2019 and the certificate-ask port 2021 are skipped even inside the configured range',
+  );
+  assert.ok(
+    ![2019, 2021].includes(ports[2] as number),
+    'a third revision is rejected or placed elsewhere, never on a management port',
+  );
+});
+
 test('a host port taken by something else is skipped', async () => {
   const host = fakeHost();
   const ctx = await makeCtx(host);

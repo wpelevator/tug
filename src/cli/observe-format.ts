@@ -1,4 +1,4 @@
-import { columnWidth } from './width.ts';
+import { columnWidth, sanitizeTerminalText } from './width.ts';
 
 /** Left-aligned columns separated by two spaces, each as wide as its widest cell, without trailing spaces. */
 export function formatTable(rows: string[][]): string {
@@ -79,19 +79,23 @@ export interface EventRow {
 export function formatEvents(events: EventRow[], options: { showProject: boolean }): string {
   if (!events.length) return 'No events';
   const header = ['TIME', 'LEVEL', 'TYPE', ...(options.showProject ? ['PROJECT'] : []), 'ACTOR'];
-  const rows = events.map((event) => [
-    event.created_at ?? '-',
-    event.level ?? '-',
-    event.type ?? '-',
-    ...(options.showProject ? [event.project_id ?? '-'] : []),
-    event.actor ?? '-',
-  ]);
+  const rows = events.map((event) =>
+    [
+      event.created_at ?? '-',
+      event.level ?? '-',
+      event.type ?? '-',
+      ...(options.showProject ? [event.project_id ?? '-'] : []),
+      event.actor ?? '-',
+    ].map(sanitizeTerminalText),
+  );
   // The message is free text of any length, so it trails the aligned columns instead of widening them.
   const table = formatTable([header, ...rows]).split('\n');
   return table
     .map((line, index) => {
       if (!index) return `${line}  MESSAGE`;
-      const message = (events[index - 1].message ?? '').replace(/\s+/g, ' ').trim();
+      const message = sanitizeTerminalText(events[index - 1].message ?? '')
+        .replace(/\s+/g, ' ')
+        .trim();
       return message ? `${line.padEnd(table[0].length)}  ${message}` : line;
     })
     .join('\n');
