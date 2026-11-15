@@ -21,7 +21,7 @@ tug node add root@203.0.113.5 --name app1
 tug deploy
 ```
 
-A typical VPS is a durable, always-on computer with enough CPU, memory and disk to host several sites or a medium-size application and its database. Tug is the layer that makes self-hosting on one or a few servers safe and repeatable, so you keep the savings of a plain server without giving up deploys, rollbacks, backups and HTTPS. Tug is free, your Compose file stays a Compose file (`x-tug` is a standard Compose extension that plain Docker Compose ignores), and it is built for a small number of servers running Compose applications, including Node.js, Laravel, Ruby and WordPress apps.
+A typical VPS is a durable, always-on computer with enough CPU, memory and disk to host several sites or a medium-size application and its database. Tug is the layer that makes self-hosting on one or a few servers safe and repeatable, so you keep the savings of a plain server without giving up deploys, rollbacks, backups and HTTPS. Tug is open source under the MIT license, your Compose file stays a Compose file (`x-tug` is a standard Compose extension that plain Docker Compose ignores), and it is built for a small number of servers running Compose applications, including Node.js, Laravel, Ruby and WordPress apps.
 
 ## What you get
 
@@ -206,3 +206,7 @@ npm run test:integration
 ```
 
 See [Development](docs/development.md) for details. Database code uses direct SQLite queries; [SQLite storage](docs/architecture.md#sqlite-storage) describes query boundaries and synchronous transactions.
+
+## License
+
+Tug is released under the [MIT License](LICENSE).
