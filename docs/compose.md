@@ -248,7 +248,7 @@ services:
         command: mariadb-dump -u root -p"$$MARIADB_ROOT_PASSWORD" --single-transaction --databases wordpress
         filename: wordpress.sql
         verify: "-- Dump completed"
-        restore: mariadb -uroot -p"$MARIADB_ROOT_PASSWORD"
+        restore: mariadb -uroot -p"$$MARIADB_ROOT_PASSWORD"
 
 volumes:
   uploads:
@@ -308,6 +308,7 @@ Reference a secret with `${NAME}` in a service's `environment`, `command`, `entr
 
 ## Example: an app and a database on one node
 
+<!-- tug-values: DB_PASSWORD, DB_ROOT_PASSWORD -->
 ```yaml
 # yaml-language-server: $schema=https://unpkg.com/@wpelevator/tug/x-tug.schema.json
 services:

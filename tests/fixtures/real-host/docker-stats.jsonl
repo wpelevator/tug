@@ -1,0 +1,4 @@
+{"BlockIO":"0B / 0B","CPUPerc":"0.52%","Container":"a1b2c3d4e5f6","ID":"a1b2c3d4e5f6","MemPerc":"2.57%","MemUsage":"50.5MiB / 1.96GiB","Name":"tug-agent","NetIO":"1.2MB / 900kB","PIDs":"14"}
+{"BlockIO":"0B / 0B","CPUPerc":"44.80%","Container":"b2c3d4e5f6a1","ID":"b2c3d4e5f6a1","MemPerc":"1.20%","MemUsage":"24.1MiB / 1.96GiB","Name":"tug-caddy","NetIO":"3.4GB / 3.1GB","PIDs":"11"}
+{"BlockIO":"0B / 0B","CPUPerc":"0.01%","Container":"c3d4e5f6a1b2","ID":"c3d4e5f6a1b2","MemPerc":"0.30%","MemUsage":"6.0MiB / 1.96GiB","Name":"express-web-1","NetIO":"1MB / 1MB","PIDs":"7"}
+{"BlockIO":"0B / 0B","CPUPerc":"1.40%","Container":"d4e5f6a1b2c3","ID":"d4e5f6a1b2c3","MemPerc":"2.80%","MemUsage":"55.0MiB / 1.96GiB","Name":"tug-control-control-1","NetIO":"1MB / 1MB","PIDs":"20"}
