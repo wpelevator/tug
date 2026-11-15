@@ -89,6 +89,7 @@ test('live command selection sends exact services, eligible nodes and remote arg
           TUG_CREDENTIAL_FILE: credentialFile,
           TUG_CONTROL_URL: url,
           CI: '',
+          TERM: 'xterm-256color',
           ...env,
         },
         timeout: 60_000,
