@@ -368,6 +368,48 @@ const work = (caddyfile: string, files: Record<string, string> = {}): IngressWor
 const stateDirFor = () => fs.mkdtemp(path.join(os.tmpdir(), 'tug-ingress-'));
 const reload = (c: string) => c.startsWith(`exec ${CADDY_CONTAINER} caddy reload`);
 
+test('a route that names its ingress nodes is rendered only on those nodes, and its mapped domains follow it', () => {
+  const named: ComposeFile = {
+    services: {
+      web: {
+        ...compose.services.web,
+        'x-tug': {
+          placement: { nodes: ['app1'] },
+          ingress: { host: 'app.example.com', port: 80, nodes: ['edge1'] },
+        },
+      },
+    },
+  };
+  const build = (edge: string) =>
+    buildIngressWork({
+      states: [state(named)],
+      endpoints: {},
+      node: edge,
+      nodes: ['edge1', 'edge2', 'app1'],
+      ingressNodes: ['edge1', 'edge2'],
+      secrets: new Map(),
+      domains: [{ project: 'blog', service: 'web', host: 'www.example.com' }],
+    });
+  const onEdge1 = build('edge1');
+  assert.deepEqual(
+    onEdge1.routes.map((r) => [r.host, r.aliases]),
+    [['app.example.com', ['www.example.com']]],
+    'the named node serves the host and its mapped domain',
+  );
+  const onEdge2 = build('edge2');
+  assert.deepEqual(onEdge2.routes, [], 'another ingress node serves no route');
+  assert.doesNotMatch(
+    onEdge2.caddyfile,
+    /example\.com/,
+    'the other node renders no site block, so Caddy requests no certificate for either name',
+  );
+  assert.deepEqual(
+    onEdge2.warnings,
+    [],
+    'a route and a domain served on another ingress node are not warnings',
+  );
+});
+
 test('first reconcile creates the Caddy container with persistent volumes, loads config and starts it', async () => {
   const docker = new FakeDocker();
   const stateDir = await stateDirFor();

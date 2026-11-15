@@ -42,6 +42,11 @@ export interface IngressSpec {
   key?: string;
   /** Answer 503 for this host without reaching the service, for planned work. */
   maintenance?: boolean;
+  /**
+   * The ingress nodes that serve this route. Without it every ingress node does, so a host must resolve to each of
+   * them. Name the nodes the host's DNS points at so the others do not request a certificate they cannot validate.
+   */
+  nodes?: string[];
 }
 
 /** What a backup captures: the output of a command run in a service, or the files of a volume. */

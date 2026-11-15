@@ -133,6 +133,7 @@ The agent checks the container after it starts, and the service is `serving` onl
 | `tls` | `auto` (ACME, with a wildcard host issued per name on demand, see [Edge features](ingress.md#edge-features)), `custom` or `off` | `auto` |
 | `cert`, `key` | With `tls: custom`: names of project secrets holding the PEM chain and private key. They must exist before you deploy, and the one certificate must cover every host | none |
 | `maintenance` | `true` makes the edge answer `503` with a short fixed page and `Retry-After` for this host, for planned work. Remove it and deploy again to resume | `false` |
+| `nodes` | The ingress nodes that serve this route, for example `[edge1]`. Each must be an enabled ingress node. Name the nodes the hostname's DNS points at, so the other ingress nodes do not request a certificate for it, see [Several ingress nodes](ingress.md#several-ingress-nodes) | every ingress node |
 
 A host with no serving upstream gets the same `503` automatically. `tug domain add` maps extra hostnames onto a route without a deployment, see [Mapped domains](ingress.md#mapped-domains-and-wildcard-zones). Setup and DNS are in [Networking](ingress.md#set-up-ingress).
 

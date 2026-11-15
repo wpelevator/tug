@@ -58,6 +58,22 @@ Control aggregates the `ingress` blocks of every project's current deployment. F
 
 An endpoint is eligible while its agent is fresh and reports the service as `serving`; removal reaches Caddy when the ingress node's agent applies the updated configuration. Replicas must be able to handle requests interchangeably, including access to the application's sessions and uploaded files. Balancing requests does not replicate application data or provide failover for the ingress node itself.
 
+### Several ingress nodes
+
+By default, every ingress node serves every route, so a host works on any of them and DNS can list several addresses for high availability. Each node's Caddy then requests a certificate for every automatic-HTTPS host, and Let's Encrypt validates the name against the address DNS gives it. A host that resolves to only one ingress node fails validation on the others. `tug ingress tls` lists those rows as `failed`, `tug status` counts them, and `tug doctor` fails the `ingress` check after ten minutes.
+
+Name the nodes in `x-tug.ingress.nodes` when a host resolves to some of them:
+
+```yaml
+x-tug:
+  ingress:
+    host: app.example.com
+    port: 80
+    nodes: [edge1]
+```
+
+Only `edge1` renders a site block for `app.example.com` and requests its certificate, and a deployment waits for `edge1` alone to apply the route. Other ingress nodes render nothing for it, and mapped domains of the service follow the same list. Deploy refuses a name that is not an enabled ingress node (`tug node list`, `tug node ingress <node>`). Leave `nodes` out to keep the default of every ingress node.
+
 ### The Caddy container
 
 The agent on an ingress node creates `tug-caddy` with host networking and three named volumes (`/data` for ACME accounts and certificates, `/config`, `/etc/caddy`), so certificates survive recreation and image updates. It uploads config through the Engine API archive endpoint, which works whether the agent runs on the host or in a container, and applies it with `caddy reload`. A reload swaps config without restarting the container or dropping in-flight HTTP requests (WebSockets stay open for a while, see [Edge features](#edge-features)). If Caddy rejects the config, the agent restores the last applied files, reports `failed` with Caddy's error in the node's ingress status and retries on the next poll. `tug doctor` flags ingress nodes that are not `serving` and ones that do not answer on ports 80 and 443 ([Port reachability](#port-reachability)). Removing the ingress role removes the container but keeps the volumes. The image is `caddy:2-alpine`, overridable with `TUG_CADDY_IMAGE` on the agent.

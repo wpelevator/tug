@@ -212,10 +212,26 @@ function validateIngress(
     errors.push(`${name}: ingress.tls must be auto, custom or off`);
   if (ingress.maintenance !== undefined && typeof ingress.maintenance !== 'boolean')
     errors.push(`${name}: ingress.maintenance must be true or false`);
+  if (ingress.nodes !== undefined) {
+    const named = ingress.nodes as unknown;
+    if (
+      !Array.isArray(named) ||
+      !named.length ||
+      named.some((n) => typeof n !== 'string' || !n.length)
+    )
+      errors.push(`${name}: ingress.nodes must be a non-empty list of ingress node names`);
+    else if (new Set(named).size !== named.length)
+      errors.push(`${name}: ingress.nodes lists a node twice`);
+  }
   if (tls === 'custom' && (!ingress.cert || !ingress.key))
     errors.push(
       `${name}: ingress.tls custom requires cert and key (names of project secrets holding the PEM certificate and private key)`,
     );
+}
+
+/** True when an ingress route is served by this ingress node: every ingress node unless `nodes` names some. */
+export function ingressServesNode(ingress: { nodes?: string[] }, node: string): boolean {
+  return !ingress.nodes?.length || ingress.nodes.includes(node);
 }
 
 /** True when the service opted in to `x-tug.rollout.strategy: rolling`. */
