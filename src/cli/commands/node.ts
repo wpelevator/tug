@@ -14,7 +14,7 @@ import type { AddressCandidate } from '../onboarding.ts';
 import { formatNodePlan, inferNodeName, isValidNodeName } from '../onboarding.ts';
 import { ask, canPrompt, confirm } from '../prompt.ts';
 import { terminalPicker } from '../pick.ts';
-import { runStep, STAGE_MARKER } from '../process.ts';
+import { runStep, SshHostKeyError, STAGE_MARKER } from '../process.ts';
 import type { Prompter } from '../prompt.ts';
 import { isNodeHost } from '../../node-address.ts';
 import { assertImagePublished, defaultImage, resolveImage } from '../../images/image.ts';
@@ -445,6 +445,7 @@ async function upgradeNode(
   try {
     current = parseAgentInspect(await runCapture('ssh', ['--', sshTarget, inspectAgentScript]));
   } catch (e) {
+    if (e instanceof SshHostKeyError) throw e;
     throw new Error(
       `no agent container on ${sshTarget} (${errMessage(e)}); \`tug node add\` installs one`,
       { cause: e },

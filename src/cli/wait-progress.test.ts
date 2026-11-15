@@ -388,6 +388,11 @@ test('long-wait commands report progress on stderr and retain their results and 
         /Restoring control-plane backup/,
         'control restore must report its active operation',
       );
+      assert.match(
+        err.join(''),
+        /run `tug control restart/,
+        'control restore must name `tug control restart` as the next step when a restart is required',
+      );
     });
     await t.test(
       'control backup --download saves a private copy and never overwrites',
