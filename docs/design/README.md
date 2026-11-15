@@ -7,6 +7,7 @@ These pages record why Tug is built the way it is and what is planned. They are 
 | [Roadmap](roadmap.md) | Living | Goals, principles, topology and milestones |
 | [Security audit](security.md) | Record | The 10 November 2026 audit, its fixes and trust boundaries |
 | [Real-host evaluation](real-host-evaluation.md) | Record | An operator trial on real hosts and the friction it found |
+| [Ingress edge features](ingress-edge.md) | Partly built | How the managed ingress compares with peers, and the planned per-route options |
 | [Observability](observability.md) | Mostly proposed | What exists today and the planned metrics, logs and alerts |
 | [Capabilities](capabilities.md) | Proposed | Delegated, attenuated authority beyond the three roles |
 | [Consoles and agent-built control planes](consoles.md) | Proposed | A controller API and MCP server for prompt-built dashboards |

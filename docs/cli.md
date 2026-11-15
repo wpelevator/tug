@@ -1,203 +1,408 @@
 # CLI reference
 
-Run `tug --help` to list commands and `tug <command> --help` for command options, units and defaults. Commands read `tug <subject> <verb> [params]`, such as `tug node add` and `tug secret set`, and `tug <subject> --help` lists a subject's verbs. Everyday project commands (`deploy`, `status`, `logs`, `exec` and the like) stay at the top level, and `tug setup` is a shortcut for `tug control setup`. There are no colon names or dash-joined legacy names.
+Every `tug` command and flag, grouped by task. Run `tug --help` for the command list and `tug <command> --help` for options, units and defaults.
 
-| Subject | Verbs |
-|---|---|
-| (top level) | `setup`, `init`, `lint`, `deploy` (and `deploy cancel`), `status`, `tui`, `rollback`, `restart`, `scale`, `logs`, `exec`, `run`, `ps`, `inspect`, `events`, `doctor` |
-| `control` | `setup`, `backup`, `restore` |
-| `node` | `add`, `list` (`ls`), `replace`, `repair`, `remove`, `disable`, `ingress`, `address`, `register`, `enroll` |
-| `secret` | `set`, `list`, `remove` |
-| `domain` | `add`, `list` (`ls`), `remove` |
-| `backup` | `run`, `list`, `password`, `destination set`, `destination show`, `destination remove` |
-| `restore` | `run`, `list`, `resume`, `release` |
-| `credential` | `create`, `list`, `revoke` |
-| `volume` | `list`, `remove` |
-| `hold` | `release` |
-| `image` | `prune` |
+```sh
+tug node add --help
+```
 
-`tug lint [-f --file <file>] [--json]` checks a Compose file against the `x-tug` schema before deploying: no control connection, credential or Docker needed. Findings go to stderr one per line as `$FILE: $RULE`, the command exits nonzero when anything is wrong, and `--json` prints `{ ok, file, errors }` for scripts and editors. The `--file` default and the `tug.yml` `file:` setting match `tug deploy` (see [Checking the file](compose.md#checking-the-file-with-tug-lint)); the schema itself is documented in [Compose extensions](compose.md).
+Commands read `tug <subject> <verb> [params]`, such as `tug node add` and `tug secret set`. Everyday project commands (`deploy`, `status`, `logs`, `exec`) stay at the top level, and `tug setup` is a shortcut for `tug control setup`. Commands reject unknown flags and extra arguments, and fail on contradictory or out-of-range values before any API request, Docker call or SSH operation.
+
+## Commands at a glance
+
+| I want to | Command | Section |
+| --- | --- | --- |
+| Install control, import a credential | `setup`, `init`, `control setup` | [Setup](#setup) |
+| Upgrade control and nodes | `upgrade`, `control upgrade`, `node upgrade` | [Setup](#setup), [Upgrade](upgrading.md) |
+| Add, change or remove a server | `node add`, `list`, `replace`, `repair`, `remove`, `disable`, `ingress`, `address`, `register`, `enroll`, `migrate` | [Nodes](#nodes) |
+| Check a Compose file offline | `lint` | [Deployments](#deployments) |
+| Deploy, undo, cancel | `deploy`, `rollback`, `deploy cancel` | [Deployments](#deployments) |
+| See what is running | `status`, `ps`, `events`, `tui`, `doctor` | [Deployments](#deployments), [Operations](#operations) |
+| Read logs, open a shell, run a job | `logs`, `exec`, `run`, `inspect` | [Services and volumes](#services-and-volumes) |
+| Restart, scale, free held services, prune builds | `restart`, `scale`, `hold release`, `image prune` | [Services and volumes](#services-and-volumes) |
+| Manage volumes | `volume list`, `volume remove` | [Services and volumes](#services-and-volumes) |
+| Manage values | `secret`, `var` | [Secrets and variables](#secrets-and-variables) |
+| Map extra hostnames | `domain add`, `list`, `remove` | [Secrets and variables](#secrets-and-variables) |
+| Back up and restore | `backup`, `restore` | [Backups](#backups) |
+| Back up and restore control | `control backup`, `control restore` | [Operations](#operations) |
+| Give CI or a teammate access | `credential create`, `list`, `revoke` | [Operator credentials](#operator-credentials) |
 
 ## Arguments, options and configuration
 
-A positional argument names the primary target: the SSH host for `node add`, node for `node register`, service for `logs`, secret name for `secret set` or backup archive for `control restore`. Named options qualify the operation. For example, `node add root@app1.example.com --name app1` distinguishes the SSH destination from the registered node name. Commands reject unknown options and extra positional arguments instead of ignoring typos. Numeric options accept bounded integers; invalid values and contradictory options fail before an API request or Docker/SSH operation.
+A positional argument names the primary target: the SSH host for `node add`, the service for `logs`, the secret for `secret set`. Named options qualify the operation, so `node add root@app1.example.com --name app1` separates the SSH destination from the node name.
 
 | Global option | Environment | Config key | Default |
-|---|---|---|---|
-| `--config <file>` | `TUG_CONFIG` |, | `tug.yml`, `tug.yaml`, `tug.json` or `.tug.json` in the current directory |
-| `--control-url <url>` (operator API endpoint) | `TUG_CONTROL_URL` | `controlUrl` | the credential's default address (an override is a connect target only) |
+| --- | --- | --- | --- |
+| `--config <file>` | `TUG_CONFIG` | none | `tug.yml`, `tug.yaml`, `tug.json` or `.tug.json` in the current directory |
+| `--control-url <url>` | `TUG_CONTROL_URL` | `controlUrl` | The credential's address. An override is a connect target only |
 | `--project <name>` | `TUG_PROJECT` | `project` | `site` |
-| `--credential <file>` | `TUG_CREDENTIAL` (inline) or `TUG_CREDENTIAL_FILE` | `credential` (a file path), only in the untracked overlay | No credential |
-| `--verbose` | `TUG_VERBOSE=1` |, | off; see [Progress and quiet steps](#progress-and-quiet-steps) |
+| `--credential <file>` | `TUG_CREDENTIAL` (inline), `TUG_CREDENTIAL_FILE` | `credential`, only in the untracked overlay | none |
+| `--verbose` | `TUG_VERBOSE=1` | none | off, see [Progress](#progress-and-quiet-steps) |
 
-Global options can appear before or after a command. Explicit options take precedence over environment variables, then the overlay, then the tracked config, then defaults. Relative `--config` paths resolve from the working directory. A missing default config is allowed; an explicitly selected missing file, invalid YAML or JSON, an unknown key or an invalid value is an error. `init` can create a new selected file. `--project` applies only to project-scoped operations; status and node operations retain their control-wide scope.
+- **Precedence.** Flags, then environment variables, then the overlay, then the tracked config, then defaults. Global options go before or after the command.
+- **Project scope.** `--project` applies to project-scoped commands. `status` and node commands are control-wide.
+- **Control URLs** must be `https://`.
+- **Credentials are never arguments**, because arguments show up in process listings and shell history. Use `TUG_CREDENTIAL`, `TUG_CREDENTIAL_FILE` or `tug init`. `secret set --value` has the same exposure, so omit it to read the value from stdin.
+- **List flags.** `deploy --move`, `restore run --writers`, `credential create --project`, `node add|replace|repair|register|enroll --label`, `control setup --extra-san` and `backup destination set --env` take a comma-separated list, a repeated flag, or both: `--move db,web` equals `--move db --move web`. Values are names and cannot contain a comma.
 
-Every command that produces a result takes `--json`. Most print the API result as JSON already and accept the flag for consistency. The ones that print a readable summary by default switch to one JSON document with `--json`: `status`, `node list`, `deploy`, `rollback`, `scale`, `lint`, `init` (`{ ok, files, credentialFile }`), `backup run` (`{ ok, queued, errors, finished }`), `backup list` (the catalog with its targets and runs; `--check` still sets the exit code), `restore run` (the plan, plus the restore record when it ran), `restore list`, `events` (`{ events }`), `doctor` (the full diagnostics document) and `ps` (Docker's container list). `exec`, `run` and `logs` write container output unchanged and take no `--json`, and `inspect` prints live Docker data as JSON. Enrollment prints a runnable command or cloud-init document; `node enroll --json` returns JSON with `command`, and also `cloudInit` with `--install-docker`, and its stdout contains no explanatory prose. There is no global `--json` flag: it follows the command. Install preflight and image-transfer tools may also print progress. Errors go to stderr and exit nonzero.
+### Output and exit codes
 
-Credentials are never command-line arguments, since arguments can appear in process listings and shell history; use `TUG_CREDENTIAL`, `TUG_CREDENTIAL_FILE` or `tug init`. `secret set --value` has the same exposure; omit it to read the value from stdin. The credential path belongs in the untracked overlay (see below), never in the tracked config.
+Errors go to stderr and exit nonzero. Progress goes to stderr, so stdout stays usable for JSON and for runnable output.
 
-Flags that take several values (`deploy --move`, `restore run --writers`, `credential create --project`, `node add|replace|repair|register|enroll --label`, `control setup --extra-san`, `backup destination set --env`) accept a comma-separated list, a repeated flag, or both: `--move db,web` and `--move db --move web` are the same, and spaces around items and empty items are ignored. Their values are names, so none may contain a comma; in particular a node label cannot. The same settings in the config file stay YAML lists.
+| Command | Default output | With `--json` |
+| --- | --- | --- |
+| `status`, `node list`, `deploy`, `rollback`, `scale`, `lint` | A readable summary | One JSON document |
+| `init` | A summary | `{ ok, files, credentialFile }` |
+| `backup run` | A summary | `{ ok, queued, errors, finished }` |
+| `backup list` | Targets and runs | The catalog. `--check` still sets the exit code |
+| `restore run`, `restore list` | The plan or list | The plan, plus the restore record when it ran |
+| `events` | A table | `{ events }` |
+| `doctor` | One line per check | The full diagnostics document |
+| `ps` | A table | Docker's container list |
+| `node enroll` | A runnable command or cloud-init document | JSON with `command`, plus `cloudInit` with `--install-docker`. Stdout has no explanatory prose |
+| `exec`, `run`, `logs` | Container output unchanged | No `--json` |
+| `inspect` | Live Docker data as JSON | Same |
 
-`tug deploy` prints progress to stderr in terminals and CI, including with `--json`: source preparation, upload/control preparation, per-service build/export/cleanup for `--build-local`, and deployment state changes while waiting. Each stage appears immediately and repeats every ten seconds with elapsed seconds for that stage, so long builds do not leave the CLI silent. Repeated polling of the same deployment state does not reset its timer. Remote upload and image building share one stage because the control API completes both in the deployment request; these updates show elapsed time, not upload percentages or Docker build logs. Stdout still contains only the final summary or JSON result. `--no-wait` reports preparation progress and returns after control publishes desired state, without waiting for rollout.
-
-The same progress reporting covers `rollback`, `backup run`, `restore run`, control-plane backup/restore, control setup, node add/replace/repair and node host teardown. Setup reports Docker installation, host checks, identity creation and installation; `--build-local-image` additionally reports image building, export, transfer and loading on the host. Node installation reports the wait for a fresh agent report. Interactive setup questions and confirmation finish before these stages start. Backups identify pending targets and their reported states, restores report their state changes, and rollback reports deployment states. The shared command wait used by `restart`, non-followed `logs` and node diagnostics in `doctor` also reports queued/running/terminal states. Heartbeats stop on completion, failure or timeout; existing timeouts and exit codes still apply. `--no-wait` skips the corresponding remote wait and its progress. `node enroll` only prepares enrollment instructions and does not wait for the host to enroll.
-
-Both remote source uploads and `--build-local` use a temporary source snapshot of the current working directory. Tug applies the root `.dockerignore` using its supported pattern matcher and always excludes `.git`, `node_modules`, `data`, credential documents named `*.credential.json`, the Tug overlays and `.tug.json` at any depth, root Tug config names, and the resolved config, overlay and credential file paths. These mandatory exclusions cannot be re-included by ignore rules. The snapshot is validated before use and unsafe links are rejected. Docker then applies its own ignore rules to the local build. Tug does not detect arbitrary secret names or claim full Docker ignore compatibility: review your build contexts and Dockerfile-specific ignore rules, especially for nested or multiple contexts. A broad `COPY .` can still include secrets that Tug cannot identify.
-
-## Interactive selection
-
-In a terminal outside CI, omit an existing target to fetch choices from control: `tug logs`, `tug exec`, `tug inspect`, `tug restart`, `tug deploy cancel`, `tug restore run`, `tug restore resume`, `tug restore release`, `tug secret remove`, `tug volume remove` and `tug credential revoke`. Node operations `replace`, `repair`, `disable`, `remove` and `ingress` also offer registered nodes when their name is omitted. Use `tug scale --replicas 3` or `tug node address --to 10.0.0.2` to supply the new value while choosing the target. `tug doctor --node` offers a node; plain `doctor` retains its existing behavior.
-
-Menus are drawn on stderr and driven by the keyboard: arrow keys, Ctrl-N/Ctrl-P or `j`/`k` move, PageUp and PageDown page, typed digits jump to that entry (`12` reaches the twelfth), `space` toggles an entry in a multi-choice menu, `a` toggles all, `enter` confirms and `q`, `Esc`, Ctrl-C or Ctrl-D cancels with nothing changed. With `TERM=dumb`, which cannot redraw, menus fall back to numbered choices: enter a number, or comma-separated numbers for several, and `q` to cancel. Nothing is preselected, `enter` on an empty multi-choice menu is refused and a single choice still has to be confirmed, even if there is only one. Chosen values come back in list order. Long menus scroll to fit the terminal. Menus and questions go to stderr, keeping JSON and command output on stdout usable. Without a terminal, or with `CI` set, missing targets fail with an explicit-target error and selection never reads stdin. Explicit targets skip their selection menu and discovery request.
-
-Live `exec`, `run`, `inspect`, `logs --follow` and `ps` offer a node when placement is ambiguous and `--node` is omitted. The choices come from current desired placement, with node status shown alongside each name; stale or disabled placements remain visible and control still validates the operation. Pass both the service and `--node` to avoid discovery for live commands. To select a service while supplying a remote command, use `tug exec --select -- sh -c 'echo hello'` or `tug run --select -- wp core update-db`; with `--select`, all positional arguments belong to the remote command.
-
-Commands whose omitted targets already mean “all” retain that behavior. Use these explicit selection options for a subset:
-
-| Command | Choices |
-| --- | --- |
-| `tug backup run --select` | Enabled backup targets; cannot combine with explicit targets |
-| `tug hold release --select` | Services held for a deployment move; excludes restore-owned holds |
-| `tug node replace --select`, `tug node repair --select` | Registered nodes with SSH targets in local config; cannot combine with a node, SSH target or `--all`; continues and reports per-node failures |
-| `tug restore run --select-snapshot` | Successful catalog backups for the chosen target, including explicitly labeled pre-restore safety backups; `--from` still accepts an external restic snapshot ID |
-| `tug restore run --select-writers` | Services to stop instead of automatic writer discovery; cannot combine with writer flags or scratch mode |
-| `tug credential create ci --role deploy --select-projects` | Existing projects, or “All projects, including future projects”; explicit repeatable `--project` (or a comma-separated list) also supports future project names |
-
-Selections are project-scoped where the operation is project-scoped and honor the credential's permissions. Service choices use current desired state rather than potentially stale reports. Deployment cancellation lists active deployments without the status history limit; snapshot selection reads the successful backup catalog rather than the recent-run display. Restore recovery lists only interrupted restores, including those outside the recent history display. Volume removal offers only unreferenced volumes and identifies persistent data that requires `--delete-data`. A choice does not bypass control's validation or existing confirmation requirements: `restore run` still previews unless given `--confirm`, and volume/node removal retains its existing guards.
-
-## Progress and quiet steps
-
-Long operations report progress on stderr. In a terminal that is one live line, `[12s] Pulling the agent image · latest output`, and each finished stage stays behind as `[12s] label`; without a terminal, or with `CI` set, it is a line per stage and an elapsed-time line every ten seconds. Steps that run on a host over SSH (Docker installation, preflight checks, image transfer and load, the control and agent install) do not print their own output while they work, so a Docker pull is one stage rather than a line per layer. A step that fails prints the last lines it produced. Pass `--verbose` (or set `TUG_VERBOSE=1`) to stream that output as it arrives; it is accepted before or after the command, except on `exec` and `run`, where everything after the service belongs to the remote command (put it before the command: `tug --verbose exec`). SSH must authenticate without a prompt for the best display: a password or passphrase prompt is shown, but the status line stays hidden until the step prints its first output.
+There is no global `--json` flag. It belongs to the command.
 
 ## Config file
 
 The CLI reads a YAML or JSON file, `tug.yml` by convention, so a repository can record how to reach its control plane and which servers it uses. [`examples/tug.yml`](../examples/tug.yml) is a complete sample.
 
-- **Lookup.** `--config` or `TUG_CONFIG` select a file, which must exist. Otherwise the working directory is searched for `tug.yml`, `tug.yaml`, `tug.json` and `.tug.json`; more than one is an error, and none is fine. The format follows the extension (`.json` is JSON, anything else YAML, which also reads JSON). Only the working directory is searched, not its parents; when a command needs a credential and finds no config there, the error names the nearest parent directory that has one.
-- **Overlay.** `tug.local.yml` next to `tug.yml` (`.tug.local.json` next to `.tug.json`, `<name>.local<ext>` in general) holds what must not be committed. It has the same keys plus `credential` (a path to a credential file), and its values win key by key, including inside `nodeDefaults` and each node. `credential` in the tracked file is an error. `tug init` writes the tracked file only when it is missing (an existing one keeps its comments), points the overlay at the imported credential file (written with mode `0600` under `~/.config/tug/credentials/`), and adds the overlay to `.gitignore` in a git checkout. Connection flags given to `init` for an existing tracked file are saved in the overlay.
-- **Strict keys.** Unknown keys, wrong types and out-of-range values fail with the file and key in the message. Paths in the file (`file`, `ca`) resolve relative to the file, not the working directory.
+| Rule | Behavior |
+| --- | --- |
+| Lookup | `--config` or `TUG_CONFIG` select a file, which must exist. Otherwise only the working directory is searched, not its parents, for `tug.yml`, `tug.yaml`, `tug.json` and `.tug.json`. More than one is an error and none is fine. When a command needs a credential and finds no config, the error names the nearest parent directory that has one |
+| Format | `.json` is JSON. Anything else is YAML, which also reads JSON |
+| Overlay | `tug.local.yml` next to `tug.yml` (`.tug.local.json` next to `.tug.json`, `<name>.local<ext>` in general) holds what must not be committed. It has the same keys plus `credential` (a path to a credential file), and its values win key by key, including inside `nodeDefaults` and each node. `credential` in the tracked file is an error |
+| `tug init` | Writes the tracked file only when it is missing, so an existing one keeps its comments. It saves the credential with mode `0600` under `~/.config/tug/credentials/`, points the overlay at it and adds the overlay to `.gitignore` in a git checkout |
+| Strict keys | Unknown keys, wrong types and out-of-range values fail with the file and key. Paths in the file (`file`, `ca`) resolve relative to the file |
+| Not desired state | Tug never reconciles against the file. Only the node commands that install or register read `nodes`, as flag defaults. See [Nodes](nodes.md#declaring-nodes-in-the-config-file) |
 
-Every key is a default for the flag it is named after, on every command that has that flag (a test enforces that the table below and the commands' real options agree), and a flag on the command line always wins. Each key is the camelCase of the long flag it supplies a default for, with the same value type. `nodeDefaults` keys that name `control setup` options (`installDocker`, `image`) are its defaults too, and `image` is one for `control upgrade`. A repeatable flag takes a list (`label: [web, db]`; a single string is a one-item list), and a negated flag maps to the positive key set to `false` (`--no-wait` is `wait: false`). A flag on the command line always wins over the file; a list from the file is replaced by flags, not appended to. A key applies only to the commands listed for it.
+Each key is the camelCase of the long flag it supplies a default for, with the same value type. A flag on the command line wins. A list from the file is replaced by flags, not appended to. A repeatable flag takes a list (`label: [web, db]`), and a negated flag maps to the positive key set to `false` (`--no-wait` is `wait: false`).
 
 | Key | Flag | Commands |
-|---|---|---|
-| `controlUrl` | `--control-url` (connections), the address `control setup` advertises | all; `control setup` also writes it into control's environment |
+| --- | --- | --- |
+| `controlUrl` | `--control-url` | All. `control setup` also advertises it and writes it into control's environment |
 | `controlSsh` | `<ssh-target>` of the control host | `control upgrade`, `upgrade` |
-| `project` | `--project` | project-scoped commands |
-| `credential` (overlay only) | `--credential`, `TUG_CREDENTIAL_FILE` | all |
-| `file` | `-f, --file` | `deploy` |
+| `project` | `--project` | Project-scoped commands |
+| `credential` (overlay only) | `--credential` | All |
+| `file` | `-f, --file` | `deploy`, `lint` |
 | `buildLocal` | `--build-local` | `deploy` |
 | `profile` | `--profile` | `deploy` |
-| `wait` | `--no-wait` | `deploy`, `rollback`, `backup run`, `node add`, `node replace`, `node repair`, `node migrate`, `node upgrade` |
-| `nodes.<name>.ssh` | `<ssh-target>` | `node add`, `node replace`, `node repair`, `node migrate`, `node upgrade` |
-| `nodes.<name>.address` | `--address` | `node add`, `node replace`, `node repair`, `node register`, `node enroll` |
-| `label` | `--label` | `node add`, `node replace`, `node repair`, `node register`, `node enroll` |
-| `installDocker` | `--install-docker` | `node add`, `node replace`, `node repair`, `node enroll`, `control setup` |
-| `image` | `--image` | `node add`, `node replace`, `node repair`, `node migrate`, `node upgrade`, `node enroll`, `control setup`, `control upgrade` |
-| `agentControlUrl` | `--agent-control-url` | `node add`, `node replace`, `node repair`, `node migrate`, `node upgrade`, `node enroll` |
+| `wait` | `--no-wait` | `deploy`, `rollback`, `backup run`, `node add`, `replace`, `repair`, `migrate`, `upgrade` |
+| `nodes.<name>.ssh` | `<ssh-target>` | `node add`, `replace`, `repair`, `migrate`, `upgrade` |
+| `nodes.<name>.address` | `--address` | `node add`, `replace`, `repair`, `register`, `enroll` |
+| `label` | `--label` | `node add`, `replace`, `repair`, `register`, `enroll` |
+| `installDocker` | `--install-docker` | `node add`, `replace`, `repair`, `enroll`, `control setup` |
+| `image` | `--image` | `node add`, `replace`, `repair`, `migrate`, `upgrade`, `enroll`, `control setup`, `control upgrade` |
+| `agentControlUrl` | `--agent-control-url` | `node add`, `replace`, `repair`, `migrate`, `upgrade`, `enroll` |
 
-`control setup` reads `controlUrl` from the selected file (or the discovered default file), with the overlay taking precedence. `controlUrl` is the single name for where control is. For `control setup` the address is, in order, `--control-url`, `TUG_CONTROL_URL`, the config file's `controlUrl`, then the SSH target's host and `--port`; the command prints which one it used. For every other command it is the connect target, falling back to the URL stored in your credential, so a tunnel is just `--control-url https://127.0.0.1:18082`. The credential's URL is never used as an installation address. A stale exported `TUG_CONTROL_URL` therefore changes what `control setup` advertises; unset it when installing. A configured URL includes its own public port; `--port` controls the host port published by Docker and does not rewrite the configured URL.
+The rows from `label` down are node keys. Set them under `nodes.<name>`, or once for every node under `nodeDefaults` (everything except `ssh` and `address`). Secrets and per-invocation choices have no key: `--value`, `--force`, `--confirm`, `--version`, `--to`, `--ttl`, `--timeout`, `--build-local-image`.
 
-The rows from `label` down are node keys: set them under `nodes.<name>`, or once for every node under `nodeDefaults` (everything except `ssh` and `address`). Secrets and per-invocation choices have no key: `--value`, `--force`, `--confirm`, `--version`, `--to`, `--ttl`, `--timeout`, `--build-local-image` and the like.
+### Where control is
 
-The file is not desired state and Tug never reconciles against it. Only `node add`, `node replace`, `node repair`, `node migrate`, `node upgrade`, `node register` and `node enroll` (and `upgrade`, for its SSH targets) read `nodes`, as defaults for flags; every other command asks the control plane. See [Nodes](nodes.md#declaring-nodes-in-the-config-file).
+`controlUrl` is the one name for where control is.
+
+- **`control setup`** advertises, in order: `--control-url`, `TUG_CONTROL_URL`, the config file's `controlUrl`, then the SSH target's host and `--port`. The command prints which one it used. The credential's URL is never an installation address, so unset a stale exported `TUG_CONTROL_URL` when installing.
+- **Every other command** connects to `--control-url`, falling back to the URL in your credential. A tunnel is `--control-url https://127.0.0.1:18082`.
+- **`--agent-control-url`** is where the agent connects. Both are connect targets only, and the server is verified by the control name derived from the pinned CA, so the address can be a DNS name, an IP, a tunnel or a moved host. Use both when you connect through a local SSH tunnel while nodes use a private network:
+
+```sh
+tug --control-url https://127.0.0.1:18082 node add root@app1.example.com --name app1 --agent-control-url https://10.110.0.3:8443
+```
+
+A configured URL includes its own public port. `--port` sets only the host port Docker publishes and does not rewrite it.
+
+## Interactive selection
+
+In a terminal outside CI, leave out an existing target and the CLI fetches choices from control. This works for `logs`, `exec`, `inspect`, `restart`, `deploy cancel`, `restore run`, `restore resume`, `restore release`, `secret remove`, `volume remove`, `credential revoke`, and for `node replace`, `repair`, `disable`, `remove` and `ingress`. Supply the new value while choosing the target with `tug scale --replicas 3` or `tug node address --to 10.0.0.2`. `tug doctor --node` offers a node, and plain `doctor` is unchanged.
+
+| Key | Action |
+| --- | --- |
+| Arrows, `Ctrl-N`/`Ctrl-P`, `j`/`k` | Move |
+| `PageUp`, `PageDown` | Page |
+| Digits | Jump to that entry (`12` is the twelfth) |
+| `space`, `a` | Toggle one, toggle all (multi-choice) |
+| `enter` | Confirm. A single choice still needs it, and an empty multi-choice is refused |
+| `q`, `Esc`, `Ctrl-C`, `Ctrl-D` | Cancel with nothing changed |
+
+With `TERM=dumb`, menus fall back to numbered choices: enter a number, comma-separated numbers, or `q`. Menus go to stderr. Without a terminal, or with `CI` set, a missing target fails with an explicit-target error and selection never reads stdin. An explicit target skips its menu and its discovery request.
+
+For live `exec`, `run`, `inspect`, `logs --follow` and `ps`, a node is offered when placement is ambiguous and `--node` is omitted. Pass both the service and `--node` to skip discovery. To select a service while giving a remote command, use `tug exec --select -- sh -c 'echo hello'` or `tug run --select -- wp core update-db`, where every positional argument then belongs to the remote command.
+
+Commands whose omitted target already means "all" keep that. Pick a subset with:
+
+| Command | Choices |
+| --- | --- |
+| `backup run --select` | Enabled backup targets. Cannot combine with explicit targets |
+| `hold release --select` | Services held for a deployment move, not restore-owned holds |
+| `node replace --select`, `node repair --select` | Nodes with SSH targets in local config. Cannot combine with a node, SSH target or `--all`. Continues and reports per-node failures |
+| `restore run --select-snapshot` | Successful catalog backups for the target, including labeled pre-restore safety backups. `--from` still takes an external restic snapshot id |
+| `restore run --select-writers` | Services to stop instead of automatic discovery. Cannot combine with writer flags or scratch mode |
+| `credential create ci --role deploy --select-projects` | Existing projects, or all projects including future ones |
+
+A choice never bypasses control's validation or confirmation: `restore run` still previews without `--confirm`, and volume and node removal keep their guards. Volume removal offers only unreferenced volumes and marks persistent data that needs `--delete-data`.
+
+## Progress and quiet steps
+
+Long operations report progress on stderr. In a terminal that is one live line, `[12s] Pulling the agent image · latest output`, and each finished stage stays as `[12s] label`. Without a terminal, or with `CI` set, it is one line per stage plus an elapsed-time line every ten seconds. Progress covers `deploy`, `rollback`, `backup run`, `restore run`, control backup and restore, `control setup`, node add, replace and repair, node teardown, and the command wait behind `restart`, non-followed `logs` and `doctor` node diagnostics. Timeouts and exit codes are unchanged, and `--no-wait` skips the remote wait and its progress. `node enroll` only prepares instructions and does not wait.
+
+Steps that run on a host over SSH (Docker installation, preflight, image transfer and load, installs) print nothing while they work, so a Docker pull is one stage, not one line per layer. A step that fails prints its last lines. `--verbose` or `TUG_VERBOSE=1` streams the output as it arrives. On `exec` and `run`, everything after the service belongs to the remote command, so put it before: `tug --verbose exec`. For the best display, SSH must authenticate without a prompt. A password or passphrase prompt is shown, but the status line stays hidden until the step prints.
 
 ## Setup
 
-- `tug init [<credential-file>|-]` creates the config file with the resolved control URL and project when it is missing, imports the credential (a file, or `-` for stdin) into a `0600` file under `~/.config/tug/credentials/` and points the git-ignored overlay next to the config at it; see [Config file](#config-file). Use global `--control-url`, `--project` or `--config` to select them.
-- `tug setup <ssh-target>` is a shortcut for `tug control setup <ssh-target> [--extra-san <name>]... [--install-docker] [--port <port>] [--image <tag>] [--build-local-image] [--credential-out <file>] [--no-import] [--recover-root] [-y]`. It installs control over SSH (the advertised address defaults to `controlUrl` from the config, then the SSH target's host and `--port`), issues the root credential and, like `init`, imports it into your local config, so no separate `init` step follows. In a terminal it offers to install Docker when it is missing, prints the plan and asks to confirm (`-y` skips the question); without a terminal it never prompts. `--credential-out <file>` also saves the credential to a `0600` file, and `--no-import` skips the import (it requires `--credential-out`). The mTLS port defaults to `8443`. `--recover-root` replaces only root's key from the control-plane host. See [Control plane](control-plane.md).
-- `tug control upgrade [<ssh-target>] [--to <version>] [--image <tag>] [--build-local-image] [--rollback] [--force] [-y]` replaces the control container over SSH with one running another image (default: this CLI's version). The command carries over the published mTLS bindings, advertised URL, extra names. It reuses the data volume and compares the CA before and after. It tags the previous image `tug:rollback` first, shows the plan and asks to confirm in a terminal (`-y` skips the question), then waits for control to answer and prints its version. `--rollback` redeploys `tug:rollback` (it warns that a database already migrated by the newer control may not open); `--to` names a published version; a control already on the image is left alone unless `--force`. The SSH target defaults to `controlSsh` in the [config file](#config-file). Run `tug control backup` first when you want a backup beyond the `tug.db.pre-v<N>.bak` copy the new control makes. See [Control plane](upgrading.md).
-- `tug node upgrade [<node>] [<ssh-target>] [--all|--select] [--to <version>] [--image <tag>] [--build-local-image] [--agent-control-url <url>] [--force] [--no-wait]` replaces an enrolled node's agent over SSH with one running another image (default: this CLI's version), keeping its key, address, labels and the connect-only control URL the running agent uses. A node already on the image is skipped (`--force` reinstalls it), a node control does not know or a host without an agent is refused (use `node add`), and `--to` is refused when it is newer than the control. `--all` walks every node with an `ssh` entry in order, continues after failures and exits nonzero if one fails. See [Nodes](nodes.md#image).
-- `tug upgrade [--to <version>] [--build-local-image] [--force] [-y]` runs `control upgrade` on `controlSsh` and then `node upgrade --all`, in that order because control refuses agents that run ahead of it, and stops without touching a node when control fails. It uses this CLI's version or `--to` for everything and ignores per-node `image` settings; use the two commands to pin one.
-- `tug node address [node] [address] [--to <address>]` updates the registered private address used for published-port binding and cross-node routing.
-- `tug node disable [node]` blocks a node's key immediately without SSH, deleting or changing placement or stopping its containers: it withdraws the node's service endpoints and ingress routes but does not drain workloads. `node replace` brings it back.
-- `tug node add [<ssh-target>] [--name <node>] [--ingress] [-y] [--all] [--agent-control-url <url>] [--install-docker] [--address <ip>] [--label <label>]... [--image <tag>] [--build-local-image] [--no-wait]` creates a node and installs its agent over SSH. The name defaults to the first DNS label of the SSH host (`app1` for `root@app1.example.com`); with an IP address a terminal asks for the name, offering the host's own `hostname -s` as the default, and without a terminal `--name` is required. `node enroll` likewise asks for `--name` in a terminal (there is no host to suggest one). Without `<ssh-target>` the target is `nodes.<node>.ssh` from the [config file](#config-file). It checks for a control credential first, then always prints the plan (node, SSH target, Docker, address, image, ingress) to stderr before changing anything; without a terminal the plan says Docker was not checked. In a terminal it also checks for Docker and offers to install it, lists the host's global IPv4 addresses (private ones first, never defaulting to a public one) to pick the inter-node `--address` from, asks whether the node should handle ingress (`--ingress` answers yes) and asks to confirm (`-y` skips the question); without a terminal it never prompts, so scripts pass `--address`, `--ingress` and `--install-docker` explicitly. `--all` walks every node with an `ssh` entry, continues after failures and prints per-node results. Unless `--no-wait` is set the result carries `reporting`; a node that has not reported after about a minute prints `reporting: false` and the command exits nonzero. The agent uses host networking for TCP and HTTP health checks, without added capabilities. See [Nodes](nodes.md).
-- `tug node migrate [<node>] [<ssh-target>] [--all|--select] [--agent-control-url <url>] [--image <tag>]` moves the agent state of a node installed before it lived in a Docker volume from `/var/lib/tug` into the `tug-agent` volume and reinstalls the agent on it with the same key; see [Nodes](nodes.md#moving-agent-state-into-the-volume-node-migrate). `tug control migrate <ssh-target>` does the same for the control data, see [Control plane](control-plane.md#moving-control-data-into-the-volume-control-migrate).
-- `tug node replace|repair [<node>] [<ssh-target>] [--all] [same options]` runs the same SSH-assisted flow for an existing node: `replace` issues a new identity (it also brings back a disabled node) and `repair` first moves corrupt agent credential documents aside. `<node>` is positional; the target defaults to `nodes.<node>.ssh`.
-- `tug node list [--json]` (alias `ls`) prints a table of the registered nodes with status, address, ingress role, labels and last contact, or the raw API result with `--json`.
-- `tug node register <node> --csr <file> [--mode create|replace]` signs a node-generated CSR and prints the identity response (node, certificate, CA and public URL). It installs nothing; use `agent install-cert` on the host.
-- `tug node enroll --name <node> [--address <addr>] [--agent-control-url <url>] [--install-docker] [--label <label>]... [--ttl <seconds>] [--image <tag>] [--json]` prepares a host to enroll itself: it mints a single-use, name-bound join key (an enrollment credential) and prints the Docker command that enrolls the host when run, or cloud-init with `--install-docker`. TTL defaults to `3600` seconds. A saved cloud-init document contains a credential. The printed image must be pullable by the new host; a development `tug:local` override must already be loaded there.
-- `tug node remove [node] [sshTarget] [--force] [--teardown [--delete-data] [-y]]` removes a retired node from the control plane: its identity (the node ID is retired and never reused), statuses and queued commands, and any unconsumed join key. It is refused while a current deployment still places a service or volume on the node (deploy without it first) and while its agent is still reporting, unless `--force`. Stop the agent and remove its containers on the host yourself. With `--teardown` it also cleans the host over SSH after the control record is gone: it stops the agent and ingress, removes the Tug containers and networks and deletes the agent's identity (the `tug-agent` volume, plus `/etc/tug` and `/var/lib/tug` on a host not yet migrated). Project volumes and ingress certificates are kept unless you add `--delete-data`. It asks for confirmation (`-y` skips it, and is required without a terminal), refuses a host that runs the control plane, and can be repeated if the cleanup failed after the record was removed. The SSH target defaults to `nodes.<name>.ssh` in the config file.
-- `tug node ingress [node] [--disable]` enables the managed Caddy ingress role, or removes it with `--disable`.
+| Command | What it does |
+| --- | --- |
+| `tug init [<credential-file>\|-]` | Creates the config file with the resolved control URL and project if missing, imports the credential (a file, or `-` for stdin) and points the git-ignored overlay at it. Select them with `--control-url`, `--project` or `--config` |
+| `tug setup <ssh-target>` | Shortcut for `tug control setup`. Installs control over SSH, issues the root credential and imports it, so no `init` follows |
+| `tug upgrade` | Runs `control upgrade` on `controlSsh`, then `node upgrade --all`. See [Upgrade control and nodes](upgrading.md) |
+| `tug control upgrade [<ssh-target>]` | Replaces the control container with one on another image |
+| `tug control migrate <ssh-target>` | Moves control data from a host directory into the `tug-control` volume. See [Control plane](control-plane.md#moving-control-data-into-the-volume-control-migrate) |
 
-Every control URL, including overrides, must be `https://`. Agents can dial out to control without an inbound control-channel port; cross-node workloads still need reachable node `address` values. See [Nodes](nodes.md) and [Networking](networking.md).
+### `tug setup` and `tug control setup`
 
-`--control-url` selects where the operator CLI connects and `--agent-control-url` where the agent connects; both are connect targets only, and the server is always verified by the control name derived from the pinned CA, so the address can be a DNS name, an IP, a tunnel or a moved host. Use them when the operator connects through a local SSH tunnel while nodes connect over a private network, for example `tug --control-url https://127.0.0.1:18082 node add root@app1.example.com --name app1 --agent-control-url https://10.110.0.3:8443`.
+| Option | Meaning |
+| --- | --- |
+| `--extra-san <name>` | Extra certificate name for control. Repeatable |
+| `--install-docker` | Install Docker when missing |
+| `--port <port>` | Host port for mutual TLS. Default `8443` |
+| `--image <tag>` | Control image. Default: this CLI's version |
+| `--build-local-image` | Build the image from the checkout and copy it over SSH |
+| `--credential-out <file>` | Also save the credential to a `0600` file |
+| `--no-import` | Skip the import. Requires `--credential-out` |
+| `--recover-root` | Replace only root's key, from the control host |
+| `-y` | Skip the confirmation |
 
-## Secrets
+In a terminal, setup offers to install Docker, prints the plan and asks to confirm. Without a terminal it never prompts. The advertised address follows [Where control is](#where-control-is). See [Control plane](control-plane.md).
 
-Every `${NAME}` in the Compose file comes from control: a project secret, a project variable, `deploy --var`, or the default in the file. The shell environment of the machine running `tug` and the `.env` next to the Compose file are not read; see [Where values come from](compose.md#where-values-come-from). `tug deploy` scans the Compose file for variables with no default (`${NAME}` or `$NAME`) that control and `--var` do not supply. In a terminal it asks, for each one, whether to generate a random 192-bit secret, enter one (hidden), or enter a variable (visible), and stores it before deploying; existing values are never overwritten and generated values are never printed. Without a terminal, or when `CI` is set, it fails immediately naming the variables and the commands that set them, so a pipeline never hangs or deploys an empty value.
+### `tug control upgrade`
 
-- `tug secret set <name> [--value <value> | --from-file <path>]` sets a secret, reading one line from stdin if neither is given. After you enter the value and press Enter, it prints the result and exits without requiring EOF (Ctrl-D). `--from-file` stores the exact contents of a file, newlines and trailing whitespace included, for a PEM key or certificate; `--from-file -` reads all of stdin to the end the same way. Needs an admin credential.
-- `tug secret list` lists names and versions, without values.
-- `tug secret remove [name]` deletes a secret.
-- `tug secret import [file] [--vars <names>] [--secrets <names>] [--select] [--overwrite] [-y]` stores the entries of a dotenv file (default `./.env`). Tug does not guess from names or values: every entry becomes a secret unless `--vars` names it as a variable. In a terminal it lists the result and asks you to confirm (`--select` chooses secret, variable or exclude per entry, defaulting to secret; `-y` skips the question). Existing names are skipped unless `--overwrite` (and a name of the other kind is always skipped), a bare `KEY` with no value is skipped, and values are never printed.
-- `tug var set <name> [--value <value> | --from-file <path>]`, `tug var list [--values]`, `tug var remove [name]` and `tug var import [file] [--secrets <names>] [--select] [--overwrite] [-y]` manage project variables: visible values such as image tags, hosts and ports. Variables are read with the `deploy` role and written by it, listing without `--values` needs only `read`, and a change takes effect on the next deploy. A name cannot be both a secret and a variable. `tug var import` stores every entry as a variable unless `--secrets` names it.
-- `tug domain add <host> --service <service>` serves an extra hostname (or a `*.zone` wildcard) on a service's `x-tug.ingress` route without a deployment, `tug domain list` shows the mapped domains of the project and `tug domain remove <host>` stops serving one. The service must already have an ingress route, and a name belongs to one project only. The edge applies the change from its next poll and Caddy requests the certificate in the background; see [Networking](networking.md#mapped-domains-and-wildcard-zones). Needs the `deploy` role for the project.
+| Option | Meaning |
+| --- | --- |
+| `--to <version>` | A published version. Default: this CLI's version |
+| `--image <tag>` | Any image tag |
+| `--build-local-image` | Build from the checkout |
+| `--rollback` | Redeploy `tug:rollback`. Warns that a database already migrated by the newer control may not open |
+| `--force` | Reinstall even when control already runs the image |
+| `-y` | Skip the confirmation |
 
-## Backups
+The SSH target defaults to `controlSsh`. The command carries over the published mTLS bindings, advertised URL and extra names, reuses the data volume, compares the CA before and after, tags the previous image `tug:rollback`, shows the plan, then waits for control to answer and prints its version. Run `tug control backup` first for a backup beyond the `tug.db.pre-v<N>.bak` copy the new control makes.
 
-The backup commands are `tug backup ...` and `tug restore ...`. These are workload backups of service commands and volumes; `control backup` below is the separate control-plane backup. Destination and restore commands need an admin credential.
+### `tug upgrade`
 
-- `tug backup destination set <url> [--env NAME ...]` sets where backups go, for example `s3:https://s3.example.com/bucket/tug-backups` with `--env AWS_ACCESS_KEY_ID --env AWS_SECRET_ACCESS_KEY`. Each value is read from the environment variable of that name, otherwise from a line on stdin; it is never a command-line argument. S3 needs both AWS variables. Values are stored encrypted on control and released only to a node running a backup. An absolute path is accepted for development, but it is read on each node and is not shared. Setting a destination replaces the previous one.
-- `tug backup run [targets...] [--no-wait] [--timeout <seconds>]` backs up the named services or volumes now, or every backup target of the project, and waits for the result. It exits nonzero if any backup fails or is missed. Needs the `deploy` role.
-- `tug backup list [--limit <n>] [--check [--allow-empty]]` shows each backup target with its node, schedule, last success and next run, then the most recent runs. With `--check` it also prints a `PROBLEM` line for each target that is stale (no success for two periods), whose last run failed or was missed, and when nothing is protected: no destination is configured, or the project has no enabled backup target. It then exits nonzero, so cron or a monitor can alert without parsing output, and a monitor cannot stay green before backups are set up. `--allow-empty` accepts a project with no enabled target, for a project that holds no data; a destination is still required, since control backs itself up there. Needs the `read` role.
-- `tug restore run [target] [--from <id|latest>] [--scratch] [--no-safety-backup] [--writers <service,...>] [--no-writers] [--confirm]` restores a service or volume. Without `--confirm` it prints the plan and changes nothing. `--from` takes a backup run id, a restic snapshot id or `latest`. See [Restore](backups.md#restore). It waits until the services it stopped report serving again (up to five minutes, then it finishes with a warning). Needs an admin credential.
-- `tug restore list` shows recent restores; `tug restore resume [id]` runs an interrupted one again; `tug restore release [id]` starts the services it stopped and unlocks the project.
-- `tug backup destination show` prints the URL and the variable names, never values.
-- `tug backup destination remove` removes the destination and its credentials. Existing backups stay in the repository.
-- `tug backup password [--control]` prints the project's repository and its password; with `--control` it prints the control-plane repository and its password, the one value to keep off the server for recovering control. Each project has its own restic repository at `<destination>/<project>` with a password derived from control's master key, so keep the printed password with the destination credentials: losing the master key loses every repository.
+Takes `--to`, `--build-local-image`, `--force` and `-y`. It uses this CLI's version or `--to` for everything and ignores per-node `image` settings, so pin a single node with the two separate commands. It stops without touching a node when control fails.
 
-These operations use the resolved project.
+## Nodes
+
+Details and recipes are in [Nodes](nodes.md). Options below are the ones that change behavior.
+
+| Command | What it does |
+| --- | --- |
+| `node add [<ssh-target>]` | Creates a node and installs its agent over SSH |
+| `node list [--json]` (alias `ls`) | Lists nodes with status, address, ingress role, labels and last contact |
+| `node replace\|repair [<node>] [<ssh-target>]` | The same SSH flow for an existing node. `replace` issues a new identity and brings back a disabled node. `repair` first moves corrupt agent credential documents aside |
+| `node upgrade [<node>] [<ssh-target>]` | Replaces an enrolled node's agent with one on another image, keeping its key, address, labels and connect-only control URL |
+| `node migrate [<node>] [<ssh-target>]` | Moves agent state from `/var/lib/tug` into the `tug-agent` volume. See [Nodes](nodes.md#moving-agent-state-into-the-volume-node-migrate) |
+| `node remove [node] [sshTarget]` | Retires a node's identity, statuses, queued commands and unconsumed join key |
+| `node disable [node]` | Blocks the node's key at once without SSH. Does not drain workloads, change placement or stop containers. `node replace` brings it back |
+| `node ingress [node] [--disable]` | Enables the managed Caddy ingress role, or removes it |
+| `node address [node] [address] [--to <address>]` | Updates the private address used for published-port binding and cross-node routing |
+| `node register <node> --csr <file> [--mode create\|replace]` | Signs a node-generated CSR and prints the identity. Installs nothing. Use `agent install-cert` on the host |
+| `node enroll --name <node>` | Prints the command that enrolls a host that runs it. See [Nodes](nodes.md#self-service-enrollment-node-enroll) |
+
+### `node add`, `replace`, `repair`
+
+| Option | Meaning |
+| --- | --- |
+| `--name <node>` | Node name. Defaults to the first DNS label of the SSH host (`app1` for `root@app1.example.com`). With an IP, a terminal asks (default: the host's `hostname -s`) and a script must pass it |
+| `--address <ip>` | Private address for inter-node traffic. A terminal lists the host's global IPv4 addresses, private first, and never defaults to a public one |
+| `--ingress` | Give the node the ingress role. A terminal asks otherwise |
+| `--install-docker` | Install Docker when missing |
+| `--label <label>` | Node label. Repeatable |
+| `--image <tag>` | Agent image |
+| `--build-local-image` | Build from the checkout |
+| `--agent-control-url <url>` | Where the agent connects |
+| `--all` | Walk every node with an `ssh` entry, continue after failures, print per-node results |
+| `--no-wait` | Do not wait for the agent's first report |
+| `-y` | Skip the confirmation |
+
+The SSH target defaults to `nodes.<node>.ssh`. The command checks for a control credential, then always prints the plan (node, SSH target, Docker, address, image, ingress) before changing anything. Without a terminal it never prompts, so scripts pass `--address`, `--ingress` and `--install-docker`, and the plan says Docker was not checked. Unless `--no-wait` is set, the result carries `reporting`. A node that has not reported after about a minute prints `reporting: false` and the command exits nonzero. Agents use host networking for TCP and HTTP health checks, without added capabilities.
+
+### `node upgrade` and `node migrate`
+
+Both take `--all|--select`, `--image`, `--agent-control-url`, and `--force` and `--no-wait` for `upgrade`. `upgrade` also takes `--to <version>`, which is refused when newer than control. A node already on the image is skipped unless `--force`. A node control does not know, or a host with no agent, is refused (use `node add`). `--all` walks every node with an `ssh` entry, continues after failures and exits nonzero if one fails.
+
+### `node enroll`
+
+| Option | Meaning |
+| --- | --- |
+| `--name <node>` | Required. A terminal asks for it |
+| `--address <addr>`, `--label`, `--image`, `--agent-control-url` | As for `node add` |
+| `--install-docker` | Print a cloud-init document instead of a `docker run` command |
+| `--ttl <seconds>` | Join key lifetime. Default `3600` |
+| `--json` | JSON with `command` (and `cloudInit`) |
+
+It mints a single-use, name-bound join key. A saved cloud-init document contains a credential. The printed image must be pullable by the new host, and a development `tug:local` override must already be loaded there.
+
+### `node remove`
+
+| Option | Meaning |
+| --- | --- |
+| `--force` | Remove while the agent still reports |
+| `--teardown` | Clean the host over SSH after the record is gone: stop the agent and ingress, remove Tug containers and networks, delete the agent identity |
+| `--delete-data` | With `--teardown`, also delete project volumes and ingress certificates |
+| `-y` | Skip the confirmation. Required without a terminal |
+
+It is refused while a current deployment places a service or volume on the node (deploy without it first), and refused for a host that runs the control plane. The node ID is retired and never reused. Without `--teardown`, stop the agent and remove its containers yourself. `--teardown` can be repeated if the cleanup failed after the record was removed. The SSH target defaults to `nodes.<name>.ssh`.
 
 ## Deployments
 
-- `tug deploy [-f, --file <file>] [--version <version>] [--build-local] [--compose-cli] [--var <NAME=value>]... [--profile <name>]... [--dry-run] [--no-wait] [--timeout <seconds>]` deploys the first of `compose.yaml`, `compose.yml`, `docker-compose.yaml` or `docker-compose.yml` found in the working directory by default. Services with `build:` upload the current directory for remote builds, or build on the operator's Docker daemon with `--build-local` and upload saved images without source. Published-image-only applications need no context upload. Control rejects a built service with no available build input. The display version defaults to `git-<Compose hash>`; deployment image identities are immutable even when that display version is reused. Local builds are single-platform and must match the target node architecture. Deployment waits for convergence by default, with a `300` second timeout; `--no-wait` returns once desired state is created. Tug reads the Compose file itself, so no Docker is needed for that (see [the native Compose reader](compose.md#native-compose-reader)); `--compose-cli` renders it with `docker compose config` instead (Docker Compose v2 on the operator machine) for a file that uses `include`, `!reset` or `!override`. With `--move <service>` (repeatable, or comma-separated) it acknowledges that a service with data placed on another node starts empty there: without the flag such a deploy is refused. The services that write to the moved one are held until you restore it (`tug restore run`) or run `tug hold release`. If the wait is interrupted (control unreachable, timeout) the error names the deployment and `tug deploy cancel [id]`; a deploy refused because another is still rolling out names that one the same way. It prints one summary line (`site git-ab12: deployment dep_1 succeeded, 3 services`); `--json` prints the full result with the desired state and the `values` record of where each `${NAME}` came from. `--var NAME=value` supplies a value for this deploy only (repeat it; a value may contain commas), `--profile` enables a Compose profile (repeat or comma-separate), and `--dry-run` resolves every value, prints each referenced name with its source (secrets as `•••`) and stops before anything is built or uploaded; it never prompts or stores a value. `rollback` and `scale` print a summary the same way and also take `--json`. `deploy` warns when the file's `name:` differs from the Tug project, because secrets, backups and restores are scoped to the project.
-- `tug status [--json]` summarizes each project’s current deployment, node reports and errors, plus node status and last contact. Stale node health is identified as the last report. A service whose container Docker keeps restarting, or that exited with an error and stays down, is listed as `unstable` with the exit code instead of `serving`, although its deployment still reads as succeeded. `--json` prints the raw API result (all projects, recent deployments, nodes and per-node status) for scripts. This is still a control-wide, credential-scoped view.
-- `tug tui [view] [--once] [--readonly] [--json]` opens a live full-screen view of the whole setup (needs a terminal): an attention list of what is wrong first, then projects, nodes and recent events, with drill-down to a service on a node, a log view, container inspection, a shell and confirmed restart, rollback, cancel-deployment and backup-now actions. `view` opens on `overview`, `projects`, `nodes`, `services`, `deployments`, `events`, `backups`, `restores`, `domains`, `volumes`, `secrets` or `credentials`. While control's watch channel is open (`● live · push`) it refetches only what changed and polls a quarter as often. A `read` credential can look; logs, inspect, shell and the actions need `deploy` (`GET /api/v1/whoami` tells the screen which). `--readonly` refuses every key that changes something, including the shell. `--once` prints the same ranked attention list as text and exits 1 when anything of rank 1 to 3 is wrong (public ports, held services and never-connected nodes are shown without failing), and `--json` (which implies `--once`) prints it as `{ ok, control, counters, attention }`. Keys, layout and design are in [Terminal UI](tui.md).
-- `tug events [--limit <n>] [--all] [--json]` lists events, newest first, as a table of time, level, type, actor and message (plus project with `--all`), in the resolved project, or in every project with `--all` (including control events that belong to no project, such as credential changes); the limit defaults to `100` (also when it is not a number) and is clamped into `1`-`500`. The human table strips terminal escapes. Control actions show the `actor` credential name that caused them. Agents add a `service.*` event when a service changes, not on every poll: `pulling`, `starting`, `health_checking` and `serving` when a new revision, changed secrets or a changed rendered configuration are applied, one `failed` event when an apply fails, and one `serving` event when it recovers. Control deletes events older than 30 days and keeps at most 100,000; see [Configuration](configuration.md#control-plane).
-- `tug rollback [--force] [--no-wait] [--timeout <seconds>]` rolls the resolved project back; `--force` permits rollback while a deployment is active. Waiting defaults to `300` seconds. Projects with `x-tug: { rollback: auto }` roll back failed deployments themselves; see [Compose extensions](compose.md#automatic-rollback).
-- `tug deploy cancel <deployment-id>` cancels an active deployment.
+### `tug lint`
 
-To build on a laptop and upload image archives, run `tug deploy --build-local -f docker-compose.yml`. To deploy CI-built images, push them to your registry and declare `image:`; control pins tags to digests before publishing the deployment. See [Private registry credentials](control-plane.md#published-images-and-private-registries).
+Checks a Compose file against the `x-tug` schema with no control connection, credential or Docker. See [Checking the file](compose.md#checking-the-file-with-tug-lint).
 
-Local builds use generated temporary image tags and remove those tags after saving each archive, including cleanup attempts after build/save failure. They do not remove your published image tags or the Tug runtime image. A refused cleanup produces a warning without hiding the original build error.
+| Option | Meaning |
+| --- | --- |
+| `-f, --file <file>` | Compose file. Default `compose.yaml` (or `file:` in `tug.yml`) |
+| `--json` | `{ ok, file, errors }` for scripts and editors |
 
-## Operator credentials
+Findings go to stderr, one per line as `$FILE: $RULE`. The command exits nonzero when anything is wrong.
 
-Scoped credentials for CI and teammates; see [Access control](access-control.md) for roles, scoping and a GitHub Actions example. All three commands need an admin credential.
+### `tug deploy`
 
-- `tug credential create <name> --role read|deploy|admin [--project <name> ...] [--expires-in-days <n>]` creates an operator credential and prints it once on stdout; control keeps no copy of its private key. Repeat `--project` or give a comma-separated list to allow several projects; without it the credential covers all projects (admin credentials cannot be limited). Here `--project` selects the credential's scope rather than the connection project. Names are 1 to 64 letters, numbers, dots, underscores or hyphens, and cannot be reused after revocation. Expiry is at most `365` days and defaults to `365`.
-- `tug credential list` lists operator credentials with role, projects, creator, last use, expiry and revocation, never secrets.
-- `tug credential revoke [name]` revokes a credential immediately and closes its live sessions.
+By default it deploys the first of `compose.yaml`, `compose.yml`, `docker-compose.yaml` or `docker-compose.yml` in the working directory.
 
-Use a created credential anywhere a credential works, for example `TUG_CREDENTIAL=<credential> tug deploy`.
+| Option | Meaning | Default |
+| --- | --- | --- |
+| `-f, --file <file>` | Compose file | First match above |
+| `--version <version>` | Display version. Image identities stay immutable even when reused | `git-<Compose hash>` |
+| `--build-local` | Build on your Docker daemon and upload saved images without source. Single-platform, must match the node architecture | Build on control |
+| `--compose-cli` | Render with `docker compose config` (needs Docker Compose v2 locally), for files that use `include`, `!reset` or `!override` | Tug's [native reader](compose.md#native-compose-reader) |
+| `--var <NAME=value>` | Value for this deploy only. Repeatable. A value may contain commas | none |
+| `--profile <name>` | Enable a Compose profile. Repeatable or comma-separated | none |
+| `--move <service>` | Acknowledge that a service with data placed on another node starts empty there. Repeatable or comma-separated | Such a deploy is refused |
+| `--dry-run` | Resolve every value, print each name with its source (secrets as `•••`) and stop before building or uploading. Never prompts or stores | off |
+| `--no-wait` | Return once desired state exists | wait |
+| `--timeout <seconds>` | Wait limit | `300` |
+
+- **Build input.** Services with `build:` upload the current directory for a remote build. Published-image-only apps upload no context. Control rejects a built service with no build input.
+- **Summary.** One line, `site git-ab12: deployment dep_1 succeeded, 3 services`. `--json` prints the full result with the desired state and the `values` record of where each `${NAME}` came from.
+- **Moved data.** After `--move`, the services that write to the moved one are held until you run `tug restore run` or `tug hold release`.
+- **Interruption.** If the wait is interrupted (control unreachable, timeout), the error names the deployment and `tug deploy cancel [id]`. A deploy refused because another is still rolling out names that one the same way.
+- **Project name.** `deploy` warns when the file's `name:` differs from the Tug project, because secrets, backups and restores are scoped to the project.
+- **Missing values.** It scans the file for `${NAME}` or `$NAME` with no default that control and `--var` do not supply. In a terminal it asks, per variable, whether to generate a random 192-bit secret, enter a secret (hidden) or enter a variable (visible), and stores it before deploying. It never overwrites an existing value and never prints a generated one. Without a terminal, or with `CI` set, it fails naming the variables and the commands that set them.
+
+To deploy CI-built images, push them to a registry and declare `image:`. Control pins tags to digests before publishing. See [Private registries](control-plane.md#published-images-and-private-registries).
+
+**Source snapshot.** Remote uploads and `--build-local` use a temporary snapshot of the working directory. Tug applies the root `.dockerignore` with its own matcher and always excludes `.git`, `node_modules`, `data`, `*.credential.json`, the Tug overlays and `.tug.json` at any depth, root Tug config names, and the resolved config, overlay and credential paths. Ignore rules cannot re-include those. Unsafe links are rejected. Docker then applies its own ignore rules to a local build. Tug does not detect arbitrary secret names, so review nested or multiple build contexts. A broad `COPY .` can include secrets Tug cannot identify. Local builds use temporary image tags that are removed after each archive is saved, including after a failure. They never remove your published tags or the Tug runtime image.
+
+### Other deployment commands
+
+| Command | Options | What it does |
+| --- | --- | --- |
+| `tug rollback` | `--force`, `--no-wait`, `--timeout <seconds>` (default `300`) | Rolls the project back. `--force` permits it while a deployment is active. With `x-tug: { rollback: auto }` Tug rolls back failed deployments itself, see [Automatic rollback](compose.md#automatic-rollback) |
+| `tug deploy cancel <deployment-id>` | | Cancels an active deployment |
+| `tug status` | `--json` | Each project's current deployment, node reports and errors, plus node status and last contact. A service whose container keeps restarting, or exited with an error and stays down, shows as `unstable` with the exit code, although its deployment reads as succeeded. Stale node health is the last report. Control-wide, credential-scoped |
+| `tug events` | `--limit <n>` (default `100`, clamped to `1`-`500`), `--all`, `--json` | Events newest first as time, level, type, actor and message, for the project, or every project with `--all` (including control events with no project). Terminal escapes are stripped. Control deletes events older than 30 days and keeps at most 100,000, see [Configuration](configuration.md#control-plane) |
+| `tug tui [view]` | `--once`, `--readonly`, `--json` | A live full-screen view. See [Watch your servers in a terminal](tui.md) |
+
+Agents add a `service.*` event when a service changes, not on every poll: `pulling`, `starting`, `health_checking` and `serving` when a new revision, changed secrets or a changed rendered configuration are applied, one `failed` event when an apply fails, and one `serving` event when it recovers.
 
 ## Services and volumes
 
-- `tug restart [service] [--timeout <seconds>]` restarts a service and waits for the result; timeout defaults to `60` seconds.
-- `tug hold release [service...]` starts the services that `tug deploy --move` held, without restoring them (all of them when none is named). A restore releases its own holds.
-- `tug image prune [--keep <n>] [--dry-run]` (admin) deletes build archives kept on control that rollback no longer needs: all but the newest `n` distinct builds of each project (default 5; deployments that reuse an archive count once), the current deployment and any version a node still reports. Rolling back to a pruned deployment is refused; deploy again instead. Control also runs this prune after every successful deploy (`TUG_IMAGE_KEEP`, default 5), so the command is for a one-off prune with a different `--keep`. `tug control backup --no-images` leaves the archives out of a control backup.
-- `tug scale [service] [replicas] [--replicas <n>]` changes how many matching nodes run a service, spreading by count over nodes that carry the service's `placement.labels` (all nodes without labels), staying within an explicit `placement.nodes` when the service has no labels, and updates the current desired state without a new deployment. `global` services run on every matching node and are scaled to that set. The next `deploy` re-resolves placement from the Compose file.
-- `tug exec [service] [-i, --interactive] [-t, --tty] [--node <name>] [-- <command> ...]` executes a command in the current service container, defaulting to `sh`. Arguments are passed directly without a shell. `-i` forwards stdin. Stdin and output are flow-controlled end to end with a 512 KiB window per direction, so there is no size limit: a database dump can be piped in with `tug exec -i db -- sh -c 'mariadb -u root -p"$MARIADB_ROOT_PASSWORD" wordpress' < dump.sql`, and a directory streamed out with `tug exec wordpress -- tar -C /var/www/html/wp-content -cf - uploads > uploads.tar`. The same holds for `tug run` output. An agent older than 2.0 does not announce flow control and keeps the old bounded buffer until it is upgraded (see [Live channel flow control](architecture.md#agent-wake-channel)). `-t` allocates a terminal (with resize) and requires a local terminal. Use `--node` when a service has more than one placement.
-- `tug run [service] [--node <name>] -- <command> ...` runs a one-off command in a new container instead of the running one: the service's image, environment (secrets included), user, working directory, network and volume mounts, no published ports, removed when it ends. It is for jobs that should not run inside the live container, such as `tug run web -- wp core update-db`. It is non-interactive, exits with the command's exit code, needs the `deploy` role and is recorded as a `job.run` event with its command line, which `read` credentials do not see (see [Audit trail](access-control.md#audit-trail)). Mounts are shared with the service, so a destructive command is the operator's responsibility; the one-off container does not take the project lock.
-- `tug logs [service] [--tail <n>] [-f, --follow] [--node <name>]` fetches recent service logs through the durable command queue, or follows them live with `-f`; the default is `200` lines. `--node` applies to followed logs and is required when the service has more than one eligible node.
-- `tug ps [--node <name>] [--json]` lists the project's containers on one node: service (or `job:<name>` for a backup or restore helper), state, Docker status, image with a shortened digest, published ports and container name. `--json` prints Docker's container list unchanged. Without `--node`, the project must resolve to exactly one eligible connected node.
-- `tug inspect [service] [--node <name>]` prints the live Docker inspection object as JSON with environment variable values redacted (names are kept). It requires the `deploy` role, which grants access to the workload's secrets regardless. Use `--node` when a service has more than one placement.
-- `tug volume list` lists recorded volumes.
-- `tug volume remove [name] [--delete-data]` removes a volume record; `--delete-data` also removes the Docker volume on its node. See [Compose extensions](compose.md#volumes).
+These use the resolved project. Live operations (`exec`, `run`, `inspect`, `logs --follow`, `ps`) go over an authenticated WebSocket from the CLI through control to the agent's existing outbound connection. They are ephemeral: control does not queue or replay them, and disconnecting any hop closes the session. Cancelling `exec` kills the agent's Docker client, but a process already started in the container can continue, because the Docker exec stream exposes no remote process id.
 
-These operations use the resolved project. Live operations use an authenticated WebSocket from the CLI through control to the agent's existing outbound connection. They are ephemeral: control does not queue or replay them, and disconnecting any hop closes the local session. Cancelling or disconnecting `exec` kills the agent's Docker client, but an already-started process inside the container may continue because the Docker exec stream does not expose a remote process identifier.
+| Command | Options | What it does |
+| --- | --- | --- |
+| `tug logs [service]` | `--tail <n>` (default `200`), `-f, --follow`, `--node <name>` | Fetches recent logs through the durable command queue, or follows live. `--node` applies to followed logs and is required when the service has more than one eligible node |
+| `tug exec [service] [-- <command>...]` | `-i, --interactive`, `-t, --tty`, `--node <name>` | Runs a command in the current service container, default `sh`. Arguments are passed without a shell. `-i` forwards stdin. `-t` allocates a terminal with resize and needs a local terminal |
+| `tug run [service] -- <command>...` | `--node <name>` | Runs a one-off command in a new container with the service's image, environment (secrets included), user, working directory, network and mounts, no published ports, removed when it ends. Non-interactive, exits with the command's exit code, needs `deploy`, and is recorded as a `job.run` event with its command line, hidden from `read` credentials. It shares mounts with the service and does not take the project lock |
+| `tug inspect [service]` | `--node <name>` | Prints the live Docker inspection as JSON with environment values redacted (names kept). Needs `deploy`, which grants access to the workload's secrets anyway |
+| `tug ps` | `--node <name>`, `--json` | Lists the project's containers on one node: service (or `job:<name>`), state, status, image with a shortened digest, ports, container name. Without `--node` the project must resolve to one eligible connected node |
+| `tug restart [service]` | `--timeout <seconds>` (default `60`) | Restarts a service on every node that runs it and waits |
+| `tug scale [service] [replicas]` | `--replicas <n>` | Changes how many matching nodes run a service, without a new deployment. Spreads by count over nodes with the service's `placement.labels` (all nodes without labels), staying within `placement.nodes` when there are no labels. `global` services run on every matching node. The next `deploy` re-resolves placement from the Compose file |
+| `tug hold release [service...]` | `--select` | Starts services that `deploy --move` held, without restoring them. All when none is named. A restore releases its own holds |
+| `tug image prune` | `--keep <n>` (default `5`), `--dry-run` | Admin. Deletes build archives on control that rollback no longer needs: all but the newest `n` distinct builds per project, the current deployment and any version a node reports. Rolling back to a pruned deployment is refused. Control prunes after every successful deploy (`TUG_IMAGE_KEEP`, default 5) |
+| `tug volume list` | | Lists recorded volumes |
+| `tug volume remove [name]` | `--delete-data` | Removes a volume record. `--delete-data` also removes the Docker volume on its node. See [Volumes](compose.md#volumes) |
+
+Large input and output work because `exec` and `run` are flow-controlled end to end with a 512 KiB window per direction. Load a database dump with `tug exec -i db -- sh -c 'mariadb -u root -p"$MARIADB_ROOT_PASSWORD" wordpress' < dump.sql`, or stream a directory out with `tug exec wordpress -- tar -C /var/www/html/wp-content -cf - uploads > uploads.tar`. An agent older than 2.0 keeps a bounded buffer until upgraded, see [Live channel flow control](architecture.md#agent-wake-channel).
+
+## Secrets and variables
+
+Every `${NAME}` in the Compose file comes from control: a project secret, a project variable, `deploy --var`, or the default in the file. Neither the shell environment of the machine running `tug` nor the `.env` next to the Compose file is read. See [Where values come from](compose.md#where-values-come-from).
+
+| Command | Options | What it does |
+| --- | --- | --- |
+| `tug secret set <name>` | `--value <value>` or `--from-file <path>` | Sets a secret. With neither, reads one line from stdin and exits after Enter, with no EOF needed. `--from-file` stores the exact contents, newlines included (for a PEM key). `--from-file -` reads all of stdin. Needs admin |
+| `tug secret list` | | Names and versions, never values |
+| `tug secret remove [name]` | | Deletes a secret |
+| `tug secret import [file]` | `--vars <names>`, `--secrets <names>`, `--select`, `--overwrite`, `-y` | Stores the entries of a dotenv file (default `./.env`). Every entry is a secret unless `--vars` names it. A terminal lists the result and confirms. `--select` picks secret, variable or exclude per entry. Existing names are skipped unless `--overwrite` (a name of the other kind is always skipped), a bare `KEY` is skipped, and values are never printed |
+| `tug var set <name>` | `--value`, `--from-file` | Sets a project variable: a visible value such as an image tag, host or port |
+| `tug var list` | `--values` | Lists variables. Without `--values` it needs only `read` |
+| `tug var remove [name]` | | Deletes a variable |
+| `tug var import [file]` | `--secrets <names>`, `--select`, `--overwrite`, `-y` | Stores every entry as a variable unless `--secrets` names it |
+| `tug domain add <host> --service <service>` | | Serves an extra hostname (or `*.zone` wildcard) on a service's ingress route without a deployment. The service must already have a route, and a name belongs to one project. Needs `deploy` |
+| `tug domain list`, `tug domain remove <host>` | | Lists or stops serving mapped domains. See [Mapped domains](networking.md#mapped-domains-and-wildcard-zones) |
+
+Variables are read and written with `deploy`, and a change takes effect on the next deploy. A name cannot be both a secret and a variable.
+
+## Backups
+
+`tug backup` and `tug restore` handle workload backups of service commands and volumes. [`control backup`](#operations) is separate. Destination and restore commands need admin.
+
+| Command | Options | What it does |
+| --- | --- | --- |
+| `tug backup destination set <url>` | `--env NAME` (repeatable) | Sets where backups go, for example `s3:https://s3.example.com/bucket/tug-backups` with `--env AWS_ACCESS_KEY_ID --env AWS_SECRET_ACCESS_KEY`. Each value is read from the environment variable of that name, else from a stdin line, never an argument. S3 needs both AWS variables. Values are stored encrypted and released only to a node running a backup. An absolute path works for development but is read per node and not shared. Replaces the previous destination |
+| `tug backup destination show` | | The URL and variable names, never values |
+| `tug backup destination remove` | | Removes the destination and its credentials. Existing backups stay in the repository |
+| `tug backup run [targets...]` | `--no-wait`, `--timeout <seconds>`, `--select` | Backs up the named services or volumes now, or every target, and waits. Exits nonzero if any backup fails or is missed. Needs `deploy` |
+| `tug backup list` | `--limit <n>`, `--check`, `--allow-empty` | Shows each target with node, schedule, last success and next run, then recent runs. Needs `read` |
+| `tug backup cancel <run>` | | Stops a queued or running backup. The run id is the last column of `backup list`. It is reported as cancelled and not retried |
+| `tug backup password` | `--control` | Prints the project's repository and password, or with `--control` the control repository and password, the one value to keep off the server for recovering control |
+| `tug restore run [target]` | `--from <id\|latest>`, `--scratch`, `--no-safety-backup`, `--writers <service,...>`, `--no-writers`, `--confirm`, `--select-snapshot`, `--select-writers` | Restores a service or volume. Without `--confirm` it prints the plan and changes nothing. `--from` takes a backup run id, a restic snapshot id or `latest`. It waits up to five minutes for stopped services to serve again, then finishes with a warning. See [Restore](backups.md#restore) |
+| `tug restore list` | | Recent restores |
+| `tug restore cancel <id>` | | Stops a restore that is waiting on its safety backup (nothing has changed) or restoring (it is interrupted and its services stay stopped until `resume` or `release`) |
+| `tug restore resume [id]` | | Runs an interrupted restore again |
+| `tug restore release [id]` | | Starts the services it stopped and unlocks the project, even if data is incomplete |
+
+**`backup list --check`** prints a `PROBLEM` line for each target that is stale (no success for two periods), whose last run failed or was missed, and when nothing is protected (no destination, or no enabled target). It then exits nonzero, so cron or a monitor alerts without parsing output. `--allow-empty` accepts a project with no enabled target, for a project that holds no data. A destination is still required, since control backs itself up there.
+
+**Passwords.** Each project has its own restic repository at `<destination>/<project>`, with a password derived from control's master key. Keep the printed password with the destination credentials, because losing the master key loses every repository.
+
+## Operator credentials
+
+Scoped credentials for CI and teammates. See [Access control](access-control.md) for roles, scoping and a GitHub Actions example. All three commands need admin.
+
+| Command | Options | What it does |
+| --- | --- | --- |
+| `tug credential create <name>` | `--role read\|deploy\|admin`, `--project <name>` (repeatable), `--select-projects`, `--expires-in-days <n>` (default and maximum `365`) | Creates a credential and prints it once on stdout. Control keeps no copy of its private key. Without `--project` it covers all projects, and admin credentials cannot be limited. Here `--project` is the credential's scope, not the connection project. Names are 1 to 64 letters, numbers, dots, underscores or hyphens and cannot be reused after revocation |
+| `tug credential list` | | Role, projects, creator, last use, expiry and revocation, never secrets |
+| `tug credential revoke [name]` | | Revokes at once and closes live sessions |
+
+Use a credential anywhere one works: `TUG_CREDENTIAL=<credential> tug deploy`.
 
 ## Operations
 
-- `tug doctor [--nodes] [--node [name]] [--timeout <seconds>] [--json]` runs diagnostics on this machine (Node.js and Docker) and on the control plane: SQLite, the CA and server certificate expiry, each node's certificate expiry and connectivity, each online node's observed clock skew (unknown for offline nodes; see [Nodes](nodes.md#doctor-certificate-expiry-and-clock-skew)), and ingress status. `--nodes` also runs host diagnostics through the agent on every node and `--node` on one; both wait for the agent result (timeout defaults to `60` seconds) instead of returning the queued command id. An unknown `--node` is an error. Node diagnostics include `ports.public`, a warning listing containers of Tug projects that listen on all interfaces or a public IP ([Networking](networking.md#published-ports-private-by-default)). It prints one `ok`, `warn` or `FAIL` line per check, grouped under this machine, control and each node, with warnings under their check, and exits nonzero when any check fails, so it works as a readiness probe. `--json` prints the full document, including output that the summary leaves out, such as `docker info`.
-- `tug control backup [--local] [--no-images] [--download] [-o, --output <file>]` stores a control-plane backup in the backup destination, like `tug backup run`, and prints the repository, the snapshot id and `stored: destination`. It holds state, PKI and the master key, never build images or workload volumes. With no destination configured it fails and says how to make an archive. `--local` instead writes an archive on the control host (state, PKI, master key and retained built-image archives, which `--no-images` leaves out) and prints `stored: control-host`. `-o <file>` also saves it on this machine (the main form for a file you keep; it implies `--local` and `--download`, which on its own uses `./tug-control-backup-<id>.tar.gz`), creates it `0600`, refuses to overwrite an existing file and prints the path, whether images are included and where the copy on control remains. Control also stores a backup in the destination every night without any command. See [Control plane backup](backups.md#control-plane-backup).
-- `tug control backup list [--json]` shows the control backups on the control host and the snapshots actually stored in the destination (read from the destination, not remembered), with the snapshot ids that `control restore --snapshot` takes and what each holds.
-- `tug control restore <artifact-path> --confirm` restores a control-plane backup that is a path on the control-plane host and requires a control restart. `--from-file <file>` instead uploads an archive saved on this machine (for example by `control backup -o`) to the control host and restores it. `--from-destination <url> [--env <name> ...] [--snapshot <id>]` restores the newest control backup stored in a backup destination, or the snapshot you name: the credential variables are read like `backup destination set` reads them, followed by the control password from `tug backup password --control` (`TUG_CONTROL_BACKUP_PASSWORD`, or `--password-stdin` to read it from the first stdin line, in which case the credential variables must be in the environment), and are used for this restore only. Without `--confirm` a restore is a preview, like `tug restore run`: it only checks the backup (archive, database integrity, CA, secrets), prints what it holds and changes nothing; `--confirm` applies it. See [Control plane](control-plane.md#backup-and-restore).
+### `tug doctor`
 
-## CLI architecture and naming
+| Option | Meaning | Default |
+| --- | --- | --- |
+| `--nodes` | Also run host diagnostics through the agent on every node and wait for the result | off |
+| `--node [name]` | The same for one node. An unknown name is an error | off |
+| `--timeout <seconds>` | Wait for node diagnostics | `60` |
+| `--json` | The full document, including output the summary leaves out such as `docker info` | off |
 
-The interface follows the relevant conventions used by `wp-release`: `tug <subject> <verb>` operations, with the everyday project commands at the top level; kebab-case command/flag names; primary targets as positional arguments; named qualifiers with consistent meanings; and positive camelCase internal options (`--no-wait` becomes `wait: false`, never `noWait`). New structured CLI results use camelCase; API responses printed unchanged may retain their existing database field names. Help, docs and tests must change together when the interface changes.
+It checks this machine (Node.js and Docker) and the control plane: SQLite, the CA and server certificate expiry, each node's certificate expiry and connectivity, each online node's observed clock skew (unknown when offline, see [Nodes](nodes.md#doctor-certificate-expiry-and-clock-skew)) and ingress status. Node diagnostics include `ports.public`, a warning that lists containers of Tug projects listening on all interfaces or a public IP ([Networking](networking.md#published-ports-private-by-default)). It prints one `ok`, `warn` or `FAIL` line per check, grouped under this machine, control and each node, and exits nonzero when any check fails, so it works as a readiness probe.
 
-CLI adapters resolve configuration, parse arguments and format results. Build, archive, installation and API primitives receive explicit values and injectable runners; they do not discover CLI config or read unrelated environment variables. Keep domain logic in ordinary module functions, and introduce stateful classes only when a multi-step workflow needs shared state/dependencies. Only operations that use Docker or SSH should require those tools. Validation must complete before side effects, and stdout intended as a runnable artifact or JSON must remain directly usable. These conventions do not imply GitHub Actions logging or additional output modes.
+### Control backup and restore
+
+| Command | Options | What it does |
+| --- | --- | --- |
+| `tug control backup` | `--local`, `--no-images`, `--download`, `-o, --output <file>` | Stores a control-plane backup in the backup destination and prints the repository, snapshot id and `stored: destination`. It holds state, PKI and the master key, never build images or workload volumes. With no destination it fails and says how to make an archive. `--local` writes an archive on the control host (including retained build archives unless `--no-images`) and prints `stored: control-host`. `-o <file>` also saves it here (implies `--local` and `--download`), creates it `0600`, refuses to overwrite and prints the path. `--download` alone uses `./tug-control-backup-<id>.tar.gz`. Control also backs itself up every night. See [Control plane backup](backups.md#control-plane-backup) |
+| `tug control backup list` | `--json` | The control backups on the control host and the snapshots stored in the destination, read from the destination, with the ids that `--snapshot` takes |
+| `tug control restore <artifact-path>` | `--confirm` | Restores a control backup that is a path on the control host. Needs a control restart |
+| `tug control restore` | `--from-file <file>` | Uploads an archive from this machine and restores it |
+| `tug control restore` | `--from-destination <url>`, `--env <name>`, `--snapshot <id>`, `--password-stdin` | Restores the newest control backup in a destination, or the named snapshot. Credential variables are read like `backup destination set` reads them, then the control password from `tug backup password --control` (`TUG_CONTROL_BACKUP_PASSWORD`, or the first stdin line with `--password-stdin`, in which case the credential variables must be in the environment). Used for this restore only |
+
+Without `--confirm`, a control restore is a preview: it checks the archive, database integrity, CA and secrets, prints what the backup holds and changes nothing. See [Control plane](control-plane.md#backup-and-restore).

@@ -1,8 +1,10 @@
 # Configuration
 
+Environment variables for the CLI, the control plane and the agent, with their defaults. Flags override environment variables, which override config files. The CLI's `tug.yml` keys are in [Config file](cli.md#config-file).
+
 ## CLI
 
-CLI options override environment variables, which override the config files and documented fallback. The config is a YAML or JSON file that is safe to commit: it holds the control URL, default project, defaults for a few command options and the servers you install. The operator credential is never read from it. See [Config file](cli.md#config-file) for the keys and how they map to flags, and [Nodes](nodes.md#declaring-nodes-in-the-config-file) for the `nodes` section.
+The CLI config is a YAML or JSON file that is safe to commit. It holds the control URL, the default project, defaults for a few command options and the servers you install, and never the operator credential. See [Config file](cli.md#config-file) for the keys and how they map to flags, and [Nodes](nodes.md#declaring-nodes-in-the-config-file) for the `nodes` section.
 
 | Variable | Purpose |
 |---|---|
