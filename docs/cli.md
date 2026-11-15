@@ -354,7 +354,7 @@ Ingress nodes run one managed Caddy for every project (see [Ingress and HTTPS](i
 
 | Command | Options | What it does |
 | --- | --- | --- |
-| `tug ingress logs [node]` | `--tail <n>` (default `200`), `-f, --follow` | Prints the `tug-caddy` container's logs on an ingress node: ACME attempts and failures, config reloads and, with `TUG_INGRESS_ACCESS_LOG`, access lines. Without `--follow` it goes through the durable command queue, like `tug logs`. `tug logs --ingress --node <node>` is the same command |
+| `tug ingress logs [node]` | `--tail <n>` (default `200`), `-f, --follow` | Prints the `tug-caddy` container's logs on an ingress node: ACME attempts and failures, config reloads and, with `TUG_INGRESS_ACCESS_LOG`, access lines. Without `--follow` it goes through the durable command queue, like `tug logs`. `tug logs --ingress --node <node>` is the same command, and unlike plain `tug logs` it accepts `--node` without `--follow`. Each read is recorded as an `ingress.logs` event naming the credential |
 | `tug ingress tls [node]` | `--json` | Lists every named host with automatic HTTPS on each ingress node, with its state, since when, and the reason when it has no certificate. See [Certificate status](ingress.md#certificate-status) |
 
 With no node, both commands offer the enabled ingress nodes in a terminal and need one outside it.

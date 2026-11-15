@@ -143,6 +143,27 @@ export interface LogsOptions {
   timestamps?: boolean;
 }
 
+/** Reads a finished (non-following) log tail from a container into strings. */
+export async function collectLogs(
+  docker: Pick<DockerApi, 'logs'>,
+  id: string,
+  tail: number,
+): Promise<{ stdout: string; stderr: string }> {
+  const logs = await docker.logs(id, { follow: false, tail });
+  const out: Buffer[] = [];
+  const err: Buffer[] = [];
+  logs.stdout.on('data', (d: Buffer) => out.push(d));
+  logs.stderr.on('data', (d: Buffer) => err.push(d));
+  await new Promise<void>((resolve, reject) => {
+    logs.on('error', reject);
+    logs.on('close', () => resolve());
+  });
+  return {
+    stdout: Buffer.concat(out).toString('utf8'),
+    stderr: Buffer.concat(err).toString('utf8'),
+  };
+}
+
 /** One entry of the daemon's event stream (`GET /events`). Container events carry the container labels in `Actor.Attributes`. */
 export interface DockerEvent {
   Type: string;

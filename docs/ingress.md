@@ -127,14 +127,15 @@ tug ingress logs n2 --tail 100
 | `pending` | The handshake fails or the certificate does not cover the host, and Caddy has logged no issuance error for the host yet. A new domain stays here until DNS and port 80 are right |
 | `failed` | Pending, and the latest issuance error Caddy logged for the host is shown as the reason |
 | `unknown` | The node's agent predates this report, or has not reported yet. It never reads as `issued` |
+| `not-probed` | `tug domain list` only: the node reports TLS state but not for this name, because it is a wildcard (issued on demand) or beyond the 256 hosts a node checks, alphabetically |
 
 The same state appears elsewhere:
 
 - `tug domain list` adds a `tls` entry per ingress node to each mapped domain.
-- `tug status` adds a count to an ingress node with hosts that have no certificate yet, so `serving` is not read as reachable. It is a count because host names span projects, so the names stay behind `tug ingress tls`.
+- `tug status` adds a count to an ingress node with hosts that have no certificate yet, so `serving` is not read as reachable. It is a count, and only for an unscoped credential, because host names span projects, so the names stay behind `tug ingress tls`.
 - `tug doctor` fails the `ingress` check for a host that has been `pending` or `failed` for more than ten minutes, which leaves time for DNS and port 80 to be fixed on a new domain, and names the host, the node and the reason.
 
-Only names Caddy issues itself are checked: `tls: auto` hosts and mapped domains. Wildcard names are skipped, because a probe would trigger on-demand issuance for a name nobody asked for, and so are `tls: custom` hosts, whose certificate you supply. The reason comes from Caddy's JSON log and is best effort: an unrecognized log format costs the reason, never the state. Probing is throttled to every twenty seconds for a host without a certificate and hourly for one with, and runs beside the agent's polling, so a slow handshake or log read never delays routing updates. A fix shows once Caddy issues the certificate, which can take minutes because Caddy retries failed orders with backoff. The `since` time and a remembered failure reason are kept by the agent process, so an agent restart starts them again.
+Only names Caddy issues itself are checked: `tls: auto` hosts and mapped domains. Wildcard names are skipped, because a probe would trigger on-demand issuance for a name nobody asked for, and so are `tls: custom` hosts, whose certificate you supply. The reason comes from Caddy's JSON log and is best effort: an unrecognized log format costs the reason, never the state. Probing is throttled to every twenty seconds for a host without a certificate and hourly for one with, and runs beside the agent's polling, so a slow handshake or log read never delays routing updates. A fix shows once Caddy issues the certificate, which can take minutes because Caddy retries failed orders with backoff. Control keeps the `since` time across agent restarts, and keeps the last results while an ingress reload is `failed`. The remembered failure reason lives in the agent process, so after a restart a failing host reads `pending` with the handshake error until Caddy logs its next attempt. An issued host needs two failed handshakes in a row to read `pending`, so a Caddy restart is not a flap.
 
 ### Wildcard hosts are issued name by name
 

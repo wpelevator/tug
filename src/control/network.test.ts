@@ -976,3 +976,124 @@ test('ingress certificate state reaches doctor, status, domain list and the admi
     await s.close();
   }
 });
+
+test('ingress certificate state survives agent restarts, failed reloads and hides from scoped readers', async () => {
+  const s = await server();
+  try {
+    const edge = await s.register('edge');
+    await s.post('/api/v1/nodes/edge/ingress', { enabled: true });
+    await s.post('/api/v1/deployments', {
+      project: 'blog',
+      version: 'v1',
+      compose: {
+        services: {
+          web: {
+            ...stack.services.web,
+            'x-tug': { ...stack.services.web['x-tug'], placement: { nodes: ['edge'] } },
+          },
+        },
+      },
+    });
+    await s.report(edge.nodeId, 'edge', 'blog', ['web']);
+    await s.post('/api/v1/domains', { project: 'blog', service: 'web', host: 'map.example.org' });
+    await s.post('/api/v1/domains', {
+      project: 'blog',
+      service: 'web',
+      host: '*.zone.example.org',
+    });
+    const get = async (route: string, token = 'op-net-token') =>
+      json(
+        await fetch(`${s.base}${route}`, {
+          headers: token.length > 200 ? { 'x-tug-test-credential': token } : s.agent(token),
+        }),
+      );
+    const report = (ingress: Record<string, unknown>) =>
+      s.post(
+        '/agent/v1/status',
+        { node: 'edge', projects: [], commandResults: [], ingress },
+        s.agent(edge.nodeId),
+      );
+    const cert = (since: string, state = 'pending') => ({
+      host: 'map.example.org',
+      state,
+      since,
+      error: 'e',
+    });
+    await report({
+      state: 'serving',
+      configHash: 'h',
+      routes: 1,
+      certs: [cert('2026-11-15T10:00:00Z')],
+    });
+    await report({
+      state: 'serving',
+      configHash: 'h',
+      routes: 1,
+      certs: [cert('2026-11-15T12:00:00Z')],
+    });
+    assert.equal(
+      (await get('/api/v1/ingress/tls')).nodes[0].certs[0].since,
+      '2026-11-15T10:00:00Z',
+      'a restarted agent resets since, but control keeps when the unchanged state began',
+    );
+    await report({
+      state: 'serving',
+      configHash: 'h',
+      routes: 1,
+      certs: [cert('2026-11-15T13:00:00Z', 'failed')],
+    });
+    assert.equal(
+      (await get('/api/v1/ingress/tls')).nodes[0].certs[0].since,
+      '2026-11-15T13:00:00Z',
+      'a changed state starts a new since',
+    );
+    await report({ state: 'failed', configHash: 'h2', routes: 1, error: 'reload rejected' });
+    assert.equal(
+      (await get('/api/v1/ingress/tls')).nodes[0].certs[0].state,
+      'failed',
+      'a failed reload carries no probe results, so the last known state is kept',
+    );
+
+    const domains = (await get('/api/v1/domains?project=blog')).domains as {
+      host: string;
+      tls: { state: string }[];
+    }[];
+    assert.equal(
+      domains.find((d) => d.host === '*.zone.example.org')!.tls[0].state,
+      'not-probed',
+      'a wildcard is not probed, which is not the same as an agent that does not report',
+    );
+
+    const scoped = (
+      await json(
+        await s.post('/api/v1/credentials', { name: 'viewer', role: 'read', projects: ['blog'] }),
+      )
+    ).credential;
+    const scopedStatus = await get('/api/v1/status', scoped);
+    assert.equal(
+      scopedStatus.nodes.find((n: { name: string }) => n.name === 'edge').tls_not_issued,
+      undefined,
+      'a project-scoped reader must not learn that hosts of other projects lack certificates',
+    );
+    assert.equal(
+      (await get('/api/v1/status')).nodes.find((n: { name: string }) => n.name === 'edge')
+        .tls_not_issued,
+      1,
+      'an unscoped reader sees the count',
+    );
+    assert.equal(
+      (await s.post('/api/v1/ingress/logs', { node: 'edge', tail: 5 })).status,
+      200,
+      'an admin can fetch the logs',
+    );
+    const events = (await get('/api/v1/events')).events as { type: string; message: string }[];
+    assert.ok(
+      events.some(
+        (e) => e.type === 'ingress.logs' && /read the ingress logs of edge/.test(e.message),
+      ),
+      'reading the shared edge logs is audited with the acting credential',
+    );
+  } finally {
+    await s.close();
+  }
+});

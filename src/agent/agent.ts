@@ -32,7 +32,7 @@ import {
   networkName,
   volumeName,
 } from '../container-spec.ts';
-import { API_VERSION, DockerEngine, isNotFound } from '../docker-api.ts';
+import { API_VERSION, DockerEngine, collectLogs, isNotFound } from '../docker-api.ts';
 import { DockerEventWatcher } from './docker-events.ts';
 import type { ContainerSummary, DockerApi } from '../docker-api.ts';
 import type { PortBind } from '../compose/compose.ts';
@@ -938,44 +938,17 @@ export async function executeCommand(
   if (command.type === 'logs.fetch') {
     const { project, service } = payload;
     const id = await resolveLiveContainer(ctx, { project, service });
-    const logs = await ctx.docker.logs(id, { follow: false, tail: Number(payload.tail || 200) });
-    const out: Buffer[] = [];
-    const err: Buffer[] = [];
-    logs.stdout.on('data', (d: Buffer) => out.push(d));
-    logs.stderr.on('data', (d: Buffer) => err.push(d));
-    await new Promise<void>((resolve, reject) => {
-      logs.on('error', reject);
-      logs.on('close', () => resolve());
-    });
     return {
       commandId: command.id,
       state: 'succeeded',
-      result: {
-        stdout: Buffer.concat(out).toString('utf8'),
-        stderr: Buffer.concat(err).toString('utf8'),
-      },
+      result: await collectLogs(ctx.docker, id, Number(payload.tail || 200)),
     };
   }
   if (command.type === 'ingress.logs') {
-    const logs = await ctx.docker.logs(CADDY_CONTAINER, {
-      follow: false,
-      tail: Number(payload.tail ?? 200),
-    });
-    const out: Buffer[] = [];
-    const err: Buffer[] = [];
-    logs.stdout.on('data', (d: Buffer) => out.push(d));
-    logs.stderr.on('data', (d: Buffer) => err.push(d));
-    await new Promise<void>((resolve, reject) => {
-      logs.on('error', reject);
-      logs.on('close', () => resolve());
-    });
     return {
       commandId: command.id,
       state: 'succeeded',
-      result: {
-        stdout: Buffer.concat(out).toString('utf8'),
-        stderr: Buffer.concat(err).toString('utf8'),
-      },
+      result: await collectLogs(ctx.docker, CADDY_CONTAINER, Number(payload.tail || 200)),
     };
   }
   if (command.type === 'volume.delete') {

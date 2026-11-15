@@ -4,6 +4,7 @@
 import tls from 'node:tls';
 import { errMessage } from './errors.ts';
 import { CADDY_CONTAINER } from './ingress.ts';
+import { collectLogs } from './docker-api.ts';
 import type { DockerApi } from './docker-api.ts';
 import type { IngressCertStatus, IngressRoute } from './protocol.ts';
 
@@ -143,15 +144,8 @@ export function parseIssuanceErrors(
 }
 
 async function readLogs(docker: DockerApi, tail: number): Promise<string> {
-  const proc = await docker.logs(CADDY_CONTAINER, { follow: false, tail });
-  const chunks: Buffer[] = [];
-  proc.stdout.on('data', (d: Buffer) => chunks.push(d));
-  proc.stderr.on('data', (d: Buffer) => chunks.push(d));
-  await new Promise<void>((resolve, reject) => {
-    proc.on('error', reject);
-    proc.on('close', () => resolve());
-  });
-  return Buffer.concat(chunks).toString('utf8');
+  const { stdout, stderr } = await collectLogs(docker, CADDY_CONTAINER, tail);
+  return stdout + stderr;
 }
 
 function within<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
@@ -159,8 +153,8 @@ function within<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
   return Promise.race([
     work,
     new Promise<never>((_resolve, reject) => {
+      // Not unref'd: the timeout is what ends the wait, so it must keep the event loop alive until it fires.
       timer = setTimeout(() => reject(new Error(`${what} timed out`)), ms);
-      timer.unref?.();
     }),
   ]).finally(() => clearTimeout(timer));
 }
@@ -177,6 +171,8 @@ interface Entry {
   firstSeen: number;
   probedAt: number;
   probeOk: boolean;
+  /** An issued host failed one probe: reported issued until a second consecutive miss, so a Caddy restart is no flap. */
+  missed?: boolean;
   probeError?: string;
   notAfter?: string;
   issuer?: string;
@@ -220,7 +216,10 @@ export function createTlsMonitor(
     const due = hosts.filter((host) => {
       const entry = known.get(host);
       if (!entry) return false;
-      return now() - entry.probedAt >= (entry.probeOk ? RECHECK_ISSUED_MS : RETRY_UNISSUED_MS);
+      return (
+        now() - entry.probedAt >=
+        (entry.probeOk && !entry.missed ? RECHECK_ISSUED_MS : RETRY_UNISSUED_MS)
+      );
     });
     for (let i = 0; i < due.length; i += PARALLEL_PROBES)
       await Promise.all(
@@ -232,6 +231,12 @@ export function createTlsMonitor(
           const entry = known.get(host);
           if (!entry) return;
           entry.probedAt = now();
+          if (!result.ok && entry.probeOk && !entry.missed) {
+            // One miss on an issued host (Caddy reloading, a busy socket) is not a state change; retry soon.
+            entry.missed = true;
+            return;
+          }
+          entry.missed = false;
           entry.probeOk = result.ok;
           if (result.ok) {
             entry.notAfter = result.notAfter;

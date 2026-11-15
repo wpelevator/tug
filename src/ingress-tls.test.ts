@@ -6,7 +6,13 @@ import os from 'node:os';
 import path from 'node:path';
 import tls from 'node:tls';
 import type { AddressInfo } from 'node:net';
-import { createTlsMonitor, parseIssuanceErrors, probeTls, tlsHosts } from './ingress-tls.ts';
+import {
+  MAX_TLS_HOSTS,
+  createTlsMonitor,
+  parseIssuanceErrors,
+  probeTls,
+  tlsHosts,
+} from './ingress-tls.ts';
 import type { TlsProbe } from './ingress-tls.ts';
 import type { IngressRoute } from './protocol.ts';
 import { FakeDocker } from '../tests/fake-docker.ts';
@@ -196,6 +202,64 @@ test('a hung probe or log read cannot hold the caller beyond the check wait', as
     'a log read that never returns is cut off by its own timeout',
   );
   assert.equal(after.error, 'refused', 'the probe result still reports');
+});
+
+test('one missed probe does not turn an issued host pending, two in a row do', async () => {
+  let time = Date.parse('2026-11-15T10:00:00Z');
+  let up = true;
+  const monitor = createTlsMonitor({
+    probe: async () =>
+      up ? { ok: true, notAfter: '2027-02-01T00:00:00.000Z' } : { ok: false, error: 'reset' },
+    now: () => time,
+    readLog: async () => '',
+  });
+  const docker = new FakeDocker();
+  const routes = [route({})];
+  await monitor.check(routes, docker);
+  up = false;
+  time += 61 * 60_000;
+  let [cert] = await monitor.check(routes, docker);
+  assert.equal(
+    cert.state,
+    'issued',
+    'a single failed handshake (a Caddy reload) must not flap the host',
+  );
+  time += 21_000;
+  [cert] = await monitor.check(routes, docker);
+  assert.equal(
+    cert.state,
+    'pending',
+    'a second consecutive miss is a real loss of the certificate',
+  );
+  up = true;
+  time += 21_000;
+  [cert] = await monitor.check(routes, docker);
+  assert.equal(cert.state, 'issued', 'the next good handshake restores issued');
+});
+
+test('hosts beyond the cap are not reported and a host that leaves the config is forgotten', async () => {
+  const many = Array.from({ length: MAX_TLS_HOSTS + 10 }, (_, i) =>
+    route({ host: `h${String(i).padStart(4, '0')}.example.com` }),
+  );
+  assert.equal(tlsHosts(many).length, MAX_TLS_HOSTS, 'a node checks at most MAX_TLS_HOSTS names');
+  const probed: string[] = [];
+  const monitor = createTlsMonitor({
+    probe: async (host) => {
+      probed.push(host);
+      return { ok: true, notAfter: '2027-02-01T00:00:00.000Z' };
+    },
+    readLog: async () => '',
+  });
+  const docker = new FakeDocker();
+  const certs = await monitor.check(many, docker);
+  assert.equal(certs.length, MAX_TLS_HOSTS, 'only the capped hosts are reported');
+  await monitor.check([many[0]], docker);
+  await monitor.check(many, docker);
+  assert.equal(
+    probed.filter((h) => h === 'h0001.example.com').length,
+    2,
+    'a host that left the config and came back is probed again, not served from stale state',
+  );
 });
 
 test('probeTls separates a covering certificate from a handshake failure and a wrong name', async () => {

@@ -165,13 +165,16 @@ function ingressCert(value: unknown, path: string): IngressCertStatus {
     throw new StatusReportError(`${path}.notAfter must be a date`);
   const issuer = text(value.issuer, `${path}.issuer`, true);
   const error = text(value.error, `${path}.error`, true);
+  // Error text from Caddy ends up in terminals and doctor output.
+  const plain = (v: string) =>
+    [...v].map((ch) => (ch.charCodeAt(0) < 32 || ch.charCodeAt(0) === 127 ? ' ' : ch)).join('');
   return {
-    host,
+    host: plain(host),
     state: value.state,
     since,
     ...(notAfter !== undefined && { notAfter }),
-    ...(issuer !== undefined && { issuer: issuer.slice(0, 100) }),
-    ...(error !== undefined && { error: error.slice(0, 300) }),
+    ...(issuer !== undefined && { issuer: plain(issuer).slice(0, 100) }),
+    ...(error !== undefined && { error: plain(error).slice(0, 300) }),
   };
 }
 

@@ -1437,6 +1437,11 @@ export async function createApp(
           request.node,
         );
         if (!ingress) throw httpError(404, `node ${request.node} is not an enabled ingress node`);
+        audit(actor, {
+          type: 'ingress.logs',
+          message: `${actor.name} followed the ingress logs of ${ingress.name}`,
+          metadata: { node: ingress.name, tail: request.tail },
+        });
         return ingress;
       }
       assertProject(actor, request.project);
@@ -2466,8 +2471,9 @@ export async function createApp(
       });
     res.json({ ok: true });
   });
-  api('get', '/api/v1/domains', queryProject, async (req, res) =>
-    isReservedProject(String(req.query.project || 'site'))
+  api('get', '/api/v1/domains', queryProject, async (req, res) => {
+    const tlsReport = ingressTlsReport();
+    return isReservedProject(String(req.query.project || 'site'))
       ? res.status(400).json({ error: 'project names starting with _ are reserved' })
       : res.json({
           domains: db
@@ -2477,14 +2483,24 @@ export async function createApp(
             )
             .map((domain) => ({
               ...domain,
-              // One entry per ingress node: `unknown` when that node's agent does not report TLS state yet.
-              tls: ingressTlsReport().map(({ node, certs }) => {
-                const cert = certs?.find((c) => c.host === domain.host.toLowerCase());
-                return cert ? { node, ...cert, host: undefined } : { node, state: 'unknown' };
+              // One entry per ingress node. `unknown`: that node's agent does not report TLS state. `not-probed`:
+              // it does, but not for this name (a wildcard, or past the per-node host limit).
+              tls: tlsReport.map(({ node, certs }) => {
+                if (!certs) return { node, state: 'unknown' };
+                const cert = certs.find((c) => c.host === domain.host.toLowerCase());
+                return cert
+                  ? { node, ...cert, host: undefined }
+                  : {
+                      node,
+                      state: 'not-probed',
+                      reason: domain.host.includes('*')
+                        ? 'wildcard names are issued on demand and not probed'
+                        : 'not reported yet, or beyond the per-node host limit',
+                    };
               }),
             })),
-        }),
-  );
+        });
+  });
   /**
    * Mapped domains are control state, not part of a deployment: a WordPress network adds sites at any time, and
    * each one is served on a service's ingress route from the next agent poll. They obey the same ownership rule as
@@ -4312,6 +4328,11 @@ export async function createApp(
     const tail = Number(req.body.tail ?? 200);
     if (!Number.isSafeInteger(tail) || tail < 0 || tail > 10_000)
       return res.status(400).json({ error: 'tail must be an integer from 0 to 10000' });
+    audit(req.actor!, {
+      type: 'ingress.logs',
+      message: `${req.actor!.name} read the ingress logs of ${node.name}`,
+      metadata: { node: node.name, tail },
+    });
     const cmdId = queueCommand(node.id, null, 'ingress.logs', { tail });
     res.json({ commandId: cmdId, nodeId: node.id });
   });
@@ -4413,8 +4434,10 @@ export async function createApp(
           status: statusOf(row),
           last_seen_at: row.last_seen_at,
           connected: wakeHub.connected(row.id),
-          // A count only: host names span projects, so they stay behind `tug ingress tls` (admin).
-          ...(tlsGaps.has(row.name) && { tls_not_issued: tlsGaps.get(row.name) }),
+          // A count only, and only for an unscoped credential: host names and gaps span projects, so the
+          // detail stays behind `tug ingress tls` (admin).
+          ...(!req.actor!.projects &&
+            tlsGaps.has(row.name) && { tls_not_issued: tlsGaps.get(row.name) }),
         })),
       statuses: db.all(
         `SELECT s.*,n.name AS node FROM node_statuses s LEFT JOIN nodes n ON n.id=s.node_id WHERE ${statuses.where}`,
@@ -4796,12 +4819,34 @@ export async function createApp(
         { result_json: JSON.stringify(cr.result), updated_at: ts },
       );
     }
-    if (report.ingress)
-      db.run(
-        'UPDATE nodes SET ingress_status_json=? WHERE id=? AND ingress=1 AND disabled_at IS NULL',
-        JSON.stringify({ ...report.ingress, reportedAt: ts }),
+    if (report.ingress) {
+      const stored = db.get<Pick<NodeRow, 'ingress_status_json'>>(
+        'SELECT ingress_status_json FROM nodes WHERE id=?',
         req.node!.id,
       );
+      const before = stored?.ingress_status_json
+        ? (JSON.parse(stored.ingress_status_json) as { certs?: IngressCertStatus[] })
+        : undefined;
+      const ingress = { ...report.ingress };
+      if (ingress.certs) {
+        // The agent's monitor is in memory, so a restart makes every host look new: keep when the state began.
+        const prior = new Map((before?.certs ?? []).map((c) => [c.host, c]));
+        ingress.certs = ingress.certs.map((c) => {
+          const old = prior.get(c.host);
+          return old && old.state === c.state && Date.parse(old.since) < Date.parse(c.since)
+            ? { ...c, since: old.since }
+            : c;
+        });
+      } else if (ingress.state === 'failed' && before?.certs) {
+        // A failed reload sends no probe results; the last known state is more useful than none.
+        ingress.certs = before.certs;
+      }
+      db.run(
+        'UPDATE nodes SET ingress_status_json=? WHERE id=? AND ingress=1 AND disabled_at IS NULL',
+        JSON.stringify({ ...ingress, reportedAt: ts }),
+        req.node!.id,
+      );
+    }
     db.run('UPDATE nodes SET last_seen_at=?,status=? WHERE id=?', ts, 'online', req.node!.id);
     if (report.sentAt)
       db.run(

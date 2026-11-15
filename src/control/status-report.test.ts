@@ -153,3 +153,29 @@ test('ingress certificate entries are validated and bounded', () => {
       `${JSON.stringify(cert)} should be refused with ${message}`,
     );
 });
+
+test('control characters in reported certificate text are replaced', () => {
+  const parsed = parseStatusReport({
+    node: 'n',
+    projects: [],
+    commandResults: [],
+    ingress: {
+      state: 'serving',
+      configHash: 'h',
+      routes: 1,
+      certs: [
+        {
+          host: 'a.example.com',
+          state: 'failed',
+          since: '2026-11-15T10:00:00Z',
+          error: 'boom\u001b[31m red\nnext',
+        },
+      ],
+    },
+  });
+  assert.equal(
+    parsed.ingress?.certs?.[0].error,
+    'boom [31m red next',
+    'escape and newline characters must not reach terminals through doctor or tug ingress tls',
+  );
+});
