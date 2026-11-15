@@ -922,6 +922,17 @@ test('deploy summaries are one line and a compose file name is read for the proj
     'rug v2: deployment dep_1 succeeded, 2 services',
     'a deploy should summarize project, version, state and service count',
   );
+  assert.equal(
+    formatDeployment(
+      {
+        deployment: { id: 'dep_3', state: 'succeeded' },
+        desiredState: { project: 'express', version: 'git-25bdc82f8359', services: { web: {} } },
+      },
+      ['dep_1'],
+    ),
+    'express git-25bdc82f8359: deployment dep_3 succeeded, 1 service (same label as dep_1; tell them apart by deployment id)',
+    'a label shared with an earlier deployment must be called out next to the deployment id',
+  );
   assert.match(
     formatDeployment({ deployment: { id: 'dep_2', state: 'failed', error_message: 'boom' } }),
     /dep_2 failed \(boom\)/,

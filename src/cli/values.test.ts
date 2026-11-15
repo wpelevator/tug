@@ -4,6 +4,9 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {
+  backupReferences,
+  escapeReference,
+  missingValuesMessage,
   classifyEnvFile,
   describeValues,
   findMissingValues,
@@ -191,5 +194,69 @@ test('promptForValues generates by default and accepts an entered secret or vari
     values.THREE,
     { kind: 'var', value: 'eu-west-1' },
     'v enters a visible variable',
+  );
+});
+
+const BACKUP_FILE = [
+  'services:',
+  '  db:',
+  '    image: mariadb:11',
+  '    x-tug:',
+  '      backup:',
+  '        command: mariadb-dump -uroot -p"$MARIADB_ROOT_PASSWORD" --all-databases',
+  '        restore: mariadb -uroot -p"${MARIADB_ROOT_PASSWORD}"',
+].join('\n');
+
+test('missingValuesMessage explains a single-$ name inside x-tug.backup as a container variable and shows the $$ line', () => {
+  const message = missingValuesMessage(
+    'compose.yaml',
+    BACKUP_FILE,
+    ['MARIADB_ROOT_PASSWORD'],
+    false,
+  );
+  assert.match(
+    message,
+    /needs values that are not set on control: MARIADB_ROOT_PASSWORD/,
+    'the standard message stays',
+  );
+  assert.match(
+    message,
+    /variable of the container/,
+    'the hint says it may be a container variable',
+  );
+  assert.match(
+    message,
+    /mariadb-dump -uroot -p"\$\$MARIADB_ROOT_PASSWORD" --all-databases/,
+    'the hint shows the corrected command line with $$',
+  );
+});
+
+test('missingValuesMessage keeps the standard message for a name outside x-tug.backup', () => {
+  const message = missingValuesMessage(
+    'compose.yaml',
+    'services:\n  web:\n    image: nginx\n    environment:\n      A: ${TOKEN}\n    x-tug:\n      backup:\n        command: echo "$OTHER"\n',
+    ['TOKEN'],
+    true,
+  );
+  assert.doesNotMatch(
+    message,
+    /variable of the container/,
+    'no backup hint for a name that is not in a backup field',
+  );
+  assert.match(message, /TOKEN/, 'the missing name is listed');
+});
+
+test('backupReferences ignores an escaped $$ and escapeReference doubles both ${NAME} and $NAME forms', () => {
+  assert.equal(
+    backupReferences('services:\n  a:\n    x-tug:\n      backup:\n        command: echo $$A\n', [
+      'A',
+    ]).size,
+    0,
+    'an already escaped name is not a Compose reference',
+  );
+  assert.equal(
+    escapeReference('p="${PW}" q=$PW r=$$PW s=$PWX', 'PW'),
+    'p="$${PW}" q=$$PW r=$$PW s=$PWX',
+    'single-$ references to the name are doubled and nothing else changes',
   );
 });

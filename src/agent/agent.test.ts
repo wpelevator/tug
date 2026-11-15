@@ -457,8 +457,24 @@ test('a failed http health check names the check, the attempts and the network e
   await withContainer(ctx, { ip: '10.1.2.3' });
   await assert.rejects(
     waitForHealth(ctx, 'proj', 'web', 'web', { type: 'http', port: 8081, path: '/', ...fastRetry }),
-    /web: http health check on port 8081\/ failed after 3 attempts: fetch failed \(ECONNREFUSED\)/,
+    /web: http health check GET http:\/\/10\.1\.2\.3:8081\/ failed after 3 attempts: fetch failed \(ECONNREFUSED\)/,
     'an operator reading a rejected rollout must see which check failed and why, not just "fetch failed"',
+  );
+});
+
+test('a failed http health check names the probed URL with its query and the last status', async () => {
+  const notFound = (async () => new Response('missing', { status: 404 })) as HttpClient;
+  const ctx = await makeCtx({ http: notFound });
+  await withContainer(ctx, { ip: '10.1.2.3' });
+  await assert.rejects(
+    waitForHealth(ctx, 'proj', 'web', 'web', {
+      type: 'http',
+      port: 80,
+      path: '/health?ready=1',
+      ...fastRetry,
+    }),
+    /web: http health check GET http:\/\/10\.1\.2\.3:80\/health\?ready=1 failed after 3 attempts: web: http 404/,
+    'the failure must carry the full URL path and query, the address probed and the last HTTP status',
   );
 });
 

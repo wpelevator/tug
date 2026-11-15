@@ -23,7 +23,6 @@ tug doctor --nodes
 | `custom TLS secret <name> not found in project <project>; set it with tug secret set first` | `tls: custom` names a secret that does not exist | `tug secret set <name> --from-file ...` |
 | `timed out waiting for deployment <id>; it is still rolling out` | The wait ended, and the rollout continues on the nodes | `tug status`, or stop it with `tug deploy cancel <id>` |
 | `<image> is not published yet` from `tug setup` or `tug node add` | A release publishes the npm package a few minutes before its image | Retry shortly, or pass `--image ghcr.io/wpelevator/tug:latest` |
-| `Bind for <address>:<port> failed: port is already allocated` in a failed deployment | Another project on that node publishes the same host port. `tug lint` and `tug deploy --dry-run` cannot see other projects, so the deploy builds first and fails when the agent applies it | Change one published host port, or move one project to another node |
 | `operation requires --node because placement is ambiguous` | The service runs on several nodes | Add `--node <name>` |
 | `The control did not present a certificate signed by this credential's CA` | The credential file and the deployed control disagree about the CA | [Mismatches](#cli-control-version-or-credentialca-mismatches) |
 | A message naming `tug control upgrade` or `npm i -g @wpelevator/tug@<version>` | CLI and control run different versions | [Mismatches](#cli-control-version-or-credentialca-mismatches) |
@@ -39,8 +38,8 @@ tug logs web
 Read the error `tug deploy` printed first. Then work down this list:
 
 1. `tug logs <service>` shows why the container died or never became healthy. With several eligible nodes, add `--node <name>`.
-2. A health check that never passes usually has the wrong `port` or `path`, or too few `retries` for a slow start. The defaults are 10 attempts, 2 seconds apart. Raise `x-tug.health.retries` or `interval`, see [Health checks](healthchecks.md).
-3. A missing variable or secret fails the deploy with the names and the command that sets them. `tug deploy --dry-run` lists every `${NAME}` and where its value comes from.
+2. A health check that never passes usually has the wrong `port` or `path`, or too few `retries` for a slow start. The failure names the request the agent made, with the container address, port, path and query, and ends with the last HTTP status or connection error, for example `web: http health check GET http://172.18.0.3:80/health failed after 10 attempts: web: http 404`. Request that URL path from inside the container to see what the app answers. The defaults are 10 attempts, 2 seconds apart. Raise `x-tug.health.retries` or `interval`, see [Health checks](healthchecks.md).
+3. A missing variable or secret fails the deploy with the names and the command that sets them. `tug deploy --dry-run` lists every `${NAME}` and where its value comes from. When the missing name sits in an `x-tug.backup` command, it is usually a container variable that needs `$$` instead of `$`, see [Recipes](backups.md#recipes).
 4. A service that cannot reach its dependency usually needs a `depends_on` with `condition: service_healthy`, or connection retries in the app.
 
 **A deploy, rollback or control backup that sits queued** is waiting behind another build. Control runs one writer at a time, and a stuck build is killed after 30 minutes. `tug status` shows the deployment still building. `tug deploy cancel` marks it cancelled, but the build process itself ends only at that deadline, so a rollback can wait that long in the worst case.

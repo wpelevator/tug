@@ -5,6 +5,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import * as yaml from 'js-yaml';
 import { parseDotenv } from '../compose/load.ts';
 import { MAX_VAR_BYTES, RESERVED_VALUE_NAMES, VALUE_NAME, VALUE_NAME_MESSAGE } from '../values.ts';
 import type { DeploymentValue } from '../values.ts';
@@ -66,6 +67,71 @@ export async function findMissingValues(
   // An unreadable file is reported by the Compose reader with its own message.
   const source = await fs.readFile(file, 'utf8').catch(() => '');
   return requiredVariables(source).filter((name) => !known.has(name));
+}
+
+/**
+ * For each missing name that appears (with a single `$`) inside an `x-tug.backup.*` string, that string. A backup
+ * `command` or `restore` runs in the container, so `$NAME` there is almost always meant for the container's own
+ * environment and needs `$$NAME`; Compose would otherwise ask control for a value.
+ */
+export function backupReferences(source: string, names: readonly string[]): Map<string, string> {
+  const found = new Map<string, string>();
+  let doc: unknown;
+  try {
+    doc = yaml.load(source, { schema: yaml.CORE_SCHEMA.withTags([yaml.mergeTag]) });
+  } catch {
+    return found;
+  }
+  const visitStrings = (node: unknown, fn: (text: string) => void): void => {
+    if (typeof node === 'string') fn(node);
+    else if (Array.isArray(node)) for (const item of node) visitStrings(item, fn);
+    else if (node && typeof node === 'object')
+      for (const item of Object.values(node)) visitStrings(item, fn);
+  };
+  const walk = (node: unknown): void => {
+    if (Array.isArray(node)) return node.forEach(walk);
+    if (!node || typeof node !== 'object') return;
+    for (const [key, child] of Object.entries(node)) {
+      if (key === 'x-tug' && child && typeof child === 'object' && 'backup' in child)
+        visitStrings((child as { backup: unknown }).backup, (text) => {
+          for (const name of requiredVariables(text))
+            if (names.includes(name) && !found.has(name)) found.set(name, text);
+        });
+      else walk(child);
+    }
+  };
+  walk(doc);
+  return found;
+}
+
+/** `text` with each single-`$` reference to `name` doubled to `$$`, the line to put in the Compose file instead. */
+export function escapeReference(text: string, name: string): string {
+  return text.replace(
+    new RegExp(`\\$\\$|\\$(\\{${name}\\}|${name}(?![A-Za-z0-9_]))`, 'g'),
+    (match) => (match === '$$' ? match : `$${match}`),
+  );
+}
+
+/**
+ * The message for a deploy whose file needs values control does not hold. A name found inside an `x-tug.backup.*`
+ * field gets the container-variable hint with the corrected line; the rest keep the standard guidance.
+ */
+export function missingValuesMessage(
+  file: string,
+  source: string,
+  missing: readonly string[],
+  dryRun: boolean,
+): string {
+  const inBackup = backupReferences(source, missing);
+  const base = `${file} needs values that are not set on control: ${missing.join(', ')}. Tug does not read your shell environment or .env; set each with tug secret set <name> (private) or tug var set <name> (visible), pass --var NAME=value for this deploy only, or import a file with tug secret import .env${
+    dryRun ? '' : ' (or run tug deploy in a terminal to be prompted)'
+  }`;
+  if (!inBackup.size) return base;
+  const hints = [...inBackup].map(
+    ([name, text]) =>
+      `${name} is used in an x-tug.backup field. If it is a variable of the container and not a value from control, write $$${name} so the container expands it: ${escapeReference(text, name).trim()}`,
+  );
+  return `${base}\n${hints.join('\n')}`;
 }
 
 /**

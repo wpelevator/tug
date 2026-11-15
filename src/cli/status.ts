@@ -29,6 +29,36 @@ export interface StatusResponse {
   }[];
 }
 
+/**
+ * What a version label says about a deployment: a rollback's `rollback-<label>-<ms>` is its source's label. The default
+ * label `git-<hash>` covers only the Compose file, so a changed build context, secret or variable keeps it.
+ */
+export function labelKey(version: string): string {
+  return version.replace(/^rollback-/, '').replace(/-\d{10,}$/, '');
+}
+
+/**
+ * Ids of the other deployments of `project` whose label reads the same as `version`, so a summary that shows the label
+ * alone would not tell them apart. Empty when the label is unique among `rows`.
+ */
+export function deploymentsSharingLabel(
+  rows: readonly { id: string; version: string; project_id?: string }[],
+  id: string,
+  project: string | undefined,
+  version: string | undefined,
+): string[] {
+  if (!version) return [];
+  const key = labelKey(version);
+  return rows
+    .filter(
+      (row) =>
+        row.id !== id &&
+        (project === undefined || row.project_id === undefined || row.project_id === project) &&
+        labelKey(row.version) === key,
+    )
+    .map((row) => row.id);
+}
+
 /** Render observations without treating a stale node's last report as current health. */
 export function formatStatus(status: StatusResponse): string {
   const lines: string[] = [];
@@ -37,7 +67,16 @@ export function formatStatus(status: StatusResponse): string {
     const deployment = status.deployments.find((item) => item.id === project.current_deployment_id);
     lines.push(`Project ${project.id}`);
     if (deployment) {
-      lines.push(`  Deployment: ${deployment.version} (${deployment.state})`);
+      const shared = deploymentsSharingLabel(
+        status.deployments,
+        deployment.id,
+        project.id,
+        deployment.version,
+      );
+      // The label alone does not tell this deployment from an earlier one with the same label, so show its id.
+      lines.push(
+        `  Deployment: ${deployment.version}${shared.length ? ` [${deployment.id}]` : ''} (${deployment.state})`,
+      );
       if (deployment.error_message) lines.push(`  Error: ${deployment.error_message}`);
     } else {
       lines.push(

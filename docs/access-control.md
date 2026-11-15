@@ -141,6 +141,7 @@ The project column says how a scoped credential's allowed projects are checked: 
 | `GET /api/v1/domains` | `read` | Query; mapped domains of the project |
 | `POST /api/v1/projects` | `deploy` | Body `name` |
 | `POST /api/v1/deployments` | `deploy` | Body or upload payload `project` |
+| `POST /api/v1/deployments/check` | `deploy` | Body |
 | `POST /api/v1/deployments/:id/cancel` | `deploy` | Deployment's project |
 | `POST /api/v1/rollback` | `deploy` | Body |
 | `POST /api/v1/scale` | `deploy` | Body |

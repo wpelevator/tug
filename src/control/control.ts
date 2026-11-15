@@ -58,6 +58,7 @@ import {
   serviceSecretNames,
   validateCompose,
 } from '../compose/compose.ts';
+import { findPortClashes, portClashMessage } from '../compose/port-clash.ts';
 import { buildImage, unpackContext, run as runCommand } from '../images/build.ts';
 import { sentinelNames } from '../compose/normalize.ts';
 import {
@@ -1210,6 +1211,41 @@ export async function createApp(
             `${name}: host port ${port} is reserved for the managed Caddy on ingress node ${nodes[0]}; publish another port`,
           );
     }
+  }
+  /**
+   * Refuses a deployment that publishes a host port another project's current deployment already publishes on the
+   * same node and address: the agent could not start it, and with a build in between the operator would only learn
+   * that minutes later. The project's own current deployment is replaced by this one, so it never counts.
+   */
+  function assertNoPortClash(project: string, compose: ComposeFile, viewer?: Actor): void {
+    const rows = db.all<{ name: string; address: string | null }>(
+      'SELECT name,address FROM nodes WHERE disabled_at IS NULL ORDER BY created_at,name',
+    );
+    const candidate = buildDesiredState({
+      project,
+      version: 'check',
+      compose,
+      defaultNode: rows[0]?.name ?? null,
+    });
+    const address = new Map(rows.map((row) => [row.name, row.address]));
+    const clashes = findPortClashes(
+      candidate,
+      currentDesiredStates(),
+      nodeTopology(),
+      (node) => address.get(node) ?? null,
+    );
+    if (!clashes.length) return;
+    const messages = [
+      ...new Set(
+        clashes.map((clash) => {
+          const canSee =
+            viewer !== undefined &&
+            (!viewer.projects || viewer.projects.includes(clash.otherProject));
+          return portClashMessage(clash, canSee ? clash.otherProject : 'another project');
+        }),
+      ),
+    ];
+    throw httpError(409, messages.join('; '));
   }
   function hostnameConflict(
     host: string,
@@ -2763,6 +2799,19 @@ export async function createApp(
   await collectArtifacts();
   await markMissingArtifacts();
   const receiveDeployment = upload.any();
+  // The checks a deploy makes against other projects, without building or recording anything: `deploy --dry-run`.
+  api('post', '/api/v1/deployments/check', bodyProject, (req, res) => {
+    try {
+      const compose: ComposeFile | undefined = req.body?.compose;
+      if (!compose || typeof compose !== 'object') throw httpError(400, 'compose is required');
+      const project = String(req.body?.project || 'site');
+      resolvePlacement(compose);
+      assertNoPortClash(project, compose, req.actor);
+      res.json({ ok: true });
+    } catch (failure) {
+      sendError(res, failure);
+    }
+  });
   api('post', '/api/v1/deployments', null, (req, res) => {
     receiveDeployment(req, res, (error) => {
       void withWriter(() => deployRequest(req, res, error))
@@ -2860,6 +2909,49 @@ export async function createApp(
     return { ...rest, values };
   }
   /**
+   * Resolves label-based and global placement into concrete node lists (in place) and returns the enabled nodes.
+   * Stale nodes (agent not seen recently) are not scheduled onto, so a dead host cannot hold a rollout open.
+   */
+  function resolvePlacement(compose: ComposeFile): { name: string }[] {
+    const nodeRows = db.all<NodeRow>(
+      'SELECT name,labels_json,last_seen_at,created_at FROM nodes WHERE disabled_at IS NULL ORDER BY created_at,name',
+    );
+    const nodeInfos = nodeRows
+      .filter((row) => !isStale(row))
+      .map((row) => ({
+        name: row.name,
+        labels: row.labels_json ? (JSON.parse(row.labels_json) as string[]) : [],
+        created_at: row.created_at,
+      }));
+    // Resolve label-based and global placement into concrete node lists before validation.
+    for (const svc of Object.values(compose.services || {})) {
+      const ext = (svc['x-tug'] ||= {}) as {
+        placement?: { nodes?: string[]; labels?: string[] };
+        replicas?: number;
+        global?: boolean;
+      };
+      const placement = ext.placement || {};
+      const global = ext.global === true;
+      const labels = Array.isArray(placement.labels) ? placement.labels : [];
+      if (!placement.nodes?.length && (labels.length || global)) {
+        const matched = nodeInfos
+          .filter((node) => labels.every((label) => node.labels.includes(label)))
+          .sort((a, b) => a.name.localeCompare(b.name));
+        if (!matched.length) throw httpError(400, 'no nodes match placement labels');
+        let selected = matched;
+        if (!global) {
+          const replicas = ext.replicas || matched.length;
+          if (!Number.isInteger(replicas) || replicas < 1)
+            throw httpError(400, 'replicas must be a positive integer');
+          selected = matched.slice(0, Math.min(replicas, matched.length));
+        }
+        ext.placement = { ...placement, nodes: selected.map((node) => node.name) };
+        ext.replicas = selected.length;
+      }
+    }
+    return nodeRows.map((row) => ({ name: row.name }));
+  }
+  /**
    * Services that keep data on a node and are placed on different nodes by `compose` than by the current
    * deployment. Deploying such a change starts the service empty on the new node: the data does not move.
    */
@@ -2915,44 +3007,7 @@ export async function createApp(
           400,
           `version cannot start with "${ROLLBACK_VERSION_PREFIX}" (reserved for rollback deployments)`,
         );
-      const nodeRows = db.all<NodeRow>(
-        'SELECT name,labels_json,last_seen_at,created_at FROM nodes WHERE disabled_at IS NULL ORDER BY created_at,name',
-      );
-      // Stale nodes (agent not seen recently) are not scheduled onto, so a dead host cannot hold a rollout open.
-      const nodeInfos = nodeRows
-        .filter((row) => !isStale(row))
-        .map((row) => ({
-          name: row.name,
-          labels: row.labels_json ? (JSON.parse(row.labels_json) as string[]) : [],
-          created_at: row.created_at,
-        }));
-      // Resolve label-based and global placement into concrete node lists before validation.
-      for (const svc of Object.values(compose.services || {})) {
-        const ext = (svc['x-tug'] ||= {}) as {
-          placement?: { nodes?: string[]; labels?: string[] };
-          replicas?: number;
-          global?: boolean;
-        };
-        const placement = ext.placement || {};
-        const global = ext.global === true;
-        const labels = Array.isArray(placement.labels) ? placement.labels : [];
-        if (!placement.nodes?.length && (labels.length || global)) {
-          const matched = nodeInfos
-            .filter((node) => labels.every((label) => node.labels.includes(label)))
-            .sort((a, b) => a.name.localeCompare(b.name));
-          if (!matched.length) throw httpError(400, 'no nodes match placement labels');
-          let selected = matched;
-          if (!global) {
-            const replicas = ext.replicas || matched.length;
-            if (!Number.isInteger(replicas) || replicas < 1)
-              throw httpError(400, 'replicas must be a positive integer');
-            selected = matched.slice(0, Math.min(replicas, matched.length));
-          }
-          ext.placement = { ...placement, nodes: selected.map((node) => node.name) };
-          ext.replicas = selected.length;
-        }
-      }
-      const nodes = nodeRows.map((row) => ({ name: row.name }));
+      const nodes = resolvePlacement(compose);
       for (const [name, svc] of Object.entries(compose.services || {}))
         for (const node of svc['x-tug']?.placement?.nodes || [])
           if (!nodes.some((n) => n.name === node))
@@ -2967,6 +3022,7 @@ export async function createApp(
       }
       assertIngressHostsFree(project, compose, req.actor);
       assertNoReservedIngressPorts(compose);
+      assertNoPortClash(project, compose, req.actor);
       const misplaced = misplacedSecrets(compose);
       if (misplaced.length)
         throw httpError(
