@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // End-to-end upgrade rehearsal on a real VM, locally, with QEMU: install control and a node with a published release
 // (state in host directories, control run by Docker Compose), then upgrade the same host with this checkout:
-// `tug control migrate`, `tug node migrate`, `tug control setup` (control started with `docker run`, with the Compose
-// plugin removed from the guest) and a deploy that reads the Compose file natively.
+// `tug control migrate`, `tug control setup` (control started with `docker run`, with the Compose plugin removed from
+// the guest), `tug node migrate` and a deploy that reads the Compose file natively.
 //
 //   node tools/scripts/qemu-upgrade.js --image <arm64 cloud image> [--work <dir>] [--legacy 1.2.0] [--keep]
 //
@@ -282,7 +282,7 @@ try {
     'the refused setup left the old control running',
   );
 
-  // 5. Migrate control, then the node.
+  // 5. Migrate the control data, keeping the old control running.
   current(['control', 'migrate', target]);
   check(
     guest('docker volume inspect tug-control', { fail: false }).status === 0,
@@ -301,35 +301,10 @@ try {
   );
   await waitFor(
     'control to answer the old credential',
-    () => current(['node', 'list', '--json'], { fail: false, quiet: true }).status === 0,
+    () => legacy(['node', 'list', '--json'], { fail: false, quiet: true }).status === 0,
     60,
   );
-  current(
-    ['node', 'migrate', nodeName, target, '--agent-control-url', agentUrl, '--build-local-image'],
-    { cwd: repo },
-  );
-  check(
-    guestOut(
-      `docker run --rm --entrypoint node -v tug-agent:/s "$(docker inspect -f '{{.Config.Image}}' tug-agent)" -e '${keyHash}' /s/agent.json`,
-    ) === agentBefore,
-    'the node key moved into the tug-agent volume unchanged',
-  );
-  await waitFor(
-    'the node to report after migration',
-    () => {
-      const list = current(['node', 'list', '--json'], { fail: false, quiet: true });
-      return (
-        list.status === 0 &&
-        nodesOf(JSON.parse(list.stdout)).some(
-          (n) => n.name === nodeName && /online|connected|ok/i.test(JSON.stringify(n)),
-        )
-      );
-    },
-    120,
-  );
-  check(true, 'the migrated node reports to control with its old identity');
-
-  // 6. Control setup on the migrated host with no Compose plugin: control starts with docker run.
+  // 6. Upgrade control before migrating the node, with no Compose plugin on the guest.
   guest('apt-get remove -y docker-compose-plugin >/dev/null 2>&1');
   check(
     guest('docker compose version', { fail: false }).status !== 0,
@@ -367,6 +342,32 @@ try {
     60,
   );
 
+  // Once the new control is running, migrate the node and its identity.
+  current(
+    ['node', 'migrate', nodeName, target, '--agent-control-url', agentUrl, '--build-local-image'],
+    { cwd: repo },
+  );
+  check(
+    guestOut(
+      `docker run --rm --entrypoint node -v tug-agent:/s "$(docker inspect -f '{{.Config.Image}}' tug-agent)" -e '${keyHash}' /s/agent.json`,
+    ) === agentBefore,
+    'the node key moved into the tug-agent volume unchanged',
+  );
+  await waitFor(
+    'the node to report after migration',
+    () => {
+      const list = current(['node', 'list', '--json'], { fail: false, quiet: true });
+      return (
+        list.status === 0 &&
+        nodesOf(JSON.parse(list.stdout)).some(
+          (n) => n.name === nodeName && /online|connected|ok/i.test(JSON.stringify(n)),
+        )
+      );
+    },
+    120,
+  );
+  check(true, 'the migrated node reports to control with its old identity');
+
   // 7. What was deployed before is intact, and a new deploy reads the file natively.
   check(
     guestOut('curl -fsS localhost:8080/marker.txt').includes('legacy-data'),
@@ -374,26 +375,48 @@ try {
   );
   const secrets = current(['secret', 'list'], { quiet: true }).stdout;
   check(secrets.includes('API_KEY'), 'the secret survived the upgrade');
+  current(['var', 'set', 'CONTROL_GREETING', '--value', 'from-control'], { cwd: project });
   fs.writeFileSync(path.join(project, '.env'), 'GREETING=hello-native\n');
   fs.writeFileSync(
     path.join(project, 'compose.yaml'),
-    `services:\n  web:\n    image: nginx:1.27-alpine\n    ports: ["8080:80"]\n    environment:\n      API_KEY: \${API_KEY}\n      GREETING: \${GREETING:-none}\n    env_file: []\n    volumes:\n      - site:/usr/share/nginx/html\n    x-tug:\n      placement:\n        nodes: [${nodeName}]\n      health:\n        type: tcp\n        port: 80\nvolumes:\n  site:\n`,
+    `services:\n  web:\n    image: nginx:1.27-alpine\n    ports: ["8080:80"]\n    environment:\n      API_KEY: \${API_KEY}\n      GREETING: \${GREETING:-none}\n      CONTROL_GREETING: \${CONTROL_GREETING}\n    volumes:\n      - site:/usr/share/nginx/html\n    x-tug:\n      placement:\n        nodes: [${nodeName}]\n      health:\n        type: tcp\n        port: 80\nvolumes:\n  site:\n`,
   );
   current(['deploy', '--timeout', '300'], { cwd: project });
   const greeting = current(
-    ['exec', 'web', '--node', nodeName, '--', 'sh', '-c', 'echo $GREETING:$API_KEY'],
+    [
+      'exec',
+      'web',
+      '--node',
+      nodeName,
+      '--',
+      'sh',
+      '-c',
+      'echo $GREETING:$API_KEY:$CONTROL_GREETING',
+    ],
     { quiet: true },
   ).stdout;
   check(
-    greeting.includes('hello-native:sekret-v1'),
-    'the new deploy interpolated .env natively and delivered the migrated secret',
+    greeting.includes('none:sekret-v1:from-control'),
+    'the new deploy ignored .env and delivered the migrated secret and control variable',
+  );
+  const composePath = path.join(project, 'compose.yaml');
+  fs.writeFileSync(
+    composePath,
+    fs.readFileSync(composePath, 'utf8').replace('${GREETING:-none}', '${GREETING:?required}'),
+  );
+  const missing = current(['deploy', '--dry-run'], { cwd: project, fail: false });
+  check(
+    missing.status !== 0 &&
+      /GREETING/.test(`${missing.stdout}${missing.stderr}`) &&
+      /not set|required/i.test(`${missing.stdout}${missing.stderr}`),
+    'a required value in .env alone is rejected and named',
   );
   check(
     guestOut('curl -fsS localhost:8080/marker.txt').includes('legacy-data'),
     'the volume data is still there after the new deployment',
   );
   log(
-    'SUCCESS: legacy install upgraded in place with migrate, then control setup and a native deploy',
+    'SUCCESS: legacy install upgraded in place with migrate, control setup and a deploy using control values',
   );
 } catch (error) {
   log(`FAILED: ${error.message}`);

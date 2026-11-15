@@ -45,6 +45,7 @@ test('CLI selections mutate only chosen resources, preserve output and abort wit
           TUG_CREDENTIAL: '',
           TUG_PROJECT: 'site',
           CI: '',
+          TERM: 'xterm-256color',
           FORCE_COLOR: '0',
         },
         timeout: 60_000,
