@@ -27,7 +27,7 @@ You need Node.js 22.18 or newer on your computer and root SSH access to a Linux 
 
 tug is for people who run Compose apps (Node.js, Laravel, Ruby, WordPress and the like) on one or a few VPSes and want deploys, rollbacks, backups and HTTPS in one tool, with one control server that they back up. Your Compose file stays a Compose file: `x-tug` is a standard Compose extension that plain Docker Compose ignores. tug is open source under the MIT license.
 
-It does not schedule across a cluster, balance load between servers or replace a failed server. Node-to-node traffic uses your own private network (Tailscale, a VPC, a LAN), so you own its firewalling and encryption.
+Managed ingress balances HTTP requests across serving replicas with round robin. Cross-node service names do not balance traffic, and tug does not automatically reschedule services or replace a failed server. Node-to-node traffic uses your own private network (Tailscale, a VPC, a LAN), so you own its firewalling and encryption.
 
 ### Not for you if
 
