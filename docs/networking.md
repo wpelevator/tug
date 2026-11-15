@@ -48,7 +48,7 @@ While enabled, the work response carries `serviceEndpoints`: for each project on
 What this means for you:
 
 - **The name points at the node, not the container.** The target must publish its port (`ports: ["3306:3306"]`) and clients use the published host port. tug binds that port to the address the name resolves to, see [Published ports](#published-ports-private-by-default), and your network and firewall decide who can reach it. Rolling services differ, see [Rolling services and service names](#rolling-services-and-service-names).
-- **No load balancing.** Most resolvers use the first `/etc/hosts` entry, so a multi-node service gives failover on node loss, not round robin.
+- **Names do not balance traffic.** Address selection and connection retries depend on the client. Control withdraws failed or stale endpoints, and the client's agent applies the changed hosts entries by recreating its container; this permits reconnecting to a remaining endpoint but does not guarantee immediate or uninterrupted failover. Managed [HTTP ingress](ingress.md#what-control-renders) separately balances requests across serving replicas with round robin.
 - **Records appear after the target reports `serving`** and the client's node re-renders on its next poll, which recreates the client container when its `extra_hosts` changed. Order dependent services with health checks and expect one extra recreate on the first deploy.
 
 ## Published ports: private by default

@@ -51,10 +51,12 @@ services:
 
 Control aggregates the `ingress` blocks of every project's current deployment. For each ingress node it renders:
 
-- one site block per host (all names of a `host` list, and every mapped domain, share their route's block when their TLS mode allows) with `reverse_proxy` to every serving endpoint,
+- one site block per host (all names of a `host` list, and every mapped domain, share their route's block when their TLS mode allows) with `reverse_proxy` to every serving endpoint and `lb_policy round_robin` to distribute HTTP requests across them,
 - for a host with no serving upstream, or with `maintenance: true`, a site block that answers `503` with `Retry-After` and a short fixed text instead of proxying (listed in the work response's `ingress.warnings`, which no command shows yet), and only the first project when a host is claimed twice,
 - with `TUG_INGRESS_ACCESS_LOG=true`, a JSON access log per site on the container's output (off by default, because URLs and client IPs are personal data), and, whenever there is a route, Caddy's Prometheus metrics labelled per host on `127.0.0.1:2019/metrics` on the ingress node (never a public port),
 - with `TUG_ACME_EMAIL`, a global `email` for ACME registration.
+
+An endpoint is eligible while its agent is fresh and reports the service as `serving`; removal reaches Caddy when the ingress node's agent applies the updated configuration. Replicas must be able to handle requests interchangeably, including access to the application's sessions and uploaded files. Balancing requests does not replicate application data or provide failover for the ingress node itself.
 
 ### The Caddy container
 
