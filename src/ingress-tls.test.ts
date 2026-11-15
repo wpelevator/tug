@@ -33,22 +33,22 @@ test('tlsHosts lists names Caddy issues itself and skips wildcards, custom certi
   );
 });
 
-test('parseIssuanceErrors keeps the latest tls error per host and ignores other lines', () => {
+test('parseIssuanceErrors keeps the latest tls error per host with its time and ignores other lines', () => {
   const lines = [
-    '{"level":"error","logger":"tls.obtain","msg":"could not get certificate","identifier":"a.example.com","error":"first"}',
+    '{"level":"error","ts":1000,"logger":"tls.obtain","msg":"could not get certificate","identifier":"a.example.com","error":"first"}',
     'not json',
     '{"level":"info","logger":"tls.obtain","msg":"obtained","identifier":"a.example.com"}',
     '{"level":"error","logger":"http.log.error","msg":"x","identifier":"a.example.com","error":"other logger"}',
-    '{"level":"error","logger":"tls.issuance.acme","msg":"challenge failed","identifier":"A.example.com","error":"connection refused"}',
+    '{"level":"error","ts":2000.5,"logger":"tls.issuance.acme","msg":"challenge failed","identifier":"A.example.com","error":"connection refused"}',
     '{"level":"warn","logger":"tls.obtain","msg":"will retry","domain":"b.example.com"}',
   ].join('\n');
   assert.deepEqual(
-    [...parseIssuanceErrors(lines)],
+    [...parseIssuanceErrors(lines, 5)],
     [
-      ['a.example.com', 'connection refused'],
-      ['b.example.com', 'will retry'],
+      ['a.example.com', { reason: 'connection refused', at: 2_000_500 }],
+      ['b.example.com', { reason: 'will retry', at: 5 }],
     ],
-    'the last warn or error line from a tls logger names each host and explains its state',
+    'the last warn or error line from a tls logger names each host and explains its state; a line without ts takes the scan time',
   );
 });
 
@@ -77,8 +77,7 @@ test('the monitor reports pending, then failed with the logged reason, then issu
   assert.equal(probes.length, 1, 'a not-yet-issued host is not re-probed on every poll');
 
   time += 60_000;
-  log =
-    '{"level":"error","logger":"tls.obtain","msg":"could not get certificate","identifier":"a.example.com","error":"connection refused on port 80"}';
+  log = `{"level":"error","ts":${time / 1000},"logger":"tls.obtain","msg":"could not get certificate","identifier":"a.example.com","error":"connection refused on port 80"}`;
   [cert] = await monitor.check(routes, docker);
   assert.equal(probes.length, 2, 'it is re-probed after the retry interval');
   assert.equal(cert.state, 'failed', 'a logged issuance error turns pending into failed');
@@ -107,6 +106,63 @@ test('the monitor reports pending, then failed with the logged reason, then issu
   assert.deepEqual(await monitor.check([], docker), [], 'a host that left the config is dropped');
 });
 
+test("a failure stays failed after Caddy's log scrolls the error away, and clears only on issuance", async () => {
+  let time = Date.parse('2026-11-15T10:00:00Z');
+  let issued = false;
+  let log = '';
+  const monitor = createTlsMonitor({
+    probe: async () =>
+      issued
+        ? { ok: true, notAfter: '2027-02-01T00:00:00.000Z' }
+        : { ok: false, error: 'tlsv1 alert internal error' },
+    now: () => time,
+    readLog: async () => log,
+  });
+  const docker = new FakeDocker();
+  const routes = [route({})];
+  await monitor.check(routes, docker);
+  time += 61_000;
+  log = `{"level":"error","ts":${time / 1000},"logger":"tls.obtain","identifier":"a.example.com","error":"port 80 refused"}`;
+  let [cert] = await monitor.check(routes, docker);
+  assert.equal(cert.state, 'failed', 'a logged ACME error makes the host failed');
+  const since = cert.since;
+  time += 61_000;
+  log = '{"level":"info","logger":"http.log.access","msg":"handled request"}';
+  [cert] = await monitor.check(routes, docker);
+  assert.equal(
+    cert.state,
+    'failed',
+    'an error that scrolled out of the log tail must not revert to pending',
+  );
+  assert.equal(cert.error, 'port 80 refused', 'the reason is remembered');
+  assert.equal(cert.since, since, 'since does not reset when the evidence scrolls away');
+  issued = true;
+  time += 61_000;
+  [cert] = await monitor.check(routes, docker);
+  assert.equal(cert.state, 'issued', 'issuance clears the failure');
+});
+
+test('log errors from before the host was first seen or before it last had a certificate are ignored', async () => {
+  let time = Date.parse('2026-11-15T10:00:00Z');
+  let log = '';
+  const monitor = createTlsMonitor({
+    probe: async () => ({ ok: false, error: 'refused' }),
+    now: () => time,
+    readLog: async () => log,
+  });
+  const docker = new FakeDocker();
+  const old = `{"level":"error","ts":${(time - 3_600_000) / 1000},"logger":"tls.obtain","identifier":"a.example.com","error":"last week\\'s failure"}`;
+  log = old;
+  await monitor.check([route({})], docker);
+  time += 61_000;
+  const [cert] = await monitor.check([route({})], docker);
+  assert.equal(
+    cert.state,
+    'pending',
+    'an error logged before the monitor saw the host describes an earlier life of the name',
+  );
+});
+
 test('the monitor survives a failing log read', async () => {
   const monitor = createTlsMonitor({
     probe: async () => ({ ok: false, error: 'refused' }),
@@ -116,6 +172,30 @@ test('the monitor survives a failing log read', async () => {
   });
   const [cert] = await monitor.check([route({})], new FakeDocker());
   assert.equal(cert.state, 'pending', 'an unreadable log leaves the host pending, not broken');
+});
+
+test('a hung probe or log read cannot hold the caller beyond the check wait', async () => {
+  const never = new Promise<never>(() => {});
+  const hungProbe = createTlsMonitor({ probe: () => never, checkWaitMs: 30 });
+  const started = Date.now();
+  const [cert] = await hungProbe.check([route({})], new FakeDocker());
+  assert.ok(Date.now() - started < 1000, 'check answers from what it knows once the wait elapses');
+  assert.equal(cert.state, 'pending', 'a host whose probe has not finished reads pending');
+  assert.equal(cert.error, 'not probed yet', 'and says it has not been probed');
+
+  const hungLog = createTlsMonitor({
+    probe: async () => ({ ok: false, error: 'refused' }),
+    readLog: () => never,
+    logTimeoutMs: 20,
+    checkWaitMs: 500,
+  });
+  const begun = Date.now();
+  const [after] = await hungLog.check([route({})], new FakeDocker());
+  assert.ok(
+    Date.now() - begun < 450,
+    'a log read that never returns is cut off by its own timeout',
+  );
+  assert.equal(after.error, 'refused', 'the probe result still reports');
 });
 
 test('probeTls separates a covering certificate from a handshake failure and a wrong name', async () => {

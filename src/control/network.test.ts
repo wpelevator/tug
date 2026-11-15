@@ -919,6 +919,19 @@ test('ingress certificate state reaches doctor, status, domain list and the admi
     await reportCerts([
       { host: 'map.example.org', state: 'failed', since: ago(1000), error: 'connection refused' },
     ]);
+    assert.equal(
+      (await doctor()).ok,
+      true,
+      'a first ACME error moments ago is a domain still being set up, so doctor waits for the grace period',
+    );
+    await reportCerts([
+      {
+        host: 'map.example.org',
+        state: 'failed',
+        since: ago(11 * 60_000),
+        error: 'connection refused',
+      },
+    ]);
     const failed = await doctor();
     assert.match(
       String(failed.error),

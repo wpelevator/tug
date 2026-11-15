@@ -286,7 +286,7 @@ const liveDimension = (value: unknown) =>
 const liveBase64 = (value: unknown): value is string =>
   typeof value === 'string' &&
   /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value);
-/** How long a host may wait for its first certificate before `tug doctor` fails: DNS and port 80 can lag a new domain. */
+/** How long a host may lack a certificate, pending or failing its first attempts, before `tug doctor` fails: DNS and port 80 can lag a new domain. */
 const PENDING_TLS_GRACE_MS = 10 * 60_000;
 
 function parseLiveRequest(value: unknown): LiveRequest {
@@ -4550,8 +4550,7 @@ export async function createApp(
           (certs ?? [])
             .filter(
               (c) =>
-                c.state === 'failed' ||
-                (c.state === 'pending' && Date.now() - Date.parse(c.since) > PENDING_TLS_GRACE_MS),
+                c.state !== 'issued' && Date.now() - Date.parse(c.since) > PENDING_TLS_GRACE_MS,
             )
             .map((c) => `${c.host} on ${node} (${c.state}${c.error ? `: ${c.error}` : ''})`),
         );

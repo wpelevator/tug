@@ -132,9 +132,9 @@ The same state appears elsewhere:
 
 - `tug domain list` adds a `tls` entry per ingress node to each mapped domain.
 - `tug status` adds a count to an ingress node with hosts that have no certificate yet, so `serving` is not read as reachable. It is a count because host names span projects, so the names stay behind `tug ingress tls`.
-- `tug doctor` fails the `ingress` check for a host that is `failed`, or `pending` for more than ten minutes, and names the host, the node and the reason.
+- `tug doctor` fails the `ingress` check for a host that has been `pending` or `failed` for more than ten minutes, which leaves time for DNS and port 80 to be fixed on a new domain, and names the host, the node and the reason.
 
-Only names Caddy issues itself are checked: `tls: auto` hosts and mapped domains. Wildcard names are skipped, because a probe would trigger on-demand issuance for a name nobody asked for, and so are `tls: custom` hosts, whose certificate you supply. The reason comes from Caddy's JSON log and is best effort: an unrecognized log format costs the reason, never the state. Probing is throttled to every twenty seconds for a host without a certificate and hourly for one with, so a fix shows within about half a minute.
+Only names Caddy issues itself are checked: `tls: auto` hosts and mapped domains. Wildcard names are skipped, because a probe would trigger on-demand issuance for a name nobody asked for, and so are `tls: custom` hosts, whose certificate you supply. The reason comes from Caddy's JSON log and is best effort: an unrecognized log format costs the reason, never the state. Probing is throttled to every twenty seconds for a host without a certificate and hourly for one with, and runs beside the agent's polling, so a slow handshake or log read never delays routing updates. A fix shows once Caddy issues the certificate, which can take minutes because Caddy retries failed orders with backoff. The `since` time and a remembered failure reason are kept by the agent process, so an agent restart starts them again.
 
 ### Wildcard hosts are issued name by name
 
