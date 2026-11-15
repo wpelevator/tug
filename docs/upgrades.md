@@ -39,7 +39,7 @@ Upgrade and rollback preserve every supported IPv4 and IPv6 binding for the mTLS
 
 ## How version skew is checked
 
-Tug trusts [semver](https://semver.org). The compatibility key of a version is its major, or the whole `0.minor` while the major is 0, because semver promises nothing for 0.x. Control, CLI and agents interoperate when their compatibility keys match. Inside one major a newer minor only adds, and a patch never changes what they say to each other. See [Choosing the bump](releases.md#choosing-the-bump).
+tug trusts [semver](https://semver.org). The compatibility key of a version is its major, or the whole `0.minor` while the major is 0, because semver promises nothing for 0.x. Control, CLI and agents interoperate when their compatibility keys match. Inside one major a newer minor only adds, and a patch never changes what they say to each other. See [Choosing the bump](releases.md#choosing-the-bump).
 
 Version information rides ordinary traffic as headers, so there is no dedicated round trip:
 

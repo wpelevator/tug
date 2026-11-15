@@ -1,6 +1,6 @@
 # Compose extensions
 
-Tug deploys a standard Docker Compose file. The `x-tug` extension on services and volumes adds placement, health checks, ingress, rollouts and backups, and plain Docker Compose ignores it.
+tug deploys a standard Docker Compose file. The `x-tug` extension on services and volumes adds placement, health checks, ingress, rollouts and backups, and plain Docker Compose ignores it.
 
 ```yaml
 # yaml-language-server: $schema=https://unpkg.com/@wpelevator/tug/x-tug.schema.json
@@ -119,7 +119,7 @@ A host with no serving upstream gets the same `503` automatically. `tug domain a
 
 ### Names across nodes
 
-A service on another node is reachable by name (`db` or `db.<project>.tug`) when the target publishes its port and the client's node can route to the target node's private `address`. Tug binds the port to that address, and your firewall controls access. The agent adds these names as hosts-file (`extra_hosts`) entries, not DNS records. Set `TUG_SERVICE_NAMES=false` on control to turn them off. See [Networking](networking.md#cross-node-service-names).
+A service on another node is reachable by name (`db` or `db.<project>.tug`) when the target publishes its port and the client's node can route to the target node's private `address`. tug binds the port to that address, and your firewall controls access. The agent adds these names as hosts-file (`extra_hosts`) entries, not DNS records. Set `TUG_SERVICE_NAMES=false` on control to turn them off. See [Networking](networking.md#cross-node-service-names).
 
 An app reaches a database through Compose DNS only when both are on the same node. Local volumes are not copied between nodes.
 
@@ -213,11 +213,11 @@ volumes:
 
 Control records volumes per project. A node's Compose file includes a volume only when a service on that node uses it and, if the volume has `placement.nodes`, the node is listed. `tug volume remove` refuses a persistent volume without `--delete-data`, and refuses any volume still referenced by the current deployment. `--delete-data` queues a `docker volume rm` on the volume's placement node.
 
-Before starting workloads, the agent checks that an existing Tug project network belongs to the project and that each existing non-external volume has the expected project and volume labels, driver and options. A mismatch stops reconciliation with an error instead of reusing the resource. Volume deletion checks the same labels. Tug reserves the `tug.project`, `tug.volume` and `tug.restore` labels on managed volumes. External volumes are selected by name and are not checked.
+Before starting workloads, the agent checks that an existing tug project network belongs to the project and that each existing non-external volume has the expected project and volume labels, driver and options. A mismatch stops reconciliation with an error instead of reusing the resource. Volume deletion checks the same labels. tug reserves the `tug.project`, `tug.volume` and `tug.restore` labels on managed volumes. External volumes are selected by name and are not checked.
 
 ### Sharing a directory between nodes
 
-Tug does not manage network file systems. Mount one with plain Compose `driver: local` and `driver_opts` against a server you run, and install the NFS client (`nfs-common` on Debian and Ubuntu) on every node that uses it:
+tug does not manage network file systems. Mount one with plain Compose `driver: local` and `driver_opts` against a server you run, and install the NFS client (`nfs-common` on Debian and Ubuntu) on every node that uses it:
 
 ```yaml
 volumes:
@@ -259,8 +259,8 @@ volumes:
 
 `x-tug.backup` marks a target, and there are two kinds:
 
-- **A service.** Tug runs your `command` in the running container and stores its standard output. A database dump, `pg_dump`, `redis-cli --rdb -`, `tar` of a directory or `wp db export -` are all commands. A string runs through `sh -c`, and a list runs as written.
-- **A top-level volume.** Tug mounts it read-only and archives its files.
+- **A service.** tug runs your `command` in the running container and stores its standard output. A database dump, `pg_dump`, `redis-cli --rdb -`, `tar` of a directory or `wp db export -` are all commands. A string runs through `sh -c`, and a list runs as written.
+- **A top-level volume.** tug mounts it read-only and archives its files.
 
 The value is a cron string, `true` (a volume, with everything from the project defaults), `false`, or an object. The top-level `x-tug.backup` holds defaults and enables nothing.
 
@@ -273,14 +273,14 @@ The value is a cron string, `true` (a volume, with everything from the project d
 | `memory` | both | Memory limit of the restic helper, `128m` to `16g` | `512m` |
 | `writers` | both | Services to hold during a restore | Discovered from `depends_on`, host names in environment variables and volume mounts |
 | `command` | service | What to run in the container. Its output is the backup | required |
-| `restore` | service | What to run to load a backup back. The stored file arrives on standard input | none, so Tug cannot restore the service |
+| `restore` | service | What to run to load a backup back. The stored file arrives on standard input | none, so tug cannot restore the service |
 | `filename` | service | Name of the file in the snapshot | `<service>.out` |
 | `verify` | service | Text that must appear in the last 4 KiB of output | none |
 | `exclude` | volume | restic exclude patterns | none |
 
 A run fails, and keeps no snapshot, when the command exits non-zero, writes nothing, or lacks the `verify` text. Use the line your tool prints when it finishes, such as `-- Dump completed`, so a cut-short dump is never mistaken for a good one.
 
-Deploy rejects a service target that is global, replicated or placed on several nodes, and a volume used on several nodes without `placement.nodes`. Tug does not check whether a volume backup and a command backup overlap, or whether a volume holds a live database. Copying the files of a running database is rarely consistent, so back databases up with a command. Recipes are in [Backups](backups.md#recipes).
+Deploy rejects a service target that is global, replicated or placed on several nodes, and a volume used on several nodes without `placement.nodes`. tug does not check whether a volume backup and a command backup overlap, or whether a volume holds a live database. Copying the files of a running database is rarely consistent, so back databases up with a command. Recipes are in [Backups](backups.md#recipes).
 
 ## Where values come from
 
@@ -293,7 +293,7 @@ Every `${NAME}` in a Compose file is filled from **control**, or from the defaul
 | `--var NAME=value` | `tug deploy --var` | Recorded on the deployment, with its value | Anywhere a variable can | That deploy only | Restores the value it had |
 | Default in the file | `${NAME:-default}` | In the Compose file | Anywhere | The next deploy | Restores it |
 
-- **Secret or variable.** A name is one or the other in a project. Use a secret for anything private, and a variable for configuration that is fine to read, such as an image tag, host name or port, which control and the agent must see before a container exists. A secret in `image`, `ports`, `volumes`, `labels` or `x-tug` is rejected, naming the field and suggesting `tug var set`. Tug never guesses which names are private, and `tug secret import` makes everything a secret unless you name variables.
+- **Secret or variable.** A name is one or the other in a project. Use a secret for anything private, and a variable for configuration that is fine to read, such as an image tag, host name or port, which control and the agent must see before a container exists. A secret in `image`, `ports`, `volumes`, `labels` or `x-tug` is rejected, naming the field and suggesting `tug var set`. tug never guesses which names are private, and `tug secret import` makes everything a secret unless you name variables.
 - **Roles.** Setting a secret needs `admin`. Variables need `deploy`, so CI can run `tug var set` or pass `--var TAG=$GITHUB_SHA`. A `--var` cannot replace a secret, and its value is recorded in plain text.
 - **Checking.** The deploy output reports the sources (`Values: 4 secrets, 2 vars, 1 --var (TAG), 1 default`). `tug deploy --dry-run` prints every referenced name with its source and stops. The deployment records the same list (`values` in `--json` and in `GET /api/v1/deployments/:id`) without secret values.
 - **Missing values.** A missing value fails with the names and the commands that set them. In a terminal, `deploy` offers to generate a secret, enter one, or enter a variable.
@@ -373,7 +373,7 @@ A file that uses `include`, an `!reset` or `!override` tag, or a non-dotenv `env
 
 ## Not supported
 
-- `container_name`. Tug names containers `tug-<project>-<service>-<hash8>` so projects stay isolated.
+- `container_name`. tug names containers `tug-<project>-<service>-<hash8>` so projects stay isolated.
 - `deploy`, which has Swarm semantics.
 
 ## Supported keys
@@ -382,7 +382,7 @@ A file that uses `include`, an `!reset` or `!override` tag, or a non-dotenv `env
 | --- | --- |
 | Service | `image`, `build`, `command`, `entrypoint`, `environment`, `ports`, `expose`, `volumes` (named volumes and absolute bind mounts), `tmpfs`, `healthcheck`, `restart`, `labels`, `depends_on` (`service_started`, `service_healthy`), `extra_hosts`, `user`, `working_dir`, `hostname`, `init`, `read_only`, `shm_size`, `mem_limit`, `mem_reservation`, `cpus`, `pids_limit`, `cap_add`, `cap_drop`, `ulimits`, `logging`, `stop_grace_period`, `stop_signal`, `x-tug` |
 | Top-level volume | `driver`, `driver_opts`, `labels`, `external`, `name`, `x-tug` |
-| Ignored | `pull_policy`, because Tug decides when images change |
+| Ignored | `pull_policy`, because tug decides when images change |
 | Rejected, with the key named | Everything else, including `network_mode`, `privileged`, `devices`, `pid`, `ipc`, `container_name`, `env_file`, custom networks, and top-level `configs` and `secrets` |
 
-Containers use Tug's own network, volume and container names (`tug_<project>`, `tug_v<project-length>_<project>_<volume>`), so existing Compose-created volumes are not reused. If an owned volume exists under an earlier Tug name and its new-name volume does not, Tug refuses to create an empty replacement or restart the workload. The older volume stays on the node, so recover or copy its data before deploying.
+Containers use tug's own network, volume and container names (`tug_<project>`, `tug_v<project-length>_<project>_<volume>`), so existing Compose-created volumes are not reused. If an owned volume exists under an earlier tug name and its new-name volume does not, tug refuses to create an empty replacement or restart the workload. The older volume stays on the node, so recover or copy its data before deploying.

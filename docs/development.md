@@ -98,7 +98,7 @@ Services with `build:` upload the current directory and control builds and store
 
 `tests/integration/compose/docker-compose.sample.yml` is a three-service sample app with explicit placement: `web` on `vps-a`, `worker` on `vps-b`, `cache` on `vps-c`.
 
-`tests/integration/compose/docker-compose.integration.yml` starts a control plane and three fake VPSes. On macOS/Docker Desktop each fake VPS is a privileged Linux container with its own Docker daemon and Tug agent, so agents apply containers into isolated Docker environments through their own Engine API rather than the host daemon.
+`tests/integration/compose/docker-compose.integration.yml` starts a control plane and three fake VPSes. On macOS/Docker Desktop each fake VPS is a privileged Linux container with its own Docker daemon and tug agent, so agents apply containers into isolated Docker environments through their own Engine API rather than the host daemon.
 
 ```bash
 npm run test:integration

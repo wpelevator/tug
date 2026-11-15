@@ -1,6 +1,6 @@
 # Releases
 
-Tug is published as the npm package [`@wpelevator/tug`](https://www.npmjs.com/package/@wpelevator/tug) (bins `tug` and `tug-runtime`) and as the multi-arch (`linux/amd64`, `linux/arm64`) Docker image `ghcr.io/wpelevator/tug`. The package and image always share one version, and the CLI's install commands default to the image with the CLI's own version.
+tug is published as the npm package [`@wpelevator/tug`](https://www.npmjs.com/package/@wpelevator/tug) (bins `tug` and `tug-runtime`) and as the multi-arch (`linux/amd64`, `linux/arm64`) Docker image `ghcr.io/wpelevator/tug`. The package and image always share one version, and the CLI's install commands default to the image with the CLI's own version.
 
 ## Changesets
 
@@ -14,7 +14,7 @@ It asks for the bump (`patch`, `minor` or `major`) and a summary, and writes a M
 
 ## Choosing the bump
 
-Tug trusts semver, and the control, CLI and agents enforce it (see [Upgrading the control plane](upgrades.md)): they interoperate while their major matches, and a client on a newer major than its control is refused. The bump in a changeset is therefore a compatibility promise, not a measure of how big the change feels:
+tug trusts semver, and the control, CLI and agents enforce it (see [Upgrading the control plane](upgrades.md)): they interoperate while their major matches, and a client on a newer major than its control is refused. The bump in a changeset is therefore a compatibility promise, not a measure of how big the change feels:
 
 - `patch`: fixes and changes that do not alter what the control, CLI and agents say to each other, including documentation.
 - `minor`: new features. Additive wire changes (a new route, an optional field, a new agent command) are minor: older peers keep working, and a newer CLI against an older control reports the missing route.

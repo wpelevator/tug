@@ -156,8 +156,8 @@ The same risk vocabulary drives the plan output and the `denyRisks` caveat. It i
 
 | System | What it gives | Decision |
 | --- | --- | --- |
-| Cedar, OPA/Rego, Casbin | Expressive policy languages | Not adopted. The vocabulary is about 50 operations and 6 dimensions with typed caveats; a language adds a dependency (Tug leans on built-ins and a standalone binary), analysis burden and the chance to write an unsafe policy. The data stays Cedar-shaped for a later swap. |
-| OpenFGA, SpiceDB (Zanzibar) | Relationship-based access | Needs a service and a relation model Tug does not have |
+| Cedar, OPA/Rego, Casbin | Expressive policy languages | Not adopted. The vocabulary is about 50 operations and 6 dimensions with typed caveats; a language adds a dependency (tug leans on built-ins and a standalone binary), analysis burden and the chance to write an unsafe policy. The data stays Cedar-shaped for a later swap. |
+| OpenFGA, SpiceDB (Zanzibar) | Relationship-based access | Needs a service and a relation model tug does not have |
 | Macaroons, Biscuit | Offline attenuation by the holder | Introduce bearer tokens, against the model. Control is local and minting is a cheap call, so offline attenuation buys little. |
 | Kubernetes RBAC | Verbs × resources × names, access review | Closest in shape. Copy the review endpoint and additive rules; skip roles and bindings. |
 | AWS STS session policies | Effective authority is the intersection with the parent | Copied: it removes the need for a subset check |

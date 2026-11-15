@@ -77,7 +77,7 @@ After an older restore:
 
 Remote builds save immutable images under `<data dir>/images/<build ID>.tar.gz`. Agents download only the images assigned to them through `GET /agent/v1/images/:buildId`, verify the compressed SHA-256 and byte count, validate the saved image metadata and load the archive, with no registry pull. No registry certificate, daemon trust change or inbound connection to a node is needed, and downloads use the same mTLS connection as every other agent request.
 
-`tug deploy --build-local` builds on your machine and uploads archives instead of source. Control validates and imports them, gives them immutable tags and serves them to assigned agents. Builds are single-platform Linux images (amd64 or arm64), so use a Docker builder matching the target nodes. Agents reject an incompatible platform before starting it. This flag is distinct from the installers' development-only `--build-local-image`, which builds the Tug runtime itself.
+`tug deploy --build-local` builds on your machine and uploads archives instead of source. Control validates and imports them, gives them immutable tags and serves them to assigned agents. Builds are single-platform Linux images (amd64 or arm64), so use a Docker builder matching the target nodes. Agents reject an incompatible platform before starting it. This flag is distinct from the installers' development-only `--build-local-image`, which builds the tug runtime itself.
 
 ### Pruning
 
@@ -90,13 +90,13 @@ All published desired-state history is retained, and its image archives remain u
 | Rollback to a pruned build | Refused. The desired states stay in history, but the service must be deployed again |
 | Identical rebuilds | A rebuild whose image ID equals one the project already has reuses that archive. The new deployment points at the existing build, no second archive is saved and the new per-deployment tag is removed. Nodes already hold that image, so they download nothing and keep the running container |
 | Cleanup | Removes failed unpublished builds and orphan archives |
-| Agents | Prune only their recorded, unused Tug images that are absent from their authorized retained set, and never run a global Docker prune. An image whose archive was pruned leaves that set, so pruning on control also frees node disk once no container uses the image |
+| Agents | Prune only their recorded, unused tug images that are absent from their authorized retained set, and never run a global Docker prune. An image whose archive was pruned leaves that set, so pruning on control also frees node disk once no container uses the image |
 
 Each changed image is stored and transferred as a complete compressed image, with no layer sharing between archives. Never delete files under `images/` in control's data volume by hand: the database would still list them and nodes would get a 404.
 
 ## Published images and private registries
 
-Control resolves each distinct published image tag once per deployment through the registry HTTPS manifest API and stores its SHA-256 digest in both desired service state and canonical Compose. Multi-platform images keep their complete index digest, so each node selects its architecture from the same immutable index. An explicit SHA-256 pin is validated and kept without a network lookup. If resolution fails, the deployment fails before replacing current desired state. Rollback and scaling reuse the stored pins without resolving tags again. Registries must keep pinned manifests and layers for rollback and fresh-node pulls, because Tug does not mirror published images.
+Control resolves each distinct published image tag once per deployment through the registry HTTPS manifest API and stores its SHA-256 digest in both desired service state and canonical Compose. Multi-platform images keep their complete index digest, so each node selects its architecture from the same immutable index. An explicit SHA-256 pin is validated and kept without a network lookup. If resolution fails, the deployment fails before replacing current desired state. Rollback and scaling reuse the stored pins without resolving tags again. Registries must keep pinned manifests and layers for rollback and fresh-node pulls, because tug does not mirror published images.
 
 Private registry credentials live in the encrypted project secret `TUG_REGISTRY_AUTH`, a JSON object keyed by registry host (with a port when applicable):
 
@@ -119,7 +119,7 @@ Give the value on stdin.
 | Who sees them | Control decrypts the secret for resolution. Assigned agents receive only credentials for their published image hosts through the authenticated secrets endpoint and pass them directly as Engine API `X-Registry-Auth`. They stay out of desired state, container environments and Docker login files, and referencing the reserved secret in a service definition is rejected |
 | Rotation | Updates apply to future pull requests, including retries and rollback. Keep access to retained image digests when rotating credentials |
 
-Tug issues one node identity (key and certificate) per node. It does not push built images, manage registry users or log agents into registries. Teams that build images in CI push them themselves and deploy with `image:`.
+tug issues one node identity (key and certificate) per node. It does not push built images, manage registry users or log agents into registries. Teams that build images in CI push them themselves and deploy with `image:`.
 
 ## Backup and restore
 
@@ -145,7 +145,7 @@ For a planned move of the whole installation, including workloads, see [Migratin
 Keep control's public host name when you move it, because credentials verify that name. Only the connect address may change. Restore workload data separately from its project backups. Keep the control backup encrypted off the host, and keep the original operator credential and backup repository passwords separately, because the control archive contains the master key and private CA.
 
 1. **Isolate the old control.** Stop or isolate it before directing agents to the replacement. Two active control planes with divergent state are not a supported failover setup. Running workload containers keep serving while control is unavailable.
-2. **Install the replacement.** Run `tug control setup` on the new host with the matching Tug release, writing its temporary bootstrap credential to a private file. This initializes a new control and CA solely to authorize the restore.
+2. **Install the replacement.** Run `tug control setup` on the new host with the matching tug release, writing its temporary bootstrap credential to a private file. This initializes a new control and CA solely to authorize the restore.
 3. **Restore the backup.** Choose where it comes from, and run the same command without `--confirm` first to check the backup and print what it holds.
 
    | Source | Command |

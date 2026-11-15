@@ -29,7 +29,7 @@ Control also backs itself up to the same destination every night, see [Control p
 
 ## Plan for recovery
 
-Workload snapshots hold application data. Control archives hold Tug state and keys. Store both away from the VPS, and keep their credentials and passwords somewhere you can reach if the server is lost.
+Workload snapshots hold application data. Control archives hold tug state and keys. Store both away from the VPS, and keep their credentials and passwords somewhere you can reach if the server is lost.
 
 | What | How to protect it | What to keep for recovery |
 | --- | --- | --- |
@@ -39,7 +39,7 @@ Workload snapshots hold application data. Control archives hold Tug state and ke
 | Control state, secrets, private CA, master key | Automatic once a destination is set. `tug control backup` stores one on demand, and `tug control backup -o <file>` saves an archive on your machine. None includes workload data | The control password (`tug backup password --control`) and the destination credentials, see [control recovery](control-plane.md#recover-control-on-another-host) |
 | Compose file and source | Keep them in version control | Access to the repository and any external dependencies |
 
-Tug backs up each target separately. If your app needs a consistent point-in-time copy, plan how to stop writes and coordinate external storage.
+tug backs up each target separately. If your app needs a consistent point-in-time copy, plan how to stop writes and coordinate external storage.
 
 ## How scheduled backups run
 
@@ -47,7 +47,7 @@ Control's scheduler ticks every 30 seconds (`TUG_BACKUP_TICK_MS`). At each slot 
 
 | Target | What happens |
 | --- | --- |
-| Service | Runs your `command` through an exec in the running container and streams its output into `restic backup --stdin`, so no staging disk is needed. The command sees the container's environment, including its secrets, so read passwords from the environment (`$MARIADB_ROOT_PASSWORD`) and they never appear in Tug's configuration, payloads or events. A command that fails, writes nothing or lacks the `verify` text is never kept: the partial snapshot is forgotten and the run fails. The service must be running on the node |
+| Service | Runs your `command` through an exec in the running container and streams its output into `restic backup --stdin`, so no staging disk is needed. The command sees the container's environment, including its secrets, so read passwords from the environment (`$MARIADB_ROOT_PASSWORD`) and they never appear in tug's configuration, payloads or events. A command that fails, writes nothing or lacks the `verify` text is never kept: the partial snapshot is forgotten and the run fails. The service must be running on the node |
 | Volume | Mounted read-only into the restic container and archived, with your `exclude` patterns. A volume that does not exist on the node fails the run instead of backing up an empty one |
 | Retention | Runs after each successful backup (`restic forget --prune` per node and target). Snapshots tagged `trigger:pre-restore` are kept regardless |
 
@@ -55,7 +55,7 @@ Restic runs in a helper container with a memory limit, labelled `tug.job` and re
 
 ## Recipes
 
-Tug has no database support of its own. Each recipe is a command for the service container. In a Compose file, use `$$` for variables the container shell must expand, because a single `$` is interpolated on your machine before deployment. Read credentials from the container environment, write the data to standard output, and give `verify` the line the tool prints on success.
+tug has no database support of its own. Each recipe is a command for the service container. In a Compose file, use `$$` for variables the container shell must expand, because a single `$` is interpolated on your machine before deployment. Read credentials from the container environment, write the data to standard output, and give `verify` the line the tool prints on success.
 
 ```yaml
 # MariaDB (use mysqldump and MYSQL_ROOT_PASSWORD for MySQL)
@@ -86,7 +86,7 @@ backup:
   restore: tar -C /var/www/html -xf -
 ```
 
-`mariadb-dump` and `mysqldump` do not dump users and grants, which come from the image's init environment. A service has one backup command, so to include PostgreSQL roles, chain them: `sh -c 'pg_dumpall --globals-only; pg_dump ...'`. Each recipe has a `restore:` command that reads the stored file on standard input, so `tug restore run <service> --confirm` can load it back. Without `restore:`, Tug refuses to restore the service. To check a snapshot by hand, run `restic dump <snapshot> wordpress.sql | mariadb ...`.
+`mariadb-dump` and `mysqldump` do not dump users and grants, which come from the image's init environment. A service has one backup command, so to include PostgreSQL roles, chain them: `sh -c 'pg_dumpall --globals-only; pg_dump ...'`. Each recipe has a `restore:` command that reads the stored file on standard input, so `tug restore run <service> --confirm` can load it back. Without `restore:`, tug refuses to restore the service. To check a snapshot by hand, run `restic dump <snapshot> wordpress.sql | mariadb ...`.
 
 ## Watch your backups
 
@@ -122,7 +122,7 @@ Restores are as generic as backups:
 
 `tug restore` returns when the data is back and the services it stopped report serving again, or after five minutes with a warning. An in-place restore goes in order:
 
-| Step | What Tug does |
+| Step | What tug does |
 | --- | --- |
 | 1. Lock | Locks the project, so a deploy, rollback or secret change gets a clear refusal while it runs |
 | 2. Stop writers | Stops the `writers` you named, or the ones discovered from `depends_on`, host names in environment variables such as `WORDPRESS_DB_HOST=db` or `mysql://u@db:3306/app` (for a service), or volume mounts (for a volume), including everything that depends on them. If none are found it refuses unless you pass `--writers` or `--no-writers`, because an app that reaches the database without `depends_on` is the hole in discovery |
@@ -131,7 +131,7 @@ Restores are as generic as backups:
 
 - **Stalls.** A restore whose restic command makes no progress for ten minutes ends as `interrupted` with the reason, and the writers stay stopped.
 - **Failures.** If the restore fails, the writers stay stopped and the project stays locked, because a half-restored database serving traffic is worse than an outage. `tug restore resume <id>` tries again, and `tug restore release <id>` starts the services anyway.
-- **Same-target snapshots only.** A snapshot can be restored only into the target that produced it (its `project:` and `target:` tags are checked). Tug does not restore a snapshot into a different project.
+- **Same-target snapshots only.** A snapshot can be restored only into the target that produced it (its `project:` and `target:` tags are checked). tug does not restore a snapshot into a different project.
 - **Scheduled backups** of a target are skipped while it is being restored.
 - **Events:** `restore.started`, `restore.completed`, `restore.failed`, `restore.released`.
 - **Health checks through a writer.** While a writer is held, a service that health-checks through it (an nginx check that requests a PHP page) is unhealthy, so its node reports a failed apply and the deployment looks failed until the hold ends. Give such services a check that does not depend on the writer (a static `/healthz`). If a writer never reports held within five minutes, the restore fails and the error names the node, the writer's state and the apply error.
@@ -150,9 +150,9 @@ A backup you have not restored is a hope. Start with an isolated restore that ch
 This is a manual procedure, not automatic failover. It was exercised with the published 0.9.0 release in the [real-host drill](real-host-evaluation.md#recovery-drill-with-the-published-090-release-2-november-2026) and again with S3-compatible backups and named volumes on the 1.0.0 candidate ([drill](real-host-evaluation.md#recovery-drill)). The original host was simulated as unavailable while control and the backup destination stayed available. Restore control first if it is also lost.
 
 1. **Fence and enroll.** Fence the lost node, or otherwise ensure its old workloads cannot write to shared services. Enroll the replacement node and check that it is online. Keep the recovery site private while its database and volumes are empty, and never expose a fresh WordPress installer.
-2. **Move placement and deploy.** Change the project's service and volume placement to the replacement node and deploy the same project with the retained images, configuration and secrets. Tug refuses until you acknowledge that stateful services start empty: add `--move <service>` for each one it names (`--move db --move wordpress`). It then holds the services that write to them, including a writer that moved too. The replacement uses fresh local volumes, so deploying alone does not restore their contents.
+2. **Move placement and deploy.** Change the project's service and volume placement to the replacement node and deploy the same project with the retained images, configuration and secrets. tug refuses until you acknowledge that stateful services start empty: add `--move <service>` for each one it names (`--move db --move wordpress`). It then holds the services that write to them, including a writer that moved too. The replacement uses fresh local volumes, so deploying alone does not restore their contents.
 3. **Preview each restore.** Run `tug backup list`, then `tug restore run db` and `tug restore run wp-content` without `--confirm`. Check that each plan names the replacement node and the snapshot you want. If the latest is not the one, use `--from` with the backup run or snapshot id. Never confirm a plan aimed at the wrong host.
-4. **Restore and verify.** Run the printed commands with `--confirm`. Tug takes a safety backup and stops the writers, so wait for each restore to finish and investigate any warning. Verify known database content and uploaded files, probe the app, then re-enable traffic and update DNS or routing.
+4. **Restore and verify.** Run the printed commands with `--confirm`. tug takes a safety backup and stops the writers, so wait for each restore to finish and investigate any warning. Verify known database content and uploaded files, probe the app, then re-enable traffic and update DNS or routing.
 
 This does not restore data that was never backed up, external services, DNS, or changes after the selected snapshots. A live workload can write new data during recovery unless traffic and other writers are fenced, and control alone cannot fence an unreachable or compromised host.
 
@@ -190,7 +190,7 @@ To recover on a fresh host, see [Recover control on another host](control-plane.
 
 ### Manual archives
 
-`tug control backup --local` needs an `admin` credential and writes an archive on the control host, in `TUG_CONTROL_BACKUP_DIR`, with the retained build images unless you pass `--no-images`. Keep images when some deployments exist only in Tug's build store. To get the archive onto your machine:
+`tug control backup --local` needs an `admin` credential and writes an archive on the control host, in `TUG_CONTROL_BACKUP_DIR`, with the retained build images unless you pass `--no-images`. Keep images when some deployments exist only in tug's build store. To get the archive onto your machine:
 
 ```sh
 tug control backup -o recovery.tar.gz

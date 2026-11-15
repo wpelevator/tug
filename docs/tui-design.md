@@ -2,7 +2,7 @@
 
 **Status: phases 1 to 3 are implemented** (the read-only overview, live detail, and confirmed actions). Phases 4 and 5 are proposed; [Phasing](#phasing) says what is and is not built. This page records why the screen exists, the situations operators open it for and the information each one needs, and how the screen answers them. It is a [K9s](https://k9scli.io/)-style full-screen view of the whole setup and a client of the controller, following the split in [Consoles](consoles.md): nothing here changes where state lives or adds a listener to control.
 
-K9s is a live, keyboard-driven table of Kubernetes resources with drill-down, a `:` command line, `/` filter and one-key actions. The Tug counterpart is smaller on purpose: a few nouns (node, project, service, deployment), one control plane, and a [`tug status`](observability.md#what-exists-today) that already answers "what is going on" as text. The screen is `tug status` kept live, ranked by what needs attention, and navigable down to a container's logs.
+K9s is a live, keyboard-driven table of Kubernetes resources with drill-down, a `:` command line, `/` filter and one-key actions. The tug counterpart is smaller on purpose: a few nouns (node, project, service, deployment), one control plane, and a [`tug status`](observability.md#what-exists-today) that already answers "what is going on" as text. The screen is `tug status` kept live, ranked by what needs attention, and navigable down to a container's logs.
 
 ## Using it
 
@@ -115,7 +115,7 @@ Volumes and their nodes, secret names with versions (never values), credential l
 
 ## Design principles
 
-1. **Attention first.** The first screen is the ranked problems, not a menu of resources. K9s shows a resource table because Kubernetes has hundreds of objects; Tug has a dozen, so the screen can afford to judge.
+1. **Attention first.** The first screen is the ranked problems, not a menu of resources. K9s shows a resource table because Kubernetes has hundreds of objects; tug has a dozen, so the screen can afford to judge.
 2. **Never display stale data as current.** Every pane carries its data age. A failed poll turns the header to "disconnected" and shows how old the data is; it never blanks or silently freezes.
 3. **Four states stay separate.** Node connectivity, project apply result, service rollout state and deployment state are different facts ([Terminology](terminology.md)). Use their own words and columns; do not collapse them into one traffic light except in the summary, where the rule is written down.
 4. **Read-only is the default posture.** Mutations appear only when the role allows them, are marked, and ask before acting. `--readonly` refuses them with a stated reason.
@@ -283,7 +283,7 @@ The name is part of the CLI contract, so it is hard to change after release ([Re
 | `tug top` | The familiar idiom for a live full-screen view quit with `q`. | `top` promises CPU and memory sorted by usage; without [M9](observability.md) stats it would show none. `kubectl top` and `docker top` both mean something narrower, and this screen sorts by attention. |
 | `tug watch` | Describes the behavior. | Suggests a non-interactive refresh like `watch(1)`, and would blur with the proposed `/api/v1/watch` change feed. |
 | `tug status --watch` | No new command; the screen is status kept live. | Interactive drill-down, a shell and mutations do not belong on a read command, and scripts that parse `status` must stay unaffected. |
-| `tug term`, `tug terminal` | Plain words. | In Tug a terminal is the interactive shell of `exec -t`, so these read as a way to open one; `term` also reads as terminology. |
+| `tug term`, `tug terminal` | Plain words. | In tug a terminal is the interactive shell of `exec -t`, so these read as a way to open one; `term` also reads as terminology. |
 | `tug dash` | Short. | Same clash as `ui` with a future web dashboard. |
 | `tug console` | Matches Docker and Rails habits. | Collides with the [console](consoles.md) concept. |
 | `tug k9s`-like brand names | Instantly understood by Kubernetes users. | Borrowed branding; vocabulary [Terminology](terminology.md) asks not to import. |

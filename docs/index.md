@@ -1,4 +1,4 @@
-# Tug documentation
+# tug documentation
 
 Find the page for what you want to do. New here: [Deploy your first service](getting-started.md) takes one VPS and about ten minutes.
 
@@ -25,14 +25,14 @@ Find the page for what you want to do. New here: [Deploy your first service](get
 - [Compose extensions](compose.md), every `x-tug` key
 - [Configuration](configuration.md), `tug.yml` keys and environment variables
 - [Access control](access-control.md), roles and what each endpoint needs
-- [Terminology](terminology.md), the words Tug uses
+- [Terminology](terminology.md), the words tug uses
 
 ## Understand how it works
 
 - [Architecture](architecture.md), components and every flow
 - [Control plane](control-plane.md), PKI, image delivery, backup and upgrade
 - [Terminal UI](tui.md), `tug tui`
-- [Tug compared with Docker Swarm](swarm-comparison.md)
+- [tug compared with Docker Swarm](swarm-comparison.md)
 
 ## Contribute and read the design record
 

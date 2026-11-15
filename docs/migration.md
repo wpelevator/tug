@@ -1,6 +1,6 @@
 # Migrating to new servers
 
-Move a Tug installation, or one tier of it, to new servers and retire the old ones. Tug has no single migrate command. A move is a short sequence of ordinary commands, and the order keeps your data safe.
+Move a tug installation, or one tier of it, to new servers and retire the old ones. tug has no single migrate command. A move is a short sequence of ordinary commands, and the order keeps your data safe.
 
 ```sh
 tug backup run
@@ -16,7 +16,7 @@ That sequence moves a stateless web tier. The database and object store need mor
 | --- | --- | --- |
 | Web | [Move the web tier](#move-the-web-tier) | Placement behavior is documented. A full move was not run live |
 | Database | [Move the database](#move-the-database) | Restore across nodes was run. The full move was not |
-| Object store | [Move the object store](#move-the-object-store) | No. Tug has no data move for it |
+| Object store | [Move the object store](#move-the-object-store) | No. tug has no data move for it |
 | Control | [Move the control plane](#move-the-control-plane) | Recovery on another host was run, see [Control plane](control-plane.md#recover-control-on-another-host) |
 | Old hosts | [Retire a host](#retire-a-host) | Manual. `node remove` alone removes only the control-plane record |
 
@@ -69,7 +69,7 @@ This is the move that can lose data. Deploying a database to a new node creates 
 | --- | --- |
 | 1. Add the node | On the same private network, with the label the database selects (or pin it by name) |
 | 2. Back up | `tug backup run db`, then `tug backup list --check` |
-| 3. Deploy with `--move` | `tug deploy --move db`. Without the flag Tug refuses, because the database would start empty. With it, services that write to the database are held (stopped), including a writer that moves too, such as WordPress with its own volume. Writers are found from `depends_on` and from host names in environment variables (`WORDPRESS_DB_HOST=db`). Check them with `tug restore run db` without `--confirm`, which prints the plan |
+| 3. Deploy with `--move` | `tug deploy --move db`. Without the flag tug refuses, because the database would start empty. With it, services that write to the database are held (stopped), including a writer that moves too, such as WordPress with its own volume. Writers are found from `depends_on` and from host names in environment variables (`WORDPRESS_DB_HOST=db`). Check them with `tug restore run db` without `--confirm`, which prints the plan |
 | 4. Restore | `tug restore run db --confirm`, adding `--writers php-fpm` if the plan missed a writer. The restore takes over the holds, takes a safety snapshot of the current data and starts the writers when it finishes |
 | 5. Verify | Check the application and `tug backup list --check` |
 | 6. Clean up | `tug volume remove db-data --delete-data` removes the record and the Docker volume on its node, but refuses while a service in the current deployment references the volume. Check `tug volume list`, and remove a leftover Docker volume on the old host by hand |
@@ -92,15 +92,15 @@ The first command loads a SQL dump, the second takes the uploads directory out, 
 
 ## Move the object store
 
-An object store such as SeaweedFS or MinIO is a plain Docker volume to Tug, and Tug does not copy volumes between nodes. Choose how the data travels:
+An object store such as SeaweedFS or MinIO is a plain Docker volume to tug, and tug does not copy volumes between nodes. Choose how the data travels:
 
 | Store | Approach |
 | --- | --- |
-| Small | Give the volume an `x-tug.backup` entry so Tug archives its files with restic, move the service, and restore with `tug restore run <volume> --confirm`. See [Backups](backups.md) |
+| Small | Give the volume an `x-tug.backup` entry so tug archives its files with restic, move the service, and restore with `tug restore run <volume> --confirm`. See [Backups](backups.md) |
 | Large | Use the store's own replication, or a one-off copy (`rsync` of the data directory with the store stopped), then point the service at the new location |
 | Disposable | Deploy a fresh one and re-upload, after `tug volume remove <volume> --delete-data` on the old node |
 
-Whatever you choose, the buckets your applications and backups use must exist before they are used, and Tug does not create them. Create them with the store's own tooling, for example `aws s3api create-bucket` through an SSH tunnel to the private port. The access keys that the application and `tug backup destination set` use must match what the new store was started with.
+Whatever you choose, the buckets your applications and backups use must exist before they are used, and tug does not create them. Create them with the store's own tooling, for example `aws s3api create-bucket` through an SSH tunnel to the private port. The access keys that the application and `tug backup destination set` use must match what the new store was started with.
 
 ## Move the control plane
 
@@ -124,7 +124,7 @@ tug node remove web-1 --teardown
 | Topic | Behavior |
 | --- | --- |
 | Refused when | A current deployment still places services on the node, or the host runs the control plane |
-| Removed | The agent and ingress, the Tug containers and networks, and the agent's identity (the `tug-agent` volume, plus `/etc/tug` and `/var/lib/tug` on a host not yet migrated) |
+| Removed | The agent and ingress, the tug containers and networks, and the agent's identity (the `tug-agent` volume, plus `/etc/tug` and `/var/lib/tug` on a host not yet migrated) |
 | Kept | Project volumes and ingress certificates. Add `--delete-data` to delete them too, only once the data has been moved or backed up |
 | Confirmation | `-y` skips it and is required without a terminal |
 | Failure | If the cleanup fails after the record was removed, run the same command again |
@@ -140,7 +140,7 @@ rm -rf /opt/tug-control
 
 Also remove `/var/lib/tug-control` if the host was never migrated, and remove Docker itself only if nothing else uses it. Locally, delete the host from `tug.yml`, and remove stale credentials under `~/.config/tug/credentials/` and any exported `TUG_CONTROL_URL`.
 
-Names to look for when cleaning up by hand: containers are `tug-<project>-<service>-<hash8>`, networks `tug_<project>`, volumes `tug_v<length>_<project>_<volume>`, and Tug resources carry `tug.project` labels. Review what a command will match before you run it, because the volume and container commands delete data.
+Names to look for when cleaning up by hand: containers are `tug-<project>-<service>-<hash8>`, networks `tug_<project>`, volumes `tug_v<length>_<project>_<volume>`, and tug resources carry `tug.project` labels. Review what a command will match before you run it, because the volume and container commands delete data.
 
 ## Known limits
 

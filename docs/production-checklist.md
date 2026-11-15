@@ -1,6 +1,6 @@
 # Production checklist
 
-Check these before a site that matters runs on Tug. Each item links to the page that explains it.
+Check these before a site that matters runs on tug. Each item links to the page that explains it.
 
 ```sh
 tug doctor --nodes
@@ -12,13 +12,13 @@ tug backup list --check
 
 ## Before launch
 
-- **Recovery works.** Set a [backup destination](backups.md#set-up-your-first-backup), mark every database and volume with `x-tug.backup`, and run a [restore drill](backups.md#restore-drill) into a scratch target. Tug backs up each target separately and workload backups do not include control state.
+- **Recovery works.** Set a [backup destination](backups.md#set-up-your-first-backup), mark every database and volume with `x-tug.backup`, and run a [restore drill](backups.md#restore-drill) into a scratch target. tug backs up each target separately and workload backups do not include control state.
 - **Control survives its host.** Control backs itself up to the same destination every night. Keep a copy off the server with `tug control backup -o <file>`, and keep the control password (`tug backup password --control`) somewhere you can reach if the server is lost. See [Recover control on another host](control-plane.md#recover-control-on-another-host).
-- **Only intended ports are public.** Tug binds an unqualified published port to the node address or loopback, and a public node address can still make it public. Check [published ports](networking.md#published-ports-private-by-default) and the provider firewall. Control listens on TCP 8443 with mutual TLS and must not sit behind a TLS-terminating proxy.
+- **Only intended ports are public.** tug binds an unqualified published port to the node address or loopback, and a public node address can still make it public. Check [published ports](networking.md#published-ports-private-by-default) and the provider firewall. Control listens on TCP 8443 with mutual TLS and must not sit behind a TLS-terminating proxy.
 - **HTTPS is on.** Enable [ingress](ingress.md#set-up-ingress), point DNS at the VPS and keep ports 80 and 443 reachable so certificates issue and renew.
-- **Every service has a health check.** [Health checks](healthchecks.md) decide when a deployment counts as serving and when `rollback: auto` fires. Use `rollout: { strategy: rolling }` where a restart must not interrupt traffic, and know that [rolling rollouts](compose.md#rolling-rollouts) need ingress, a Tug health check and one published port.
-- **State is pinned.** Pin each database and its volume to a node with `x-tug.placement`, as in [Service placement](placement.md#keep-state-on-its-server). Tug does not copy a volume to another node.
-- **Secrets are in Tug, not in git.** Keep private values with `tug secret set`, visible ones with `tug var set`, and review the result with `tug deploy --dry-run`. See [Where values come from](compose.md#where-values-come-from).
+- **Every service has a health check.** [Health checks](healthchecks.md) decide when a deployment counts as serving and when `rollback: auto` fires. Use `rollout: { strategy: rolling }` where a restart must not interrupt traffic, and know that [rolling rollouts](compose.md#rolling-rollouts) need ingress, a tug health check and one published port.
+- **State is pinned.** Pin each database and its volume to a node with `x-tug.placement`, as in [Service placement](placement.md#keep-state-on-its-server). tug does not copy a volume to another node.
+- **Secrets are in tug, not in git.** Keep private values with `tug secret set`, visible ones with `tug var set`, and review the result with `tug deploy --dry-run`. See [Where values come from](compose.md#where-values-come-from).
 - **CI has the least role it needs.** Create a `deploy` credential limited to its projects (`tug credential create ci --role deploy --project site`). A `deploy` credential can still read secret values with `exec` or through deployed code. See [Access control](access-control.md).
 
 ## After launch

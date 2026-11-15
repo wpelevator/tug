@@ -1,6 +1,6 @@
 # Deploy your first service
 
-Install Tug's control plane and agent on one Linux VPS, deploy nginx, and open its welcome page. You end with a running service that you can roll back, back up and put behind HTTPS.
+Install tug's control plane and agent on one Linux VPS, deploy nginx, and open its welcome page. You end with a running service that you can roll back, back up and put behind HTTPS.
 
 ```sh
 npm install -g @wpelevator/tug
@@ -15,13 +15,13 @@ The steps below explain each command, with the Compose file `tug deploy` reads i
 
 You need:
 
-- A VPS with a public IP and SSH access as root. Debian, Ubuntu, Fedora or a RHEL-compatible distribution lets Tug install Docker for you. On any other distribution, install Docker Engine first.
+- A VPS with a public IP and SSH access as root. Debian, Ubuntu, Fedora or a RHEL-compatible distribution lets tug install Docker for you. On any other distribution, install Docker Engine first.
 - Node.js 22.18 or newer on your computer. Docker is needed there only for `--build-local`.
 - Enough room on the VPS. Setup fails its preflight check with under 2048 MB free under Docker's data root (usually `/var/lib/docker`), and adding the node needs 1024 MB free. About 1 GB of memory runs one small site, and control and the agent share the VPS with your app.
 - Outbound access from the VPS to pull images.
 - TCP 8443 open from your computer and the agent to control, and TCP 8080 open from your computer for this temporary example. Check the provider firewall as well as any host firewall.
 
-Replace `203.0.113.5` with your VPS address. The commands assume an interactive terminal, where Tug explains each choice and waits for you to confirm. For automation see [Setup in the CLI reference](cli.md#setup).
+Replace `203.0.113.5` with your VPS address. The commands assume an interactive terminal, where tug explains each choice and waits for you to confirm. For automation see [Setup in the CLI reference](cli.md#setup).
 
 ## Optional: check your own app first
 
@@ -43,9 +43,9 @@ bad.yaml: web: networks other than the default network are not supported
 bad.yaml: web: x-tug.rollback is not supported (supported: placement, replicas, global, health, ingress, rollout, backup)
 ```
 
-[What Tug accepts](compose.md#not-supported) lists the unsupported keys. Existing Compose volumes are not reused: Tug names its volumes differently, so data moves in explicitly.
+[What tug accepts](compose.md#not-supported) lists the unsupported keys. Existing Compose volumes are not reused: tug names its volumes differently, so data moves in explicitly.
 
-## 1. Install Tug and control
+## 1. Install tug and control
 
 On your computer, create a directory for this project. The CLI is the one you installed at the top:
 
@@ -54,7 +54,7 @@ mkdir my-first-tug && cd my-first-tug
 tug setup root@203.0.113.5
 ```
 
-Allow Tug to install Docker if necessary and confirm the plan. Setup installs control and imports a root operator credential to your computer. The credential has full administrative access; keep it private. Setup creates `tug.yml` for shared defaults and a local overlay pointing to the credential. Keep working in this directory: the CLI searches the current directory for configuration, not its parents. See [project and configuration selection](cli.md#arguments-options-and-configuration).
+Allow tug to install Docker if necessary and confirm the plan. Setup installs control and imports a root operator credential to your computer. The credential has full administrative access; keep it private. Setup creates `tug.yml` for shared defaults and a local overlay pointing to the credential. Keep working in this directory: the CLI searches the current directory for configuration, not its parents. See [project and configuration selection](cli.md#arguments-options-and-configuration).
 
 ```sh
 tug status
@@ -96,13 +96,13 @@ tug logs web
 curl http://203.0.113.5:8080/
 ```
 
-`tug deploy` prints one summary line that ends in `succeeded`, for example `site git-ab12: deployment dep_1 succeeded, 3 services`, with your own project, version, id and service count. Status should show `web` serving on `app1`, and curl should return the nginx welcome page. The explicit `0.0.0.0` publishes the example on all IPv4 interfaces; restrict TCP 8080 to your computer in the provider firewall while trying it. For a real site, use [managed ingress and HTTPS](ingress.md#set-up-ingress), remove this explicit public binding, and redeploy. Tug otherwise binds published ports to the node address or loopback; a public node address can still make them public. See [port exposure](networking.md#published-ports-private-by-default).
+`tug deploy` prints one summary line that ends in `succeeded`, for example `site git-ab12: deployment dep_1 succeeded, 3 services`, with your own project, version, id and service count. Status should show `web` serving on `app1`, and curl should return the nginx welcome page. The explicit `0.0.0.0` publishes the example on all IPv4 interfaces; restrict TCP 8080 to your computer in the provider firewall while trying it. For a real site, use [managed ingress and HTTPS](ingress.md#set-up-ingress), remove this explicit public binding, and redeploy. tug otherwise binds published ports to the node address or loopback; a public node address can still make them public. See [port exposure](networking.md#published-ports-private-by-default).
 
-With one node, omitted placement selects it automatically. The HTTP check verifies nginx responds before Tug marks it serving; see [Health checks](healthchecks.md). If the deploy fails or the page is unreachable, start with [Troubleshooting](troubleshooting.md).
+With one node, omitted placement selects it automatically. The HTTP check verifies nginx responds before tug marks it serving; see [Health checks](healthchecks.md). If the deploy fails or the page is unreachable, start with [Troubleshooting](troubleshooting.md).
 
 ## Deploy your own app
 
-Tug reads `tug.yml` only from the current directory, and `tug setup` wrote it in `my-first-tug`. To deploy from your app's repository, give that directory the credential setup saved under `~/.config/tug/credentials/` (the file name starts with the control host):
+tug reads `tug.yml` only from the current directory, and `tug setup` wrote it in `my-first-tug`. To deploy from your app's repository, give that directory the credential setup saved under `~/.config/tug/credentials/` (the file name starts with the control host):
 
 ```sh
 cd path/to/your-app

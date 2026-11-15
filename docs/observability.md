@@ -1,8 +1,8 @@
 # Observability
 
-**Status: mostly proposed.** Tug today has an audit trail, a few read commands and a certificate and connectivity check, and nothing that measures CPU, memory, requests or latency. Sections marked **Proposed** describe a setup that is not built; the milestone is [M9](roadmap.md#m9--observability). Nothing marked proposed works yet, and none of the names, flags or environment variables in those sections exist in the code.
+**Status: mostly proposed.** tug today has an audit trail, a few read commands and a certificate and connectivity check, and nothing that measures CPU, memory, requests or latency. Sections marked **Proposed** describe a setup that is not built; the milestone is [M9](roadmap.md#m9--observability). Nothing marked proposed works yet, and none of the names, flags or environment variables in those sections exist in the code.
 
-The aim is the smallest setup that answers the day-to-day questions: is every node reporting, did the last deployment succeed, did an automatic rollback happen, will a certificate expire, is the control database growing. It follows the shape of the rest of Tug: one central control plane, agents that only dial out, and no required extra services.
+The aim is the smallest setup that answers the day-to-day questions: is every node reporting, did the last deployment succeed, did an automatic rollback happen, will a certificate expire, is the control database growing. It follows the shape of the rest of tug: one central control plane, agents that only dial out, and no required extra services.
 
 ## What exists today
 
@@ -93,7 +93,7 @@ Agents already send a status report on every poll. The proposal adds a `stats` b
 | `tug_service_memory_bytes` | gauge | `node`, `project`, `service` | Memory in use |
 | `tug_service_up` | gauge | `node`, `project`, `service` | 1 when the container is running, 0 otherwise |
 | `tug_service_restarts_total` | counter | `node`, `project`, `service` | Container restarts since the container was created |
-| `tug_node_disk_free_bytes` | gauge | `node`, `path` | Free space on the Docker data and Tug state paths |
+| `tug_node_disk_free_bytes` | gauge | `node`, `path` | Free space on the Docker data and tug state paths |
 | `tug_node_load1` | gauge | `node` | One-minute load average |
 
 The agent would read these from `docker stats --no-stream` and `docker inspect`, and control would drop series for services that no longer exist. A node that stops reporting keeps its last values, so alerts use `tug_node_poll_age_seconds` to tell fresh data from stale data.
@@ -124,7 +124,7 @@ Open questions:
 
 Status: proposed.
 
-Tug would not bundle Prometheus or Alertmanager. A sample scrape configuration:
+tug would not bundle Prometheus or Alertmanager. A sample scrape configuration:
 
 ```yaml
 scrape_configs:
@@ -183,7 +183,7 @@ Status: proposed.
 
 Modelled on madplay's `@magplay/observability` package: metrics sit behind a small injectable interface whose default is a no-op, so unit tests of control and agent logic need no registry; a small closed outcome taxonomy (`success`, `failure`, `timeout`, `rejected`, `cancelled`) with one helper that maps an error to an outcome; and a CI check (`test:observability`) that fails when the code and the documentation disagree.
 
-For Tug the equivalent check would assert:
+For tug the equivalent check would assert:
 
 - every metric registered in code appears in this page's metric tables with the same name, type and label set, and every row in the tables is registered in code;
 - every label name is on an allow-list, and none is `id`, `version`, `error`, `path` or `message`, so cardinality stays bounded;
@@ -210,6 +210,6 @@ Open questions:
 - How the ingress metrics reach control (see [Ingress metrics](#ingress-metrics)).
 - Whether control should keep a short history of stats for `tug top` and a dashboard without Prometheus.
 
-Non-goals: a log aggregation system (JSON on stdout is the interface), distributed tracing, and a bundled Prometheus, Alertmanager or Grafana. Tug would expose metrics and document how to scrape them; running the monitoring stack is the operator's choice.
+Non-goals: a log aggregation system (JSON on stdout is the interface), distributed tracing, and a bundled Prometheus, Alertmanager or Grafana. tug would expose metrics and document how to scrape them; running the monitoring stack is the operator's choice.
 
 See also [Architecture](architecture.md), [Control plane](control-plane.md), [Networking](networking.md), [Testing](testing.md) and the [Roadmap](roadmap.md).

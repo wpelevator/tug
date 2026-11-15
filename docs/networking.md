@@ -1,6 +1,6 @@
 # Networking: node addresses, service names and ports
 
-How services on different servers find each other, and which ports are public. Everything here uses the private network you already run. Tug does not create an overlay network, and the control plane never carries workload traffic.
+How services on different servers find each other, and which ports are public. Everything here uses the private network you already run. tug does not create an overlay network, and the control plane never carries workload traffic.
 
 ```sh
 tug node address app2 10.0.0.7
@@ -11,7 +11,7 @@ The first command sets the private address other nodes use to reach `app2`. The 
 
 | Topic | What it covers |
 | --- | --- |
-| [Bring your own network](#bring-your-own-network) | The node `address`, firewalls and what Tug does not encrypt |
+| [Bring your own network](#bring-your-own-network) | The node `address`, firewalls and what tug does not encrypt |
 | [Cross-node service names](#cross-node-service-names) | Services on other nodes resolve by name to their node's `address` (hosts-file entries, not DNS), only while healthy. On by default, and `TUG_SERVICE_NAMES=false` on control turns it off |
 | [Published ports](#published-ports-private-by-default) | Ports bind to the node's private address or loopback unless you write a host IP |
 | [Rolling services and names](#rolling-services-and-service-names) | How names behave when a service rolls |
@@ -25,11 +25,11 @@ A node's `address` is its only inter-node address. Set it to a private IP on one
 | Hostname | Accepted, but it must resolve on the node to an address Docker can bind |
 | Change it | `tug node address <name> <address>` |
 | Cloud NAT | Do not use a VM's public 1:1 NAT address when it is absent from its interfaces. Register the private interface address |
-| Network | A VPC, LAN, VPN or other routed private network. Tug allocates no addresses, creates no tunnels, configures no routes and provides no NAT traversal for workload traffic |
+| Network | A VPC, LAN, VPN or other routed private network. tug allocates no addresses, creates no tunnels, configures no routes and provides no NAT traversal for workload traffic |
 | Behind NAT | Agents can still dial out to control. Cross-node names and remote ingress upstreams work only where the workload network is reachable |
-| Single node | Needs no inter-node network. When only the managed Caddy on the same node reaches an ingress port, Tug binds that port to loopback |
+| Single node | Needs no inter-node network. When only the managed Caddy on the same node reaches an ingress port, tug binds that port to loopback |
 
-**Tug does not encrypt node-to-node workload traffic.** Mutual TLS protects connections to control, not connections between containers, published ports or ingress upstreams. Use application-layer TLS or an encrypted network you operate where traffic needs confidentiality or integrity.
+**tug does not encrypt node-to-node workload traffic.** Mutual TLS protects connections to control, not connections between containers, published ports or ingress upstreams. Use application-layer TLS or an encrypted network you operate where traffic needs confidentiality or integrity.
 
 Firewall the workload network so only the required peers reach published service ports. Allow ingress nodes to reach their upstream ports and application nodes to reach only the services they consume. Publish ports 80 and 443 on ingress nodes only. Keep databases and other internal services off public interfaces, and use a provider firewall as a second boundary, because Docker's iptables rules can bypass host firewalls such as ufw. An explicit `0.0.0.0` or `[::]` host IP in Compose requests all-interface exposure.
 
@@ -47,13 +47,13 @@ While enabled, the work response carries `serviceEndpoints`: for each project on
 
 What this means for you:
 
-- **The name points at the node, not the container.** The target must publish its port (`ports: ["3306:3306"]`) and clients use the published host port. Tug binds that port to the address the name resolves to, see [Published ports](#published-ports-private-by-default), and your network and firewall decide who can reach it. Rolling services differ, see [Rolling services and service names](#rolling-services-and-service-names).
+- **The name points at the node, not the container.** The target must publish its port (`ports: ["3306:3306"]`) and clients use the published host port. tug binds that port to the address the name resolves to, see [Published ports](#published-ports-private-by-default), and your network and firewall decide who can reach it. Rolling services differ, see [Rolling services and service names](#rolling-services-and-service-names).
 - **No load balancing.** Most resolvers use the first `/etc/hosts` entry, so a multi-node service gives failover on node loss, not round robin.
 - **Records appear after the target reports `serving`** and the client's node re-renders on its next poll, which recreates the client container when its `extra_hosts` changed. Order dependent services with health checks and expect one extra recreate on the first deploy.
 
 ## Published ports: private by default
 
-A `ports` entry such as `"3306:3306"` would listen on every interface of the node, and Docker's iptables rules bypass host firewalls such as ufw, so the port would be on the internet unless a provider firewall blocks it. Tug therefore rewrites every `ports` entry that names no host IP in the container definition the agent builds:
+A `ports` entry such as `"3306:3306"` would listen on every interface of the node, and Docker's iptables rules bypass host firewalls such as ufw, so the port would be on the internet unless a provider firewall blocks it. tug therefore rewrites every `ports` entry that names no host IP in the container definition the agent builds:
 
 | Situation | Bound to |
 | --- | --- |
@@ -74,7 +74,7 @@ A configured node `address` is the same one other nodes resolve the service to a
 | Hostname `address` | Resolved on the node, only when some port of the project binds to it. If it does not resolve, the project fails to apply rather than falling back to every interface. The address must belong to one of the node's interfaces, or Docker cannot bind it (`cannot assign requested address`) |
 | Public `address` | Ports bind to that public address and the agent sends one `ports.public` warning event naming the services, again whenever the set changes. Register a private `address`, or write the host IP in `ports` to make the exposure explicit |
 | Rolling revisions | Keep the host IP when their host port is remapped, so revision ports (`TUG_ROLLOUT_PORTS`) are bound the same way |
-| `tug doctor --nodes` | Runs a `ports.public` check on every agent. It lists containers of Tug projects (and rolling revisions) on `0.0.0.0`, `::` or a public IP. It is a warning, not a failure, because an explicit `0.0.0.0` may be intended |
+| `tug doctor --nodes` | Runs a `ports.public` check on every agent. It lists containers of tug projects (and rolling revisions) on `0.0.0.0`, `::` or a public IP. It is a warning, not a failure, because an explicit `0.0.0.0` may be intended |
 
 ## Rolling services and service names
 

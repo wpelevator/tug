@@ -8,4 +8,4 @@ Act as product owner and designer. Name who reads the docs and their jobs. Judge
 
 ## 2. Adopter run
 
-Follow the README and getting-started as a newcomer who knows Docker and Node but not Tug. Run what can run without a VPS (`tug lint`, `--help`, `init`). Mark each shown output MATCH, MISMATCH or NOT RUNNABLE. Report broken links, circular links and contradictions.
+Follow the README and getting-started as a newcomer who knows Docker and Node but not tug. Run what can run without a VPS (`tug lint`, `--help`, `init`). Mark each shown output MATCH, MISMATCH or NOT RUNNABLE. Report broken links, circular links and contradictions.

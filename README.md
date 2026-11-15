@@ -1,8 +1,8 @@
-# Tug
+# tug
 
 [![CI](https://github.com/wpelevator/tug/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/wpelevator/tug/actions/workflows/ci.yml?query=branch%3Amain) [![Release](https://github.com/wpelevator/tug/actions/workflows/release.yml/badge.svg?branch=main)](https://github.com/wpelevator/tug/actions/workflows/release.yml?query=branch%3Amain)
 
-Deploy Docker Compose apps to your own Linux VPS with one command, from your laptop or CI. Tug adds image delivery, rollbacks, scheduled backups, HTTPS and encrypted secrets, so one small server can run a whole stack and a few servers can run a larger one.
+Deploy Docker Compose apps to your own Linux VPS with one command, from your laptop or CI. tug adds image delivery, rollbacks, scheduled backups, HTTPS and encrypted secrets, so one small server can run a whole stack and a few servers can run a larger one.
 
 ```sh
 npm install -g @wpelevator/tug    # or run it with npx @wpelevator/tug
@@ -21,11 +21,11 @@ tug node add root@203.0.113.5 --name app1
 tug deploy
 ```
 
-You need Node.js 22.18 or newer on your computer and root SSH access to a Linux server. Tug can install Docker on Debian, Ubuntu, Fedora and RHEL-compatible servers. [Deploy your first service](docs/getting-started.md) walks through each step.
+You need Node.js 22.18 or newer on your computer and root SSH access to a Linux server. tug can install Docker on Debian, Ubuntu, Fedora and RHEL-compatible servers. [Deploy your first service](docs/getting-started.md) walks through each step.
 
 ## Who it is for
 
-Tug is for people who run Compose apps (Node.js, Laravel, Ruby, WordPress and the like) on one or a few VPSes and want deploys, rollbacks, backups and HTTPS in one tool, with one control server that they back up. Your Compose file stays a Compose file: `x-tug` is a standard Compose extension that plain Docker Compose ignores. Tug is open source under the MIT license.
+tug is for people who run Compose apps (Node.js, Laravel, Ruby, WordPress and the like) on one or a few VPSes and want deploys, rollbacks, backups and HTTPS in one tool, with one control server that they back up. Your Compose file stays a Compose file: `x-tug` is a standard Compose extension that plain Docker Compose ignores. tug is open source under the MIT license.
 
 It does not schedule across a cluster, balance load between servers or replace a failed server. Node-to-node traffic uses your own private network (Tailscale, a VPC, a LAN), so you own its firewalling and encryption.
 
@@ -38,14 +38,14 @@ It does not schedule across a cluster, balance load between servers or replace a
 
 ## What you get
 
-| Need | What Tug does | Details |
+| Need | What tug does | Details |
 | --- | --- | --- |
 | Get images to servers | Builds your images on control (or on your machine with `tug deploy --build-local`) and sends them over connections the agents already make. Or push to any HTTPS registry and declare `image:`, and control pins the tag to a digest before deploying. A failed build leaves the nodes untouched. | [Control plane](docs/control-plane.md#image-delivery-without-a-registry) |
 | Serve HTTPS | Managed Caddy serves a hostname with `tls: auto`, gets the certificate and renews it. DNS must point at the server and ports 80 and 443 must be reachable. | [Ingress](docs/ingress.md) |
 | Back up and restore | Scheduled [restic](https://restic.net) backups of volumes and databases to S3-compatible storage. `tug restore run db` brings one back. Control backs itself up every night. | [Backups](docs/backups.md) |
 | Keep secrets out of git | `tug secret set` keeps them encrypted on control and delivers each only to the nodes whose services use it. Every `${NAME}` in your Compose file comes from control, never from the shell or `.env` of whoever runs the deploy. | [Where values come from](docs/compose.md#where-values-come-from) |
 | Roll back | `tug rollback` returns to a previous deployment, and a top-level `x-tug: { rollback: auto }` does it when a node reports the new version unhealthy. It cannot undo database writes or schema changes. | [Health checks](docs/healthchecks.md) |
-| Update without a restart | `x-tug: { rollout: { strategy: rolling } }` starts the new revision beside the old one and switches ingress once it is healthy. It needs ingress, a Tug health check and one published port. The default `recreate` restarts the container and can interrupt traffic. | [Rolling rollouts](docs/compose.md#rolling-rollouts) |
+| Update without a restart | `x-tug: { rollout: { strategy: rolling } }` starts the new revision beside the old one and switches ingress once it is healthy. It needs ingress, a tug health check and one published port. The default `recreate` restarts the container and can interrupt traffic. | [Rolling rollouts](docs/compose.md#rolling-rollouts) |
 | Give CI one scoped credential | One credential limited by role (`read`, `deploy` or `admin`), and for `deploy` by project. | [Access control](docs/access-control.md) |
 | Read logs and open shells | `tug logs`, `tug exec`, `tug run` (for example the `wp` CLI), `tug ps` and `tug status` go through the control plane. SSH is only for installing and managing nodes. | [CLI](docs/cli.md) |
 | Catch config errors early | `tug lint` checks your `x-tug` config offline, and the same schema ships as JSON Schema for [editor autocomplete](docs/compose.md#editor-autocomplete-and-squiggles). | [Compose extensions](docs/compose.md) |
@@ -161,7 +161,7 @@ Project commands sit at the top level and the rest read `tug <subject> <verb>`. 
   the control API.
 ```
 
-`tug deploy` reads your Compose file on your machine and sends it to the control plane. Control stores it as an immutable desired state, builds application images when needed and pins published images to digests. Each agent fetches the work for its node, applies it through the Docker Engine API, runs the health checks and reports back. Control marks the deployment done when every node reports it serving. Tug reads Compose files with its own reader, so nodes need only Docker Engine and Docker Compose is not needed anywhere.
+`tug deploy` reads your Compose file on your machine and sends it to the control plane. Control stores it as an immutable desired state, builds application images when needed and pins published images to digests. Each agent fetches the work for its node, applies it through the Docker Engine API, runs the health checks and reports back. Control marks the deployment done when every node reports it serving. tug reads Compose files with its own reader, so nodes need only Docker Engine and Docker Compose is not needed anywhere.
 
 Control serves mutual TLS on one port (`8443`). Every operator, CI job and node authenticates with a certificate from a private CA created at install, so the control address can be a bare IP and can change later. Do not terminate TLS in front of it. [Architecture](docs/architecture.md) covers every flow, and the [security audit](docs/security-audit.md) covers the trust boundaries.
 
@@ -186,4 +186,4 @@ npm run lint
 
 ## License
 
-Tug is released under the [MIT License](LICENSE).
+tug is released under the [MIT License](LICENSE).

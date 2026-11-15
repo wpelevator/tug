@@ -6,7 +6,7 @@
 
 From each project's documentation. A blank means not confirmed, not no.
 
-| Feature | Tug today | kamal-proxy | Uncloud (Caddy) | Traefik | Dokku (nginx) |
+| Feature | tug today | kamal-proxy | Uncloud (Caddy) | Traefik | Dokku (nginx) |
 | --- | --- | --- | --- | --- | --- |
 | Declared in | Typed `x-tug.ingress` | CLI flags, `proxy:` in `deploy.yml` | `x-ports`, raw `x-caddy` | Labels | Per-app `nginx:set` |
 | Health-gated cutover and drain | Yes, for `rolling` services | Yes | Yes | No mechanism of its own | |
@@ -19,7 +19,7 @@ From each project's documentation. A blank means not confirmed, not no.
 | HTTP/3 | Yes (Caddy default, needs UDP 443 open) | | Yes | Yes | |
 | On-demand TLS, DNS-01 wildcards | No | On-demand yes | Partial | DNS-01 yes | |
 
-Tug's strengths for an edge are that control renders and validates the whole Caddyfile (hostname and wildcard overlaps across projects are rejected before anything reaches Caddy), the endpoint list is already health-aware before Caddy sees it, secrets reach only the ingress node as files, and a reload is graceful, hash-gated and rolled back when Caddy rejects it. Caddy's retries are a second layer on top of that, not a replacement, and its active health checks would duplicate `x-tug.health`.
+tug's strengths for an edge are that control renders and validates the whole Caddyfile (hostname and wildcard overlaps across projects are rejected before anything reaches Caddy), the endpoint list is already health-aware before Caddy sees it, secrets reach only the ingress node as files, and a reload is graceful, hash-gated and rolled back when Caddy rejects it. Caddy's retries are a second layer on top of that, not a replacement, and its active health checks would duplicate `x-tug.health`.
 
 ## Direction
 

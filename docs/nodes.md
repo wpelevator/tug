@@ -1,13 +1,13 @@
 # Nodes
 
-Add a Docker host to Tug, keep its certificate healthy, and replace or retire it.
+Add a Docker host to tug, keep its certificate healthy, and replace or retire it.
 
 ```sh
 tug node add root@app1.example.com --name app1 --address 10.0.0.11 --install-docker
 tug node list
 ```
 
-A node is a registered Docker host on which Tug places services. The agent is the container on it that fetches work from control and manages the node's containers through the Docker Engine API. Nodes need Docker Engine only, with no Compose plugin, and so does the control host. Add a node by pushing an install over SSH, or let a fresh host enroll itself. Options for every `node` command are in the [CLI reference](cli.md#nodes).
+A node is a registered Docker host on which tug places services. The agent is the container on it that fetches work from control and manages the node's containers through the Docker Engine API. Nodes need Docker Engine only, with no Compose plugin, and so does the control host. Add a node by pushing an install over SSH, or let a fresh host enroll itself. Options for every `node` command are in the [CLI reference](cli.md#nodes).
 
 | I want to | Command | Section |
 | --- | --- | --- |
@@ -52,7 +52,7 @@ The install writes no file on the host, so a node is Docker plus the `tug-agent`
 
 ### The node address
 
-`--address` is the node's only inter-node address. Other nodes and the ingress use it to reach services, service names resolve to it, and published ports bind to it ([Published ports](networking.md#published-ports-private-by-default)). Give a private IP on one of the host's interfaces, reachable from the other nodes that need it. Control rejects an address that is not an IP or a hostname without a port. Tug does not create or encrypt this network, see [Bring your own network](networking.md#bring-your-own-network).
+`--address` is the node's only inter-node address. Other nodes and the ingress use it to reach services, service names resolve to it, and published ports bind to it ([Published ports](networking.md#published-ports-private-by-default)). Give a private IP on one of the host's interfaces, reachable from the other nodes that need it. Control rejects an address that is not an IP or a hostname without a port. tug does not create or encrypt this network, see [Bring your own network](networking.md#bring-your-own-network).
 
 ### Images and registries
 
@@ -68,7 +68,7 @@ tug --control-url https://127.0.0.1:18082 node add root@app1.example.com --name 
 
 ### Small hosts
 
-A 1 GB VPS is enough for one site (a database and WordPress together use a few hundred MB) and not for much else. Ubuntu's `unattended-upgrades` and `apt-check` can run for hours on such a host and starve Docker of memory and CPU until commands time out. During testing one pegged a 1 GB node at load 16. Tug does not manage host updates, so schedule them for a quiet window or disable the timers (`systemctl disable --now apt-daily.timer apt-daily-upgrade.timer`) and patch deliberately. A control plane and a node on the same host also compete for port 8443 if a service publishes it, which is why the WordPress example is not meant to share a host with control until [M15](roadmap.md#m15--flexible-node-roles).
+A 1 GB VPS is enough for one site (a database and WordPress together use a few hundred MB) and not for much else. Ubuntu's `unattended-upgrades` and `apt-check` can run for hours on such a host and starve Docker of memory and CPU until commands time out. During testing one pegged a 1 GB node at load 16. tug does not manage host updates, so schedule them for a quiet window or disable the timers (`systemctl disable --now apt-daily.timer apt-daily-upgrade.timer`) and patch deliberately. A control plane and a node on the same host also compete for port 8443 if a service publishes it, which is why the WordPress example is not meant to share a host with control until [M15](roadmap.md#m15--flexible-node-roles).
 
 ## Certificates, renewal and recovery
 
@@ -163,9 +163,9 @@ The join key is an enrollment credential and as sensitive as any bootstrap secre
 
 ## Bare-host Docker installation
 
-`control setup --install-docker` and `node add --install-docker` run the same Docker bootstrap over SSH before Docker preflight or runtime-image transfer. Without the flag, Docker Engine must already work on the control host and on nodes. The SSH target must be root for installation. Tug does not change group membership or configure passwordless sudo.
+`control setup --install-docker` and `node add --install-docker` run the same Docker bootstrap over SSH before Docker preflight or runtime-image transfer. Without the flag, Docker Engine must already work on the control host and on nodes. The SSH target must be root for installation. tug does not change group membership or configure passwordless sudo.
 
-For a host your cloud provider creates, save `tug node enroll --name app1 --address 10.0.0.11 --install-docker` as user-data. Its stdout starts with `#cloud-config`, includes the bootstrap script and starts the agent only after Docker installation succeeds. The version-matched Tug runtime image must be reachable from the host, and an overridden development `tug:local` image must already be loaded there. Treat a saved user-data document as a credential.
+For a host your cloud provider creates, save `tug node enroll --name app1 --address 10.0.0.11 --install-docker` as user-data. Its stdout starts with `#cloud-config`, includes the bootstrap script and starts the agent only after Docker installation succeeds. The version-matched tug runtime image must be reachable from the host, and an overridden development `tug:local` image must already be loaded there. Treat a saved user-data document as a credential.
 
 Bootstrap requires systemd and supports:
 
@@ -177,7 +177,7 @@ Bootstrap requires systemd and supports:
 | RHEL (dnf) | 9, 10 | [RHEL](https://docs.docker.com/engine/install/rhel/) |
 | Rocky Linux, AlmaLinux, CentOS Stream (dnf) | 9, 10 | [CentOS](https://docs.docker.com/engine/install/centos/) |
 
-It adds Docker's official apt or dnf repository, installs Engine and Buildx, and enables Docker. A working Engine installation is preserved. An inaccessible existing daemon, an unsupported OS or release, or conflicting distribution packages (`docker.io` and `podman-docker` on Debian and Ubuntu, `docker`, `moby-engine` and `podman-docker` on RPM hosts) produce an error for manual resolution. Tug removes nothing and leaves Docker daemon trust settings alone. Other distributions such as Alpine or Arch, and hosts without systemd, need Docker installed manually.
+It adds Docker's official apt or dnf repository, installs Engine and Buildx, and enables Docker. A working Engine installation is preserved. An inaccessible existing daemon, an unsupported OS or release, or conflicting distribution packages (`docker.io` and `podman-docker` on Debian and Ubuntu, `docker`, `moby-engine` and `podman-docker` on RPM hosts) produce an error for manual resolution. tug removes nothing and leaves Docker daemon trust settings alone. Other distributions such as Alpine or Arch, and hosts without systemd, need Docker installed manually.
 
 **Retries and logs.**
 
@@ -208,7 +208,7 @@ Run it after a control upgrade. `tug upgrade` does both in order, see [Upgrade c
 | Order | Control and its agents exchange version declarations on every request. An agent declaring a version on a newer compatibility key than control (a newer major, or a newer `0.minor` before 1.0) is refused by control itself. Upgrade control first, then the agents, and confirm each node reports `online` in `tug status` |
 | `node add` again | `tug node add <ssh-target> --name <name>` does the same replacement without the checks. A host already enrolled as a different node name is refused with a hint, because two nodes must never share a key. A host whose saved identity no longer matches the node in control (the state volume was replaced or reset) is refused with a hint to use `tug node replace`. `node replace` and `node repair` always rotate the key |
 
-`node add --build-local-image` is for development. It builds the image from the current checkout (a Tug checkout with the Dockerfile must be in the working directory), copies it to the host with `docker save`, `scp` and `docker load`, and runs it tagged `tug:local` unless `--image` is given, plus the image ID (for example `tug:local-a17ed756592c`), so rebuilding never leaves a running container pointing at a moved tag. The image is built for the target host's architecture, read with `uname -m` over SSH, so an arm64 laptop can install an amd64 VPS. x86_64 and aarch64 hosts are supported. See [Releases](releases.md) for how images are published.
+`node add --build-local-image` is for development. It builds the image from the current checkout (a tug checkout with the Dockerfile must be in the working directory), copies it to the host with `docker save`, `scp` and `docker load`, and runs it tagged `tug:local` unless `--image` is given, plus the image ID (for example `tug:local-a17ed756592c`), so rebuilding never leaves a running container pointing at a moved tag. The image is built for the target host's architecture, read with `uname -m` over SSH, so an arm64 laptop can install an amd64 VPS. x86_64 and aarch64 hosts are supported. See [Releases](releases.md) for how images are published.
 
 ## Moving agent state into the volume (`node migrate`)
 

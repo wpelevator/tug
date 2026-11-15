@@ -76,7 +76,7 @@ The CLI reads a YAML or JSON file, `tug.yml` by convention, so a repository can 
 | Overlay | `tug.local.yml` next to `tug.yml` (`.tug.local.json` next to `.tug.json`, `<name>.local<ext>` in general) holds what must not be committed. It has the same keys plus `credential` (a path to a credential file), and its values win key by key, including inside `nodeDefaults` and each node. `credential` in the tracked file is an error |
 | `tug init` | Writes the tracked file only when it is missing, so an existing one keeps its comments. It saves the credential with mode `0600` under `~/.config/tug/credentials/`, points the overlay at it and adds the overlay to `.gitignore` in a git checkout |
 | Strict keys | Unknown keys, wrong types and out-of-range values fail with the file and key. Paths in the file (`file`, `ca`) resolve relative to the file |
-| Not desired state | Tug never reconciles against the file. Only the node commands that install or register read `nodes`, as flag defaults. See [Nodes](nodes.md#declaring-nodes-in-the-config-file) |
+| Not desired state | tug never reconciles against the file. Only the node commands that install or register read `nodes`, as flag defaults. See [Nodes](nodes.md#declaring-nodes-in-the-config-file) |
 
 Each key is the camelCase of the long flag it supplies a default for, with the same value type. A flag on the command line wins. A list from the file is replaced by flags, not appended to. A repeatable flag takes a list (`label: [web, db]`), and a negated flag maps to the positive key set to `false` (`--no-wait` is `wait: false`).
 
@@ -249,7 +249,7 @@ It mints a single-use, name-bound join key. A saved cloud-init document contains
 | Option | Meaning |
 | --- | --- |
 | `--force` | Remove while the agent still reports |
-| `--teardown` | Clean the host over SSH after the record is gone: stop the agent and ingress, remove Tug containers and networks, delete the agent identity |
+| `--teardown` | Clean the host over SSH after the record is gone: stop the agent and ingress, remove tug containers and networks, delete the agent identity |
 | `--delete-data` | With `--teardown`, also delete project volumes and ingress certificates |
 | `-y, --yes` | Skip the confirmation. Required without a terminal |
 
@@ -277,7 +277,7 @@ By default it deploys the first of `compose.yaml`, `compose.yml`, `docker-compos
 | `-f, --file <file>` | Compose file | First match above |
 | `--version <version>` | Display version. Image identities stay immutable even when reused | `git-<Compose hash>` |
 | `--build-local` | Build on your Docker daemon and upload saved images without source. Single-platform, must match the node architecture | Build on control |
-| `--compose-cli` | Render with `docker compose config` (needs Docker Compose v2 locally), for files that use `include`, `!reset` or `!override` | Tug's [native reader](compose.md#native-compose-reader) |
+| `--compose-cli` | Render with `docker compose config` (needs Docker Compose v2 locally), for files that use `include`, `!reset` or `!override` | tug's [native reader](compose.md#native-compose-reader) |
 | `--var <NAME=value>` | Value for this deploy only. Repeatable. A value may contain commas | none |
 | `--profile <name>` | Enable a Compose profile. Repeatable or comma-separated | none |
 | `--move <service>` | Acknowledge that a service with data placed on another node starts empty there. Repeatable or comma-separated | Such a deploy is refused |
@@ -289,18 +289,18 @@ By default it deploys the first of `compose.yaml`, `compose.yml`, `docker-compos
 - **Summary.** One line, `site git-ab12: deployment dep_1 succeeded, 3 services`. `--json` prints the full result with the desired state and the `values` record of where each `${NAME}` came from.
 - **Moved data.** After `--move`, the services that write to the moved one are held until you run `tug restore run` or `tug hold release`.
 - **Interruption.** If the wait is interrupted (control unreachable, timeout), the error names the deployment and `tug deploy cancel [id]`. A deploy refused because another is still rolling out names that one the same way.
-- **Project name.** `deploy` warns when the file's `name:` differs from the Tug project, because secrets, backups and restores are scoped to the project.
+- **Project name.** `deploy` warns when the file's `name:` differs from the tug project, because secrets, backups and restores are scoped to the project.
 - **Missing values.** It scans the file for `${NAME}` or `$NAME` with no default that control and `--var` do not supply. In a terminal it asks, per variable, whether to generate a random 192-bit secret, enter a secret (hidden) or enter a variable (visible), and stores it before deploying. It never overwrites an existing value and never prints a generated one. Without a terminal, or with `CI` set, it fails naming the variables and the commands that set them.
 
 To deploy CI-built images, push them to a registry and declare `image:`. Control pins tags to digests before publishing. See [Private registries](control-plane.md#published-images-and-private-registries).
 
-**Source snapshot.** Remote uploads and `--build-local` use a temporary snapshot of the working directory. Tug applies the root `.dockerignore` with its own matcher and always excludes `.git`, `node_modules`, `data`, `*.credential.json`, the Tug overlays and `.tug.json` at any depth, root Tug config names, and the resolved config, overlay and credential paths. Ignore rules cannot re-include those. Unsafe links are rejected. Docker then applies its own ignore rules to a local build. Tug does not detect arbitrary secret names, so review nested or multiple build contexts. A broad `COPY .` can include secrets Tug cannot identify. Local builds use temporary image tags that are removed after each archive is saved, including after a failure. They never remove your published tags or the Tug runtime image.
+**Source snapshot.** Remote uploads and `--build-local` use a temporary snapshot of the working directory. tug applies the root `.dockerignore` with its own matcher and always excludes `.git`, `node_modules`, `data`, `*.credential.json`, the tug overlays and `.tug.json` at any depth, root tug config names, and the resolved config, overlay and credential paths. Ignore rules cannot re-include those. Unsafe links are rejected. Docker then applies its own ignore rules to a local build. tug does not detect arbitrary secret names, so review nested or multiple build contexts. A broad `COPY .` can include secrets tug cannot identify. Local builds use temporary image tags that are removed after each archive is saved, including after a failure. They never remove your published tags or the tug runtime image.
 
 ### Other deployment commands
 
 | Command | Options | What it does |
 | --- | --- | --- |
-| `tug rollback` | `--force`, `--no-wait`, `--timeout <seconds>` (default `300`) | Rolls the project back. `--force` permits it while a deployment is active. With `x-tug: { rollback: auto }` Tug rolls back failed deployments itself, see [Automatic rollback](compose.md#automatic-rollback) |
+| `tug rollback` | `--force`, `--no-wait`, `--timeout <seconds>` (default `300`) | Rolls the project back. `--force` permits it while a deployment is active. With `x-tug: { rollback: auto }` tug rolls back failed deployments itself, see [Automatic rollback](compose.md#automatic-rollback) |
 | `tug deploy cancel [deployment-id]` | | Cancels an active deployment. In a terminal, omit the id to choose from active ones |
 | `tug status` | `--json` | Each project's current deployment, node reports and errors, plus node status and last contact. A service whose container keeps restarting, or exited with an error and stays down, shows as `unstable` with the exit code, although its deployment reads as succeeded. Stale node health is the last report. Control-wide, credential-scoped |
 | `tug events` | `--limit <n>` (default `100`, values outside `1`-`500` are an error), `--all`, `--json` | Events newest first as time, level, type, actor and message, for the project, or every project with `--all` (including control events with no project). Terminal escapes are stripped. Control deletes events older than 30 days and keeps at most 100,000, see [Configuration](configuration.md#control-plane) |
@@ -393,7 +393,7 @@ Use a credential anywhere one works: `TUG_CREDENTIAL=<credential> tug deploy`.
 | `--timeout <seconds>` | Wait for node diagnostics | `60` |
 | `--json` | The full document, including output the summary leaves out such as `docker info` | off |
 
-It checks this machine (Node.js and Docker) and the control plane: SQLite, the CA and server certificate expiry, each node's certificate expiry and connectivity, each online node's observed clock skew (unknown when offline, see [Nodes](nodes.md#doctor-certificate-expiry-and-clock-skew)) and ingress status. Node diagnostics include `ports.public`, a warning that lists containers of Tug projects listening on all interfaces or a public IP ([Networking](networking.md#published-ports-private-by-default)). It prints one `ok`, `warn` or `FAIL` line per check, grouped under this machine, control and each node, and exits nonzero when any check fails, so it works as a readiness probe.
+It checks this machine (Node.js and Docker) and the control plane: SQLite, the CA and server certificate expiry, each node's certificate expiry and connectivity, each online node's observed clock skew (unknown when offline, see [Nodes](nodes.md#doctor-certificate-expiry-and-clock-skew)) and ingress status. Node diagnostics include `ports.public`, a warning that lists containers of tug projects listening on all interfaces or a public IP ([Networking](networking.md#published-ports-private-by-default)). It prints one `ok`, `warn` or `FAIL` line per check, grouped under this machine, control and each node, and exits nonzero when any check fails, so it works as a readiness probe.
 
 ### Control backup and restore
 

@@ -8,7 +8,7 @@ tug events
 tug doctor --nodes
 ```
 
-`status` shows the last report from each node, which can be stale, so it is not a live probe. `events` shows who did what and what failed, newest first. `doctor --nodes` runs host diagnostics through every connected agent and waits for the result. Tug reads `tug.yml` only from the current directory and defaults to the `site` project unless you pass `--project`, set `TUG_PROJECT` or configure one, see [configuration precedence](cli.md#arguments-options-and-configuration).
+`status` shows the last report from each node, which can be stale, so it is not a live probe. `events` shows who did what and what failed, newest first. `doctor --nodes` runs host diagnostics through every connected agent and waits for the result. tug reads `tug.yml` only from the current directory and defaults to the `site` project unless you pass `--project`, set `TUG_PROJECT` or configure one, see [configuration precedence](cli.md#arguments-options-and-configuration).
 
 ## Find the message
 

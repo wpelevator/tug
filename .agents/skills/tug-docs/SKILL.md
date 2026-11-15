@@ -1,15 +1,15 @@
 ---
 name: tug-docs
-description: Write, rewrite, restructure or review Tug documentation (README.md and docs/*.md) so readers see real command output first and reach a result fast. Use when creating or updating a docs page, the README, a quickstart, a troubleshooting or production page or a command reference, when deciding how to split or move pages, or when a code change adds a command, flag, `x-tug` key or config key that docs must cover.
+description: Write, rewrite, restructure or review tug documentation (README.md and docs/*.md) so readers see real command output first and reach a result fast. Use when creating or updating a docs page, the README, a quickstart, a troubleshooting or production page or a command reference, when deciding how to split or move pages, or when a code change adds a command, flag, `x-tug` key or config key that docs must cover.
 ---
 
-# Tug docs
+# tug docs
 
-Docs here are task-first: each guide opens with a command and its real output, then short recipes, then reference. A reader sees what Tug does within ten seconds and has a first result within a minute. Read `docs/getting-started.md` and one guide before writing a new page.
+Docs here are task-first: each guide opens with a command and its real output, then short recipes, then reference. A reader sees what tug does within ten seconds and has a first result within a minute. Read `docs/getting-started.md` and one guide before writing a new page.
 
 ## Principles
 
-- **Value first.** Open with the outcome the reader gets, not with how Tug is built.
+- **Value first.** Open with the outcome the reader gets, not with how tug is built.
 - **Progressive disclosure.** See it (a command and its output), do it (the copy-paste path), shape it (recipes), look it up (tables and edge cases). Reference detail never sits above a result.
 - **Never invent output.** Run the command and paste what it prints. If you cannot run it (no VPS, no Docker), show the command without output. Normalize paths, addresses, keys, digests and dates.
 - **Decide the structure first.** Retitling pages keeps the old shape. List the reader's jobs, then split, merge, move and add pages, as in [references/structure.md](references/structure.md).
@@ -30,7 +30,7 @@ Docs here are task-first: each guide opens with a command and its real output, t
 
 | The reader wants to | Page | Opens with |
 |---|---|---|
-| Try Tug | Quickstart | A first result in minutes |
+| Try tug | Quickstart | A first result in minutes |
 | Do one task | Guide | The command and its real output |
 | Pick between commands | Hub (`docs/index.md`) | A table from task to page |
 | Look something up | Reference | A table grouped by task, defaults stated |
