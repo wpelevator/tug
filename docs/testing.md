@@ -23,6 +23,7 @@ Managed-ingress convergence tests exercise current and outdated configuration ha
 | `secret set` printed success but stayed running with stdin open; auditing prompts also found stale readline listeners that echoed later hidden answers | CLI bug report and subprocess reproduction | Tier 1: `src/cli/commands/secret.test.ts` and `src/cli/prompt.test.ts` check exit with open input, listener cleanup, hidden answers and EOF errors |
 | `tug run` lost the start of a command's output: the one-off container's logs were attached after it started with the default 100-line tail, and with flow control a fixed 1.5 s drain cap would also have cut the end | Local integration run on Docker Desktop | Tier 2: `tests/integration/live-exec-flow.test.ts` (8 MB through `tug run` to a slow reader) |
 | The first rolling deploy started two revisions of the same image | Real hosts | Not guarded yet, see backlog item 1 |
+| Backup recipes in `docs/backups.md` used a single `$` in `restore:`, which `tug deploy` 3.0 rejects as an unset value | Real hosts, 15 November 2026 | The recipes use `$$`. A test that checks every Compose snippet in `docs/` is not written yet |
 | A control database from before scoped credentials lacks columns the current control writes | Real hosts | Tier 1: `src/db/migrate.test.ts` upgrades the committed `v0.2.0`, `v0.14.0` and `v1.1.0` schemas (`tests/fixtures/db/`) and requires them to match a fresh database column for column |
 | The earlier Compose-based agent failed `depends_on.condition: service_healthy` when the image had no Docker `HEALTHCHECK`, and the deploy error omitted the Compose message | Historical real-host evaluation | The Engine API agent now falls back to checking that the dependency is running; `src/agent/agent.test.ts` covers this and `src/control/rollout.test.ts` checks apply errors are reported |
 
@@ -107,7 +108,7 @@ The language stack examples have a separate Docker check: `node --test tests/int
 
 Real hosts are the only place that shows routing between separate machines on an operator-provided private network, real certificate issuance, real network latency and the state a previous install leaves behind. Proposed: a manually triggered GitHub workflow that creates two throwaway DigitalOcean droplets, runs the scenarios, writes the report and always destroys the droplets, even on failure. A run should cost cents. It needs a DigitalOcean token and an SSH key as repository secrets, and should use Let's Encrypt's staging CA to stay clear of production rate limits.
 
-The scripts from the first run are the starting point: a request loop from a developer machine and one on the ingress host, a generator for the test application, and a driver for the CLI. They are not in the repository yet.
+The scripts from the first run are the starting point: a request loop from a developer machine and one on the ingress host, a generator for the test application, and a driver for the CLI. They are not in the repository yet. The 15 November 2026 run on five Vultr VMs measured the agent, control and Caddy overhead, rolling and rollback under load, a 2.0.0 to 3.0.0 upgrade and a control restore ([results](real-host-evaluation.md#300-on-vultr-with-five-frameworks-15-november-2026)), with ApacheBench and `docker stats` driven by hand over SSH.
 
 ## Caddy proxy overhead benchmark
 

@@ -19,7 +19,7 @@ tug doctor
 tug ps
 ```
 
-Confirm with `tug doctor` and `tug ps` right after the control upgrade. If `tug doctor` reports a CA fingerprint mismatch, follow the [mismatch runbook](troubleshooting.md#cli-control-version-or-credentialca-mismatches).
+On one VM, `tug upgrade` from 2.0.0 to 3.0.0 took 36 seconds, and a service on the node answered every request sent during it ([measurements](real-host-evaluation.md#rolling-rollback-upgrade-and-recovery)). Confirm with `tug doctor` and `tug ps` right after the control upgrade. If `tug doctor` reports a CA fingerprint mismatch, follow the [mismatch runbook](troubleshooting.md#cli-control-version-or-credentialca-mismatches).
 
 Roll control back with `tug control upgrade --rollback`, which redeploys the image the upgrade tagged `tug:rollback`. Roll nodes back together with it, see [Rolling back](#rolling-back).
 
