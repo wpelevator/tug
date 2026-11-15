@@ -81,7 +81,7 @@ Question: what, where, why, what do I do?
 
 The path is always the same, and the screen makes it a drill-down: attention line, project, service, node, detail.
 
-- Failure reason: `rolloutError`, the agent's `error`, the failing health check ([Health checks](health-checks.md)).
+- Failure reason: `rolloutError`, the agent's `error`, the failing health check ([Health checks](healthchecks.md)).
 - Placement: which nodes run this service, which of them are healthy.
 - Container truth: state, exit code, restarts, image digest, published port (`ps`, `inspect` through `live`; `inspect` redacts environment values).
 - Timeline: events for the project, newest first, with the acting credential.

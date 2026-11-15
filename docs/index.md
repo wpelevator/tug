@@ -8,7 +8,7 @@ Find the page for what you want to do. New here: [Deploy your first service](get
 | --- | --- | --- |
 | Check a Compose file before touching a server | `tug lint` | [Compose extensions](compose.md#checking-the-file-with-tug-lint) |
 | Install control and a first node | `tug setup`, `tug node add` | [Deploy your first service](getting-started.md) |
-| Deploy, or undo a deploy | `tug deploy`, `tug rollback` | [Compose extensions](compose.md), [Health checks](health-checks.md) |
+| Deploy, or undo a deploy | `tug deploy`, `tug rollback` | [Compose extensions](compose.md), [Health checks](healthchecks.md) |
 | Fill `${NAME}` values and keep secrets out of git | `tug secret set`, `tug var set` | [Where values come from](compose.md#where-values-come-from) |
 | Serve a hostname over HTTPS | `tug node ingress`, `x-tug.ingress` | [Ingress and HTTPS](ingress.md) |
 | Back up a volume or database and restore it | `tug backup run`, `tug restore run` | [Backups and recovery](backups.md) |

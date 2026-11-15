@@ -15,9 +15,9 @@ Decide the page set before writing a page.
 
 File names are URL path elements, so they follow one scheme.
 
-- **Lowercase kebab-case**, one to three words, ending in `.md`: `health-checks.md`, `control-plane.md`.
+- **Lowercase kebab-case**, one to three words, ending in `.md`: `healthchecks.md`, `control-plane.md`.
 - **A topic noun, not a verb or gerund.** `upgrades.md`, `backups.md`, `migration.md`, not `upgrading.md`. Command names that are nouns keep the command's name (`cli.md`, `tui.md`).
-- **Plural for a collection, singular for a mass topic or concept.** `backups`, `nodes`, `health-checks`, but `networking`, `migration`, `placement`.
+- **Plural for a collection, singular for a mass topic or concept.** `backups`, `nodes`, but `networking`, `migration`, `placement`.
 - **No qualifiers that describe the writing.** Not `*-reference`, `*-guide`, `*-overview`, `*-proposal`. The folder and the status line carry that.
 - **No subfolders.** `docs/` is flat, so every page is `/docs/<name>`. `docs/index.md` is the only hub for operators, and `docs/design-records.md` is the hub for contributors and evaluators.
 - **A design page that shares a topic with an operator page takes a suffix that says what it is**, as in `tui.md` and `tui-design.md`, `terminology.md` and `terminology-review.md`, and `ingress.md` and `ingress-design.md`.

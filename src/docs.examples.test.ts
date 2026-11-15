@@ -62,7 +62,7 @@ test('the second-node example places the service on both named nodes', () => {
 });
 
 test('the health-check example declares a healthy database dependency', () => {
-  const compose = normalized(composeBlock('health-checks.md'));
+  const compose = normalized(composeBlock('healthchecks.md'));
   assert.doesNotThrow(
     () => validateCompose(compose, ['app1']),
     'the health-check example should validate',

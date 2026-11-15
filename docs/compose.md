@@ -22,7 +22,7 @@ services:
 
 `tug deploy` reads the file on your machine with its own reader, so neither your machine nor the nodes need Docker Compose. Each agent turns the services placed on its node into Docker Engine API container definitions, without `x-tug`, `build`, `deploy` and `container_name`, with `extra_hosts` added for services on other nodes and `image` set to the built or declared image. A published port without a host IP is bound to the node's `address` or `127.0.0.1`, not every interface. Write the host IP (`"0.0.0.0:80:80"`) to publish on purpose. See [Published ports](networking.md#published-ports-private-by-default).
 
-To choose a probe see [Health checks](health-checks.md), and to choose where services run see [Service placement](placement.md).
+To choose a probe see [Health checks](healthchecks.md), and to choose where services run see [Service placement](placement.md).
 
 ## Checking the file with `tug lint`
 

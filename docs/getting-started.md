@@ -98,7 +98,7 @@ curl http://203.0.113.5:8080/
 
 `tug deploy` prints one summary line that ends in `succeeded`, for example `site git-ab12: deployment dep_1 succeeded, 3 services`, with your own project, version, id and service count. Status should show `web` serving on `app1`, and curl should return the nginx welcome page. The explicit `0.0.0.0` publishes the example on all IPv4 interfaces; restrict TCP 8080 to your computer in the provider firewall while trying it. For a real site, use [managed ingress and HTTPS](ingress.md#set-up-ingress), remove this explicit public binding, and redeploy. Tug otherwise binds published ports to the node address or loopback; a public node address can still make them public. See [port exposure](networking.md#published-ports-private-by-default).
 
-With one node, omitted placement selects it automatically. The HTTP check verifies nginx responds before Tug marks it serving; see [Health checks](health-checks.md). If the deploy fails or the page is unreachable, start with [Troubleshooting](troubleshooting.md).
+With one node, omitted placement selects it automatically. The HTTP check verifies nginx responds before Tug marks it serving; see [Health checks](healthchecks.md). If the deploy fails or the page is unreachable, start with [Troubleshooting](troubleshooting.md).
 
 ## Deploy your own app
 
@@ -120,7 +120,7 @@ tug deploy
 - [Set secrets and variables](compose.md#where-values-come-from): keep private values with `tug secret`, visible ones such as image tags with `tug var`, move an existing `.env` in with `tug secret import`, and check the result with `tug deploy --dry-run`.
 - [Back up and recover](backups.md): protect workload data and the control plane separately, then rehearse a restore.
 - [Add another node](placement.md): pin stateful services and spread a stateless service across servers.
-- [Choose health checks and safer rollouts](health-checks.md): understand readiness, failures and rollback.
+- [Choose health checks and safer rollouts](healthchecks.md): understand readiness, failures and rollback.
 - [Give CI or teammates access](access-control.md): create credentials appropriate for trusted operators.
 
 The service and control plane will keep running after this tutorial. Before retiring a host that contains data, follow [Retire a host](migration.md#retire-a-host); teardown can delete volumes and credentials. The [CLI reference](cli.md), [Compose reference](compose.md) and [configuration reference](configuration.md) describe all options.

@@ -38,7 +38,7 @@ tug logs web
 Read the error `tug deploy` printed first. Then work down this list:
 
 1. `tug logs <service>` shows why the container died or never became healthy. With several eligible nodes, add `--node <name>`.
-2. A health check that never passes usually has the wrong `port` or `path`, or too few `retries` for a slow start. The defaults are 10 attempts, 2 seconds apart. Raise `x-tug.health.retries` or `interval`, see [Health checks](health-checks.md).
+2. A health check that never passes usually has the wrong `port` or `path`, or too few `retries` for a slow start. The defaults are 10 attempts, 2 seconds apart. Raise `x-tug.health.retries` or `interval`, see [Health checks](healthchecks.md).
 3. A missing variable or secret fails the deploy with the names and the command that sets them. `tug deploy --dry-run` lists every `${NAME}` and where its value comes from.
 4. A service that cannot reach its dependency usually needs a `depends_on` with `condition: service_healthy`, or connection retries in the app.
 
