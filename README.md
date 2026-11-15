@@ -30,7 +30,7 @@ A typical VPS is a durable, always-on computer with enough CPU, memory and disk 
 | Get images to servers | Builds your images on control (or on your machine with `tug deploy --build-local`) and sends them to each server over connections the agents already make. Or push to any HTTPS registry and declare `image:`; control pins the tag to a digest before deploying. | [Control plane](docs/control-plane.md#image-delivery-without-a-registry) |
 | Give CI one scoped credential | CI holds one credential limited by role (`read`, `deploy` or `admin`), and `deploy` credentials can be limited to projects. | [Access control](docs/access-control.md) |
 | Back up and restore | Scheduled [restic](https://restic.net) backups of volumes and databases to S3-compatible storage. `tug restore run db` brings one back. Control backs itself up every night. | [Backups](docs/backups.md) |
-| Roll back | `tug rollback` returns to a previous deployment, and `x-tug: { rollback: auto }` does it when a node reports the new version unhealthy. It cannot undo database writes or schema changes. | [Health checks](docs/healthchecks.md) |
+| Roll back | `tug rollback` returns to a previous deployment, and `x-tug: { rollback: auto }` does it when a node reports the new version unhealthy. It cannot undo database writes or schema changes. | [Health checks](docs/health-checks.md) |
 | Serve HTTPS | Managed Caddy serves a hostname with `tls: auto`, obtains the certificate and renews it. DNS must point at the server and ports 80 and 443 must be reachable. | [Networking](docs/networking.md#layer-b-ingress-and-tls) |
 | Keep secrets out of git | `tug secret set` keeps them encrypted on control and delivers each only to the nodes whose services use it. Every `${NAME}` in your Compose file comes from control, never from the shell or `.env` of whoever runs the deploy, and `tug deploy --dry-run` shows where each value came from. | [Where values come from](docs/compose.md#where-values-come-from) |
 | Read logs and open shells | `tug logs`, `tug exec`, `tug run` (for example the `wp` CLI), `tug ps` and `tug status` go through the control plane. SSH is needed only to install and manage nodes. | [CLI](docs/cli.md) |
@@ -40,7 +40,7 @@ A typical VPS is a durable, always-on computer with enough CPU, memory and disk 
 
 Follow [Deploy your first service](docs/getting-started.md) to install Tug, deploy nginx to one VPS and verify that it works. You need Node.js 22.18 or newer on your computer, plus SSH access to a Linux server. Tug can install Docker on supported servers.
 
-The control plane and agent share the VPS with your application. Once your service is running, you can [add HTTPS](docs/networking.md#layer-b-ingress-and-tls), [back up your data](docs/backups.md) or [add another server](docs/service-placement.md).
+The control plane and agent share the VPS with your application. Once your service is running, you can [add HTTPS](docs/networking.md#layer-b-ingress-and-tls), [back up your data](docs/backups.md) or [add another server](docs/placement.md).
 
 Existing service and resource targets can be chosen interactively (try `tug logs`, `tug deploy cancel` or `tug restore run`; see [interactive CLI selection](docs/cli.md#interactive-selection)). In a terminal Tug asks before it changes anything: whether to install Docker, which private address the node should use and whether it should handle ingress. It shows the plan and waits for you to confirm. `tug deploy` asks for any Compose variables, such as `${DB_PASSWORD}`, that no secret or `.env` provides. In CI or any other script nothing is ever asked, so pass the choices as flags (`--address`, `--ingress`, `--install-docker`, `-y`).
 
@@ -184,17 +184,17 @@ Every command and option is in the [CLI reference](docs/cli.md). `tug status --j
 
 `tug deploy` reads your Compose file on your machine and sends it to the control plane, which stores it as an immutable desired state, builds application images when needed and pins published images to digests. Tug delivers its built images as archives; published images are pulled from their upstream registries. Each agent fetches the work for its node, applies it through the Docker Engine API, runs the health checks and reports back. The control plane marks the deployment done when every node reports it serving. Tug reads Compose files with its own built-in reader, so Docker Compose is not needed anywhere: nodes need only Docker Engine, and control runs as a container started with `docker run`. Cross-node workload traffic uses your own private network.
 
-Control serves mutual TLS directly on one port (`8443`). Every operator, CI job and node authenticates with a certificate from a private CA created at install, so the control address can be a bare IP and can change later. Do not terminate TLS in front of it. A `controlUrl` in `tug.yml` tells the CLI where control is (see [CLI configuration](docs/cli.md#config-file)). [Architecture](docs/architecture.md) covers every flow in detail, and [Security](docs/design/security.md) the trust boundaries.
+Control serves mutual TLS directly on one port (`8443`). Every operator, CI job and node authenticates with a certificate from a private CA created at install, so the control address can be a bare IP and can change later. Do not terminate TLS in front of it. A `controlUrl` in `tug.yml` tells the CLI where control is (see [CLI configuration](docs/cli.md#config-file)). [Architecture](docs/architecture.md) covers every flow in detail, and [Security](docs/design/security-audit.md) the trust boundaries.
 
 ## Documentation
 
 The [documentation index](docs/index.md) lists every page by task. The ones you will reach for first:
 
 - **Start:** [Deploy your first service](docs/getting-started.md), then the [application examples](examples/README.md)
-- **Run it for real:** [Production checklist](docs/production-checklist.md), [Backups and recovery](docs/backups.md), [Upgrade control and nodes](docs/upgrading.md), [Troubleshooting](docs/troubleshooting.md)
+- **Run it for real:** [Production checklist](docs/production-checklist.md), [Backups and recovery](docs/backups.md), [Upgrade control and nodes](docs/upgrades.md), [Troubleshooting](docs/troubleshooting.md)
 - **Look it up:** [CLI](docs/cli.md), [Compose extensions](docs/compose.md), [Configuration](docs/configuration.md), [Access control](docs/access-control.md)
 - **Understand it:** [Architecture](docs/architecture.md), [Docker Swarm comparison](docs/design/swarm-comparison.md), [Terminal UI](docs/tui.md)
-- **Contribute:** [Development](docs/contributing/development.md), [Testing](docs/contributing/testing.md), [Releases](docs/releases.md), and the [design records](docs/design/README.md) (roadmap, security audit, proposals)
+- **Contribute:** [Development](docs/contributing/development.md), [Testing](docs/contributing/testing.md), [Releases](docs/releases.md), and the [design records](docs/design/index.md) (roadmap, security audit, proposals)
 
 ## Development
 

@@ -13,7 +13,7 @@ Commands read `tug <subject> <verb> [params]`, such as `tug node add` and `tug s
 | I want to | Command | Section |
 | --- | --- | --- |
 | Install control, import a credential | `setup`, `init`, `control setup` | [Setup](#setup) |
-| Upgrade control and nodes | `upgrade`, `control upgrade`, `node upgrade` | [Setup](#setup), [Upgrade](upgrading.md) |
+| Upgrade control and nodes | `upgrade`, `control upgrade`, `node upgrade` | [Setup](#setup), [Upgrade](upgrades.md) |
 | Add, change or remove a server | `node add`, `list`, `replace`, `repair`, `remove`, `disable`, `ingress`, `address`, `register`, `enroll`, `migrate` | [Nodes](#nodes) |
 | Check a Compose file offline | `lint` | [Deployments](#deployments) |
 | Deploy, undo, cancel | `deploy`, `rollback`, `deploy cancel` | [Deployments](#deployments) |
@@ -155,7 +155,7 @@ Steps that run on a host over SSH (Docker installation, preflight, image transfe
 | --- | --- |
 | `tug init [<credential-file>\|-]` | Creates the config file with the resolved control URL and project if missing, imports the credential (a file, or `-` for stdin) and points the git-ignored overlay at it. Select them with `--control-url`, `--project` or `--config` |
 | `tug setup <ssh-target>` | Shortcut for `tug control setup`. Installs control over SSH, issues the root credential and imports it, so no `init` follows |
-| `tug upgrade` | Runs `control upgrade` on `controlSsh`, then `node upgrade --all`. See [Upgrade control and nodes](upgrading.md) |
+| `tug upgrade` | Runs `control upgrade` on `controlSsh`, then `node upgrade --all`. See [Upgrade control and nodes](upgrades.md) |
 | `tug control upgrade [<ssh-target>]` | Replaces the control container with one on another image |
 | `tug control migrate <ssh-target>` | Moves control data from a host directory into the `tug-control` volume. See [Control plane](control-plane.md#moving-control-data-into-the-volume-control-migrate) |
 

@@ -14,7 +14,7 @@ It asks for the bump (`patch`, `minor` or `major`) and a summary, and writes a M
 
 ## Choosing the bump
 
-Tug trusts semver, and the control, CLI and agents enforce it (see [Upgrading the control plane](upgrading.md)): they interoperate while their major matches, and a client on a newer major than its control is refused. The bump in a changeset is therefore a compatibility promise, not a measure of how big the change feels:
+Tug trusts semver, and the control, CLI and agents enforce it (see [Upgrading the control plane](upgrades.md)): they interoperate while their major matches, and a client on a newer major than its control is refused. The bump in a changeset is therefore a compatibility promise, not a measure of how big the change feels:
 
 - `patch`: fixes and changes that do not alter what the control, CLI and agents say to each other, including documentation.
 - `minor`: new features. Additive wire changes (a new route, an optional field, a new agent command) are minor: older peers keep working, and a newer CLI against an older control reports the missing route.
@@ -40,7 +40,7 @@ From 1.0.0 these are public contracts. Inside one major they change only compati
 
 - **The CLI:** command names, flags and exit codes, and the JSON printed by `--json` and by commands documented as machine-readable.
 - **`x-tug`:** the keys, values and defaults in [Compose extensions](compose.md) and the published `x-tug.schema.json`. A new key is a minor; a key's meaning does not change.
-- **The wire protocol:** the HTTP routes under `/api/v1` and `/agent/v1`, the `x-tug-*` skew headers and the agent commands, as described in [Upgrading the control plane](upgrading.md).
+- **The wire protocol:** the HTTP routes under `/api/v1` and `/agent/v1`, the `x-tug-*` skew headers and the agent commands, as described in [Upgrading the control plane](upgrades.md).
 - **Persisted state:** the control database and the agent state database upgrade in place through migrations; the credential file (`v: 1`), the join key (`v: 2`) and the control backup archive stay readable by every release of the same major. A change that cannot be read by an older release of the major is announced as a schema or format change in the changelog.
 - **Image and package names:** `@wpelevator/tug` and `ghcr.io/wpelevator/tug:X.Y.Z`, `X.Y` and `latest`.
 

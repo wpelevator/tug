@@ -300,7 +300,7 @@ Secrets are encrypted at rest with AES-256-GCM using the control master key, and
 
 Project variables (`tug var`) are the visible counterpart, kept in their own table (`project_vars`, encrypted at rest like secrets) so nothing that releases secrets can pick one up. A name is a secret or a variable in a project, never both. The CLI fetches the variable values with the `deploy` role and interpolates them while it reads the Compose file, so they are baked into the desired state and a rollback restores them; a secret is substituted by the agent from its current value. Each deployment also stores a record of every referenced name and its source (`deployments.values_json`, returned as `values`): control fills secret versions and variable values from its own rows, refuses a variable whose version changed while the CLI prepared the deployment, and never records a secret value. A rollback carries the record of the deployment it restores.
 
-A possible evolution is delivering secrets as read-only files under `/run/secrets/` instead of environment variables, which would keep values out of `Config.Env` and `docker inspect`; see [File-mounted workload secrets](design/secrets.md).
+A possible evolution is delivering secrets as read-only files under `/run/secrets/` instead of environment variables, which would keep values out of `Config.Env` and `docker inspect`; see [File-mounted workload secrets](design/workload-secrets.md).
 
 ## Runtime paths
 

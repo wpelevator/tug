@@ -22,7 +22,7 @@ Roles are cumulative.
 
 Setting and deleting secrets is `admin` only, and listing secret names is `read`. Variables are visible configuration versioned with each deployment, so `deploy` can set, read and remove them, and every change is audited with the credential's name. A name is either a secret or a variable in a project.
 
-A `deploy` credential must be trusted with its workloads' secrets. `inspect` redacts environment values, but `exec` can read them and deployed code can disclose any secret it receives. Project scope limits API access to project records and does not isolate hosts or co-located projects. Current deployments can select shared nodes and request host bind mounts, external volumes, volume driver options and added capabilities. Treat deployment authors as administrators of the nodes they can select, and use separate hosts or control planes for mutually untrusted authors. See the [security audit](design/security.md) for the demonstrated boundaries and outstanding fixes.
+A `deploy` credential must be trusted with its workloads' secrets. `inspect` redacts environment values, but `exec` can read them and deployed code can disclose any secret it receives. Project scope limits API access to project records and does not isolate hosts or co-located projects. Current deployments can select shared nodes and request host bind mounts, external volumes, volume driver options and added capabilities. Treat deployment authors as administrators of the nodes they can select, and use separate hosts or control planes for mutually untrusted authors. See the [security audit](design/security-audit.md) for the demonstrated boundaries and outstanding fixes.
 
 ## Manage credentials
 

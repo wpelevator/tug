@@ -64,7 +64,7 @@ Swarm requires reachable manager endpoints and, for overlay networking, peer con
 
 Tug exposes a narrow application-oriented API with named actors and built-in roles/projects. This is more convenient than granting a deployment job unrestricted manager Docker access. Swarm's default authorization can be extended with plugins, so it is inaccurate to say Swarm cannot have scoped access. [D12] Docker events also exist; Tug's distinction is an application deployment history that records the acting credential, rather than the mere existence of events. [D16]
 
-These controls do not make Tug a hostile-tenant platform. Deployment authors must be trusted with their selectable hosts, co-located workloads and runtime secrets. See the current [access boundaries](../access-control.md) and [security findings](security.md); some findings remain partial, and this report does not re-audit them.
+These controls do not make Tug a hostile-tenant platform. Deployment authors must be trusted with their selectable hosts, co-located workloads and runtime secrets. See the current [access boundaries](../access-control.md) and [security findings](security-audit.md); some findings remain partial, and this report does not re-audit them.
 
 ## Where Tug is worse or more limited
 

@@ -15,7 +15,7 @@ In scope, because they are the real failures of the current model:
 3. **Accidental overreach by humans.** Root is the daily driver, so a typo is a root typo.
 4. **Unattributable delegation.** A tool acting for a person records only the tool.
 
-Out of scope, consistent with the [product decisions](roadmap.md#product-decisions-and-reasoning): isolating mutually untrusted tenants. Shared kernels, builds on control and the host-level reach of deployers are unchanged, and [Security](security.md) still applies. The engine reduces blast radius and makes authority explicit and reviewable; it is not a sandbox against a hostile deployer. Where a grant is secretly root-equivalent, the engine says so ([Root-equivalence analysis](#root-equivalence-analysis)).
+Out of scope, consistent with the [product decisions](roadmap.md#product-decisions-and-reasoning): isolating mutually untrusted tenants. Shared kernels, builds on control and the host-level reach of deployers are unchanged, and [Security](security-audit.md) still applies. The engine reduces blast radius and makes authority explicit and reviewable; it is not a sandbox against a hostile deployer. Where a grant is secretly root-equivalent, the engine says so ([Root-equivalence analysis](#root-equivalence-analysis)).
 
 ## Where authorization sits today
 

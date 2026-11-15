@@ -11,13 +11,25 @@ Decide the page set before writing a page.
 5. **Name files after titles** and update every link when a title changes.
 6. **Keep a fact in one place** and link to it.
 
+## File names
+
+File names are URL path elements, so they follow one scheme.
+
+- **Lowercase kebab-case**, one to three words, ending in `.md`: `health-checks.md`, `control-plane.md`.
+- **A topic noun, not a verb or gerund.** `upgrades.md`, `backups.md`, `migration.md`, not `upgrading.md`. Command names that are nouns keep the command's name (`cli.md`, `tui.md`).
+- **Plural for a collection, singular for a mass topic or concept.** `backups`, `nodes`, `health-checks`, but `networking`, `migration`, `placement`.
+- **No qualifiers that describe the writing.** Not `*-reference`, `*-guide`, `*-overview`, `*-proposal`. The folder and the status line carry that.
+- **Every folder has an `index.md`**, never `README.md`, so every folder URL has the same shape. The repository root `README.md` is the only exception.
+- **The same topic keeps the same name across folders**, so `docs/tui.md` and `docs/design/tui.md` are the operator and design pages of one topic, and `docs/terminology.md` pairs with `docs/design/terminology.md`.
+- **Rename only when the job changes.** A rename breaks outside links, so name the old URLs in the pull request.
+
 ## Layout
 
 | Folder | Audience | Pages |
 |---|---|---|
 | `docs/` | Operators | `index.md` hub, getting started, guides by task, production checklist, troubleshooting, reference |
 | `docs/design/` | Contributors and evaluators | Proposals, audits, evaluations, comparisons of approaches. State at the top whether the page is a proposal, a record or shipped behavior |
-| `docs/contributing/` | Contributors | Development, testing, releases |
+| `docs/contributing/` | Contributors | Development, testing |
 
 ## Reference pages
 

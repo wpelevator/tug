@@ -27,11 +27,11 @@ Status reports the last observation from each node, which may be stale; it is no
 
 ## Deploy fails or a service is unhealthy
 
-Read the error from `tug deploy`, then check `tug status`, `tug events` and `tug logs <service>`. If there is more than one eligible node, use `tug logs <service> --node <name>`. Check image availability, environment variables, secret names, container startup logs and health-check port and path. Check that the service can reach its dependencies and that the probe allows enough startup time. See [Health checks](healthchecks.md).
+Read the error from `tug deploy`, then check `tug status`, `tug events` and `tug logs <service>`. If there is more than one eligible node, use `tug logs <service> --node <name>`. Check image availability, environment variables, secret names, container startup logs and health-check port and path. Check that the service can reach its dependencies and that the probe allows enough startup time. See [Health checks](health-checks.md).
 
 A deploy, rollback or control backup that sits queued for a long time is usually waiting behind another build: control runs one writer at a time, and a stuck build is killed after 30 minutes. `tug status` shows the deployment that is still building; `tug deploy cancel` marks it cancelled, but the build process itself ends only at that deadline. Plan for a rollback to wait that long in the worst case.
 
-A project with multiple registered nodes needs placement for every service. A stateful service moved to another node may require an explicit `--move` acknowledgement and a restore; do not release held writers until you understand whether the new volume contains the correct data. See [Service placement](service-placement.md) and [Move the database](migration.md#move-the-database).
+A project with multiple registered nodes needs placement for every service. A stateful service moved to another node may require an explicit `--move` acknowledgement and a restore; do not release held writers until you understand whether the new volume contains the correct data. See [Service placement](placement.md) and [Move the database](migration.md#move-the-database).
 
 ## The service is running but the site is unreachable
 
@@ -62,7 +62,7 @@ Verify the configured control URL, network path, TCP 8443 and the operator crede
 | A warning naming `npm i -g @wpelevator/tug@<version>` | The CLI is older than control | Pin or upgrade the CLI |
 | No version stamp in control's responses | An older control | Upgrade it with the same command |
 
-   After any control upgrade, run `tug doctor` right away. An upgrade must preserve `/data/pki`, and `control upgrade` compares the CA before and after and fails if it changed. See [Upgrade control and nodes](upgrading.md).
+   After any control upgrade, run `tug doctor` right away. An upgrade must preserve `/data/pki`, and `control upgrade` compares the CA before and after and fails if it changed. See [Upgrade control and nodes](upgrades.md).
 
 3. **"The control did not present a certificate signed by this credential's CA".** The credential file and the deployed control disagree, so establish which side is canonical. Control's PKI lives at `/data/pki` in its container (the `tug-control` volume), and its compose files at `/opt/tug-control`. `tug init` names credential files by CA fingerprint and never overwrites a file cast for another CA, so the previously working credential remains under `~/.config/tug/credentials/`. Flipping back to it is the least destructive fix: point `tug.local.yml` at it, or re-run `tug init <file>`. Never regenerate one side to "fix" the other before checking which CA `cat /data/pki/ca.crt` on the control host reports.
 4. **Verify after any control redeploy.** `tug status` should still list every project. Run `tug ps` and `tug exec <service> -- sh -c 'echo ok'` as an end-to-end check. `tug control upgrade` tags the previous control image `tug:rollback` itself, so `tug control upgrade --rollback` stays available.

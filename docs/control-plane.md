@@ -16,7 +16,7 @@ tug control setup root@control.example.com
 | Free disk used by build archives | [Image delivery](#image-delivery-without-a-registry) |
 | Use a private registry | [Published images](#published-images-and-private-registries) |
 | Back up or restore control | [Backup and restore](#backup-and-restore) |
-| Upgrade | [Upgrade control and nodes](upgrading.md) |
+| Upgrade | [Upgrade control and nodes](upgrades.md) |
 | Re-address or move control | [Moving the control plane](#moving-the-control-plane) |
 | Recover from loss or compromise | [Lost or compromised something](#lost-or-compromised-something) |
 
@@ -27,7 +27,7 @@ tug control setup root@control.example.com
 | Topic | Behavior |
 | --- | --- |
 | Address clients use | `controlUrl` in the CLI config file (including any overlay), else the SSH target's host plus the published port (`https://control.example.com:8443`), which `control setup` prints. Pass `--control-url` or set `TUG_CONTROL_URL` to override, for example when you install through an SSH alias or a private address but clients reach control elsewhere. The credential URL is never an installation address. A configured URL keeps its public port even when `--port` publishes a different Docker host port. It is only an address, because clients verify the generated control name, not this URL |
-| Running it again | Recreates the container on the same volume with only the flags you pass, so a port or extra name you leave out resets to its default. Upgrade with [`tug control upgrade`](upgrading.md) instead. Setup prints a note when its flags would change the settings of a control already there. On an install made before control stopped using Compose, it also removes the Compose file and network. It accepts the port when the existing `tug-control-control-1` container holds it and fails when anything else does |
+| Running it again | Recreates the container on the same volume with only the flags you pass, so a port or extra name you leave out resets to its default. Upgrade with [`tug control upgrade`](upgrades.md) instead. Setup prints a note when its flags would change the settings of a control already there. On an install made before control stopped using Compose, it also removes the Compose file and network. It accepts the port when the existing `tug-control-control-1` container holds it and fails when anything else does |
 | Docker | `--install-docker` installs Docker Engine first on a supported Debian, Ubuntu, Fedora or RHEL-compatible host |
 | Root credential | Issued with `docker exec ... control issue-credential --name root --role admin` over SSH. It never lands in container logs or a permanent file on control. `--credential-out <file>` writes an extra copy, and `--no-import` skips the import. Upgrading or running setup again preserves credentials and never reissues root |
 | Lost root | `tug control setup <ssh-target> --control-url https://control.example.com:8443 --recover-root` replaces only root's key without the API, closes its sessions within a second and audits the recovery. Other admins are unaffected |
@@ -161,7 +161,7 @@ A snapshot older than later node or operator changes does not contain those chan
 
 ## Upgrading the control plane
 
-Upgrades, version skew and rollback are in [Upgrade control and nodes](upgrading.md).
+Upgrades, version skew and rollback are in [Upgrade control and nodes](upgrades.md).
 
 ## Moving control data into the volume (`control migrate`)
 

@@ -127,7 +127,7 @@ A WordPress multisite can serve sites on different top-level domains (domain map
 
 ## Edge features
 
-The generated Caddyfile is small: per host one `reverse_proxy` with `lb_policy round_robin` and the resilience settings below, the TLS mode and the optional ACME email. It has no compression, response headers, timeouts or body limit. The proposals for more are in [Ingress edge features](design/ingress-edge.md).
+The generated Caddyfile is small: per host one `reverse_proxy` with `lb_policy round_robin` and the resilience settings below, the TLS mode and the optional ACME email. It has no compression, response headers, timeouts or body limit. The proposals for more are in [Ingress edge features](design/ingress.md).
 
 It needs a current Caddy 2 image. The directives were tested against 2.11.7. A node that cached an older `caddy:2-alpine` is never re-pulled, so Caddy rejects the config, ingress reports `failed` and deployments for routed projects wait for it. Pull a newer image on that node, or set `TUG_CADDY_IMAGE` to a pinned tag, and recreate the container.
 

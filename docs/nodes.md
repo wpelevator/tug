@@ -197,7 +197,7 @@ tug node upgrade app1
 tug node upgrade --all
 ```
 
-Run it after a control upgrade. `tug upgrade` does both in order, see [Upgrade control and nodes](upgrading.md).
+Run it after a control upgrade. `tug upgrade` does both in order, see [Upgrade control and nodes](upgrades.md).
 
 | Behavior | Detail |
 | --- | --- |

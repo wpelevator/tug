@@ -50,7 +50,7 @@ The spike (step 1) answers each before any code is written.
 6. [ ] Extend doctor with Podman-specific checks: restart service enabled, rootless detected (unsupported, clear error), socket mount and SELinux hint.
 7. [ ] Apply each workaround the spike requires, each with a test whose assertion message states the expected behavior.
 8. [ ] Add a Podman variant of the `tools/docker/fake-vps` integration tier and run it in the same tier as the Docker one; add the fixes for findings it surfaces to [Testing](../contributing/testing.md)'s regression table.
-9. [ ] Update [Nodes](../nodes.md) (installer behavior with a pre-installed Podman), [Getting started](../getting-started.md), [Troubleshooting](../troubleshooting.md), [Security](security.md) (the engine socket is host-administrator power under either engine), [Development](../contributing/development.md) (runtime image CLI) and the README with an engine compatibility table.
+9. [ ] Update [Nodes](../nodes.md) (installer behavior with a pre-installed Podman), [Getting started](../getting-started.md), [Troubleshooting](../troubleshooting.md), [Security](security-audit.md) (the engine socket is host-administrator power under either engine), [Development](../contributing/development.md) (runtime image CLI) and the README with an engine compatibility table.
 10. [ ] Add a changeset; when it ships, fold this proposal into the compatibility table in the docs and delete it.
 
 ## Non-goals
