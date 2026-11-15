@@ -95,13 +95,13 @@ tug logs web
 curl http://203.0.113.5:8080/
 ```
 
-The deploy should report success, status should show `web` serving on `app1`, and curl should return the nginx welcome page. The explicit `0.0.0.0` publishes the example on all IPv4 interfaces; restrict TCP 8080 to your computer in the provider firewall while trying it. For a real site, use [managed ingress and HTTPS](networking.md#layer-b-ingress-and-tls), remove this explicit public binding, and redeploy. Tug otherwise binds published ports to the node address or loopback; a public node address can still make them public. See [port exposure](networking.md#published-ports-private-by-default).
+The deploy should report success, status should show `web` serving on `app1`, and curl should return the nginx welcome page. The explicit `0.0.0.0` publishes the example on all IPv4 interfaces; restrict TCP 8080 to your computer in the provider firewall while trying it. For a real site, use [managed ingress and HTTPS](ingress.md#set-up-ingress), remove this explicit public binding, and redeploy. Tug otherwise binds published ports to the node address or loopback; a public node address can still make them public. See [port exposure](networking.md#published-ports-private-by-default).
 
 With one node, omitted placement selects it automatically. The HTTP check verifies nginx responds before Tug marks it serving; see [Health checks](health-checks.md). If the deploy fails or the page is unreachable, start with [Troubleshooting](troubleshooting.md).
 
 ## Choose a next step
 
-- [Add a hostname and HTTPS](networking.md#layer-b-ingress-and-tls): enable ingress, point DNS at the VPS and route a service.
+- [Add a hostname and HTTPS](ingress.md#set-up-ingress): enable ingress, point DNS at the VPS and route a service.
 - [Deploy an application and database](https://github.com/wpelevator/tug/blob/main/README.md#your-compose-file-plus-a-little-x-tug): use a volume and a project secret, then explore the [WordPress example](https://github.com/wpelevator/tug/blob/main/examples/wordpress/README.md).
 - [Set secrets and variables](compose.md#where-values-come-from): keep private values with `tug secret`, visible ones such as image tags with `tug var`, move an existing `.env` in with `tug secret import`, and check the result with `tug deploy --dry-run`.
 - [Back up and recover](backups.md): protect workload data and the control plane separately, then rehearse a restore.

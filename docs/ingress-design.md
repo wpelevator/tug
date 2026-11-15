@@ -1,6 +1,6 @@
 # Ingress edge features
 
-**Status: partly built.** Items 1 and 2 below shipped. The rest is proposed, and the roadmap lists it under [Later](roadmap.md#later--only-if-needed). Current behavior and limits are in [Networking](networking.md#edge-features).
+**Status: partly built.** Items 1 and 2 below shipped. The rest is proposed, and the roadmap lists it under [Later](roadmap.md#later--only-if-needed). Current behavior and limits are in [Networking](ingress.md#edge-features).
 
 ## How the managed ingress compares
 

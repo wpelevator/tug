@@ -111,15 +111,15 @@ The agent checks the container after it starts, and the service is `serving` onl
 | --- | --- | --- |
 | `host` | A fully qualified hostname, or a list (`[app.example.com, example.org, "*.network.example.com"]`), unique across the file. Every name shares the route's upstreams and TLS mode, and the first is the primary | required |
 | `port` | The service's container port or published host port. It must appear in `ports` | required |
-| `tls` | `auto` (ACME, with a wildcard host issued per name on demand, see [Edge features](networking.md#edge-features)), `custom` or `off` | `auto` |
+| `tls` | `auto` (ACME, with a wildcard host issued per name on demand, see [Edge features](ingress.md#edge-features)), `custom` or `off` | `auto` |
 | `cert`, `key` | With `tls: custom`: names of project secrets holding the PEM chain and private key. They must exist before you deploy, and the one certificate must cover every host | none |
 | `maintenance` | `true` makes the edge answer `503` with a short fixed page and `Retry-After` for this host, for planned work. Remove it and deploy again to resume | `false` |
 
-A host with no serving upstream gets the same `503` automatically. `tug domain add` maps extra hostnames onto a route without a deployment, see [Mapped domains](networking.md#mapped-domains-and-wildcard-zones). Setup and DNS are in [Networking](networking.md#layer-b-ingress-and-tls).
+A host with no serving upstream gets the same `503` automatically. `tug domain add` maps extra hostnames onto a route without a deployment, see [Mapped domains](ingress.md#mapped-domains-and-wildcard-zones). Setup and DNS are in [Networking](ingress.md#set-up-ingress).
 
 ### Names across nodes
 
-A service on another node is reachable by name (`db` or `db.<project>.tug`) when the target publishes its port and the client's node can route to the target node's private `address`. Tug binds the port to that address, and your firewall controls access. The agent adds these names as hosts-file (`extra_hosts`) entries, not DNS records. Set `TUG_SERVICE_NAMES=false` on control to turn them off. See [Networking](networking.md#layer-a-cross-node-service-names).
+A service on another node is reachable by name (`db` or `db.<project>.tug`) when the target publishes its port and the client's node can route to the target node's private `address`. Tug binds the port to that address, and your firewall controls access. The agent adds these names as hosts-file (`extra_hosts`) entries, not DNS records. Set `TUG_SERVICE_NAMES=false` on control to turn them off. See [Networking](networking.md#cross-node-service-names).
 
 An app reaches a database through Compose DNS only when both are on the same node. Local volumes are not copied between nodes.
 

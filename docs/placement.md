@@ -20,7 +20,7 @@ With one registered node, a service with no placement runs there. Once several n
 
 ## Spread the first service across two nodes
 
-This continues from [Deploy your first service](getting-started.md). The nginx service is stateless, so both VPSes can run an independent copy. The example keeps the tutorial's public port, so restrict TCP 8080 to your computer on both VPSes with provider firewalls. For a public site use [ingress and HTTPS](networking.md#layer-b-ingress-and-tls) instead.
+This continues from [Deploy your first service](getting-started.md). The nginx service is stateless, so both VPSes can run an independent copy. The example keeps the tutorial's public port, so restrict TCP 8080 to your computer on both VPSes with provider firewalls. For a public site use [ingress and HTTPS](ingress.md#set-up-ingress) instead.
 
 1. **Give the new VPS an address** on your private network and make sure it can reach control on TCP 8443. To call services across nodes, or route ingress from one node to services on the other, both hosts need mutually reachable private addresses and matching firewall rules. Tug does not create or encrypt this network, see [Networking](networking.md#bring-your-own-network).
 2. **Add the agent**, replacing the SSH address and private address with yours. In a terminal, Tug offers Docker installation and shows the plan first.
@@ -57,7 +57,7 @@ curl http://203.0.113.5:8080/
 curl http://198.51.100.7:8080/
 ```
 
-This places one container on each named node and does not load-balance the two public addresses. Managed ingress can route to healthy services on several nodes when their workload network is reachable, and its hostname needs DNS pointing at an ingress node, see [Ingress and TLS](networking.md#layer-b-ingress-and-tls).
+This places one container on each named node and does not load-balance the two public addresses. Managed ingress can route to healthy services on several nodes when their workload network is reachable, and its hostname needs DNS pointing at an ingress node, see [Ingress and TLS](ingress.md#set-up-ingress).
 
 ## Keep state on its server
 
@@ -84,6 +84,6 @@ This is a placement fragment, not a complete Compose file. If a web service on `
 - The network and firewall must allow the connection.
 - The app needs connection retries.
 
-Same-node services use Docker's project network. Cross-node service names are hosts-file entries and do not encrypt traffic, see [Cross-node service names](networking.md#layer-a-cross-node-service-names).
+Same-node services use Docker's project network. Cross-node service names are hosts-file entries and do not encrypt traffic, see [Cross-node service names](networking.md#cross-node-service-names).
 
 To move a stateful service, back up and restore its data. Tug requires an explicit `tug deploy --move <service>` for guarded moves and holds detected writers until restore or release, see [Move the database](migration.md#move-the-database). Test recovery before moving data.

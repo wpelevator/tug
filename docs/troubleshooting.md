@@ -35,11 +35,11 @@ A project with multiple registered nodes needs placement for every service. A st
 
 ## The service is running but the site is unreachable
 
-Check that DNS points to the ingress VPS, ingress is enabled on the node, ports 80 and 443 are reachable for automatic HTTPS, and `x-tug.ingress` names a published service port. Run `tug doctor --nodes` and inspect ingress warnings in `tug status`. For a directly published port, check the actual node address, host binding and provider firewall. Tug may bind an unqualified published port to a private address or loopback. A public binding or node address can expose the service, depending on your firewall. See [Ingress](networking.md#layer-b-ingress-and-tls) and [published ports](networking.md#published-ports-private-by-default).
+Check that DNS points to the ingress VPS, ingress is enabled on the node, ports 80 and 443 are reachable for automatic HTTPS, and `x-tug.ingress` names a published service port. Run `tug doctor --nodes` and inspect ingress warnings in `tug status`. For a directly published port, check the actual node address, host binding and provider firewall. Tug may bind an unqualified published port to a private address or loopback. A public binding or node address can expose the service, depending on your firewall. See [Ingress](ingress.md#set-up-ingress) and [published ports](networking.md#published-ports-private-by-default).
 
 ## A node is stale or cannot reach a service
 
-Check `tug node list`, the node's last contact in `tug status`, and control reachability from the node. Agent-to-control mTLS is separate from application traffic: a node behind NAT can report to control while workload traffic between nodes still fails. Verify the private node addresses, routes, firewall rules and the target's published host port. Cross-node names are not load-balanced DNS and changes can recreate client containers. See [Networking](networking.md#layer-a-cross-node-service-names) and [node certificate recovery](nodes.md#certificates-renewal-and-recovery).
+Check `tug node list`, the node's last contact in `tug status`, and control reachability from the node. Agent-to-control mTLS is separate from application traffic: a node behind NAT can report to control while workload traffic between nodes still fails. Verify the private node addresses, routes, firewall rules and the target's published host port. Cross-node names are not load-balanced DNS and changes can recreate client containers. See [Networking](networking.md#cross-node-service-names) and [node certificate recovery](nodes.md#certificates-renewal-and-recovery).
 
 ## A backup failed or a restore was interrupted
 

@@ -343,7 +343,7 @@ Every `${NAME}` in the Compose file comes from control: a project secret, a proj
 | `tug var remove [name]` | | Deletes a variable |
 | `tug var import [file]` | `--secrets <names>`, `--select`, `--overwrite`, `-y` | Stores every entry as a variable unless `--secrets` names it |
 | `tug domain add <host> --service <service>` | | Serves an extra hostname (or `*.zone` wildcard) on a service's ingress route without a deployment. The service must already have a route, and a name belongs to one project. Needs `deploy` |
-| `tug domain list`, `tug domain remove <host>` | | Lists or stops serving mapped domains. See [Mapped domains](networking.md#mapped-domains-and-wildcard-zones) |
+| `tug domain list`, `tug domain remove <host>` | | Lists or stops serving mapped domains. See [Mapped domains](ingress.md#mapped-domains-and-wildcard-zones) |
 
 Variables are read and written with `deploy`, and a change takes effect on the next deploy. A name cannot be both a secret and a variable.
 

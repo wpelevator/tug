@@ -279,7 +279,7 @@ sequenceDiagram
     end
 ```
 
-How this meets the managed Caddy: the ingress switches by reload when the new revision's port is reported, and the old revision stays up for `drain` (default 30s), so no request depends on Caddy's retry window during a rolling switch. That window (`lb_try_duration 5s`, see [Networking](networking.md#edge-features)) matters for `recreate`, for a node dying between agent polls and for a revision that crashes after takeover.
+How this meets the managed Caddy: the ingress switches by reload when the new revision's port is reported, and the old revision stays up for `drain` (default 30s), so no request depends on Caddy's retry window during a rolling switch. That window (`lb_try_duration 5s`, see [Networking](ingress.md#edge-features)) matters for `recreate`, for a node dying between agent polls and for a revision that crashes after takeover.
 
 Rules the agent follows (`src/agent/reconciler.ts`):
 

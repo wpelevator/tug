@@ -20,7 +20,7 @@ File names are URL path elements, so they follow one scheme.
 - **Plural for a collection, singular for a mass topic or concept.** `backups`, `nodes`, `health-checks`, but `networking`, `migration`, `placement`.
 - **No qualifiers that describe the writing.** Not `*-reference`, `*-guide`, `*-overview`, `*-proposal`. The folder and the status line carry that.
 - **No subfolders.** `docs/` is flat, so every page is `/docs/<name>`. `docs/index.md` is the only hub for operators, and `docs/design-records.md` is the hub for contributors and evaluators.
-- **A design page that shares a topic with an operator page takes a suffix that says what it is**, as in `tui.md` and `tui-design.md`, `terminology.md` and `terminology-review.md`, `networking.md` and `ingress-features.md`.
+- **A design page that shares a topic with an operator page takes a suffix that says what it is**, as in `tui.md` and `tui-design.md`, `terminology.md` and `terminology-review.md`, and `ingress.md` and `ingress-design.md`.
 - **Rename only when the job changes.** A rename breaks outside links, so name the old URLs in the pull request.
 
 ## Layout
