@@ -44,4 +44,5 @@ Docs here are task-first: each guide opens with a command and its real output, t
 - Every command shown runs as written, and none has invented output.
 - Each setting a reader looks up has its default.
 - No reader page has requirement IDs, "proposal", "audit finding" or changelog voice ("now", "no longer", "as before"). Version history goes in the changelog, and the upgrade note per major goes in `docs/releases.md`.
+- A single `$` in a Compose snippet is a value from control: use `$$` for the container shell and declare control values with `<!-- tug-values: NAME -->` ([details](references/verification.md#compose-snippets-and)). `npm test` fails otherwise.
 - Markdown is not hard-wrapped, and links are relative `.md` links that resolve.

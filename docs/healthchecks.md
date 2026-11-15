@@ -2,6 +2,7 @@
 
 A health check tells tug when a service is ready to serve. Add one to every service.
 
+<!-- tug-values: DB_ROOT_PASSWORD -->
 ```yaml
 # yaml-language-server: $schema=https://unpkg.com/@wpelevator/tug/x-tug.schema.json
 services:

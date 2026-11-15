@@ -29,3 +29,13 @@ node tools/scripts/check-doc-links.mjs
 ```
 
 The script checks relative links and anchors in README.md and docs/. After renaming or splitting a heading, search for the old anchor.
+
+## Compose snippets and `$`
+
+`tug deploy` takes every unescaped `$NAME` and `${NAME}` in a Compose file from control and refuses the deploy when control lacks one. `src/docs.snippets.test.ts` runs that same check on every `yaml` fence with a top-level `services` or `x-tug` key in README.md and docs/, and on every Compose file in examples/.
+
+- Write `$$NAME` where the container shell should expand the variable: `restore: mariadb -uroot -p"$$MARIADB_ROOT_PASSWORD"`. A single `$` there fails the reader's deploy.
+- Write `${NAME}` only for a value the reader sets on control with `tug secret set` or `tug var set`, and declare it in a comment on the line before the fence (one blank line is allowed): `<!-- tug-values: DB_PASSWORD, DB_ROOT_PASSWORD -->`. The comment is invisible when rendered. The test fails on a name that is not declared and on a declared name the snippet does not use.
+- `${NAME:-default}` and `${NAME-default}` need no declaration.
+- A file under examples/ declares its names by listing them in backticks in its README (`Secrets to set with tug secret set: ...`).
+- Fences of other languages, such as `sh`, are not checked.
