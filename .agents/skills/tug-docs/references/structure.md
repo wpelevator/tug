@@ -15,7 +15,8 @@ Decide the page set before writing a page.
 
 File names are URL path elements, so they follow one scheme.
 
-- **Lowercase kebab-case**, one to three words, ending in `.md`: `healthchecks.md`, `control-plane.md`.
+- **Lowercase kebab-case**, one to three words, ending in `.md`: `control-plane.md`, `getting-started.md`.
+- **Keep a term the way the ecosystem spells it.** Docker and Compose write `healthcheck` and `HEALTHCHECK` as one word, so the page is `healthchecks.md`, not `health-checks.md`.
 - **A topic noun, not a verb or gerund.** `upgrades.md`, `backups.md`, `migration.md`, not `upgrading.md`. Command names that are nouns keep the command's name (`cli.md`, `tui.md`).
 - **Plural for a collection, singular for a mass topic or concept.** `backups`, `nodes`, but `networking`, `migration`, `placement`.
 - **No qualifiers that describe the writing.** Not `*-reference`, `*-guide`, `*-overview`, `*-proposal`. The folder and the status line carry that.
