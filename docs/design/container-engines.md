@@ -12,7 +12,7 @@ Tug already speaks the Engine API through the `DockerApi` interface in `src/dock
 
 - The agent uses about 25 `DockerApi` methods at API `v1.41` over a unix socket (`DOCKER_HOST` or `/var/run/docker.sock`). Podman's compat layer serves this surface, but behavior at the edges differs (see [Risks to verify](#risks-to-verify)).
 - Everything outside the agent shells out to the `docker` binary: `build` (`src/images/build.ts`), `save` and `image inspect` (`src/images/artifacts.ts`), `load`, `tag` and `image rm` (`src/control/control.ts`), `manifest inspect` (`src/images/image.ts`), `compose config` (`src/compose/normalize.ts`) and `version` (`src/control/control.ts` doctor check). Podman's CLI accepts the same arguments for all but Compose.
-- The runtime image ships `docker-cli`, and control and agent containers mount the engine socket. The installer ([Nodes](nodes.md)) installs Docker's repositories and rejects `podman-docker`.
+- The runtime image ships `docker-cli`, and control and agent containers mount the engine socket. The installer ([Nodes](../nodes.md)) installs Docker's repositories and rejects `podman-docker`.
 - Archive validation already tolerates the containerd image store's `docker save` output, so image-ID differences between stores are handled; Podman's `podman save` output must be checked against the same validator.
 
 ## Decisions
@@ -43,14 +43,14 @@ The spike (step 1) answers each before any code is written.
 ## Implementation checklist
 
 1. [ ] Spike: on a rootful Podman 5 host (Fedora or Alma VM), run the existing integration tier by hand against the compat socket, record every failure against [Risks to verify](#risks-to-verify) and update this plan's scope with the results.
-2. [ ] Detect and report the engine: parse `/version`, add it to the node report and protocol, show it in `tug nodes` and doctor. A protocol addition is additive; choose the bump by [Releases](releases.md#choosing-the-bump).
+2. [ ] Detect and report the engine: parse `/version`, add it to the node report and protocol, show it in `tug nodes` and doctor. A protocol addition is additive; choose the bump by [Releases](../releases.md#choosing-the-bump).
 3. [~] Replace the control-side `docker` shell-outs with `DockerApi` methods and keep the artifact validation tests passing. Done: `docker version` (the diagnostics check now asks the socket, so it proves the engine answers rather than that the CLI binary is present), `docker image inspect` and `docker image rm`; `createApp` takes a `docker` option that tests fill with `FakeDocker`. Remaining: `docker load` and `docker tag` of the local-image import (checksum and identity checks make it a separate review; needs a `tagImage` method), `docker save` (the output format is a Podman spike question), `docker build` and `docker manifest inspect` (need the CLI), and `docker builder prune` (BuildKit only).
 4. [ ] Add an engine setting that selects the CLI binary for `build`, `manifest inspect` and version checks; default `docker`.
 5. [x] Compose rendering needs no engine tooling: the native reader replaced `docker compose config`.
 6. [ ] Extend doctor with Podman-specific checks: restart service enabled, rootless detected (unsupported, clear error), socket mount and SELinux hint.
 7. [ ] Apply each workaround the spike requires, each with a test whose assertion message states the expected behavior.
-8. [ ] Add a Podman variant of the `tools/docker/fake-vps` integration tier and run it in the same tier as the Docker one; add the fixes for findings it surfaces to [Testing](testing.md)'s regression table.
-9. [ ] Update [Nodes](nodes.md) (installer behavior with a pre-installed Podman), [Getting started](getting-started.md), [Troubleshooting](troubleshooting.md), [Security](security.md) (the engine socket is host-administrator power under either engine), [Development](development.md) (runtime image CLI) and the README with an engine compatibility table.
+8. [ ] Add a Podman variant of the `tools/docker/fake-vps` integration tier and run it in the same tier as the Docker one; add the fixes for findings it surfaces to [Testing](../contributing/testing.md)'s regression table.
+9. [ ] Update [Nodes](../nodes.md) (installer behavior with a pre-installed Podman), [Getting started](../getting-started.md), [Troubleshooting](../troubleshooting.md), [Security](security.md) (the engine socket is host-administrator power under either engine), [Development](../contributing/development.md) (runtime image CLI) and the README with an engine compatibility table.
 10. [ ] Add a changeset; when it ships, fold this proposal into the compatibility table in the docs and delete it.
 
 ## Non-goals

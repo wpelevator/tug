@@ -94,7 +94,7 @@ Why Tug owns the list rather than asking WordPress: a hostname belongs to one pr
 
 ### Edge features
 
-The generated Caddyfile is deliberately small: per host one `reverse_proxy` with `lb_policy round_robin` and the resilience settings below, the TLS mode and the optional ACME email. It has no compression, response headers, timeouts or body limit. This subsection records what the proxy does to survive upstream churn, the remaining limits, how the surrounding tools compare and the direction; the remaining proposal is listed under [Later](roadmap.md#later--only-if-needed). It needs a current Caddy 2 image: the directives below were tested against 2.11.7, and a node that cached an older `caddy:2-alpine` is never re-pulled, so Caddy rejects the config, the ingress reports `failed` and deployments for routed projects wait for it. Pull a newer image on that node, or set `TUG_CADDY_IMAGE` to a pinned tag, and recreate the container.
+The generated Caddyfile is deliberately small: per host one `reverse_proxy` with `lb_policy round_robin` and the resilience settings below, the TLS mode and the optional ACME email. It has no compression, response headers, timeouts or body limit. This subsection records what the proxy does to survive upstream churn, the remaining limits, how the surrounding tools compare and the direction; the remaining proposal is listed under [Later](design/roadmap.md#later--only-if-needed). It needs a current Caddy 2 image: the directives below were tested against 2.11.7, and a node that cached an older `caddy:2-alpine` is never re-pulled, so Caddy rejects the config, the ingress reports `failed` and deployments for routed projects wait for it. Pull a newer image on that node, or set `TUG_CADDY_IMAGE` to a pinned tag, and recreate the container.
 
 Every route that has an upstream is generated with a `reverse_proxy` that has:
 
@@ -135,7 +135,7 @@ Tug's strengths for an edge are that control renders and validates the whole Cad
 The direction, in order:
 
 1. Done: resilience defaults with no new key (retries, `stream_close_delay`), described above and exercised against a real Caddy by `tests/integration/ingress-resilience.test.ts`.
-2. Done: opt-in JSON access logs, per-host Caddy metrics on the admin endpoint, and a 503 (or `maintenance: true`) response for a host with no serving upstream. Still proposed: reading those metrics into the status report and re-exporting them from control ([ingress metrics](observability.md#ingress-metrics)).
+2. Done: opt-in JSON access logs, per-host Caddy metrics on the admin endpoint, and a 503 (or `maintenance: true`) response for a host with no serving upstream. Still proposed: reading those metrics into the status report and re-exporting them from control ([ingress metrics](design/observability.md#ingress-metrics)).
 3. Optional per-route `x-tug.ingress` keys, each a minor release: response timeout, body limit, compression (stock Caddy `encode` offers gzip and zstd, not brotli), alias redirects, load-balancing policy, basic auth (the hash delivered as a secret file like a custom certificate) and an IP allowlist.
 4. Per-node settings under `tug node ingress`: trusted proxies behind a CDN, ACME CA and fallback issuer. Wildcards stay `tls: custom` unless a real need justifies on-demand TLS or a DNS-01 Caddy build.
 
@@ -153,7 +153,7 @@ A `ports` entry such as `"3306:3306"` would listen on every interface of the nod
 
 When a node `address` is configured, it is the same one other nodes resolve the service to and the ingress dials, so cross-node service names and upstreams keep working when the private network is reachable.
 
-"Only the managed Caddy on this node" means: this node is the only ingress node, the service runs on it, and every service of the project runs only on nodes where this service also runs, so no other node reaches it through a service name. That is the [small reference topology](roadmap.md#reference-topology) (app, database and Caddy on one node). Only the entry that publishes `x-tug.ingress.port` moves to loopback; other ports of the service follow the rest of the table.
+"Only the managed Caddy on this node" means: this node is the only ingress node, the service runs on it, and every service of the project runs only on nodes where this service also runs, so no other node reaches it through a service name. That is the [small reference topology](design/roadmap.md#reference-topology) (app, database and Caddy on one node). Only the entry that publishes `x-tug.ingress.port` moves to loopback; other ports of the service follow the rest of the table.
 
 Details:
 
@@ -208,4 +208,4 @@ sequenceDiagram
 
 ## Verifying
 
-`npm run test:integration:network` starts three privileged fake VPSes with plain numeric node `address` values (`vps-c` as ingress node), deploys `tests/integration/compose/docker-compose.network-sample.yml`, and checks a container on `vps-b` fetching `http://web:8080` by its cross-node service name, Caddy on `vps-c` serving `app.test` from `vps-a`, and published ports bound to the intended private node addresses rather than every interface. See [Development](development.md#integration-test).
+`npm run test:integration:network` starts three privileged fake VPSes with plain numeric node `address` values (`vps-c` as ingress node), deploys `tests/integration/compose/docker-compose.network-sample.yml`, and checks a container on `vps-b` fetching `http://web:8080` by its cross-node service name, Caddy on `vps-c` serving `app.test` from `vps-a`, and published ports bound to the intended private node addresses rather than every interface. See [Development](contributing/development.md#integration-test).

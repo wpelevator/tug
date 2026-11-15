@@ -1,12 +1,12 @@
 # Standalone binary
 
-Status: prototyped, not implemented. A throwaway prototype showed the client half works under Bun; its code is not merged, and the build script, CI smoke test, release job and Homebrew tap do not exist. Sections below describe the prototype as findings and the code changes as the design to implement. This document is the design and the record of what the prototype found for shipping the `tug` CLI as a self-contained executable, so it can be installed with Homebrew without a Node.js dependency. When it ships, this page becomes the canonical description of the binary build and [Releases](releases.md#native-binary) links to it.
+Status: prototyped, not implemented. A throwaway prototype showed the client half works under Bun; its code is not merged, and the build script, CI smoke test, release job and Homebrew tap do not exist. Sections below describe the prototype as findings and the code changes as the design to implement. This document is the design and the record of what the prototype found for shipping the `tug` CLI as a self-contained executable, so it can be installed with Homebrew without a Node.js dependency. When it ships, this page becomes the canonical description of the binary build and [Releases](../releases.md#native-binary) links to it.
 
 ## Scope
 
 Only the client is shipped as a binary. The control plane and agent (`tug-runtime`, `src/main.ts`) stay on Node in the multi-arch Docker image, and the npm package and the image are unchanged. See [One binary or two](#one-binary-or-two) for why.
 
-The control plane and agent use SQLite metadata and server-only packages (`express`, `multer`). SQLite goes through an isolated `node:sqlite` adapter ([Architecture](architecture.md#sqlite-storage)); the prototype found that Bun 1.4.4 implements `node:sqlite`, including the error codes the adapter classifies, so no `bun:sqlite` adapter is needed. The CLI's import graph does not include the database.
+The control plane and agent use SQLite metadata and server-only packages (`express`, `multer`). SQLite goes through an isolated `node:sqlite` adapter ([Architecture](../architecture.md#sqlite-storage)); the prototype found that Bun 1.4.4 implements `node:sqlite`, including the error codes the adapter classifies, so no `bun:sqlite` adapter is needed. The CLI's import graph does not include the database.
 
 ## Prototype findings
 
@@ -141,4 +141,4 @@ Still to do:
 - [ ] Keep `tug runtime` out of the release entry unless the control listener moves to the raw `tls.createServer` shape ([Peer certificate under Bun](#peer-certificate-under-bun))
 - [ ] `binaries` job in `release.yml` uploading assets and checksums
 - [ ] `wpelevator/homebrew-tap` formula and automatic bump
-- [ ] Document binary and Homebrew install in the README, [CLI reference](cli.md) and [Releases](releases.md); then drop the "prototyped, not implemented" status above
+- [ ] Document binary and Homebrew install in the README, [CLI reference](../cli.md) and [Releases](../releases.md); then drop the "prototyped, not implemented" status above

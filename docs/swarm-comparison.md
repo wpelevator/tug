@@ -8,7 +8,7 @@ Assessment date: 2 November 2026. Tug baseline: package version 0.9.0, checkout 
 
 There is considerable overlap. Tug implements its own desired-state distribution, node identities, placement, health reporting, container reconciliation, rolling replacement and rollback. Those are orchestration responsibilities, even though Tug uses ordinary Docker containers instead of Swarm services. Calling Tug merely a deployment CLI understates its scope; treating it as a Swarm-equivalent scheduler overstates its recovery behavior.
 
-For the [target workload](roadmap.md#goal)—one to a few dozen sites on two to ten VPSes—Tug's integrated operating workflow is a credible reason to exist. The strongest case for Swarm is an application whose stateless capacity must recover automatically after a machine fails. Neither tool alone makes a database or local uploads highly available.
+For the [target workload](design/roadmap.md#goal), one to a few dozen sites on two to ten VPSes, Tug's integrated operating workflow is a credible reason to exist. The strongest case for Swarm is an application whose stateless capacity must recover automatically after a machine fails. Neither tool alone makes a database or local uploads highly available.
 
 This is a source and documentation assessment, not a comparative benchmark or a live Swarm failure test. “Better” below means better suited to a stated requirement, not a measured performance or reliability ranking.
 
@@ -36,7 +36,7 @@ This is a source and documentation assessment, not a comparative benchmark or a 
 | One-off work | `tug exec`, service-derived `tug run`, scheduled backup commands and restore holds. | Replicated/global jobs are available through the service CLI. [D14] | Swarm has job primitives; Tug bundles application operating tasks. Neither fact implies a general built-in cron service. |
 | Diagnostics | JSON or human-readable status, events, doctor and live container commands; metrics, alerting and webhooks remain planned. | Task states, service inspection/logs and Docker events. [D15][D16] | Neither core product is a complete monitoring stack. |
 
-Tug evidence: [Architecture](architecture.md), [Compose extensions](compose.md), [Networking](networking.md), [Access control](access-control.md), [Control plane](control-plane.md), [Backups](backups.md) and [Observability](observability.md). Code references for the less obvious differences follow below. Docker references are listed under [Sources](#sources).
+Tug evidence: [Architecture](architecture.md), [Compose extensions](compose.md), [Networking](networking.md), [Access control](access-control.md), [Control plane](control-plane.md), [Backups](backups.md) and [Observability](design/observability.md). Code references for the less obvious differences follow below. Docker references are listed under [Sources](#sources).
 
 ## Where Tug is better suited
 
@@ -64,7 +64,7 @@ Swarm requires reachable manager endpoints and, for overlay networking, peer con
 
 Tug exposes a narrow application-oriented API with named actors and built-in roles/projects. This is more convenient than granting a deployment job unrestricted manager Docker access. Swarm's default authorization can be extended with plugins, so it is inaccurate to say Swarm cannot have scoped access. [D12] Docker events also exist; Tug's distinction is an application deployment history that records the acting credential, rather than the mere existence of events. [D16]
 
-These controls do not make Tug a hostile-tenant platform. Deployment authors must be trusted with their selectable hosts, co-located workloads and runtime secrets. See the current [access boundaries](access-control.md) and [security findings](security.md); some findings remain partial, and this report does not re-audit them.
+These controls do not make Tug a hostile-tenant platform. Deployment authors must be trusted with their selectable hosts, co-located workloads and runtime secrets. See the current [access boundaries](access-control.md) and [security findings](design/security.md); some findings remain partial, and this report does not re-audit them.
 
 ## Where Tug is worse or more limited
 

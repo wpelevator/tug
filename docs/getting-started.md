@@ -1,18 +1,30 @@
 # Deploy your first service
 
-Install Tug's control plane and agent on one Linux VPS, deploy nginx, and visit its welcome page.
+Install Tug's control plane and agent on one Linux VPS, deploy nginx, and open its welcome page. You end with a running service that you can roll back, back up and put behind HTTPS.
 
-A typical VPS is a durable, always-on computer with enough CPU, memory and disk to host several sites or a medium-size application and its database, so you do not need a cluster, a per-app platform plan or a pile of managed services to run it well. Tug gives you the parts that usually make self-hosting a chore, namely image delivery (with an optional registry), rollbacks, scheduled backups, HTTPS and encrypted secrets, so you can keep the savings of a plain server. This tutorial uses one server; adding more later is covered in [service placement](service-placement.md).
+```sh
+npm install -g @wpelevator/tug
+tug setup root@203.0.113.5
+tug node add root@203.0.113.5 --name app1
+tug deploy
+```
+
+The steps below explain each command, with the Compose file `tug deploy` reads in step 3.
 
 ## Before you start
 
-You need a VPS with a public IP and SSH access as root, Node.js 22.18 or newer on your computer (Docker is needed there only for `--build-local`). The VPS must run Debian, Ubuntu, Fedora or a RHEL-compatible distribution if you want Tug to install Docker; otherwise install Docker Engine there first. The VPS needs outbound access to pull images. Allow your computer and the agent to reach control on TCP 8443, and allow your computer to reach TCP 8080 for this temporary example. Check your provider firewall as well as any host firewall.
+You need:
 
-Replace `203.0.113.5` below with your VPS address. These commands assume an interactive terminal, where Tug explains and confirms the installation choices. For automation see [Setup in the CLI reference](cli.md#setup).
+- A VPS with a public IP and SSH access as root. Debian, Ubuntu, Fedora or a RHEL-compatible distribution lets Tug install Docker for you. On any other distribution, install Docker Engine first.
+- Node.js 22.18 or newer on your computer. Docker is needed there only for `--build-local`.
+- Outbound access from the VPS to pull images.
+- TCP 8443 open from your computer and the agent to control, and TCP 8080 open from your computer for this temporary example. Check the provider firewall as well as any host firewall.
+
+Replace `203.0.113.5` with your VPS address. The commands assume an interactive terminal, where Tug explains each choice and waits for you to confirm. For automation see [Setup in the CLI reference](cli.md#setup).
 
 ## Optional: check your own app first
 
-If you already have a Compose app, you can check whether Tug supports it before you touch a server. `tug lint` reads the file offline and needs no control plane, credential or Docker:
+`tug lint` reads a Compose file offline and needs no control plane, credential or Docker. Run it in a directory with a `compose.yaml`:
 
 ```sh
 npm install -g @wpelevator/tug
@@ -20,7 +32,18 @@ cd path/to/your-app
 tug lint
 ```
 
-It lists unsupported Compose keys (such as custom networks or Compose `secrets`) and invalid `x-tug` settings, and exits nonzero when anything is wrong. See [what Tug accepts](compose.md#not-supported). Existing Compose volumes are not reused: Tug names its volumes differently, so data moves in explicitly.
+```text
+compose.yaml: ok
+```
+
+When something is unsupported, each finding names the service and the rule, and the command exits 1:
+
+```text
+bad.yaml: web: networks other than the default network are not supported
+bad.yaml: web: x-tug.rollback is not supported (supported: placement, replicas, global, health, ingress, rollout, backup)
+```
+
+[What Tug accepts](compose.md#not-supported) lists the unsupported keys. Existing Compose volumes are not reused: Tug names its volumes differently, so data moves in explicitly.
 
 ## 1. Install Tug and control
 

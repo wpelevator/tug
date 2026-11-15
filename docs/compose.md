@@ -14,7 +14,18 @@ tug lint -f proxy.yml    # any --file, as `tug lint --file <file>` and `tug depl
 tug lint --json          # { ok, file, errors: [ ... ] } for scripts and editors
 ```
 
-The command exits nonzero when anything is wrong, so `tug lint` works as a CI step before `tug deploy`.
+A clean file prints one line:
+
+```text
+compose.yaml: ok
+```
+
+A file with problems prints each finding and exits 1, so `tug lint` works as a CI step before `tug deploy`:
+
+```text
+bad.yaml: web: networks other than the default network are not supported
+bad.yaml: web: x-tug.rollback is not supported (supported: placement, replicas, global, health, ingress, rollout, backup)
+```
 
 ## Editor autocomplete and squiggles
 

@@ -1,6 +1,6 @@
 # Capabilities
 
-**Status: proposed.** Nothing on this page is built. Today a credential has one of three cumulative roles and an optional project list ([Access control](access-control.md)); every name, flag, route and field below is a design, not an interface. The work is [M16](roadmap.md#m16--capabilities-and-delegated-authority).
+**Status: proposed.** Nothing on this page is built. Today a credential has one of three cumulative roles and an optional project list ([Access control](../access-control.md)); every name, flag, route and field below is a design, not an interface. The work is [M16](roadmap.md#m16--capabilities-and-delegated-authority).
 
 The problem is that the `root` credential `tug control setup` imports is an admin, so every consumer of the controller gets either everything or one of two coarser presets: CI, a teammate, a monitor, a script, a dashboard or an AI agent driving the CLI. This page designs a small capability engine so each consumer holds exactly the authority its job needs, and so the CLI stops being root by default.
 
@@ -20,7 +20,7 @@ Out of scope, consistent with the [product decisions](roadmap.md#product-decisio
 ## Where authorization sits today
 
 - A client certificate resolves to an `Actor { name, role, projects }`. The credential row holds the role and project list; the certificate carries only an ID and authorization follows the key hash.
-- `ROUTE_ROLES` in `src/control/credentials.ts` maps each `METHOD path` to a role, `createGuard` checks the role and then a project resolver, and handlers call `assertProject` and `projectScope` for what is known only after parsing. A test ties the table, the router and [the endpoint table](access-control.md#endpoint-table) together.
+- `ROUTE_ROLES` in `src/control/credentials.ts` maps each `METHOD path` to a role, `createGuard` checks the role and then a project resolver, and handlers call `assertProject` and `projectScope` for what is known only after parsing. A test ties the table, the router and [the endpoint table](../access-control.md#endpoint-table) together.
 - Revocation, expiry and key replacement are database state read on every request. The design keeps that property.
 
 The design below evolves this shape; it does not replace it.
@@ -68,7 +68,7 @@ A credential carries a list of grants. Evaluation is default deny and additive w
 - `ops`: exact names or `group.*`.
 - `on`: per dimension, exact names or a trailing-`*` prefix. An absent dimension means any value. A request whose dimension cannot be resolved is denied when a grant constrains that dimension, the rule that stops scoped credentials probing for IDs today. The `secret` dimension is project-qualified (`project/NAME`).
 - `where`: typed caveats from a closed set, not a policy language: `denyRisks` and `images` (deployments), `expires` and `notBefore`. There is no rate limit; expiry and gates bound a misbehaving consumer.
-- `gate`: `approval` turns the operation into a proposal ([Approvals](#approvals-and-the-plan-apply-split)).
+- `gate`: `approval` turns the operation into a proposal ([Approvals](#approvals-and-the-planapply-split)).
 
 A role-only credential has an implicit grant list equal to its preset, and today's `--project` scope becomes `on: { project: [...] }`, so existing credentials behave as before. The compact CLI form maps one to one: `--grant 'service.restart project=site service=web'` and `--grant 'deployment.create project=site deny=host-bind,privileged,build gate=approval'`.
 
@@ -118,7 +118,7 @@ A plan is required only when a grant is gated. `denyRisks` and `images` need no 
 
 - `GET /api/v1/whoami` returns name, preset, grants, lineage and expiry, so a consumer can discover what it may do and hide the rest.
 - `POST /api/v1/authz/check { op, on }` returns `{ allow, via, requires: ['approval'] }`, the equivalent of Kubernetes' SelfSubjectAccessReview.
-- A denial says what was missing for the requested thing (`deployment.create on project=blog`) and never whether it exists, keeping [the no-probing rule](access-control.md#failures).
+- A denial says what was missing for the requested thing (`deployment.create on project=blog`) and never whether it exists, keeping [the no-probing rule](../access-control.md#failures).
 - Allowed mutations record the matched grant and lineage in event metadata. Denials are recorded as `authz.deny`, aggregated per credential and operation so a looping agent cannot flood the table.
 - The CLI gains `tug whoami`, `tug can <op> [k=v...]` and `tug credential explain <name>`.
 
@@ -171,8 +171,8 @@ The decision is a small closed-vocabulary engine with a pure decision function a
 
 - One migration step, appended in `src/db/db.ts` with a previous-release fixture: `operator_credentials` gains `grants_json`, `parent_id`, `on_behalf_of` and `via`, and a `proposals` table arrives with approvals. Existing rows have NULL grants, meaning "the preset", so nothing changes for them.
 - `role` stays. A grants-only credential stores `custom`, and an older control that reads it fails closed (the role rank lookup is undefined, so every check denies).
-- The credential file (`v: 1`) is unchanged; grants live on control. `POST /api/v1/credentials` gains optional `grants`, `ttlSeconds` and `parent`, so the change is additive. Operations, grants and sessions are minors under [the 1.0 contracts](releases.md#what-10-freezes); the `root` default is a separate decision ([below](#decisions)).
-- The endpoint table in [Access control](access-control.md#endpoint-table) gains an operation and an effect column, and the test that compares the table with the router and the page keeps it honest.
+- The credential file (`v: 1`) is unchanged; grants live on control. `POST /api/v1/credentials` gains optional `grants`, `ttlSeconds` and `parent`, so the change is additive. Operations, grants and sessions are minors under [the 1.0 contracts](../releases.md#what-10-freezes); the `root` default is a separate decision ([below](#decisions)).
+- The endpoint table in [Access control](../access-control.md#endpoint-table) gains an operation and an effect column, and the test that compares the table with the router and the page keeps it honest.
 
 ## Tests
 
@@ -187,7 +187,7 @@ The decision is a small closed-vocabulary engine with a pure decision function a
 ## Decisions
 
 - **No rate limits.** Expiry and gates bound a misbehaving consumer; there are no per-credential counters.
-- **Gating** applies only to hashable operations, as described under [Approvals](#approvals-and-the-plan-apply-split).
+- **Gating** applies only to hashable operations, as described under [Approvals](#approvals-and-the-planapply-split).
 - **Demoting `root` is opt-in first.** `tug control setup` keeps importing root unchanged: the quick start is frozen and root is the recovery path. `tug login` (a session with read, operate and workload but no admin) and `tug sudo` (a short admin session) are added, and interactive shells use `login` by default once it exists. A session needs its parent to renew, so while root sits on the same laptop this prevents accidents (threat 3), not theft. Changing setup is revisited only after real use, and only if root moves off the daily machine.
 - **Per-secret grants are included** with the grants step: `secret.list` stays read-level, and `secret.set` and `secret.delete` become grantable per project-qualified name pattern. The root-equivalence analysis flags `secret.set` with `deployment.create`.
 

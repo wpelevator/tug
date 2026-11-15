@@ -16,17 +16,17 @@ Tug already has the right split. The controller is a small single writer and the
 
 ## What the controller offers today
 
-- One mTLS port, no bearer token, no unauthenticated route and no CORS. A browser cannot call it without CA trust and an imported client certificate ([Control plane](control-plane.md#authentication-and-pki)), so a browser UI always needs a server-side component holding a credential.
-- Three cumulative roles and project scope, fixed at creation, created only by `admin` ([Access control](access-control.md)). `deploy` includes live `exec`, `run` and `inspect`, so it is effectively access to the workload's secrets and nodes.
+- One mTLS port, no bearer token, no unauthenticated route and no CORS. A browser cannot call it without CA trust and an imported client certificate ([Control plane](../control-plane.md#authentication-and-pki)), so a browser UI always needs a server-side component holding a credential.
+- Three cumulative roles and project scope, fixed at creation, created only by `admin` ([Access control](../access-control.md)). `deploy` includes live `exec`, `run` and `inspect`, so it is effectively access to the workload's secrets and nodes.
 - The audit `actor` is the credential name, so a dashboard acting for a person records only the dashboard.
 - No machine-readable description of `/api/v1`. The types are in `src/protocol.ts`; `x-tug.schema.json` covers Compose only. The CLI has `--json` on some commands, not a global flag.
-- `GET /api/v1/events` takes `project`, `limit` (at most 500, newest first) and `after=<seq>` (oldest first, to follow the log), and `GET /api/v1/watch` is a WebSocket that pushes change hints and new events ([Architecture](architecture.md#operator-watch-channel)). `status` returns the 20 latest deployments and computes `stale` when called. Webhooks (M8) and `/metrics` (M9) are not built.
+- `GET /api/v1/events` takes `project`, `limit` (at most 500, newest first) and `after=<seq>` (oldest first, to follow the log), and `GET /api/v1/watch` is a WebSocket that pushes change hints and new events ([Architecture](../architecture.md#operator-watch-channel)). `status` returns the 20 latest deployments and computes `stale` when called. Webhooks (M8) and `/metrics` (M9) are not built.
 - Dry-run exists for `restore` (without `confirm` it returns the plan) and `image prune --dry-run`. A deploy has no plan; `tug lint` is offline.
 - `deploy` needs a normalized Compose file, which the CLI produces with its own reader (`src/compose/load.ts`, no Docker needed), so a server-side deployer needs the CLI or that module.
 
 ## Controller changes
 
-All are additive minors and keep [the frozen contracts](releases.md#what-10-freezes). Operations, grants, sessions, attribution, plans and approvals are designed in [Capabilities](capabilities.md). The remaining controller work specific to consumers:
+All are additive minors and keep [the frozen contracts](../releases.md#what-10-freezes). Operations, grants, sessions, attribution, plans and approvals are designed in [Capabilities](capabilities.md). The remaining controller work specific to consumers:
 
 1. **A machine-readable API.** Generate OpenAPI 3.1 from the operation table and the `protocol.ts` types, serve it at `GET /api/v1/openapi.json` and ship it in the npm package. Each operation carries its role, project check, effect class and idempotence. An MCP server and a typed SDK are built from it.
 2. **A change feed.** Built: `GET /api/v1/events?after=<seq>` and a streaming `GET /api/v1/watch` (WebSocket) for deployment, node (including `stale`, found by a once-a-second sweep), backup and restore changes and new events. It sends hints and events, not state, so a console refetches what a hint names. Webhooks (M8) are the server-to-server form of the same thing and are not built.
@@ -77,7 +77,7 @@ Most users will not use a Tug-specific UI. They will use whatever AI frontend th
 - **A curated tool set, not one tool per route.** A model chooses poorly from 55 near-identical tools, so tools are task-shaped (`get_status`, `list_events`, `plan_deploy`, `rollback`, `restart`, `run_command`, `list_backups`), generated from the operation table and its effect classes, not written by hand. An escape hatch for the long tail is a code-mode tool that runs a script against the typed SDK inside a sandbox.
 - **Annotations come from the effect class.** `read` maps to the read-only hint, `destructive` and `escalates` to the destructive hint, and the operation's idempotence to the idempotent hint, so clients that ask for confirmation do it where it matters.
 - **The tool list follows the grants.** `whoami` decides what is advertised. A session that cannot run `exec` never sees an exec tool, so the model does not waste turns on it and a prompt cannot talk it into trying.
-- **Gated operations return a proposal.** A tool for a gated grant returns "pending approval" with the plan and the risk tags. Clients that support elicitation can ask the user in place; otherwise the user approves in the console or with `tug proposals approve`. The agent then repeats the call with the approval. See [Approvals](capabilities.md#approvals-and-the-plan-apply-split).
+- **Gated operations return a proposal.** A tool for a gated grant returns "pending approval" with the plan and the risk tags. Clients that support elicitation can ask the user in place; otherwise the user approves in the console or with `tug proposals approve`. The agent then repeats the call with the approval. See [Approvals](capabilities.md#approvals-and-the-planapply-split).
 - **Resources and prompts.** `status` and `events` are resources, with subscriptions backed by the [change feed](#controller-changes). Prompts carry runbooks such as "diagnose a failing deployment".
 - **Logs and event text are untrusted.** Tool results wrap them in a marked block, which helps little against a determined injection. The real defense is server-side: the grants the session holds and the gates on anything that mutates. The frontend's model is outside Tug's control.
 

@@ -4,33 +4,36 @@
 
 Deploy Docker Compose apps to your own Linux VPS with one command, from your laptop or CI. Images, rollbacks, backups, HTTPS and secrets are built in, so one small server can run the whole stack.
 
-A typical VPS is a durable, always-on computer with enough CPU, memory and disk to host several sites or a medium-size application and its database. You do not need a cluster, a per-app platform plan or a pile of managed services to run that well, and a plain server often costs far less than renting the same capacity piece by piece. tug is the missing layer that makes self-hosting on one or a few servers safe and repeatable, so you keep the savings without giving up deploys, rollbacks, backups and HTTPS.
+```sh
+npm install -g @wpelevator/tug    # or run it with npx @wpelevator/tug
+tug lint                          # check compose.yaml offline, no server needed
+tug setup root@203.0.113.5        # install the control plane
+tug node add root@203.0.113.5 --name app1
+tug deploy
+```
+
+```text
+compose.yaml: ok
+```
+
+A typical VPS is a durable, always-on computer with enough CPU, memory and disk to host several sites or a medium-size application and its database. Tug is the layer that makes self-hosting on one or a few servers safe and repeatable, so you keep the savings of a plain server without giving up deploys, rollbacks, backups and HTTPS. Tug is free, your Compose file stays a Compose file (`x-tug` is a standard Compose extension that plain Docker Compose ignores), and it is built for a small number of servers running Compose applications, including Node.js, Laravel, Ruby and WordPress apps.
 
 ## What you get
 
-- **Image delivery built in, registry optional.** By default your own images are built on the control server (or on your machine with `tug deploy --build-local`) and sent to each server as an archive over connections the agents already make. If you prefer to build in CI, push to any HTTPS registry (GHCR, Docker Hub, a private one) and declare `image:`; control pins the tag to a digest before deploying. Third-party images such as `nginx` are always pulled from their registry.
-- **One scoped credential for CI.** CI holds a single tug credential limited by role (`read`, `deploy` or `admin`), and `deploy` credentials can be limited to projects (`tug credential create ci --role deploy --project site`). Built images need no registry login on your servers. For a private registry, store its pull credentials once as an encrypted project secret (`TUG_REGISTRY_AUTH`; see [private registries](docs/control-plane.md#published-images-and-private-registries)); control uses them to resolve digests and agents receive only the credentials for the registries their images need.
-- **Scheduled, restorable backups.** Mark a volume or database with `x-tug.backup`, point tug at S3-compatible storage and it runs scheduled [restic](https://restic.net) backups; databases use a dump command. `tug restore run db` brings one back. Control backs itself up to the same destination every night, and `tug control backup --download` saves a copy on your machine.
-- **One-command rollback.** `tug rollback` returns to a previous deployment, and `x-tug: { rollback: auto }` does it when a node reports the new version unhealthy. It cannot undo database writes or schema changes.
-- **HTTPS ingress included.** Managed Caddy serves a hostname with `tls: auto`, obtains the certificate and renews it. Your DNS must point at the server and ports 80 and 443 must be reachable.
-- **Encrypted secrets, delivered where needed.** `tug secret set DB_PASSWORD` keeps them encrypted on control and delivers each one only to the nodes whose services use it, so nothing lives in your repository. Every `${NAME}` in your Compose file comes from control (`tug secret` for private values, `tug var` for visible ones such as image tags), never from the shell or `.env` of whoever runs the deploy, and `tug deploy --dry-run` shows where each value came from ([details](docs/compose.md#where-values-come-from)).
-- **Logs and shells from your laptop.** `tug logs`, `tug exec`, `tug run` (for example the `wp` CLI), `tug ps` and `tug status` go through the control plane. SSH is needed only to install and manage nodes (`tug setup`, `tug node add`); day-to-day operation goes through the control plane.
-- **Config checks before deploy.** `tug lint` checks your `x-tug` config offline in milliseconds (the same schema ships as JSON Schema for [editor autocomplete and squiggles](docs/compose.md#editor-autocomplete-and-squiggles)), and a published tag is resolved to a digest on control before anything is deployed, so a typo'd tag is a deploy-time error instead of a surprise on the live server.
-
-tug is free. Your Compose file stays a Compose file: `x-tug` is a standard Compose extension that plain Docker Compose ignores, so there is no new config format to learn or unlearn. Start with one VPS and add more when you need them. tug is built for a small number of servers and Compose applications, including Node.js, Laravel, Ruby and WordPress apps.
+| Need | What Tug does | Details |
+| --- | --- | --- |
+| Get images to servers | Builds your images on control (or on your machine with `tug deploy --build-local`) and sends them to each server over connections the agents already make. Or push to any HTTPS registry and declare `image:`; control pins the tag to a digest before deploying. | [Control plane](docs/control-plane.md#image-delivery-without-a-registry) |
+| Give CI one scoped credential | CI holds one credential limited by role (`read`, `deploy` or `admin`), and `deploy` credentials can be limited to projects. | [Access control](docs/access-control.md) |
+| Back up and restore | Scheduled [restic](https://restic.net) backups of volumes and databases to S3-compatible storage. `tug restore run db` brings one back. Control backs itself up every night. | [Backups](docs/backups.md) |
+| Roll back | `tug rollback` returns to a previous deployment, and `x-tug: { rollback: auto }` does it when a node reports the new version unhealthy. It cannot undo database writes or schema changes. | [Health checks](docs/healthchecks.md) |
+| Serve HTTPS | Managed Caddy serves a hostname with `tls: auto`, obtains the certificate and renews it. DNS must point at the server and ports 80 and 443 must be reachable. | [Networking](docs/networking.md#layer-b-ingress-and-tls) |
+| Keep secrets out of git | `tug secret set` keeps them encrypted on control and delivers each only to the nodes whose services use it. Every `${NAME}` in your Compose file comes from control, never from the shell or `.env` of whoever runs the deploy, and `tug deploy --dry-run` shows where each value came from. | [Where values come from](docs/compose.md#where-values-come-from) |
+| Read logs and open shells | `tug logs`, `tug exec`, `tug run` (for example the `wp` CLI), `tug ps` and `tug status` go through the control plane. SSH is needed only to install and manage nodes. | [CLI](docs/cli.md) |
+| Catch config errors early | `tug lint` checks your `x-tug` config offline in milliseconds, and the same schema ships as JSON Schema for [editor autocomplete](docs/compose.md#editor-autocomplete-and-squiggles). A published tag is resolved to a digest before anything is deployed. | [Compose extensions](docs/compose.md) |
 
 ## Try it
 
 Follow [Deploy your first service](docs/getting-started.md) to install tug, deploy nginx to one VPS and verify that it works. You need Node.js 22.18 or newer on your computer, plus SSH access to a Linux server. tug can install Docker on supported servers.
-
-```bash
-npm install -g @wpelevator/tug      # or run it with npx @wpelevator/tug
-
-tug lint                            # check your compose.yaml offline, no server needed
-tug setup root@203.0.113.5          # install the control plane
-tug node add root@203.0.113.5 --name app1  # install the agent on the same VPS
-tug deploy                          # deploy a Compose file in this directory
-```
 
 The control plane and agent share the VPS with your application. Once your service is running, you can [add HTTPS](docs/networking.md#layer-b-ingress-and-tls), [back up your data](docs/backups.md) or [add another server](docs/service-placement.md).
 
@@ -48,7 +51,11 @@ tug moves the checks earlier: your images are built (on control, or on your mach
 - **Choose where things run.** Pin a database and its volume to one node and spread web containers over several.
 - **Works behind NAT.** Agents only dial out to control, so a node can sit behind a firewall that allows nothing inbound. tug needs no cloud provider API or overlay network.
 
-## Not for you if
+## Is tug right for you?
+
+tug fits if you run Compose apps on one or a few VPSes, want deploys, rollbacks, secrets and backups handled in one tool, and are happy with a single control server that you back up. A server can host multiple apps as long as it has enough capacity; tug does not automatically balance resource usage or replace a failed server. Node-to-node traffic travels over your own private network (Tailscale, a VPC, a LAN), so you own its firewalling and encryption. The goals, principles and planned milestones are in the [Roadmap](docs/design/roadmap.md).
+
+### Not for you if
 
 - You need Kubernetes-style scheduling, autoscaling, distributed storage, database failover, automatic rescheduling across a cluster or servers provisioned through a provider's API. See the [Docker Swarm comparison](docs/swarm-comparison.md).
 - Your workloads are not Compose and Docker, or you need to roll back the host itself. `tug rollback` reverts deployments, not host packages or kernel settings.
@@ -116,7 +123,7 @@ tug logs wordpress --follow
 
 The named volume holds data on `app1`; it is not copied to another node automatically. Back it up and restore or move its data deliberately if you replace the server.
 
-See the [examples directory](examples/) for stack-specific applications and [local stack benchmarks](docs/testing.md#example-stack-benchmarks) for measured behavior of those examples. Everything `x-tug` can express is in [Compose extensions](docs/compose.md).
+See the [examples directory](examples) for stack-specific applications and [local stack benchmarks](docs/contributing/testing.md#example-stack-benchmarks) for measured behavior of those examples. Everything `x-tug` can express is in [Compose extensions](docs/compose.md).
 
 ## Everyday commands
 
@@ -138,12 +145,6 @@ Project commands sit at the top level; everything else reads `tug <subject> <ver
 | Check everything is healthy | `tug doctor` |
 
 Every command and option is in the [CLI reference](docs/cli.md). `tug status --json` prints raw JSON for scripts.
-
-## Is tug right for you?
-
-tug fits if you run Compose apps on one or a few VPSes, want deploys, rollbacks, secrets and backups handled in one tool, and are happy with a single control server that you back up. A server can host multiple apps as long as it has enough capacity; tug does not automatically balance resource usage or replace a failed server.
-
-See [Not for you if](#not-for-you-if) for what tug deliberately leaves out. Node-to-node traffic travels over your own private network (Tailscale, a VPC, a LAN), so you own its firewalling and encryption. The goals, principles and planned milestones are in the [Roadmap](docs/roadmap.md).
 
 ## How it works
 
@@ -178,45 +179,17 @@ See [Not for you if](#not-for-you-if) for what tug deliberately leaves out. Node
 
 `tug deploy` reads your Compose file on your machine and sends it to the control plane, which stores it as an immutable desired state, builds application images when needed and pins published images to digests. tug delivers its built images as archives; published images are pulled from their upstream registries. Each agent fetches the work for its node, applies it through the Docker Engine API, runs the health checks and reports back. The control plane marks the deployment done when every node reports it serving. tug reads Compose files with its own built-in reader, so Docker Compose is not needed anywhere: nodes need only Docker Engine, and control runs as a container started with `docker run`. Cross-node workload traffic uses your own private network.
 
-Control serves mutual TLS directly on one port (`8443`). Every operator, CI job and node authenticates with a certificate from a private CA created at install, so the control address can be a bare IP and can change later. Do not terminate TLS in front of it. A `controlUrl` in `tug.yml` tells the CLI where control is (see [CLI configuration](docs/cli.md#config-file)). [Architecture](docs/architecture.md) covers every flow in detail, and [Security](docs/security.md) the trust boundaries.
+Control serves mutual TLS directly on one port (`8443`). Every operator, CI job and node authenticates with a certificate from a private CA created at install, so the control address can be a bare IP and can change later. Do not terminate TLS in front of it. A `controlUrl` in `tug.yml` tells the CLI where control is (see [CLI configuration](docs/cli.md#config-file)). [Architecture](docs/architecture.md) covers every flow in detail, and [Security](docs/design/security.md) the trust boundaries.
 
 ## Documentation
 
-Start with the [single-VPS tutorial](docs/getting-started.md), then choose the topic that matches your next task:
+The [documentation index](docs/index.md) lists every page by task. The ones you will reach for first:
 
-- **Deploy and operate**
-  - [Application examples](examples/README.md)
-  - [Health checks and rollouts](docs/healthchecks.md)
-  - [Troubleshooting](docs/troubleshooting.md)
-- **Networking and access**
-  - [Hostnames, HTTPS and service networking](docs/networking.md)
-  - [Credentials and CI](docs/access-control.md)
-  - [Security audit and trust boundaries](docs/security.md)
-- **Servers and data**
-  - [Service placement and scaling](docs/service-placement.md)
-  - [Node management](docs/nodes.md)
-  - [Backups and recovery](docs/backups.md)
-  - [Moving to new servers](docs/migration.md)
-- **Reference**
-  - [CLI](docs/cli.md)
-  - [Compose extensions](docs/compose.md)
-  - [Configuration](docs/configuration.md)
-  - [Control plane](docs/control-plane.md)
-- **Contribute and design**
-  - [Development](docs/development.md)
-  - [Testing](docs/testing.md)
-  - [Releases](docs/releases.md)
-  - [Architecture](docs/architecture.md)
-  - [Roadmap](docs/roadmap.md)
-  - [Observability status and proposal](docs/observability.md)
-  - [Capabilities proposal](docs/capabilities.md)
-  - [Consoles and agent-built control planes (proposal)](docs/consoles.md)
-  - [Terminal UI (`tug tui`)](docs/tui.md)
-  - [Terminology](docs/terminology.md)
-  - [Standalone binary (prototype)](docs/standalone-binary.md)
-  - [Docker Swarm comparison](docs/swarm-comparison.md)
-  - [Podman and other container engines (proposal)](docs/container-engines.md)
-  - [File-mounted workload secrets (proposal)](docs/secrets.md)
+- **Start:** [Deploy your first service](docs/getting-started.md), then the [application examples](examples/README.md)
+- **Run it for real:** [Production checklist](docs/production-checklist.md), [Backups and recovery](docs/backups.md), [Upgrade control and nodes](docs/upgrading.md), [Troubleshooting](docs/troubleshooting.md)
+- **Look it up:** [CLI](docs/cli.md), [Compose extensions](docs/compose.md), [Configuration](docs/configuration.md), [Access control](docs/access-control.md)
+- **Understand it:** [Architecture](docs/architecture.md), [Docker Swarm comparison](docs/swarm-comparison.md), [Terminal UI](docs/tui.md)
+- **Contribute:** [Development](docs/contributing/development.md), [Testing](docs/contributing/testing.md), [Releases](docs/releases.md), and the [design records](docs/design/README.md) (roadmap, security audit, proposals)
 
 ## Development
 
@@ -227,4 +200,4 @@ npm run lint
 npm run test:integration
 ```
 
-See [Development](docs/development.md) for details. Database code uses direct SQLite queries; [SQLite storage](docs/architecture.md#sqlite-storage) describes query boundaries and synchronous transactions.
+See [Development](docs/contributing/development.md) for details. Database code uses direct SQLite queries; [SQLite storage](docs/architecture.md#sqlite-storage) describes query boundaries and synchronous transactions.

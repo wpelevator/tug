@@ -17,11 +17,11 @@ Code style is enforced by Prettier (`.prettierrc.json`: 100 columns, single quot
 
 `npm test` runs `node --test 'src/**/*.test.ts'`. `npm run typecheck` runs `tsc --noEmit` over `src/` and `tests/` with `strict` on. `npm run build` compiles `src/` to `dist/` (JavaScript plus `.d.ts`) and copies `src/templates` to `dist/templates`. `npm run test:smoke:dist` builds and checks that `control setup` and `node add` render their templates from `dist/`.
 
-`npm run schema` regenerates the committed, published `x-tug.schema.json` (the editor schema for `x-tug`, see [Compose extensions](compose.md#editor-autocomplete-and-squiggles)) from `src/compose/x-tug-schema.ts`. A test compares the committed file against a fresh generation, and further tests pin the schema's key lists and enums to the validator constants they mirror, so the schema cannot drift from `tug lint` and deploy; a schema change means changing the generator and running the script.
+`npm run schema` regenerates the committed, published `x-tug.schema.json` (the editor schema for `x-tug`, see [Compose extensions](../compose.md#editor-autocomplete-and-squiggles)) from `src/compose/x-tug-schema.ts`. A test compares the committed file against a fresh generation, and further tests pin the schema's key lists and enums to the validator constants they mirror, so the schema cannot drift from `tug lint` and deploy; a schema change means changing the generator and running the script.
 
 Import specifiers in the source use the `.ts` extension (`import { x } from './files.ts'`) because Node's type stripping does not remap `.js` to `.ts`; `tsc` rewrites them to `.js` in `dist/` (`rewriteRelativeImportExtensions`). Only erasable TypeScript syntax is allowed (`erasableSyntaxOnly`: no enums or constructor parameter properties).
 
-Unit tests sit next to the module they test as `src/**/*.test.ts`, and the folder layout is described in [Architecture](architecture.md#source-layout). The agent integration test lives in `tests/integration/`. [Testing](testing.md) explains how the test layers fit together and what each one is expected to catch.
+Unit tests sit next to the module they test as `src/**/*.test.ts`, and the folder layout is described in [Architecture](../architecture.md#source-layout). The agent integration test lives in `tests/integration/`. [Testing](testing.md) explains how the test layers fit together and what each one is expected to catch.
 
 ## Docker image
 
@@ -33,7 +33,7 @@ Run `npm run test:smoke:image` to build the actual shipped runtime image and exe
 
 ## Continuous integration and releases
 
-`.github/workflows/ci.yml` runs on pushes to `main` and on pull requests: typecheck and lint on Node 24 (the version in `.nvmrc`), unit tests and the dist smoke test on the exact minimum Node 22.18.0 and current Node 22 and 24, plus the Docker integration tests (fake VPS containers, registry-free image delivery, plain-address cross-node networking and rolling rollouts) as separate jobs. `.github/workflows/release.yml` versions and publishes; see [Releases](releases.md). Every user-facing change needs a changeset (`npm run changeset`).
+`.github/workflows/ci.yml` runs on pushes to `main` and on pull requests: typecheck and lint on Node 24 (the version in `.nvmrc`), unit tests and the dist smoke test on the exact minimum Node 22.18.0 and current Node 22 and 24, plus the Docker integration tests (fake VPS containers, registry-free image delivery, plain-address cross-node networking and rolling rollouts) as separate jobs. `.github/workflows/release.yml` versions and publishes; see [Releases](../releases.md). Every user-facing change needs a changeset (`npm run changeset`).
 
 ### CI caching
 

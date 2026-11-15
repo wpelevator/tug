@@ -117,7 +117,7 @@ A scratch restore of a volume is also the restore drill: it proves a backup can 
 
 ## Recover a site on a replacement node
 
-This is a manual procedure, not automatic failover. A WordPress and MariaDB project was recovered this way with the published 0.9.0 release in the [real-host drill](real-host-evaluation.md#recovery-drill-with-the-published-090-release-2-november-2026), and again, with S3-compatible backups and named volumes, on the 1.0.0 candidate ([drill](real-host-evaluation.md#recovery-drill)). The original host was simulated as unavailable while control and the backup destination stayed available. Restore control first if it is also lost.
+This is a manual procedure, not automatic failover. A WordPress and MariaDB project was recovered this way with the published 0.9.0 release in the [real-host drill](design/real-host-evaluation.md#recovery-drill-with-the-published-090-release-2-november-2026), and again, with S3-compatible backups and named volumes, on the 1.0.0 candidate ([drill](design/real-host-evaluation.md#recovery-drill)). The original host was simulated as unavailable while control and the backup destination stayed available. Restore control first if it is also lost.
 
 1. Fence the lost node or otherwise ensure its old workloads cannot write to shared services. Enroll the replacement node and verify it is online. Keep the recovery site private or otherwise block public traffic while its new database and volumes are empty; do not expose a fresh WordPress installer.
 2. Change the project’s service and volume placement to the replacement node and deploy the same project using the retained images, configuration and secrets. Tug refuses the deploy until you acknowledge that the stateful services start empty: add `--move <service>` for each one it names (for example `--move db --move wordpress`). It then holds the services that write to them, including a writer that moved too, so a fresh WordPress installer is not served. The replacement uses fresh local volumes; deploying alone does not restore their contents. Keep the old backup repository and its password available.
@@ -178,7 +178,7 @@ Every restic command fails when it makes no progress for ten minutes, so a damag
 
 ## Known limits
 
-- One failed night is visible as a `backup.failed` or `backup.stale` event, not a push notification, until [webhooks](roadmap.md#m8--central-api-advantages-partly-done) exist. Watch `tug events`, or point a monitor at `tug backup list`.
+- One failed night is visible as a `backup.failed` or `backup.stale` event, not a push notification, until [webhooks](design/roadmap.md#m8--central-api-advantages-partly-done) exist. Watch `tug events`, or point a monitor at `tug backup list`.
 - While control is down no backup starts. Running jobs finish and report when control returns, and a long gap yields one missed event and one catch-up run per target.
 - Live volumes are crash-consistent, not application-consistent. Use a command backup for anything with its own consistency (databases).
 - A volume is backed up from the one node that holds it. A volume you mount from a file server with `driver_opts` is read through that node's mount; back up the file server's own disk where you can.
