@@ -204,6 +204,8 @@ export type CommandType =
   | 'diagnostics.run'
   | 'service.restart'
   | 'logs.fetch'
+  /** Payload `{ tail }`: the last lines of the node's managed Caddy container. */
+  | 'ingress.logs'
   | 'volume.delete'
   | 'backup.check'
   | 'backup.run'
@@ -384,7 +386,9 @@ export type LiveRequest =
       tail: number;
     }
   | { operation: 'ps'; project: string; node?: string }
-  | { operation: 'inspect'; project: string; service: string; node?: string };
+  | { operation: 'inspect'; project: string; service: string; node?: string }
+  /** The node's managed Caddy container, which belongs to no project, so it carries no project or service. */
+  | { operation: 'ingress-logs'; node: string; follow: true; tail: number };
 export const LIVE_MAX_FRAME_BYTES = 256 * 1024;
 /** What one operator socket may hold unsent; the flow-control window keeps a session's output well below it. */
 export const LIVE_MAX_BUFFERED_BYTES = 1024 * 1024;
@@ -540,12 +544,31 @@ export interface IngressWork {
   warnings: string[];
 }
 
+/**
+ * What a client gets from the ingress node for one named host, observed by a TLS handshake against the node's own
+ * Caddy: `issued` (a valid certificate that covers the host is served), `pending` (no usable certificate yet, so the
+ * handshake fails) or `failed` (pending, and Caddy's log shows the latest issuance attempt for the host failing).
+ */
+export interface IngressHostTls {
+  host: string;
+  state: 'issued' | 'pending' | 'failed';
+  /** When the host last changed state, so a long `pending` can be told from a new domain. */
+  since: string;
+  /** `issued` only: the certificate's expiry. */
+  notAfter?: string;
+  issuer?: string;
+  /** Why it is not issued: the handshake error, or the latest issuance error from Caddy's log. */
+  error?: string;
+}
+
 export interface IngressStatus {
   state: 'serving' | 'failed';
   /** sha256 of the applied Caddyfile and files. */
   configHash: string;
   routes: number;
   error?: string;
+  /** Per named host with automatic HTTPS. Absent from agents that predate it: unknown, not issued. */
+  tls?: IngressHostTls[];
 }
 
 // ---- POST /agent/v1/status ---------------------------------------------------------------------

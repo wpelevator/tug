@@ -680,6 +680,29 @@ test('executeCommand drives the Engine API for restart, logs, volume delete and 
   );
 });
 
+test('ingress.logs reads the managed Caddy container and reports its absence', async () => {
+  const ctx = await makeCtx();
+  const d = fake(ctx);
+  await assert.rejects(
+    executeCommand({ id: 'i0', type: 'ingress.logs', payload_json: '{}' }, ctx),
+    /tug-caddy|No such container/,
+    'a node without the Caddy container should fail the command instead of returning empty logs',
+  );
+  d.addImage('caddy:2-alpine');
+  await d.createContainer('tug-caddy', { Image: 'caddy:2-alpine' } as never);
+  d.logOutput.set('tug-caddy', '{"msg":"certificate obtained"}\n');
+  const logs = await executeCommand(
+    { id: 'i1', type: 'ingress.logs', payload_json: JSON.stringify({ tail: 7 }) },
+    ctx,
+  );
+  assert.deepEqual(
+    logs.result,
+    { stdout: '{"msg":"certificate obtained"}\n', stderr: '' },
+    'the Caddy container output should be returned',
+  );
+  assert.equal(d.calls.at(-1), 'logs tug-caddy tail=7', 'the requested tail should be honored');
+});
+
 test('diagnostics fail on a daemon older than the Engine API the agent needs', async () => {
   const ctx = await makeCtx();
   fake(ctx).version_ = { Version: '20.10.0', ApiVersion: '1.40' };
@@ -840,6 +863,54 @@ test('pollOnce reconciles desired states, runs commands and posts one status rep
     report.commandResults.map((r) => [r.commandId, r.state]),
     [['c1', 'succeeded']],
   );
+});
+
+test('the ingress status carries per-host certificate state, and a failing monitor never withholds it', async () => {
+  const routes = [
+    { project: 'p', service: 'web', host: 'a.example.com', tls: 'auto' as const, upstreams: [] },
+  ];
+  const run = async (tlsMonitor: AgentContext['tlsMonitor']) => {
+    const posted: { ingress?: { state: string; tls?: unknown } }[] = [];
+    const http = (async (url: string | URL | Request, init?: RequestInit) => {
+      const u = String(url);
+      if (u.endsWith('/agent/v1/work'))
+        return Response.json({
+          desiredStates: [],
+          commands: [],
+          ingress: { caddyfile: ':80 {\n}\n', files: {}, routes, warnings: [] },
+        });
+      if (u.endsWith('/agent/v1/status')) {
+        posted.push(JSON.parse(String(init?.body)));
+        return Response.json({ ok: true });
+      }
+      return Response.json({});
+    }) as HttpClient;
+    const ctx = await makeCtx({ http, tlsMonitor });
+    fake(ctx).addImage('caddy:2-alpine');
+    await pollOnce(ctx);
+    return posted[0].ingress;
+  };
+  const tls = [{ host: 'a.example.com', state: 'pending', since: '2026-11-15T10:00:00.000Z' }];
+  const seen: string[][] = [];
+  const reported = await run({
+    check: async (r) => {
+      seen.push(r.map((x) => x.host));
+      return tls as never;
+    },
+  });
+  assert.deepEqual(reported?.tls, tls, 'the monitor result should ride on the ingress status');
+  assert.deepEqual(seen, [['a.example.com']], 'the monitor should see the rendered routes');
+  const survived = await run({
+    check: async () => {
+      throw new Error('probe exploded');
+    },
+  });
+  assert.equal(
+    survived?.state,
+    'serving',
+    'a TLS check failure must not stop the routing acknowledgement',
+  );
+  assert.equal(survived?.tls, undefined, 'no certificate state is better than a wrong one');
 });
 
 test('published-image pulls use project registry auth only in the Engine request', async () => {

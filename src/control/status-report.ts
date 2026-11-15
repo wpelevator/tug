@@ -1,6 +1,7 @@
 import { isPort } from '../node-address.ts';
 import type {
   CommandResult,
+  IngressHostTls,
   IngressStatus,
   JobStatus,
   ProjectStatus,
@@ -141,6 +142,39 @@ function ingressStatus(value: unknown): IngressStatus {
     configHash: text(value.configHash, 'ingress.configHash')!,
     routes: value.routes,
     ...(value.error !== undefined && { error: text(value.error, 'ingress.error') }),
+    ...(value.tls !== undefined && {
+      tls: list(value.tls, 'ingress.tls')
+        .slice(0, MAX_INGRESS_CERTS)
+        .map((c, i) => ingressHostTls(c, `ingress.tls[${i}]`)),
+    }),
+  };
+}
+
+const MAX_INGRESS_CERTS = 256;
+function ingressHostTls(value: unknown, path: string): IngressHostTls {
+  if (!isObject(value)) throw new StatusReportError(`${path} must be an object`);
+  if (value.state !== 'issued' && value.state !== 'pending' && value.state !== 'failed')
+    throw new StatusReportError(`${path}.state must be issued, pending or failed`);
+  const host = text(value.host, `${path}.host`)!;
+  if (host.length > 253) throw new StatusReportError(`${path}.host is too long`);
+  const since = text(value.since, `${path}.since`)!;
+  if (!Number.isFinite(Date.parse(since)))
+    throw new StatusReportError(`${path}.since must be a date`);
+  const notAfter = text(value.notAfter, `${path}.notAfter`, true);
+  if (notAfter !== undefined && !Number.isFinite(Date.parse(notAfter)))
+    throw new StatusReportError(`${path}.notAfter must be a date`);
+  const issuer = text(value.issuer, `${path}.issuer`, true);
+  const error = text(value.error, `${path}.error`, true);
+  // Error text from Caddy ends up in terminals and doctor output.
+  const plain = (v: string) =>
+    [...v].map((ch) => (ch.charCodeAt(0) < 32 || ch.charCodeAt(0) === 127 ? ' ' : ch)).join('');
+  return {
+    host: plain(host),
+    state: value.state,
+    since,
+    ...(notAfter !== undefined && { notAfter }),
+    ...(issuer !== undefined && { issuer: plain(issuer).slice(0, 100) }),
+    ...(error !== undefined && { error: plain(error).slice(0, 300) }),
   };
 }
 

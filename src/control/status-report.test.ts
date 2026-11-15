@@ -122,3 +122,60 @@ test('a job heartbeat keeps its lane and what it waits for, and drops an unknown
   );
   assert.equal(report.jobs?.[1].lane, undefined, 'a lane control does not know is dropped');
 });
+
+test('ingress certificate entries are validated and bounded', () => {
+  const ok = {
+    host: 'a.example.com',
+    state: 'failed',
+    since: '2026-11-15T10:00:00Z',
+    error: 'e'.repeat(500),
+  };
+  const body = (cert: unknown) => ({
+    node: 'n',
+    projects: [],
+    commandResults: [],
+    ingress: { state: 'serving', configHash: 'h', routes: 1, tls: [cert] },
+  });
+  assert.equal(
+    parseStatusReport(body(ok)).ingress?.tls?.[0].error?.length,
+    300,
+    'a reported error is truncated to 300 characters',
+  );
+  for (const [cert, message] of [
+    [{ ...ok, state: 'valid' }, /state must be issued, pending or failed/],
+    [{ ...ok, since: 'yesterday' }, /since must be a date/],
+    [{ ...ok, host: 'h'.repeat(254) }, /host is too long/],
+    [{ ...ok, notAfter: 'never' }, /notAfter must be a date/],
+  ] as const)
+    assert.throws(
+      () => parseStatusReport(body(cert)),
+      (error) => error instanceof StatusReportError && message.test(error.message),
+      `${JSON.stringify(cert)} should be refused with ${message}`,
+    );
+});
+
+test('control characters in reported certificate text are replaced', () => {
+  const parsed = parseStatusReport({
+    node: 'n',
+    projects: [],
+    commandResults: [],
+    ingress: {
+      state: 'serving',
+      configHash: 'h',
+      routes: 1,
+      tls: [
+        {
+          host: 'a.example.com',
+          state: 'failed',
+          since: '2026-11-15T10:00:00Z',
+          error: 'boom\u001b[31m red\nnext',
+        },
+      ],
+    },
+  });
+  assert.equal(
+    parsed.ingress?.tls?.[0].error,
+    'boom [31m red next',
+    'escape and newline characters must not reach terminals through doctor or tug ingress tls',
+  );
+});

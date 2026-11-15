@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { formatStatus } from './status.ts';
+import { formatIngressTls, formatStatus } from './status.ts';
 import type { StatusResponse } from './status.ts';
 
 const status: StatusResponse = {
@@ -101,4 +101,57 @@ test('a service Docker keeps restarting is listed as unstable, not serving', () 
     'a crash loop must be visible in the status summary',
   );
   assert.match(output, /db: serving/, 'a stable service still reads as serving');
+});
+
+test('status flags an ingress node whose hosts have no certificate yet', () => {
+  const output = formatStatus({
+    ...status,
+    nodes: [{ ...status.nodes[0], status: 'online', tls_not_issued: 2 }],
+  });
+  assert.match(
+    output,
+    /web: online; last seen .*; 2 hosts have no certificate yet \(tug ingress tls\)/,
+    'serving must not hide hosts that clients cannot reach over HTTPS',
+  );
+});
+
+test('the ingress TLS table lists hosts, reasons and unknown agents', () => {
+  const output = formatIngressTls([
+    {
+      node: 'n1',
+      state: 'serving',
+      reportedAt: null,
+      tls: [
+        {
+          host: 'a.example.com',
+          state: 'issued',
+          since: '2026-11-15T10:00:00Z',
+          notAfter: '2027-02-01',
+        },
+        {
+          host: 'b.example.com',
+          state: 'failed',
+          since: '2026-11-15T10:01:00Z',
+          error: 'port 80 refused',
+        },
+      ],
+    },
+    { node: 'n2', state: 'serving', reportedAt: null, tls: null },
+  ]);
+  assert.match(
+    output,
+    /a\.example\.com\s+issued\s+\S+\s+valid until 2027-02-01/,
+    'an issued host shows its expiry',
+  );
+  assert.match(
+    output,
+    /b\.example\.com\s+failed\s+\S+\s+port 80 refused/,
+    'a failed host shows the reason',
+  );
+  assert.match(
+    output,
+    /n2\s+-\s+unknown\s+-\s+ingress serving; agent does not report TLS state/,
+    'an old agent is unknown, not issued',
+  );
+  assert.equal(formatIngressTls([]), 'No ingress nodes', 'no ingress nodes says so');
 });
