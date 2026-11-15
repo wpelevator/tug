@@ -134,10 +134,10 @@ test('ingress certificate entries are validated and bounded', () => {
     node: 'n',
     projects: [],
     commandResults: [],
-    ingress: { state: 'serving', configHash: 'h', routes: 1, certs: [cert] },
+    ingress: { state: 'serving', configHash: 'h', routes: 1, tls: [cert] },
   });
   assert.equal(
-    parseStatusReport(body(ok)).ingress?.certs?.[0].error?.length,
+    parseStatusReport(body(ok)).ingress?.tls?.[0].error?.length,
     300,
     'a reported error is truncated to 300 characters',
   );
@@ -163,7 +163,7 @@ test('control characters in reported certificate text are replaced', () => {
       state: 'serving',
       configHash: 'h',
       routes: 1,
-      certs: [
+      tls: [
         {
           host: 'a.example.com',
           state: 'failed',
@@ -174,7 +174,7 @@ test('control characters in reported certificate text are replaced', () => {
     },
   });
   assert.equal(
-    parsed.ingress?.certs?.[0].error,
+    parsed.ingress?.tls?.[0].error,
     'boom [31m red next',
     'escape and newline characters must not reach terminals through doctor or tug ingress tls',
   );

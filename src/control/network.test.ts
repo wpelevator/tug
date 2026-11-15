@@ -879,14 +879,14 @@ test('ingress certificate state reaches doctor, status, domain list and the admi
     const doctor = async () =>
       (await get('/api/v1/diagnostics')).checks.find((c: { name: string }) => c.name === 'ingress');
     const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
-    const reportCerts = (certs: unknown) =>
+    const reportCerts = (tls: unknown) =>
       s.post(
         '/agent/v1/status',
         {
           node: 'edge',
           projects: [],
           commandResults: [],
-          ingress: { state: 'serving', configHash: 'h', routes: 1, certs },
+          ingress: { state: 'serving', configHash: 'h', routes: 1, tls },
         },
         s.agent(edge.nodeId),
       );
@@ -939,7 +939,7 @@ test('ingress certificate state reaches doctor, status, domain list and the admi
       'doctor names the host, node and issuance error',
     );
     const report = await get('/api/v1/ingress/tls');
-    assert.equal(report.nodes[0].certs[0].state, 'failed', 'the admin report lists per-host state');
+    assert.equal(report.nodes[0].tls[0].state, 'failed', 'the admin report lists per-host state');
 
     await reportCerts([
       {
@@ -968,7 +968,7 @@ test('ingress certificate state reaches doctor, status, domain list and the admi
       'an agent that does not report certificates reads unknown, never issued',
     );
     assert.equal(
-      (await get('/api/v1/ingress/tls')).nodes[0].certs,
+      (await get('/api/v1/ingress/tls')).nodes[0].tls,
       null,
       'the admin report distinguishes no data from no hosts',
     );
@@ -1023,16 +1023,16 @@ test('ingress certificate state survives agent restarts, failed reloads and hide
       state: 'serving',
       configHash: 'h',
       routes: 1,
-      certs: [cert('2026-11-15T10:00:00Z')],
+      tls: [cert('2026-11-15T10:00:00Z')],
     });
     await report({
       state: 'serving',
       configHash: 'h',
       routes: 1,
-      certs: [cert('2026-11-15T12:00:00Z')],
+      tls: [cert('2026-11-15T12:00:00Z')],
     });
     assert.equal(
-      (await get('/api/v1/ingress/tls')).nodes[0].certs[0].since,
+      (await get('/api/v1/ingress/tls')).nodes[0].tls[0].since,
       '2026-11-15T10:00:00Z',
       'a restarted agent resets since, but control keeps when the unchanged state began',
     );
@@ -1040,16 +1040,16 @@ test('ingress certificate state survives agent restarts, failed reloads and hide
       state: 'serving',
       configHash: 'h',
       routes: 1,
-      certs: [cert('2026-11-15T13:00:00Z', 'failed')],
+      tls: [cert('2026-11-15T13:00:00Z', 'failed')],
     });
     assert.equal(
-      (await get('/api/v1/ingress/tls')).nodes[0].certs[0].since,
+      (await get('/api/v1/ingress/tls')).nodes[0].tls[0].since,
       '2026-11-15T13:00:00Z',
       'a changed state starts a new since',
     );
     await report({ state: 'failed', configHash: 'h2', routes: 1, error: 'reload rejected' });
     assert.equal(
-      (await get('/api/v1/ingress/tls')).nodes[0].certs[0].state,
+      (await get('/api/v1/ingress/tls')).nodes[0].tls[0].state,
       'failed',
       'a failed reload carries no probe results, so the last known state is kept',
     );

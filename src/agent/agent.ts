@@ -1485,7 +1485,7 @@ export async function pollOnce(ctx: AgentContext = defaultContext()): Promise<Pr
         // Certificate state is advisory: a probe failure must never withhold the routing acknowledgement.
         try {
           ctx.tlsMonitor ??= createTlsMonitor();
-          ingress.certs = await ctx.tlsMonitor.check(work.ingress.routes, ctx.docker);
+          ingress.tls = await ctx.tlsMonitor.check(work.ingress.routes, ctx.docker);
         } catch (e) {
           console.error(`ingress TLS check failed: ${errMessage(e)}`);
         }

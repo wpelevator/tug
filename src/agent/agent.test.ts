@@ -870,7 +870,7 @@ test('the ingress status carries per-host certificate state, and a failing monit
     { project: 'p', service: 'web', host: 'a.example.com', tls: 'auto' as const, upstreams: [] },
   ];
   const run = async (tlsMonitor: AgentContext['tlsMonitor']) => {
-    const posted: { ingress?: { state: string; certs?: unknown } }[] = [];
+    const posted: { ingress?: { state: string; tls?: unknown } }[] = [];
     const http = (async (url: string | URL | Request, init?: RequestInit) => {
       const u = String(url);
       if (u.endsWith('/agent/v1/work'))
@@ -890,15 +890,15 @@ test('the ingress status carries per-host certificate state, and a failing monit
     await pollOnce(ctx);
     return posted[0].ingress;
   };
-  const certs = [{ host: 'a.example.com', state: 'pending', since: '2026-11-15T10:00:00.000Z' }];
+  const tls = [{ host: 'a.example.com', state: 'pending', since: '2026-11-15T10:00:00.000Z' }];
   const seen: string[][] = [];
   const reported = await run({
     check: async (r) => {
       seen.push(r.map((x) => x.host));
-      return certs as never;
+      return tls as never;
     },
   });
-  assert.deepEqual(reported?.certs, certs, 'the monitor result should ride on the ingress status');
+  assert.deepEqual(reported?.tls, tls, 'the monitor result should ride on the ingress status');
   assert.deepEqual(seen, [['a.example.com']], 'the monitor should see the rendered routes');
   const survived = await run({
     check: async () => {
@@ -910,7 +910,7 @@ test('the ingress status carries per-host certificate state, and a failing monit
     'serving',
     'a TLS check failure must not stop the routing acknowledgement',
   );
-  assert.equal(survived?.certs, undefined, 'no certificate state is better than a wrong one');
+  assert.equal(survived?.tls, undefined, 'no certificate state is better than a wrong one');
 });
 
 test('published-image pulls use project registry auth only in the Engine request', async () => {

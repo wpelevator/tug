@@ -121,7 +121,7 @@ test('the ingress TLS table lists hosts, reasons and unknown agents', () => {
       node: 'n1',
       state: 'serving',
       reportedAt: null,
-      certs: [
+      tls: [
         {
           host: 'a.example.com',
           state: 'issued',
@@ -136,7 +136,7 @@ test('the ingress TLS table lists hosts, reasons and unknown agents', () => {
         },
       ],
     },
-    { node: 'n2', state: 'serving', reportedAt: null, certs: null },
+    { node: 'n2', state: 'serving', reportedAt: null, tls: null },
   ]);
   assert.match(
     output,

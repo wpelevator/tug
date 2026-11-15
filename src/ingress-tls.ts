@@ -6,7 +6,7 @@ import { errMessage } from './errors.ts';
 import { CADDY_CONTAINER } from './ingress.ts';
 import { collectLogs } from './docker-api.ts';
 import type { DockerApi } from './docker-api.ts';
-import type { IngressCertStatus, IngressRoute } from './protocol.ts';
+import type { IngressHostTls, IngressRoute } from './protocol.ts';
 
 /** Reports at most this many hosts, so a huge mapped-domain list cannot bloat the status report. */
 export const MAX_TLS_HOSTS = 256;
@@ -160,12 +160,12 @@ function within<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
 }
 
 export interface TlsMonitor {
-  check(routes: IngressRoute[], docker: DockerApi): Promise<IngressCertStatus[]>;
+  check(routes: IngressRoute[], docker: DockerApi): Promise<IngressHostTls[]>;
 }
 
 interface Entry {
   host: string;
-  state: IngressCertStatus['state'];
+  state: IngressHostTls['state'];
   since: string;
   /** When the monitor first saw the host: log errors older than this belong to an earlier life of the name. */
   firstSeen: number;
@@ -295,7 +295,7 @@ export function createTlsMonitor(
           inflight = undefined;
         });
       await within(inflight, checkWaitMs, 'the TLS check').catch(() => {});
-      return hosts.map((host): IngressCertStatus => {
+      return hosts.map((host): IngressHostTls => {
         const e = known.get(host)!;
         return {
           host,

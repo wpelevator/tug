@@ -549,7 +549,7 @@ export interface IngressWork {
  * Caddy: `issued` (a valid certificate that covers the host is served), `pending` (no usable certificate yet, so the
  * handshake fails) or `failed` (pending, and Caddy's log shows the latest issuance attempt for the host failing).
  */
-export interface IngressCertStatus {
+export interface IngressHostTls {
   host: string;
   state: 'issued' | 'pending' | 'failed';
   /** When the host last changed state, so a long `pending` can be told from a new domain. */
@@ -568,7 +568,7 @@ export interface IngressStatus {
   routes: number;
   error?: string;
   /** Per named host with automatic HTTPS. Absent from agents that predate it: unknown, not issued. */
-  certs?: IngressCertStatus[];
+  tls?: IngressHostTls[];
 }
 
 // ---- POST /agent/v1/status ---------------------------------------------------------------------

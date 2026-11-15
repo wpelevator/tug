@@ -1,7 +1,7 @@
 import { isPort } from '../node-address.ts';
 import type {
   CommandResult,
-  IngressCertStatus,
+  IngressHostTls,
   IngressStatus,
   JobStatus,
   ProjectStatus,
@@ -142,16 +142,16 @@ function ingressStatus(value: unknown): IngressStatus {
     configHash: text(value.configHash, 'ingress.configHash')!,
     routes: value.routes,
     ...(value.error !== undefined && { error: text(value.error, 'ingress.error') }),
-    ...(value.certs !== undefined && {
-      certs: list(value.certs, 'ingress.certs')
+    ...(value.tls !== undefined && {
+      tls: list(value.tls, 'ingress.tls')
         .slice(0, MAX_INGRESS_CERTS)
-        .map((c, i) => ingressCert(c, `ingress.certs[${i}]`)),
+        .map((c, i) => ingressHostTls(c, `ingress.tls[${i}]`)),
     }),
   };
 }
 
 const MAX_INGRESS_CERTS = 256;
-function ingressCert(value: unknown, path: string): IngressCertStatus {
+function ingressHostTls(value: unknown, path: string): IngressHostTls {
   if (!isObject(value)) throw new StatusReportError(`${path} must be an object`);
   if (value.state !== 'issued' && value.state !== 'pending' && value.state !== 'failed')
     throw new StatusReportError(`${path}.state must be issued, pending or failed`);

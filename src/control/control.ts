@@ -160,7 +160,7 @@ import { eventForRole } from './event-redaction.ts';
 import type { RedactableEvent } from './event-redaction.ts';
 import type {
   BackupCredentialsResponse,
-  IngressCertStatus,
+  IngressHostTls,
   LiveRequest,
   LiveInput,
   OperatorLiveMessage,
@@ -2485,9 +2485,9 @@ export async function createApp(
               ...domain,
               // One entry per ingress node. `unknown`: that node's agent does not report TLS state. `not-probed`:
               // it does, but not for this name (a wildcard, or past the per-node host limit).
-              tls: tlsReport.map(({ node, certs }) => {
-                if (!certs) return { node, state: 'unknown' };
-                const cert = certs.find((c) => c.host === domain.host.toLowerCase());
+              tls: tlsReport.map(({ node, tls }) => {
+                if (!tls) return { node, state: 'unknown' };
+                const cert = tls.find((c) => c.host === domain.host.toLowerCase());
                 return cert
                   ? { node, ...cert, host: undefined }
                   : {
@@ -4290,7 +4290,7 @@ export async function createApp(
     const cmdId = queueCommand(node.id, project, 'logs.fetch', { project, service, tail });
     res.json({ commandId: cmdId, nodeId: node.id });
   });
-  /** Each enabled ingress node's last report of per-host TLS state; `certs` is absent for an agent that predates it. */
+  /** Each enabled ingress node's last report of per-host TLS state; `tls` is absent for an agent that predates it. */
   function ingressTlsReport() {
     return db
       .all<Pick<NodeRow, 'name' | 'ingress_status_json'>>(
@@ -4301,14 +4301,14 @@ export async function createApp(
           ? (JSON.parse(n.ingress_status_json) as {
               state?: string;
               reportedAt?: string;
-              certs?: IngressCertStatus[];
+              tls?: IngressHostTls[];
             })
           : undefined;
         return {
           node: n.name,
           state: status?.state ?? 'unreported',
           reportedAt: status?.reportedAt ?? null,
-          certs: status?.certs ?? null,
+          tls: status?.tls ?? null,
         };
       });
   }
@@ -4415,8 +4415,8 @@ export async function createApp(
     const statuses = projectScope(req.actor!, 's.project_id');
     const tlsGaps = new Map(
       ingressTlsReport()
-        .filter((n) => n.certs)
-        .map((n) => [n.node, n.certs!.filter((c) => c.state !== 'issued').length]),
+        .filter((n) => n.tls)
+        .map((n) => [n.node, n.tls!.filter((c) => c.state !== 'issued').length]),
     );
     res.json({
       projects: db.all(`SELECT * FROM projects WHERE ${projects.where}`, ...projects.args),
@@ -4569,8 +4569,8 @@ export async function createApp(
           .map((n) => n.name);
         if (bad.length) throw new Error(`ingress nodes not serving: ${bad.join(', ')}`);
         // A host that never got a certificate leaves its site returning a TLS error while everything reads serving.
-        const stuck = ingressTlsReport().flatMap(({ node, certs }) =>
-          (certs ?? [])
+        const stuck = ingressTlsReport().flatMap(({ node, tls }) =>
+          (tls ?? [])
             .filter(
               (c) =>
                 c.state !== 'issued' && Date.now() - Date.parse(c.since) > PENDING_TLS_GRACE_MS,
@@ -4825,21 +4825,21 @@ export async function createApp(
         req.node!.id,
       );
       const before = stored?.ingress_status_json
-        ? (JSON.parse(stored.ingress_status_json) as { certs?: IngressCertStatus[] })
+        ? (JSON.parse(stored.ingress_status_json) as { tls?: IngressHostTls[] })
         : undefined;
       const ingress = { ...report.ingress };
-      if (ingress.certs) {
+      if (ingress.tls) {
         // The agent's monitor is in memory, so a restart makes every host look new: keep when the state began.
-        const prior = new Map((before?.certs ?? []).map((c) => [c.host, c]));
-        ingress.certs = ingress.certs.map((c) => {
+        const prior = new Map((before?.tls ?? []).map((c) => [c.host, c]));
+        ingress.tls = ingress.tls.map((c) => {
           const old = prior.get(c.host);
           return old && old.state === c.state && Date.parse(old.since) < Date.parse(c.since)
             ? { ...c, since: old.since }
             : c;
         });
-      } else if (ingress.state === 'failed' && before?.certs) {
+      } else if (ingress.state === 'failed' && before?.tls) {
         // A failed reload sends no probe results; the last known state is more useful than none.
-        ingress.certs = before.certs;
+        ingress.tls = before.tls;
       }
       db.run(
         'UPDATE nodes SET ingress_status_json=? WHERE id=? AND ingress=1 AND disabled_at IS NULL',

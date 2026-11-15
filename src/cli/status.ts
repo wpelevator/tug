@@ -148,7 +148,7 @@ export interface IngressTlsNode {
   state: string;
   reportedAt: string | null;
   /** `null` when the node's agent does not report certificate state. */
-  certs: { host: string; state: string; since: string; notAfter?: string; error?: string }[] | null;
+  tls: { host: string; state: string; since: string; notAfter?: string; error?: string }[] | null;
 }
 
 /** One row per host and ingress node; an agent that predates TLS reporting reads `unknown`, never `issued`. */
@@ -156,7 +156,7 @@ export function formatIngressTls(nodes: IngressTlsNode[]): string {
   if (!nodes.length) return 'No ingress nodes';
   const rows = [['NODE', 'HOST', 'TLS', 'SINCE', 'DETAIL']];
   for (const node of nodes) {
-    if (!node.certs)
+    if (!node.tls)
       rows.push([
         node.node,
         '-',
@@ -164,9 +164,9 @@ export function formatIngressTls(nodes: IngressTlsNode[]): string {
         '-',
         `ingress ${node.state}; agent does not report TLS state`,
       ]);
-    else if (!node.certs.length)
+    else if (!node.tls.length)
       rows.push([node.node, '-', '-', '-', 'no hosts with automatic HTTPS']);
-    for (const cert of node.certs ?? [])
+    for (const cert of node.tls ?? [])
       rows.push([
         node.node,
         cert.host,
