@@ -2,7 +2,6 @@
 
 `tug tui` is a live full-screen view of your whole setup: what needs attention first, then projects, nodes, events, logs and a shell.
 
-
 ```sh
 tug tui                 # the overview: attention first, then projects, nodes and events
 tug tui nodes           # open on a view: overview, projects, nodes, services, deployments, events, backups, restores, domains, volumes, secrets or credentials

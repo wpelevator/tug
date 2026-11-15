@@ -14,5 +14,6 @@ These pages record why Tug is built the way it is and what is planned. They are 
 | [File-mounted workload secrets](secrets.md) | Proposed | Mounting secrets as files instead of environment variables |
 | [Podman and other container engines](container-engines.md) | Proposed | Supporting engines other than Docker |
 | [Standalone binary](standalone-binary.md) | Prototyped | A compiled client without Node.js |
+| [Tug compared with Docker Swarm](swarm-comparison.md) | Record | A dated source assessment of overlap and gaps, with evidence |
 | [Terminal UI design](tui.md) | Phases 1 to 3 built | User flows, screen design, architecture and the remaining phases of `tug tui` |
 | [Terminology review](terminology-review.md) | Record | The 1 November 2026 naming review behind the vocabulary |

@@ -57,7 +57,7 @@ The schema that `tug lint` applies is published as [JSON Schema](https://unpkg.c
 # yaml-language-server: $schema=https://unpkg.com/@wpelevator/tug/x-tug.schema.json
 ```
 
-- **Pin a version** to keep schema and behavior in step: `https://unpkg.com/@wpelevator/tug@0.14.0/x-tug.schema.json`.
+- **Pin a version** to keep schema and behavior in step: `https://unpkg.com/@wpelevator/tug@<version>/x-tug.schema.json`.
 - **JetBrains:** Settings, Languages & Frameworks, Schemas and DTDs, JSON Schema Mappings. Map the URL to your file name pattern.
 - **Offline:** place the schema next to the file and reference it with a `file:` URL.
 
@@ -258,7 +258,7 @@ volumes:
 
 `x-tug.backup` marks a target, and there are two kinds:
 
-- **A service.** Tug runs your `command` in the running container and stores its standard output. A database dump, `pg_dump`, `redis-cli --rdb -`, `tar` of a directory or `wp db export -` are all just commands. A string runs through `sh -c`, and a list runs as written.
+- **A service.** Tug runs your `command` in the running container and stores its standard output. A database dump, `pg_dump`, `redis-cli --rdb -`, `tar` of a directory or `wp db export -` are all commands. A string runs through `sh -c`, and a list runs as written.
 - **A top-level volume.** Tug mounts it read-only and archives its files.
 
 The value is a cron string, `true` (a volume, with everything from the project defaults), `false`, or an object. The top-level `x-tug.backup` holds defaults and enables nothing.

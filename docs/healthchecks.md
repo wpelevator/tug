@@ -1,16 +1,6 @@
 # Health checks and safer deployments
 
-A health check tells Tug when a service is ready to serve. During a deployment, the agent checks the container and reports failures to control. Ingress uses serving endpoints, and a rolling deployment waits for a healthy replacement before switching traffic. If you omit `x-tug.health`, Tug does not run a Tug readiness probe for that service; a running container alone does not prove the application is ready.
-
-## Choose a check
-
-| Type | What it tests | Useful for |
-| --- | --- | --- |
-| `docker` | The container is running and, if present, its Docker `HEALTHCHECK` reports healthy. Without a Docker health check it only verifies the container is running. | Images that already define a meaningful health check. |
-| `tcp` | The agent can connect to a port on the container IP. | A database or protocol server when a port-open check is sufficient. It does not prove a query will succeed. |
-| `http` | An HTTP request to the container IP returns 2xx after redirects. | A web app with a dedicated readiness endpoint. |
-
-This example gives MariaDB a TCP check and nginx an HTTP check:
+A health check tells Tug when a service is ready to serve. Add one to every service.
 
 ```yaml
 # yaml-language-server: $schema=https://unpkg.com/@wpelevator/tug/x-tug.schema.json
@@ -35,18 +25,38 @@ services:
         path: /
 ```
 
-Set `DB_ROOT_PASSWORD` with `tug secret set DB_ROOT_PASSWORD` before deploying. The nginx service in this example does not use the database. See the [WordPress example](../examples/wordpress/README.md) for an app that does.
+Set `DB_ROOT_PASSWORD` with `tug secret set DB_ROOT_PASSWORD` before deploying. The nginx service here does not use the database, and the [WordPress example](https://github.com/wpelevator/tug/blob/main/examples/wordpress/README.md) shows an app that does.
 
-Checks default to 10 attempts, a two-second interval and a two-second timeout. Increase the interval or retries for a slow-starting application. HTTP checks use the container IP and port, not the public hostname or ingress; select an endpoint that returns 2xx without relying on public redirects. A process-only endpoint can pass while a database or migration is broken; decide which dependencies must be ready before traffic is sent. Conversely, a check that depends on a service stopped during restore can make its own service unhealthy during that restore. Field details are in the [Compose reference](compose.md#services).
+During a deployment the agent checks the container and reports failures to control. Ingress uses serving endpoints, and a rolling deployment waits for a healthy replacement before switching traffic. Without `x-tug.health`, Tug runs no readiness probe for that service, and a running container alone does not prove the app is ready.
+
+## Choose a check
+
+| Type | What it tests | Use it for |
+| --- | --- | --- |
+| `docker` | The container runs and, if the image defines a Docker `HEALTHCHECK`, that it reports healthy. Without one, only that the container runs | Images that already define a meaningful health check |
+| `tcp` | The agent can connect to a port on the container IP. It does not prove a query succeeds | A database or protocol server where an open port is enough |
+| `http` | An HTTP request to the container IP returns 2xx after redirects | A web app with a dedicated readiness endpoint |
+
+| Setting | Default |
+| --- | --- |
+| `retries` | `10` |
+| `interval` | `2s` |
+| `timeout` | `2s` |
+
+Increase the interval or retries for a slow-starting app. Field details are in [Compose extensions](compose.md#health).
+
+- **HTTP checks** use the container IP and port, not the public hostname or ingress. Pick an endpoint that returns 2xx without relying on public redirects.
+- **What to check.** A process-only endpoint can pass while a database or migration is broken, so decide which dependencies must be ready before traffic is sent.
+- **During a restore.** A check that depends on a service stopped for a restore makes its own service unhealthy for that time. Use a check that does not depend on the writer.
 
 ## Dependencies and failures
 
-`depends_on` orders services on the same node; `condition: service_healthy` waits for the dependency's `x-tug.health`, or its Docker health check if there is no Tug check. Without either, the fallback checks only that the dependency container is running. Applications still need connection retries, particularly across nodes or when a dependency later restarts. Rolling services have additional ordering limitations described in [Rolling rollouts](compose.md#rolling-rollouts).
+`depends_on` orders services on the same node. `condition: service_healthy` waits for the dependency's `x-tug.health`, or its Docker health check if there is no Tug check. With neither, it checks only that the dependency container runs. Apps still need connection retries, particularly across nodes or when a dependency restarts later. Rolling services have extra ordering limits, see [Rolling rollouts](compose.md#rolling-rollouts).
 
-If a check fails, `tug deploy` reports the error and `tug status`, `tug events` and `tug logs <service>` help diagnose it. Check the container port and path, the application's startup time and the service logs. A successful TCP check does not verify credentials or application data. See [Troubleshooting](troubleshooting.md).
+If a check fails, `tug deploy` reports the error, and `tug status`, `tug events` and `tug logs <service>` help you diagnose it. Check the container port and path, the app's startup time and the service logs. A passing TCP check does not verify credentials or data. See [Troubleshooting](troubleshooting.md).
 
 ## Roll forward safely
 
-The default rollout recreates a changed service, which can interrupt traffic. A stateless service behind managed ingress can opt into `x-tug.rollout.strategy: rolling`; Tug starts and checks the new revision before ingress switches to it, then drains the old one. Rolling requires ingress, an explicit Tug health check and exactly one published port. It is not a database failover mechanism, and overlapping revisions can share mounted volumes. Review [rolling requirements and limits](compose.md#rolling-rollouts) before enabling it.
+The default rollout recreates a changed service, which can interrupt traffic. A stateless service behind managed ingress can opt into `x-tug.rollout.strategy: rolling`. Tug then starts and checks the new revision before ingress switches to it, and drains the old one. Rolling needs ingress, an explicit Tug health check and exactly one published port. It is not a database failover mechanism, and overlapping revisions can share mounted volumes. Review the [requirements and limits](compose.md#rolling-rollouts) first.
 
-`tug rollback` returns a project to a previous deployment; top-level `x-tug: { rollback: auto }` opts into automatic rollback for eligible failures. It cannot undo database writes or schema changes. See [automatic rollback](compose.md#automatic-rollback) and plan compatible migrations separately.
+`tug rollback` returns a project to a previous deployment, and top-level `x-tug: { rollback: auto }` rolls back eligible failures on its own. Rollback cannot undo database writes or schema changes, so plan compatible migrations separately. See [Automatic rollback](compose.md#automatic-rollback).

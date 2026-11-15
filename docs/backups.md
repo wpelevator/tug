@@ -4,7 +4,7 @@ Mark a service or a volume with `x-tug.backup`, give control one S3-compatible d
 
 ## Set up your first backup
 
-You need S3-compatible storage reachable from the workload node, and credentials allowed to use the bucket. Create the bucket first. Mark each target in your Compose file as shown in [Compose extensions](compose.md#backups), and see the [WordPress example](../examples/wordpress/README.md) for a database and files together. A top-level schedule only supplies defaults and enables nothing.
+You need S3-compatible storage reachable from the workload node, and credentials allowed to use the bucket. Create the bucket first. Mark each target in your Compose file as shown in [Compose extensions](compose.md#backups), and see the [WordPress example](https://github.com/wpelevator/tug/blob/main/examples/wordpress/README.md) for a database and files together. A top-level schedule only supplies defaults and enables nothing.
 
 ```sh
 # Supply the values through your shell or secret manager. Do not commit them.

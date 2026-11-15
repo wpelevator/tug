@@ -1,4 +1,4 @@
-# tug
+# Tug
 
 [![CI](https://github.com/wpelevator/tug/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/wpelevator/tug/actions/workflows/ci.yml?query=branch%3Amain) [![Release](https://github.com/wpelevator/tug/actions/workflows/release.yml/badge.svg?branch=main)](https://github.com/wpelevator/tug/actions/workflows/release.yml?query=branch%3Amain)
 
@@ -7,13 +7,18 @@ Deploy Docker Compose apps to your own Linux VPS with one command, from your lap
 ```sh
 npm install -g @wpelevator/tug    # or run it with npx @wpelevator/tug
 tug lint                          # check compose.yaml offline, no server needed
-tug setup root@203.0.113.5        # install the control plane
-tug node add root@203.0.113.5 --name app1
-tug deploy
 ```
 
 ```text
 compose.yaml: ok
+```
+
+Then install control and an agent on your VPS and deploy:
+
+```sh
+tug setup root@203.0.113.5
+tug node add root@203.0.113.5 --name app1
+tug deploy
 ```
 
 A typical VPS is a durable, always-on computer with enough CPU, memory and disk to host several sites or a medium-size application and its database. Tug is the layer that makes self-hosting on one or a few servers safe and repeatable, so you keep the savings of a plain server without giving up deploys, rollbacks, backups and HTTPS. Tug is free, your Compose file stays a Compose file (`x-tug` is a standard Compose extension that plain Docker Compose ignores), and it is built for a small number of servers running Compose applications, including Node.js, Laravel, Ruby and WordPress apps.
@@ -33,31 +38,31 @@ A typical VPS is a durable, always-on computer with enough CPU, memory and disk 
 
 ## Try it
 
-Follow [Deploy your first service](docs/getting-started.md) to install tug, deploy nginx to one VPS and verify that it works. You need Node.js 22.18 or newer on your computer, plus SSH access to a Linux server. tug can install Docker on supported servers.
+Follow [Deploy your first service](docs/getting-started.md) to install Tug, deploy nginx to one VPS and verify that it works. You need Node.js 22.18 or newer on your computer, plus SSH access to a Linux server. Tug can install Docker on supported servers.
 
 The control plane and agent share the VPS with your application. Once your service is running, you can [add HTTPS](docs/networking.md#layer-b-ingress-and-tls), [back up your data](docs/backups.md) or [add another server](docs/service-placement.md).
 
-Existing service and resource targets can be chosen interactively (try `tug logs`, `tug deploy cancel` or `tug restore run`; see [interactive CLI selection](docs/cli.md#interactive-selection)). In a terminal tug asks before it changes anything: whether to install Docker, which private address the node should use and whether it should handle ingress. It shows the plan and waits for you to confirm. `tug deploy` asks for any Compose variables, such as `${DB_PASSWORD}`, that no secret or `.env` provides. In CI or any other script nothing is ever asked, so pass the choices as flags (`--address`, `--ingress`, `--install-docker`, `-y`).
+Existing service and resource targets can be chosen interactively (try `tug logs`, `tug deploy cancel` or `tug restore run`; see [interactive CLI selection](docs/cli.md#interactive-selection)). In a terminal Tug asks before it changes anything: whether to install Docker, which private address the node should use and whether it should handle ingress. It shows the plan and waits for you to confirm. `tug deploy` asks for any Compose variables, such as `${DB_PASSWORD}`, that no secret or `.env` provides. In CI or any other script nothing is ever asked, so pass the choices as flags (`--address`, `--ingress`, `--install-docker`, `-y`).
 
 Long-running deployments, rollbacks, setup, image transfers, backups, restores and agent command waits report their current stage and elapsed time to stderr every ten seconds. Progress also works in CI and keeps JSON results separate. See [CLI progress reporting](docs/cli.md).
 
-## How tug is different
+## How Tug is different
 
-tug moves the checks earlier: your images are built (on control, or on your machine with `--build-local`) and published tags are resolved to digests before a deployment is published, and a failed build leaves the nodes untouched. Third-party images are still pulled from their upstream registry at rollout.
+Tug moves the checks earlier: your images are built (on control, or on your machine with `--build-local`) and published tags are resolved to digests before a deployment is published, and a failed build leaves the nodes untouched. Third-party images are still pulled from their upstream registry at rollout.
 
-- **Updates without downtime, when you opt in.** With `x-tug: { rollout: { strategy: rolling } }` the new revision starts next to the old one and ingress switches only once it is healthy. It needs ingress, a tug health check and one published port; see [rolling rollouts](docs/compose.md#rolling-rollouts). The default `recreate` restarts the container and can interrupt traffic.
+- **Updates without downtime, when you opt in.** With `x-tug: { rollout: { strategy: rolling } }` the new revision starts next to the old one and ingress switches only once it is healthy. It needs ingress, a Tug health check and one published port; see [rolling rollouts](docs/compose.md#rolling-rollouts). The default `recreate` restarts the container and can interrupt traffic.
 - **Know what is running.** Published images are pinned to a digest, built images get an immutable tag, and every deployment records who made it. `tug status`, `tug events` and `tug ps` show what runs where and how it got there.
 - **Adding a server does not change your app.** Your Compose file and `x-tug` are held as desired state on control, `tug node add` bootstraps a fresh node (installing Docker if you ask), and services placed on it get the same pinned images.
 - **Choose where things run.** Pin a database and its volume to one node and spread web containers over several.
-- **Works behind NAT.** Agents only dial out to control, so a node can sit behind a firewall that allows nothing inbound. tug needs no cloud provider API or overlay network.
+- **Works behind NAT.** Agents only dial out to control, so a node can sit behind a firewall that allows nothing inbound. Tug needs no cloud provider API or overlay network.
 
-## Is tug right for you?
+## Is Tug right for you?
 
-tug fits if you run Compose apps on one or a few VPSes, want deploys, rollbacks, secrets and backups handled in one tool, and are happy with a single control server that you back up. A server can host multiple apps as long as it has enough capacity; tug does not automatically balance resource usage or replace a failed server. Node-to-node traffic travels over your own private network (Tailscale, a VPC, a LAN), so you own its firewalling and encryption. The goals, principles and planned milestones are in the [Roadmap](docs/design/roadmap.md).
+Tug fits if you run Compose apps on one or a few VPSes, want deploys, rollbacks, secrets and backups handled in one tool, and are happy with a single control server that you back up. A server can host multiple apps as long as it has enough capacity; Tug does not automatically balance resource usage or replace a failed server. Node-to-node traffic travels over your own private network (Tailscale, a VPC, a LAN), so you own its firewalling and encryption. The goals, principles and planned milestones are in the [Roadmap](docs/design/roadmap.md).
 
 ### Not for you if
 
-- You need Kubernetes-style scheduling, autoscaling, distributed storage, database failover, automatic rescheduling across a cluster or servers provisioned through a provider's API. See the [Docker Swarm comparison](docs/swarm-comparison.md).
+- You need Kubernetes-style scheduling, autoscaling, distributed storage, database failover, automatic rescheduling across a cluster or servers provisioned through a provider's API. See the [Docker Swarm comparison](docs/design/swarm-comparison.md).
 - Your workloads are not Compose and Docker, or you need to roll back the host itself. `tug rollback` reverts deployments, not host packages or kernel settings.
 - You run several servers with no private network between them. Management traffic works where inbound connections don't, but node-to-node service traffic needs a VPC, LAN or VPN.
 - You need to hide secrets from people who can deploy. A `deploy` credential can read secret values with `exec` or through deployed code; `inspect` redacts environment values, but not a secret you put in `command` or `labels`.
@@ -177,7 +182,7 @@ Every command and option is in the [CLI reference](docs/cli.md). `tug status --j
   the control API.
 ```
 
-`tug deploy` reads your Compose file on your machine and sends it to the control plane, which stores it as an immutable desired state, builds application images when needed and pins published images to digests. tug delivers its built images as archives; published images are pulled from their upstream registries. Each agent fetches the work for its node, applies it through the Docker Engine API, runs the health checks and reports back. The control plane marks the deployment done when every node reports it serving. tug reads Compose files with its own built-in reader, so Docker Compose is not needed anywhere: nodes need only Docker Engine, and control runs as a container started with `docker run`. Cross-node workload traffic uses your own private network.
+`tug deploy` reads your Compose file on your machine and sends it to the control plane, which stores it as an immutable desired state, builds application images when needed and pins published images to digests. Tug delivers its built images as archives; published images are pulled from their upstream registries. Each agent fetches the work for its node, applies it through the Docker Engine API, runs the health checks and reports back. The control plane marks the deployment done when every node reports it serving. Tug reads Compose files with its own built-in reader, so Docker Compose is not needed anywhere: nodes need only Docker Engine, and control runs as a container started with `docker run`. Cross-node workload traffic uses your own private network.
 
 Control serves mutual TLS directly on one port (`8443`). Every operator, CI job and node authenticates with a certificate from a private CA created at install, so the control address can be a bare IP and can change later. Do not terminate TLS in front of it. A `controlUrl` in `tug.yml` tells the CLI where control is (see [CLI configuration](docs/cli.md#config-file)). [Architecture](docs/architecture.md) covers every flow in detail, and [Security](docs/design/security.md) the trust boundaries.
 
@@ -188,7 +193,7 @@ The [documentation index](docs/index.md) lists every page by task. The ones you 
 - **Start:** [Deploy your first service](docs/getting-started.md), then the [application examples](examples/README.md)
 - **Run it for real:** [Production checklist](docs/production-checklist.md), [Backups and recovery](docs/backups.md), [Upgrade control and nodes](docs/upgrading.md), [Troubleshooting](docs/troubleshooting.md)
 - **Look it up:** [CLI](docs/cli.md), [Compose extensions](docs/compose.md), [Configuration](docs/configuration.md), [Access control](docs/access-control.md)
-- **Understand it:** [Architecture](docs/architecture.md), [Docker Swarm comparison](docs/swarm-comparison.md), [Terminal UI](docs/tui.md)
+- **Understand it:** [Architecture](docs/architecture.md), [Docker Swarm comparison](docs/design/swarm-comparison.md), [Terminal UI](docs/tui.md)
 - **Contribute:** [Development](docs/contributing/development.md), [Testing](docs/contributing/testing.md), [Releases](docs/releases.md), and the [design records](docs/design/README.md) (roadmap, security audit, proposals)
 
 ## Development

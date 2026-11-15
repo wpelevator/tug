@@ -24,8 +24,9 @@ tug backup list --check
 ## After launch
 
 - Look at `tug status`, `tug events` and `tug backup list --check` on a schedule. No backup notification is pushed automatically.
+- Watch expiry. Operator credentials last at most 365 days, and `tug doctor` warns before the CA, the server certificate and node certificates expire. Agents renew node certificates themselves.
 - Upgrade control and nodes together with [`tug upgrade`](upgrading.md), and run `tug doctor` afterwards.
-- Know the limits. `tug rollback` cannot undo database writes or schema changes, and it does not roll back the host. One control plane is one point of failure for operations, though running containers keep serving while it is down. See [Not for you if](../README.md#not-for-you-if).
+- Know the limits. `tug rollback` cannot undo database writes or schema changes, and it does not roll back the host. One control plane is one point of failure for operations, though running containers keep serving while it is down. See [Not for you if](https://github.com/wpelevator/tug/blob/main/README.md#not-for-you-if).
 
 ## Next steps
 

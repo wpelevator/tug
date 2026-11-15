@@ -67,7 +67,7 @@ There is no global `--json` flag. It belongs to the command.
 
 ## Config file
 
-The CLI reads a YAML or JSON file, `tug.yml` by convention, so a repository can record how to reach its control plane and which servers it uses. [`examples/tug.yml`](../examples/tug.yml) is a complete sample.
+The CLI reads a YAML or JSON file, `tug.yml` by convention, so a repository can record how to reach its control plane and which servers it uses. [`examples/tug.yml`](https://github.com/wpelevator/tug/blob/main/examples/tug.yml) is a complete sample.
 
 | Rule | Behavior |
 | --- | --- |

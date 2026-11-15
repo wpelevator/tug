@@ -14,7 +14,7 @@ Find the page for what you want to do. New here: [Deploy your first service](get
 | Back up a volume or database and restore it | `tug backup run`, `tug restore run` | [Backups and recovery](backups.md) |
 | Add a server or spread services over servers | `tug node add`, `x-tug.placement` | [Service placement](service-placement.md), [Nodes](nodes.md) |
 | Give CI a deploy key | `tug credential create ci --role deploy` | [Access control](access-control.md#deploying-from-github-actions) |
-| Upgrade control and nodes | `tug upgrade` | [Upgrade control and nodes](upgrading.md) |
+| Upgrade control and nodes | `tug upgrade` | [Upgrade control and nodes](upgrading.md), [Release notes for majors](releases.md#upgrading-to-30-values-come-only-from-control) |
 | Move to new servers | `tug node add`, `tug node replace` | [Migrating to new servers](migration.md) |
 | Run it for real | | [Production checklist](production-checklist.md) |
 | Fix an error | `tug doctor` | [Troubleshooting](troubleshooting.md) |
@@ -32,7 +32,7 @@ Find the page for what you want to do. New here: [Deploy your first service](get
 - [Architecture](architecture.md), components and every flow
 - [Control plane](control-plane.md), PKI, image delivery, backup and upgrade
 - [Terminal UI](tui.md), `tug tui`
-- [Tug compared with Docker Swarm](swarm-comparison.md)
+- [Tug compared with Docker Swarm](design/swarm-comparison.md)
 
 ## Contribute and read the design record
 

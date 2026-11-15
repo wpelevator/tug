@@ -2,9 +2,20 @@
 
 Tug deploys Docker Compose applications to one or more Docker hosts through a small self-hosted control plane and a pull-based agent on each node. The agents drive each node's Docker Engine API directly; Compose is used only on the operator machine to normalize the file. SSH is used only to install the control plane and nodes; normal deploys go through the control API and the agents, which share one mutual-TLS port. [Terminology](terminology.md) defines the vocabulary used here.
 
+## Components at a glance
+
+| Part | Runs on | Job |
+| --- | --- | --- |
+| Control plane | One host | Stores desired state, nodes, secrets and events in SQLite, serves the mTLS API, builds images, renders ingress config |
+| Agent | Every node | Fetches its work from control, reconciles containers through the Docker Engine API, runs health checks, reports status |
+| CLI | Your machine or CI | Reads the Compose file, talks to the control API, and uses SSH only to install control and nodes |
+| Caddy | Ingress nodes | Terminates TLS and proxies hostnames to serving endpoints. The agent manages it |
+
+The sections below are written for contributors and describe each component with its source files.
+
 ## Components
 
-The [README](../README.md#how-it-works) has an overview diagram of how these fit together.
+The [README](https://github.com/wpelevator/tug/blob/main/README.md#how-it-works) has an overview diagram of how these fit together.
 
 - **Control plane** (`src/control/control.ts`): an Express API behind a single TLS 1.3 listener that requires a client certificate ([Control plane](control-plane.md#authentication-and-pki)), backed by SQLite (`tug.db`), an install-time master key (`master.key`) and the private CA (`pki/`) in `TUG_DATA_DIR`. It stores nodes, projects, deployments, desired states, encrypted secrets, volumes, queued commands, events, operator and enrollment credentials (public-key hashes, never private keys) and locks, and builds images from uploaded source tarballs or imports operator-built archives. It always stores and serves built images as compressed artifacts and resolves published image tags to immutable registry digests before publication.
 - **Access control** (`src/control/credentials.ts`, `src/pki.ts`): every peer presents a certificate signed by control's CA. The certificate names one principal (`tug:operator:<id>`, `tug:node:<id>` or `tug:enroll:<id>`) and control authorizes it by comparing the certificate's public-key hash with the key stored for that principal. Every operator route is declared once in a role table (`read`, `deploy`, `admin`) and passes through one guard that checks the role and the credential's allowed projects, and attaches the acting credential name that deployments and audit events record. Agent routes derive the node from the certificate and touch only that node's objects. See [Access control](access-control.md).

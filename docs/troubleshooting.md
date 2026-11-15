@@ -51,9 +51,18 @@ Verify the configured control URL, network path, TCP 8443 and the operator crede
 
 ## CLI, control version or credential/CA mismatches
 
-`exec`, `run`, `logs` and `ps` first list services through the control, so a version or credential problem hits them first while `tug status` and `tug doctor` keep working. Work through this list; stop at the first match.
+`exec`, `run`, `logs` and `ps` first list services through control, so a version or credential problem hits them first while `tug status` and `tug doctor` keep working. Work through the steps and stop at the first match.
 
-1. Run `tug doctor`. It compares the credential's CA with the server certificate control presents and prints both fingerprints under `control_server_cert`. If that check fails, go to step 3.
-2. A version mismatch is refused with the upgrade commands named in the message: `tug control upgrade <control host> --yes` means the deployed control is older than this CLI and must be upgraded (the control may say this itself when the CLI declares a newer version), and a warning naming `npm i -g @wpelevator/tug@<version>` means the CLI is older than the control and should be pinned or upgraded. A control whose responses carry no version stamp also means an older control: upgrade it with the same command and verify with `tug doctor` right after, because an upgrade must preserve `/data/pki` (`control upgrade` compares the CA before and after and fails if it changed) (see [Upgrading the control plane](upgrading.md)).
-3. "The control did not present a certificate signed by this credential's CA" means the credential file and the deployed control disagree. Establish which side is canonical: the control's own PKI lives at `/data/pki` of its container (the `tug-control` volume), its compose files at `/opt/tug-control`. Since `tug init` names credential files by CA fingerprint and never overwrites a file cast for another CA, the previously working credential remains under `~/.config/tug/credentials/`, flipping back to it (point `tug.local.yml` at it, or re-run `tug init <file>`) is the least destructive fix. Never regenerate one side to "fix" the other without checking which CA `cat /data/pki/ca.crt` on the control host reports.
-4. After any control redeploy, verify data survived (`tug status` should still list every project) and run one end-to-end command that uses the service listing (`tug ps`) plus one `tug exec <service> -- sh -c 'echo ok'`. `tug control upgrade` tags the previous control image as `tug:rollback` itself, so `tug control upgrade --rollback` stays available (see [Upgrading the control plane](upgrading.md)).
+1. **Run `tug doctor`.** It compares the credential's CA with the server certificate control presents and prints both fingerprints under `control_server_cert`. If that check fails, go to step 3.
+2. **Read the version message.** The refusal names the fix:
+
+| You see | It means | Do |
+| --- | --- | --- |
+| `tug control upgrade <control host> --yes` | Control is older than this CLI (control may say this itself when the CLI declares a newer version) | Upgrade control with that command |
+| A warning naming `npm i -g @wpelevator/tug@<version>` | The CLI is older than control | Pin or upgrade the CLI |
+| No version stamp in control's responses | An older control | Upgrade it with the same command |
+
+   After any control upgrade, run `tug doctor` right away. An upgrade must preserve `/data/pki`, and `control upgrade` compares the CA before and after and fails if it changed. See [Upgrade control and nodes](upgrading.md).
+
+3. **"The control did not present a certificate signed by this credential's CA".** The credential file and the deployed control disagree, so establish which side is canonical. Control's PKI lives at `/data/pki` in its container (the `tug-control` volume), and its compose files at `/opt/tug-control`. `tug init` names credential files by CA fingerprint and never overwrites a file cast for another CA, so the previously working credential remains under `~/.config/tug/credentials/`. Flipping back to it is the least destructive fix: point `tug.local.yml` at it, or re-run `tug init <file>`. Never regenerate one side to "fix" the other before checking which CA `cat /data/pki/ca.crt` on the control host reports.
+4. **Verify after any control redeploy.** `tug status` should still list every project. Run `tug ps` and `tug exec <service> -- sh -c 'echo ok'` as an end-to-end check. `tug control upgrade` tags the previous control image `tug:rollback` itself, so `tug control upgrade --rollback` stays available.

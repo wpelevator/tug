@@ -27,7 +27,6 @@ Replace `203.0.113.5` with your VPS address. The commands assume an interactive 
 `tug lint` reads a Compose file offline and needs no control plane, credential or Docker. Run it in a directory with a `compose.yaml`:
 
 ```sh
-npm install -g @wpelevator/tug
 cd path/to/your-app
 tug lint
 ```
@@ -47,11 +46,10 @@ bad.yaml: web: x-tug.rollback is not supported (supported: placement, replicas, 
 
 ## 1. Install Tug and control
 
-On your computer, create a directory for this project and install the CLI (skip the install if you already did):
+On your computer, create a directory for this project. The CLI is the one you installed at the top:
 
 ```sh
 mkdir my-first-tug && cd my-first-tug
-npm install -g @wpelevator/tug
 tug setup root@203.0.113.5
 ```
 
@@ -104,7 +102,7 @@ With one node, omitted placement selects it automatically. The HTTP check verifi
 ## Choose a next step
 
 - [Add a hostname and HTTPS](networking.md#layer-b-ingress-and-tls): enable ingress, point DNS at the VPS and route a service.
-- [Deploy an application and database](../README.md#your-compose-file-plus-a-little-x-tug): use a volume and a project secret, then explore the [WordPress example](../examples/wordpress/README.md).
+- [Deploy an application and database](https://github.com/wpelevator/tug/blob/main/README.md#your-compose-file-plus-a-little-x-tug): use a volume and a project secret, then explore the [WordPress example](https://github.com/wpelevator/tug/blob/main/examples/wordpress/README.md).
 - [Set secrets and variables](compose.md#where-values-come-from): keep private values with `tug secret`, visible ones such as image tags with `tug var`, move an existing `.env` in with `tug secret import`, and check the result with `tug deploy --dry-run`.
 - [Back up and recover](backups.md): protect workload data and the control plane separately, then rehearse a restore.
 - [Add another node](service-placement.md): pin stateful services and spread a stateless service across servers.
