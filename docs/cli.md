@@ -292,18 +292,18 @@ By default it deploys the first of `compose.yaml`, `compose.yml`, `docker-compos
 | Option | Meaning | Default |
 | --- | --- | --- |
 | `-f, --file <file>` | Compose file | First match above |
-| `--version <version>` | Display version. Image identities stay immutable even when reused | `git-<Compose hash>` |
+| `--version <version>` | Display version. Image identities stay immutable even when reused. The default label hashes only the Compose file, so a change to a `build:` context, a secret or a variable keeps it; the summary and `tug status` then add the deployment id | `git-<Compose hash>` |
 | `--build-local` | Build on your Docker daemon and upload saved images without source. Single-platform, must match the node architecture | Build on control |
 | `--compose-cli` | Render with `docker compose config` (needs Docker Compose v2 locally), for files that use `include`, `!reset` or `!override` | tug's [native reader](compose.md#native-compose-reader) |
 | `--var <NAME=value>` | Value for this deploy only. Repeatable. A value may contain commas | none |
 | `--profile <name>` | Enable a Compose profile. Repeatable or comma-separated | none |
 | `--move <service>` | Acknowledge that a service with data placed on another node starts empty there. Repeatable or comma-separated | Such a deploy is refused |
-| `--dry-run` | Resolve every value, print each name with its source (secrets as `•••`) and stop before building or uploading. Never prompts or stores | off |
+| `--dry-run` | Resolve every value, print each name with its source (secrets as `•••`), ask control to check the file against other projects (a host port another project already publishes on the node, see [Checks against other projects](compose.md#checks-against-other-projects)) and stop before building or uploading. Never prompts or stores | off |
 | `--no-wait` | Return once desired state exists | wait |
 | `--timeout <seconds>` | Wait limit | `300` |
 
 - **Build input.** Services with `build:` upload the current directory for a remote build. Published-image-only apps upload no context. Control rejects a built service with no build input.
-- **Summary.** One line, `site git-ab12: deployment dep_1 succeeded, 3 services`. `--json` prints the full result with the desired state and the `values` record of where each `${NAME}` came from.
+- **Summary.** One line, `site git-ab12: deployment dep_1 succeeded, 3 services`. The default label `git-<Compose hash>` covers the Compose file and not the build context, secrets or variables, so two deployments can carry one label. When control's recent deployments of the project include another with the same label, the line ends with `(same label as dep_0; tell them apart by deployment id)`. A rollback deployment, whose label `rollback-git-ab12-<ms>` embeds the one it replaced, counts as the same label. `tug status` shows `[dep_1]` after the label in the same case. `--json` prints the full result with the desired state and the `values` record of where each `${NAME}` came from.
 - **Moved data.** After `--move`, the services that write to the moved one are held until you run `tug restore run` or `tug hold release`.
 - **Interruption.** If the wait is interrupted (control unreachable, timeout), the error names the deployment and `tug deploy cancel [id]`. A deploy refused because another is still rolling out names that one the same way.
 - **Project name.** `deploy` warns when the file's `name:` differs from the tug project, because secrets, backups and restores are scoped to the project.
@@ -319,7 +319,7 @@ To deploy CI-built images, push them to a registry and declare `image:`. Control
 | --- | --- | --- |
 | `tug rollback` | `--force`, `--no-wait`, `--timeout <seconds>` (default `300`) | Rolls the project back. `--force` permits it while a deployment is active. With `x-tug: { rollback: auto }` tug rolls back failed deployments itself, see [Automatic rollback](compose.md#automatic-rollback) |
 | `tug deploy cancel [deployment-id]` | | Cancels an active deployment. In a terminal, omit the id to choose from active ones |
-| `tug status` | `--json` | Each project's current deployment, node reports and errors, plus node status and last contact. A service whose container keeps restarting, or exited with an error and stays down, shows as `unstable` with the exit code, although its deployment reads as succeeded. Stale node health is the last report. Control-wide, credential-scoped |
+| `tug status` | `--json` | Each project's current deployment (with its id in brackets when another recent deployment of the project has the same label), node reports and errors, plus node status and last contact. A service whose container keeps restarting, or exited with an error and stays down, shows as `unstable` with the exit code, although its deployment reads as succeeded. Stale node health is the last report. Control-wide, credential-scoped |
 | `tug events` | `--limit <n>` (default `100`, values outside `1`-`500` are an error), `--all`, `--json` | Events newest first as time, level, type, actor and message, for the project, or every project with `--all` (including control events with no project). Terminal escapes are stripped. Control deletes events older than 30 days and keeps at most 100,000, see [Configuration](configuration.md#control-plane) |
 | `tug tui [view]` | `--once`, `--readonly`, `--json` | A live full-screen view. See [Watch your servers in a terminal](tui.md) |
 

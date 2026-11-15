@@ -53,7 +53,10 @@ export interface DeployResponse {
 }
 
 /** One line for a person: which project and version reached which state, and how many services it runs. */
-export function formatDeployment(response: DeployResponse): string {
+export function formatDeployment(
+  response: DeployResponse,
+  sharedWith: readonly string[] = [],
+): string {
   const { deployment } = response;
   const state = response.desiredState as
     { project?: string; version?: string; services?: Record<string, unknown> } | undefined;
@@ -61,6 +64,10 @@ export function formatDeployment(response: DeployResponse): string {
   const label = [state?.project, state?.version].filter(Boolean).join(' ');
   return `${label ? `${label}: ` : ''}deployment ${deployment.id} ${deployment.state}${
     services ? `, ${services} service${services === 1 ? '' : 's'}` : ''
+  }${
+    sharedWith.length
+      ? ` (same label as ${sharedWith.slice(0, 3).join(', ')}${sharedWith.length > 3 ? ', ...' : ''}; tell them apart by deployment id)`
+      : ''
   }${deployment.error_message ? ` (${deployment.error_message})` : ''}`;
 }
 

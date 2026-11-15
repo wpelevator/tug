@@ -5,12 +5,14 @@ import os from 'node:os';
 import path from 'node:path';
 import type { Command } from 'commander';
 import { createLocalBuildSnapshot, createSourceArchive, prepareLocalImages } from '../build.ts';
+import { deploymentsSharingLabel } from '../status.ts';
 import { createProgress, withProgress } from '../progress.ts';
 import { canPrompt } from '../prompt.ts';
 import {
   describeValues,
   findMissingValues,
   ignoredSourceNotes,
+  missingValuesMessage,
   parseVarFlags,
   promptForValues,
 } from '../values.ts';
@@ -78,6 +80,27 @@ export function defaultComposeFile(cwd = process.cwd()): string {
 export async function composeName(file: string): Promise<string | undefined> {
   const text = await fs.readFile(file, 'utf8').catch(() => '');
   return /^name:\s*["']?([A-Za-z0-9][\w.-]*)["']?\s*(?:#.*)?$/m.exec(text)?.[1];
+}
+
+/**
+ * Ids of earlier deployments of the project that carry the same version label as this one, found from control's recent
+ * deployments. A failed lookup is no hint: the summary still shows the deployment id.
+ */
+async function sharedLabel(response: DeployResponse): Promise<string[]> {
+  try {
+    const state = response.desiredState as { project?: string; version?: string } | undefined;
+    const { deployments } = await request<{
+      deployments: { id: string; version: string; project_id?: string }[];
+    }>('GET', '/api/v1/status');
+    return deploymentsSharingLabel(
+      deployments,
+      response.deployment.id,
+      state?.project,
+      state?.version,
+    );
+  } catch {
+    return [];
+  }
 }
 
 export function registerDeploy(program: Command): void {
@@ -160,9 +183,12 @@ export function registerDeploy(program: Command): void {
           if (missing.length) {
             if (o.dryRun || !canPrompt())
               throw new Error(
-                `${o.file} needs values that are not set on control: ${missing.join(', ')}. Tug does not read your shell environment or .env; set each with tug secret set <name> (private) or tug var set <name> (visible), pass --var NAME=value for this deploy only, or import a file with tug secret import .env${
-                  o.dryRun ? '' : ' (or run tug deploy in a terminal to be prompted)'
-                }`,
+                missingValuesMessage(
+                  o.file,
+                  await fs.readFile(o.file, 'utf8').catch(() => ''),
+                  missing,
+                  Boolean(o.dryRun),
+                ),
               );
             console.error(
               `Values not set on control for project ${project}: ${missing.join(', ')}`,
@@ -207,6 +233,9 @@ export function registerDeploy(program: Command): void {
           if (o.dryRun) {
             // Reading the file is part of the dry run: an env_file or an unsupported construct fails here too.
             console.log(formatValuesTable(values));
+            // The checks a deploy makes against other projects (a host port another project already publishes on a node).
+            await request('POST', '/api/v1/deployments/check', { project, compose });
+            console.error('No host-port clash with another project on any node.');
             return;
           }
           for (const warning of bindMountWarnings(compose)) console.error(warning);
@@ -279,7 +308,8 @@ export function registerDeploy(program: Command): void {
               (deployment) => progress.stage(`Deployment ${deployment.id}: ${deployment.state}`),
             );
           }
-          printResult(o.json, response, formatDeployment);
+          const sharedWith = o.json ? [] : await sharedLabel(response);
+          printResult(o.json, response, (value) => formatDeployment(value, sharedWith));
         } finally {
           progress.stop();
         }
@@ -319,7 +349,8 @@ export function registerDeploy(program: Command): void {
             (deployment) => progress.stage(`Deployment ${deployment.id}: ${deployment.state}`),
           );
         }
-        printResult(o.json, response, formatDeployment);
+        const sharedWith = o.json ? [] : await sharedLabel(response);
+        printResult(o.json, response, (value) => formatDeployment(value, sharedWith));
       });
     });
 

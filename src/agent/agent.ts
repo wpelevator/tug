@@ -726,6 +726,8 @@ export async function waitForHealth(
   const retries = Number(health.retries || 10);
   const intervalMs = parseDuration(health.interval || '2s');
   let last: unknown;
+  // The URL of the last http request, with the container address the agent dialed.
+  let probed: string | undefined;
   for (let i = 0; i < retries; i++) {
     try {
       if (health.type === 'docker') {
@@ -743,7 +745,8 @@ export async function waitForHealth(
       } else if (health.type === 'http') {
         await assertRunning(ctx, container, service);
         const ip = await containerIp(ctx, project, container);
-        const res = await ctx.http(`http://${ip}:${health.port || 80}${health.path || '/'}`, {
+        probed = `http://${ip}:${health.port || 80}${health.path || '/'}`;
+        const res = await ctx.http(probed, {
           signal: AbortSignal.timeout(parseDuration(health.timeout || '2s')),
         });
         if (!res.ok) throw new Error(`${service}: http ${res.status}`);
@@ -755,7 +758,7 @@ export async function waitForHealth(
     }
   }
   throw new Error(
-    `${service}: ${describeHealthCheck(health)} failed after ${retries} attempt${retries === 1 ? '' : 's'}: ${describeError(last)}${outsideContainerHint(health)}`,
+    `${service}: ${describeHealthCheck(health, probed)} failed after ${retries} attempt${retries === 1 ? '' : 's'}: ${describeError(last)}${outsideContainerHint(health)}`,
   );
 }
 
@@ -794,9 +797,11 @@ function describeError(error: unknown): string {
   const cause = e?.cause?.code || e?.cause?.message;
   return cause ? `${e?.message ?? 'error'} (${cause})` : (e?.message ?? 'no response');
 }
-function describeHealthCheck(health: HealthCheck): string {
+function describeHealthCheck(health: HealthCheck, probed?: string): string {
   if (health.type === 'http')
-    return `http health check on port ${health.port || 80}${health.path || '/'}`;
+    return probed
+      ? `http health check GET ${probed}`
+      : `http health check on port ${health.port || 80}${health.path || '/'}`;
   if (health.type === 'tcp') return `tcp health check on port ${health.port}`;
   return 'docker health check';
 }

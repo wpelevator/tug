@@ -55,7 +55,13 @@ Restic runs in a helper container with a memory limit, labelled `tug.job` and re
 
 ## Recipes
 
-tug has no database support of its own. Each recipe is a command for the service container. In a Compose file, use `$$` for variables the container shell must expand, because a single `$` is read by `tug deploy` as a value to take from control. A single `$` in a `command` or `restore` fails the deploy with `compose.yaml needs values that are not set on control: MARIADB_ROOT_PASSWORD`. Read credentials from the container environment, write the data to standard output, and give `verify` the line the tool prints on success.
+tug has no database support of its own. Each recipe is a command for the service container. In a Compose file, use `$$` for variables the container shell must expand, because a single `$` is read by `tug deploy` as a value to take from control. A single `$` in a `command` or `restore` fails the deploy with `compose.yaml needs values that are not set on control: MARIADB_ROOT_PASSWORD`. When the unset name is used in an `x-tug.backup` field, the error adds a second line that says it may be a container variable and shows the field with `$$`:
+
+```text
+MARIADB_ROOT_PASSWORD is used in an x-tug.backup field. If it is a variable of the container and not a value from control, write $$MARIADB_ROOT_PASSWORD so the container expands it: mariadb-dump -uroot -p"$$MARIADB_ROOT_PASSWORD" --all-databases
+```
+
+Names outside `x-tug.backup` get only the first line. Read credentials from the container environment, write the data to standard output, and give `verify` the line the tool prints on success.
 
 ```yaml
 # MariaDB (use mysqldump and MYSQL_ROOT_PASSWORD for MySQL)
