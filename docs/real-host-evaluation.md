@@ -477,6 +477,27 @@ Two more findings from these runs:
 12. **There is no `tug` command to stop or restart control.** Isolating the old control needed `docker stop` over SSH, and the restart that `control restore` asks for (`restartRequired: true`) was done with `tug control upgrade <host> --force -y`, which works but is not what the restore output suggests. `tug control stop` and `tug control restart` now cover both, see [`tug control stop` and `tug control restart`](cli.md#tug-control-stop-and-tug-control-restart).
 13. **The default version label comes from the Compose file only.** A source change under `build:` (v1, v2, v3, v4 of the Express app) printed `git-25bdc82f8359` every time, so the deploy summary and `status` cannot tell the builds apart. It is documented for `--version` but easy to misread in a rollback line.
 
+### Merged main on the same hosts, 16 November 2026
+
+The image built from `ca456aa` (the merge of the papercut fixes) replaced control and both agents with `tug control upgrade --image` and `tug node upgrade --image`. There was no Docker daemon on the operator machine for `--build-local-image`, so the image was built with `docker build` on the control VM and copied to the nodes with `docker save | docker load` over SSH. Control was the restored one from the recovery drill, and the nodes had been repointed to it.
+
+| Check | What was done | Result |
+|---|---|---|
+| `tug doctor --nodes` | Healthy hosts | The local Docker check printed `skip  docker  needed only for --build-local`. `ingress_ports` printed `80, 443 open on n1, n2`. Control and each node listed load, memory, disk under `/var/lib/docker` and agent, Caddy and control container CPU and memory (agent 46 to 54 MiB, Caddy 30 to 36 MiB, control 60 MiB, matching the `docker stats` samples above) |
+| Port probe | `ufw` rules for 80, 443 and the private subnet removed on n1 | `doctor` failed with `port 80 on ingress node n1 (10.50.0.4) did not answer`, named `ufw` and gave the `ufw` and `firewalld` commands. Control's probe uses the node's inter-node address, so a firewall that filters only the public address is not caught, as the docs say. This run removed the subnet rule too, so it tested the host firewall case only |
+| `tug ingress tls` and `tug ingress logs` | A new hostname mapped with `tug domain add` while ports were blocked | The host showed `failed` with Let's Encrypt's text `Timeout during connect (likely firewall problem)`, and `tug ingress logs n1 --tail 5` returned Caddy's ACME lines through the agent. With the ports open `doctor` reported no problems again |
+| `tug control stop` and `restart` | On the control VM | Control stopped (`status` timed out), the Express site kept answering 200, and after `restart` both nodes were `online` |
+| Host key refusal | `known_hosts` entry for n1 swapped for a bogus key (file restored byte for byte afterwards) | `tug node upgrade` printed `Host key verification failed.` followed by tug's explanation, the `ssh-keygen -R <host>` remedy and `tug never edits known_hosts or turns off host key checking for you` |
+| Duplicate host port | A project publishing 8080 on n1, where `phpdb` already did | Both `deploy --dry-run` and `deploy` returned `409 … host port 8080 on node n1 (10.50.0.4) is already published by web in project phpdb` in under a second, where the same mistake earlier failed after a 2 min 18 s build |
+| Cross-node names | `client` on n1 and `api` (nginx, published 8090) on n2 in one project | `getent hosts api` on n1 gave `10.50.0.5` and `wget http://api:8090/` returned the nginx page. Rocky's `firewalld` needed the private subnet in its `trusted` zone, set by hand |
+| Reboot of both nodes | `reboot` on n1 and n2 at once | Express answered 200 again 55 s after the command, and after a few minutes all seven sites, all seven projects (`serving`) and the nodes were back with no tug command. The MariaDB hit counter had kept its data (72) |
+| Reboot of control | `reboot` on the control VM | The sites kept serving, control answered again about 1.5 minutes later, both nodes were `online` and the backup catalog was intact |
+
+Two things the run showed that the unit tests could not:
+
+14. **Every ingress node reports `failed` for the other node's hosts.** `tug ingress tls` listed `django.108-61-164-220.sslip.io` as `failed` on n1 and `php.95-179-141-193.sslip.io` as `failed` on n2, because each Caddy requests certificates for every project's host. On a healthy two-ingress setup `tug status` keeps saying `3 hosts have no certificate yet (tug ingress tls)` on both nodes, although `doctor` reports no problems. This is the P7 behavior, now visible in tug's own output.
+15. **Nothing in tug sets or checks the firewall rules that cross-node traffic needs.** The rules for 80, 443 and the private subnet on the Debian and Rocky nodes were added by hand over SSH, and a node that blocks the subnet gives no tug message until a service on another node cannot connect.
+
 ### Not covered
 
 - All sites share two small nodes, so the Caddy figures show how the ingress behaves on 2 vCPUs, not how it scales.
