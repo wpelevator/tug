@@ -99,6 +99,26 @@ test('validateCompose accepts a boolean ingress.maintenance and rejects anything
   );
 });
 
+test('validateCompose checks ingress.nodes is a list of distinct names', () => {
+  const host = { host: 'app.example.com', port: 80 };
+  assert.equal(
+    errorsFor(ingressSvc({ ...host, nodes: ['edge1', 'edge2'] })),
+    '',
+    'a list of ingress node names is valid',
+  );
+  for (const nodes of ['edge1', [], [''], [1]])
+    assert.match(
+      errorsFor(ingressSvc({ ...host, nodes })),
+      /ingress\.nodes must be a non-empty list of ingress node names/,
+      `${JSON.stringify(nodes)} is not a non-empty list of names`,
+    );
+  assert.match(
+    errorsFor(ingressSvc({ ...host, nodes: ['edge1', 'edge1'] })),
+    /ingress\.nodes lists a node twice/,
+    'a repeated node is reported',
+  );
+});
+
 test('publishedPort resolves container ports to host ports across Compose port syntaxes', () => {
   assert.equal(publishedPort({ ports: ['8080:80'] }, 80), 8080, 'short syntax, container port');
   assert.equal(publishedPort({ ports: ['8080:80'] }, 8080), 8080, 'short syntax, host port');

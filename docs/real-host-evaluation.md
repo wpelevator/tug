@@ -495,7 +495,7 @@ The image built from `ca456aa` (the merge of the papercut fixes) replaced contro
 
 Two things the run showed that the unit tests could not:
 
-14. **Every ingress node reports `failed` for the other node's hosts.** `tug ingress tls` listed `django.108-61-164-220.sslip.io` as `failed` on n1 and `php.95-179-141-193.sslip.io` as `failed` on n2, because each Caddy requests certificates for every project's host. On a healthy two-ingress setup `tug status` keeps saying `3 hosts have no certificate yet (tug ingress tls)` on both nodes, although `doctor` reports no problems. This is the P7 behavior, now visible in tug's own output.
+14. **Every ingress node reports `failed` for the other node's hosts.** `tug ingress tls` listed `django.108-61-164-220.sslip.io` as `failed` on n1 and `php.95-179-141-193.sslip.io` as `failed` on n2, because each Caddy requests certificates for every project's host. On a healthy two-ingress setup `tug status` keeps saying `3 hosts have no certificate yet (tug ingress tls)` on both nodes, although `doctor` reports no problems. This is the P7 behavior, now visible in tug's own output. `x-tug.ingress.nodes` now names the ingress nodes that serve a route, and the other nodes render nothing for it ([Several ingress nodes](ingress.md#several-ingress-nodes)).
 15. **Nothing in tug sets or checks the firewall rules that cross-node traffic needs.** The rules for 80, 443 and the private subnet on the Debian and Rocky nodes were added by hand over SSH, and a node that blocks the subnet gives no tug message until a service on another node cannot connect.
 
 ### Not covered

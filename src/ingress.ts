@@ -4,7 +4,12 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { ingressHostList, loopbackIngressServices, publishedPort } from './compose/compose.ts';
+import {
+  ingressHostList,
+  ingressServesNode,
+  loopbackIngressServices,
+  publishedPort,
+} from './compose/compose.ts';
 import { errMessage } from './errors.ts';
 import { ensureDir } from './files.ts';
 import { isPort } from './node-address.ts';
@@ -147,8 +152,14 @@ export function buildIngressWork({
     }
   }
   tagged.sort((a, b) => `${a.project}/${a.service}`.localeCompare(`${b.project}/${b.service}`));
+  // Routes that name other ingress nodes are not served here, and their hosts must not be requested here either.
+  const elsewhere = new Set<string>();
   for (const { project, service, ingress, port, loopback } of tagged) {
     const label = `${project}/${service}`;
+    if (!ingressServesNode(ingress, node)) {
+      elsewhere.add(label);
+      continue;
+    }
     const [host, ...furtherHosts] = ingressHostList(ingress);
     const tls: IngressTls = ingress.tls || 'auto';
     if (seenHosts.has(host)) {
@@ -226,7 +237,10 @@ export function buildIngressWork({
   }
   const served = new Set(routes.map((r) => `${r.project}/${r.service}`));
   for (const domain of domains)
-    if (!served.has(`${domain.project}/${domain.service}`))
+    if (
+      !served.has(`${domain.project}/${domain.service}`) &&
+      !elsewhere.has(`${domain.project}/${domain.service}`)
+    )
       warnings.push(
         `${domain.project}/${domain.service}: domain ${domain.host} is not served because the service has no served ingress route (no ingress block, an unpublished port or missing certificate secrets)`,
       );

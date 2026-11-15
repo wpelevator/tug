@@ -52,6 +52,7 @@ import {
   buildDesiredState,
   ingressHostsOf,
   ingressHostsOverlap,
+  ingressServesNode,
   domainProblem,
   publishesHostPort,
   loopbackIngressServices,
@@ -1130,11 +1131,12 @@ export async function createApp(
       projectId,
       project.current_deployment_id,
     );
-    const previouslyRouted = previous
-      ? Object.values(
-          (JSON.parse(previous.state_json) as DesiredState).compose.services || {},
-        ).some((service) => service['x-tug']?.ingress)
-      : false;
+    const previousServices = previous
+      ? (JSON.parse(previous.state_json) as DesiredState).compose.services || {}
+      : {};
+    const previouslyRouted = Object.values(previousServices).some(
+      (service) => service['x-tug']?.ingress,
+    );
     const ingressNodes =
       ingressServices.length || previouslyRouted
         ? db.all<NodeRow>('SELECT * FROM nodes WHERE ingress=1 AND disabled_at IS NULL')
@@ -1145,17 +1147,29 @@ export async function createApp(
     const ingressReady =
       !ingressNodes.length ||
       ingressNodes.every((node) => {
+        // A node that neither this revision nor the previous one routes through has nothing to apply for this project.
+        const routesThrough = (services: ComposeFile['services']) =>
+          Object.values(services || {}).some((service) => {
+            const ingress = service['x-tug']?.ingress;
+            return ingress && ingressServesNode(ingress, node.name);
+          });
+        if (!routesThrough(state.compose.services) && !routesThrough(previousServices)) return true;
         const work = ingressFor(node, currentDesiredStates());
         if (
-          !ingressServices.every((service) =>
-            work.routes.some(
-              (route) =>
-                route.project === projectId &&
-                route.service === service &&
-                // A host in maintenance is routed on purpose with no upstream, so it does not gate the rollout.
-                (route.upstreams.length > 0 || route.maintenance === true),
-            ),
-          )
+          !ingressServices
+            .filter((service) => {
+              const ingress = state.compose.services?.[service]?.['x-tug']?.ingress;
+              return !ingress || ingressServesNode(ingress, node.name);
+            })
+            .every((service) =>
+              work.routes.some(
+                (route) =>
+                  route.project === projectId &&
+                  route.service === service &&
+                  // A host in maintenance is routed on purpose with no upstream, so it does not gate the rollout.
+                  (route.upstreams.length > 0 || route.maintenance === true),
+              ),
+            )
         )
           return false;
         if (!node.ingress_status_json) return false;
@@ -1217,6 +1231,21 @@ export async function createApp(
    * The managed Caddy listens on the loopback of every ingress node (its admin endpoint and the ask site), so a
    * service that publishes one of those host ports there would make every site's reload fail.
    */
+  /** `x-tug.ingress.nodes` may only name enabled ingress nodes, or the route would be served nowhere. */
+  function assertIngressNodes(compose: ComposeFile): void {
+    const enabled = new Set(
+      db
+        .all<{ name: string }>('SELECT name FROM nodes WHERE ingress=1 AND disabled_at IS NULL')
+        .map((n) => n.name),
+    );
+    for (const [name, svc] of Object.entries(compose.services || {}))
+      for (const node of svc['x-tug']?.ingress?.nodes || [])
+        if (!enabled.has(node))
+          throw httpError(
+            400,
+            `${name}: ingress node ${node} is not an enabled ingress node (see tug node list, and tug node ingress ${node} to enable it)`,
+          );
+  }
   function assertNoReservedIngressPorts(compose: ComposeFile): void {
     const ingressNodes = db
       .all<{ name: string }>('SELECT name FROM nodes WHERE ingress=1')
@@ -3081,6 +3110,7 @@ export async function createApp(
       } catch (e) {
         throw httpError(400, errMessage(e));
       }
+      assertIngressNodes(compose);
       assertIngressHostsFree(project, compose, req.actor);
       assertNoReservedIngressPorts(compose);
       assertNoPortClash(project, compose, req.actor);

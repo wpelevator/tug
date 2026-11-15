@@ -117,6 +117,14 @@ const ingress = (): JsonSchema => ({
       description:
         'Answer 503 with a short page for this host instead of reaching the service, for planned work. Default false.',
     },
+    nodes: {
+      type: 'array',
+      items: { type: 'string', minLength: 1 },
+      minItems: 1,
+      uniqueItems: true,
+      description:
+        'The ingress nodes that serve this route. Default: every ingress node. Name the nodes the hostname resolves to, so the other ingress nodes do not request certificates for it.',
+    },
   },
   required: ['host', 'port'],
   additionalProperties: false,

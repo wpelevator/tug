@@ -367,6 +367,92 @@ test('all enabled ingress nodes must acknowledge before deployment succeeds', as
   }
 });
 
+test('a route that names its ingress nodes is rendered and acknowledged only there', async () => {
+  const s = await server();
+  try {
+    const edge1 = await s.register('edge1');
+    const edge2 = await s.register('edge2');
+    const app = await s.register('app', { address: '192.168.1.5' });
+    await s.post('/api/v1/nodes/edge1/ingress', { enabled: true });
+    await s.post('/api/v1/nodes/edge2/ingress', { enabled: true });
+    const named = stack('web:1');
+    named.services.web['x-tug']!.ingress!.nodes = ['edge1'];
+    const deploy = await s.deploy(named, 'v1');
+    await s.report(app.nodeId, 'app', 'serving', serving(20000));
+    const workOf = async (node: { nodeId: string }) =>
+      json(await fetch(`${s.base}/agent/v1/work`, { headers: s.agent(node.nodeId) }));
+    assert.equal(
+      (await workOf(edge1)).ingress.routes.length,
+      1,
+      'the named ingress node serves the route',
+    );
+    const other = await workOf(edge2);
+    assert.deepEqual(
+      other.ingress.routes,
+      [],
+      'an ingress node the route does not name has no route',
+    );
+    assert.doesNotMatch(
+      other.ingress.caddyfile,
+      /app\.example\.com/,
+      'the other node must not request a certificate for a host it does not serve',
+    );
+    assert.deepEqual(other.ingress.warnings, [], 'a route served elsewhere is not a warning');
+    await s.reportIngress(edge1.nodeId, 'edge1');
+    assert.equal(
+      (await s.deployment(deploy.deployment.id)).state,
+      'succeeded',
+      'only the named ingress node has to acknowledge the deployment',
+    );
+  } finally {
+    await s.close();
+  }
+});
+
+test('ingress.nodes must name enabled ingress nodes', async () => {
+  const s = await server();
+  try {
+    await s.register('edge1');
+    await s.register('app', { address: '192.168.1.5' });
+    await s.post('/api/v1/nodes/edge1/ingress', { enabled: true });
+    const withNodes = (nodes: string[]) => {
+      const compose = stack('web:1');
+      compose.services.web['x-tug']!.ingress!.nodes = nodes;
+      return compose;
+    };
+    const missing = await s.post('/api/v1/deployments', {
+      project: 'site',
+      version: 'v1',
+      compose: withNodes(['ghost']),
+    });
+    assert.equal(missing.status, 400, 'an unknown node is refused');
+    assert.match(
+      (await json(missing)).error,
+      /web: ingress node ghost is not an enabled ingress node/,
+      'the error names the service and the node',
+    );
+    const notEdge = await s.post('/api/v1/deployments', {
+      project: 'site',
+      version: 'v1',
+      compose: withNodes(['app']),
+    });
+    assert.equal(notEdge.status, 400, 'a node without the ingress role is refused');
+    assert.equal(
+      (
+        await s.post('/api/v1/deployments', {
+          project: 'site',
+          version: 'v1',
+          compose: withNodes(['edge1']),
+        })
+      ).status,
+      200,
+      'an enabled ingress node is accepted',
+    );
+  } finally {
+    await s.close();
+  }
+});
+
 test('deployment convergence: serving succeeds, a failed node marks the deployment failed', async () => {
   const s = await server();
   try {
