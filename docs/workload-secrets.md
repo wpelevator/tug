@@ -1,10 +1,10 @@
 # File-mounted workload secrets (proposal)
 
-Status: proposed; implementation has not started. Written 3 November 2026 and moved here from a working plan on 7 November 2026 against `4721cdd`. It is a possible evolution of [Secrets](architecture.md#secrets) and is listed under [Later](roadmap.md#later--only-if-needed) in the roadmap. It needs a demonstrated need and the storage spike in [Phase 1](#phase-1-prove-the-storage-boundary) before it becomes a milestone. This covers the current standalone-container runtime: the separate [Swarm comparison](swarm-comparison.md) notes that Swarm has native in-memory secret files, so if a Swarm-backed Tug is ever selected first, carry the Compose and file-consumption contract below into that work and skip the agent-managed storage.
+Status: proposed; implementation has not started. Written 3 November 2026 and moved here from a working plan on 7 November 2026 against `4721cdd`. It is a possible evolution of [Secrets](architecture.md#secrets) and is listed under [Later](roadmap.md#later--only-if-needed) in the roadmap. It needs a demonstrated need and the storage spike in [Phase 1](#phase-1-prove-the-storage-boundary) before it becomes a milestone. This covers the current standalone-container runtime: the separate [Swarm comparison](swarm-comparison.md) notes that Swarm has native in-memory secret files, so if a Swarm-backed tug is ever selected first, carry the Compose and file-consumption contract below into that work and skip the agent-managed storage.
 
 ## Outcome
 
-Deliver project secrets to a container as read-only files under `/run/secrets/` instead of environment variables, using Tug's existing encrypted project store and its authenticated, placement-scoped delivery. Environment interpolation stays for applications that need it. Tug does not convert files into variables, inject an entrypoint wrapper or require a shell in application images. `_FILE` variables are an image convention, not a Docker feature: the application must support them or read the file itself.
+Deliver project secrets to a container as read-only files under `/run/secrets/` instead of environment variables, using tug's existing encrypted project store and its authenticated, placement-scoped delivery. Environment interpolation stays for applications that need it. tug does not convert files into variables, inject an entrypoint wrapper or require a shell in application images. `_FILE` variables are an image convention, not a Docker feature: the application must support them or read the file itself.
 
 The benefit is less accidental disclosure through `Config.Env`, `docker inspect`, process environments and debugging tools, the gap recorded in [Docker Swarm comparison](swarm-comparison.md#secret-handling-and-certificate-recovery-have-gaps). It does not isolate secrets from root, the Docker socket, trusted deployment authors or application processes granted the files, and tmpfs can be swapped to disk, so never promise that plaintext cannot reach storage. The [access boundaries](access-control.md) are unchanged.
 
@@ -15,7 +15,7 @@ The benefit is less accidental disclosure through `Config.Env`, `docker inspect`
 | Native Docker Engine secrets | Available to Swarm services, not standalone containers. Right for a Swarm proposal, not an incremental change to today's agent. |
 | Agent-managed files on host tmpfs, mounted read-only per file | Recommended. Reuses encrypted control storage and scoped delivery, keeps values out of Engine environment configuration and works with read-only roots and arbitrary entrypoints. Needs a daemon-visible path, careful lifecycle management and recovery after reboot. |
 | Plaintext files in the persistent agent state directory | Easier to restart while control is down, but leaves decrypted secrets on disk and in host backups. Never a silent fallback. |
-| Container tmpfs populated by exec or archive copy | Needs a startup coordination mechanism, and ordinary Docker restart policies bypass Tug. Not selected. |
+| Container tmpfs populated by exec or archive copy | Needs a startup coordination mechanism, and ordinary Docker restart policies bypass tug. Not selected. |
 
 ## Where the code stands
 
@@ -44,9 +44,9 @@ secrets:
     name: DB_PASSWORD
 ```
 
-This fragment shows delivery only. The project must already contain `DB_PASSWORD`, set with `tug secret set DB_PASSWORD`. In Tug `external: true` means the secret exists in the project's Tug store, not that it was made with `docker secret create`. An omitted `name` uses the declaration key without Compose project prefixing. Local `docker compose up` needs its own secret source or an override.
+This fragment shows delivery only. The project must already contain `DB_PASSWORD`, set with `tug secret set DB_PASSWORD`. In tug `external: true` means the secret exists in the project's tug store, not that it was made with `docker secret create`. An omitted `name` uses the declaration key without Compose project prefixing. Local `docker compose up` needs its own secret source or an override.
 
-- Accept short references and long references with `source`, a single filename `target`, numeric `uid` and `gid`, and a read-only `mode`. The default target is the declaration key under `/run/secrets/`, with ownership `0:0` and mode `0444` like Compose's file-consumption convention. Reject writable and executable bits. Each service gets its own files, so differing ownership or modes never touch another consumer. Tug implements this subset itself even when local Compose warns that it ignores ownership and mode outside Swarm.
+- Accept short references and long references with `source`, a single filename `target`, numeric `uid` and `gid`, and a read-only `mode`. The default target is the declaration key under `/run/secrets/`, with ownership `0:0` and mode `0444` like Compose's file-consumption convention. Reject writable and executable bits. Each service gets its own files, so differing ownership or modes never touch another consumer. tug implements this subset itself even when local Compose warns that it ignores ownership and mode outside Swarm.
 - Accept only top-level `external: true` with an optional literal `name`. Reject local `file`, `environment`, inline content, drivers, templated source names, unknown fields and use through `build.secrets` (build-time secrets are a separate feature).
 - Reject undefined declarations, missing store entries, duplicate target filenames, path traversal, absolute or nested targets, and volume or tmpfs mounts at or above `/run/secrets` or a secret target. Validate raw API submissions as strictly as CLI-normalized input, and keep `TUG_REGISTRY_AUTH` reserved on every reference path.
 - Discover references in one place: the union of sentinels and resolved service declarations feeds deploy checks, node authorization, change hashes, status and removal guards. An unused declaration releases no values and restarts nothing.
@@ -56,7 +56,7 @@ This fragment shows delivery only. The project must already contain `DB_PASSWORD
 
 Updating a secret still replaces only the services that reference it. Rotation is not atomic across nodes, services or external credential providers, so operators must let old and new credentials overlap, and changing a database password file does not rotate an initialized account.
 
-Keep the latest-value model: rollback restores configuration and images and resolves the currently stored secrets, with no historical recovery or release-pinned secrets. Old running or draining containers keep the files they started with until removed. After a reboot an older version cannot be rebuilt from today's store, so Tug recovers the current desired revision.
+Keep the latest-value model: rollback restores configuration and images and resolves the currently stored secrets, with no historical recovery or release-pinned secrets. Old running or draining containers keep the files they started with until removed. After a reboot an older version cannot be rebuilt from today's store, so tug recovers the current desired revision.
 
 Reject deletion of a secret referenced by current desired state, TLS references included, under the project lock so it serializes with deploy and update. A missing value in a reconcile fails before an existing service is stopped and never becomes an empty file. Identify a store generation by secret-row identity plus version, or an opaque non-reusable generation, so deleting and recreating a name cannot alias an older version 1. Keep values and value-derived hashes out of labels, logs, desired state and status. Deleting a secret does not revoke files already delivered.
 
@@ -81,7 +81,7 @@ Prepare every file and check the byte budget before a recreate can stop a health
 ### Restart and reboot
 
 - **Agent restart:** the tmpfs and existing files survive and applications keep running, including while control is down. Rebuild snapshot usage from Docker inventory without rewriting mounted files, and never empty the shared directory when an agent is replaced.
-- **Docker restart without a host reboot:** source files remain, so restart policies can remount them without Tug.
+- **Docker restart without a host reboot:** source files remain, so restart policies can remount them without tug.
 - **Host reboot:** the tmpfs is empty, so secret-using containers may fail to start until the agent reconnects to control and prepares current values. Reconcile must detect missing or invalid mounts and recreate those containers even when the hash matches, onto fresh paths, respecting holds and readiness.
 - **Control unavailable after a reboot:** secret-using workloads stay down until control returns. Do not fall back to plaintext on disk. Show this tradeoff in doctor, status and recovery docs. An encrypted offline cache could close it later but needs its own key storage and revocation design.
 
@@ -95,7 +95,7 @@ One-off creation and snapshot acquisition are synchronized, helpers carry owners
 
 ### Phase 1: prove the storage boundary
 
-- [ ] Using Node.js test drivers and disposable Linux or nested-daemon fixtures, prove the identical host and agent tmpfs path, read-only file binds, ownership and modes, non-root reads, read-only root filesystems and shell-free images. Include the minimum Engine API version Tug supports, or revise that requirement from the evidence.
+- [ ] Using Node.js test drivers and disposable Linux or nested-daemon fixtures, prove the identical host and agent tmpfs path, read-only file binds, ownership and modes, non-root reads, read-only root filesystems and shell-free images. Include the minimum Engine API version tug supports, or revise that requirement from the evidence.
 - [ ] Prove agent replacement, Docker restart, and host reboot with control available and unavailable, plus missing-source recovery, through the real SSH and bare enrollment paths. Do not reboot a developer or production host.
 - [ ] Validate target distributions and SELinux, and fail closed on rootless, user namespaces, non-tmpfs and remote-path mismatch.
 
@@ -119,7 +119,7 @@ Exit: the host-path and reboot behavior is demonstrated with real Docker. If the
 ### Phase 4: verification and delivery
 
 - [ ] Extend `tests/integration/agent.secret-restart.test.ts` and the rollout, live and backup fixtures: exact file contents, rejected writes, only referencing services rotate, old and new bytes coexist through drain, files persist while a one-off uses them.
-- [ ] Prove file-only values are absent from `Config.Env`, labels, status, events, desired-state JSON and Tug-generated logs and errors. Secrets an application emits itself are outside this guarantee.
+- [ ] Prove file-only values are absent from `Config.Env`, labels, status, events, desired-state JSON and tug-generated logs and errors. Secrets an application emits itself are outside this guarantee.
 - [ ] Run `npm test`, `npm run typecheck`, `npm run lint`, packaging checks and the affected real-Docker suites, and report any check the environment blocked.
 - [ ] Fold the result into [Secrets](architecture.md#secrets), [Compose extensions](compose.md), [Nodes](nodes.md), [Configuration](configuration.md), [Access control](access-control.md), [Backups](backups.md), [Testing](testing.md) and the [CLI](cli.md), and update security claims only where behavior changed. Adapt examples to `_FILE`, with the database-initialization and rotation caveats.
 - [ ] Add a `minor` changeset for the feature, and delete this proposal's status banner once it ships.

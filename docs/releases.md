@@ -1,6 +1,6 @@
 # Releases
 
-Tug is published as the npm package [`@wpelevator/tug`](https://www.npmjs.com/package/@wpelevator/tug) (bins `tug` and `tug-runtime`) and as the multi-arch (`linux/amd64`, `linux/arm64`) Docker image `ghcr.io/wpelevator/tug`. The package and image always share one version, and the CLI's install commands default to the image with the CLI's own version.
+tug is published as the npm package [`@wpelevator/tug`](https://www.npmjs.com/package/@wpelevator/tug) (bins `tug` and `tug-runtime`) and as the multi-arch (`linux/amd64`, `linux/arm64`) Docker image `ghcr.io/wpelevator/tug`. The package and image always share one version, and the CLI's install commands default to the image with the CLI's own version.
 
 ## Changesets
 
@@ -14,7 +14,7 @@ It asks for the bump (`patch`, `minor` or `major`) and a summary, and writes a M
 
 ## Choosing the bump
 
-Tug trusts semver, and the control, CLI and agents enforce it (see [Upgrading the control plane](control-plane.md#upgrading-the-control-plane)): they interoperate while their major matches, and a client on a newer major than its control is refused. The bump in a changeset is therefore a compatibility promise, not a measure of how big the change feels:
+tug trusts semver, and the control, CLI and agents enforce it (see [Upgrading the control plane](upgrades.md)): they interoperate while their major matches, and a client on a newer major than its control is refused. The bump in a changeset is therefore a compatibility promise, not a measure of how big the change feels:
 
 - `patch`: fixes and changes that do not alter what the control, CLI and agents say to each other, including documentation.
 - `minor`: new features. Additive wire changes (a new route, an optional field, a new agent command) are minor: older peers keep working, and a newer CLI against an older control reports the missing route.
@@ -32,7 +32,7 @@ Before 1.0 semver gives no guarantees, so the whole `0.minor` is the compatibili
 2. Move what you relied on into control: `tug secret import .env` (every entry becomes a secret unless `--vars` names it, and in a terminal you confirm the list or choose per entry with `--select`), or `tug secret set` and `tug var set` one by one. In CI, set variables with `tug var set` or pass `--var TAG=$GITHUB_SHA`.
 3. Replace each `env_file:` with `environment:` entries (`KEY: ${KEY}`) once its values are in control, and replace `COMPOSE_PROFILES=x` with `tug deploy --profile x` or `profile: [x]` in `tug.yml`.
 
-Control 3.0 reads the database written by 2.x and adds `project_vars` and a value record to deployments; deployments made before the upgrade simply have no record. A 2.x CLI keeps working against a 3.0 control, since the value record is optional, but it still resolves values on the machine that runs it.
+Control 3.0 reads the database written by 2.x and adds `project_vars` and a value record to deployments; deployments made before the upgrade have no record. A 2.x CLI keeps working against a 3.0 control, since the value record is optional, but it still resolves values on the machine that runs it.
 
 ## What 1.0 freezes
 
@@ -40,7 +40,7 @@ From 1.0.0 these are public contracts. Inside one major they change only compati
 
 - **The CLI:** command names, flags and exit codes, and the JSON printed by `--json` and by commands documented as machine-readable.
 - **`x-tug`:** the keys, values and defaults in [Compose extensions](compose.md) and the published `x-tug.schema.json`. A new key is a minor; a key's meaning does not change.
-- **The wire protocol:** the HTTP routes under `/api/v1` and `/agent/v1`, the `x-tug-*` skew headers and the agent commands, as described in [Upgrading the control plane](control-plane.md#upgrading-the-control-plane).
+- **The wire protocol:** the HTTP routes under `/api/v1` and `/agent/v1`, the `x-tug-*` skew headers and the agent commands, as described in [Upgrading the control plane](upgrades.md).
 - **Persisted state:** the control database and the agent state database upgrade in place through migrations; the credential file (`v: 1`), the join key (`v: 2`) and the control backup archive stay readable by every release of the same major. A change that cannot be read by an older release of the major is announced as a schema or format change in the changelog.
 - **Image and package names:** `@wpelevator/tug` and `ghcr.io/wpelevator/tug:X.Y.Z`, `X.Y` and `latest`.
 

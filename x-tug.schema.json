@@ -315,7 +315,7 @@
               "type": "object",
               "properties": {
                 "placement": {
-                  "description": "Where the service or volume runs. With one registered node it may be omitted; with several, every service chooses nodes or labels (see docs/service-placement.md).",
+                  "description": "Where the service or volume runs. With one registered node it may be omitted; with several, every service chooses nodes or labels (see docs/placement.md).",
                   "type": "object",
                   "properties": {
                     "nodes": {
@@ -724,7 +724,7 @@
                   "description": "A persistent volume needs --delete-data on `tug volume remove`."
                 },
                 "placement": {
-                  "description": "Where the service or volume runs. With one registered node it may be omitted; with several, every service chooses nodes or labels (see docs/service-placement.md).",
+                  "description": "Where the service or volume runs. With one registered node it may be omitted; with several, every service chooses nodes or labels (see docs/placement.md).",
                   "type": "object",
                   "properties": {
                     "nodes": {

@@ -78,7 +78,7 @@ The binary is built with `bun build --compile`, which bundles the TypeScript ent
 | `bun-linux-x64` | `tug-linux-x64.tar.gz` |
 | `bun-linux-arm64` | `tug-linux-arm64.tar.gz` |
 
-Windows is out of scope: Tug drives hosts over SSH and shell scripts, and the project does not target Windows operators today. Add `bun-windows-x64` if that changes. Use the `-musl` Linux targets only if Alpine users ask for them.
+Windows is out of scope: tug drives hosts over SSH and shell scripts, and the project does not target Windows operators today. Add `bun-windows-x64` if that changes. Use the `-musl` Linux targets only if Alpine users ask for them.
 
 Node SEA is the fallback if a Bun runtime difference cannot be worked around. It needs a native runner per target and macOS signing, so it is more CI work for the same result.
 

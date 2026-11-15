@@ -1,8 +1,16 @@
 # Configuration
 
+Environment variables for the CLI, the control plane and the agent, with their defaults. Flags override environment variables, which override config files. The CLI's `tug.yml` keys are in [Config file](cli.md#config-file).
+
+```sh
+TUG_PROJECT=blog TUG_CREDENTIAL_FILE=./ci.credential.json tug status
+```
+
+This runs `status` for the `blog` project with a credential from a file, without touching `tug.yml`.
+
 ## CLI
 
-CLI options override environment variables, which override the config files and documented fallback. The config is a YAML or JSON file that is safe to commit: it holds the control URL, default project, defaults for a few command options and the servers you install. The operator credential is never read from it. See [Config file](cli.md#config-file) for the keys and how they map to flags, and [Nodes](nodes.md#declaring-nodes-in-the-config-file) for the `nodes` section.
+The CLI config is a YAML or JSON file that is safe to commit. It holds the control URL, the default project, defaults for a few command options and the servers you install, and never the operator credential. See [Config file](cli.md#config-file) for the keys and how they map to flags, and [Nodes](nodes.md#declaring-nodes-in-the-config-file) for the `nodes` section.
 
 | Variable | Purpose |
 |---|---|
@@ -35,10 +43,10 @@ CLI options override environment variables, which override the config files and 
 | `TUG_CONTROL_BACKUP_RETRY_MS` | `3600000` | How long to wait before retrying a failed control backup. |
 | `TUG_CONTROL_BACKUP_STALL_MS` | `120000` | How long restic may print only backend retry notices (a missing bucket, a refused login, an unreachable store) before a control backup, listing or fetch is failed with the cause instead of running to the limit. Any other output counts as progress. |
 | `TUG_CONTROL_BACKUP_LIMIT_MS` | `1800000` | How long one control backup, listing or fetch may take before its restic helper is removed and the job fails. |
-| `TUG_CONTROL_RESTORE_DIR` | `<data dir>/control-restore` | Parent of the private scratch directories restores use. Only directories Tug created in it are ever removed, never the path itself. |
-| `TUG_SERVICE_NAMES` | `true` | Publish health-aware `serviceEndpoints` so agents inject cross-node `extra_hosts` using each node's `address`. Set `false` to opt out. See [Networking](networking.md#layer-a-cross-node-service-names). |
+| `TUG_CONTROL_RESTORE_DIR` | `<data dir>/control-restore` | Parent of the private scratch directories restores use. Only directories tug created in it are ever removed, never the path itself. |
+| `TUG_SERVICE_NAMES` | `true` | Publish health-aware `serviceEndpoints` so agents inject cross-node `extra_hosts` using each node's `address`. Set `false` to opt out. See [Networking](networking.md#cross-node-service-names). |
 | `TUG_ACME_EMAIL` | unset | Email for ACME registration in rendered Caddy configs. |
-| `TUG_INGRESS_ACCESS_LOG` | unset (off) | Set `true` and each ingress site writes a JSON access log line per request to the `tug-caddy` container's output (`docker logs tug-caddy` on the ingress node). Caddy redacts cookies and `Authorization` headers, but URLs (including query-string tokens) and client IPs are logged. Docker's log cap applies only to a newly created container; see [Networking](networking.md#edge-features). |
+| `TUG_INGRESS_ACCESS_LOG` | unset (off) | Set `true` and each ingress site writes a JSON access log line per request to the `tug-caddy` container's output (`docker logs tug-caddy` on the ingress node). Caddy redacts cookies and `Authorization` headers, but URLs (including query-string tokens) and client IPs are logged. Docker's log cap applies only to a newly created container; see [Networking](ingress.md#edge-features). |
 
 ## Agent
 

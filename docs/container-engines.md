@@ -4,9 +4,9 @@ Status: proposed; implementation has not started. Written 7 November 2026 agains
 
 ## Outcome
 
-Run Tug on a node or control host whose engine is Podman (rootful first) through Podman's Docker-compatible API socket, with the engine identified, reported and verified by `tug doctor`. Docker Engine stays the default and the only engine Tug installs. containerd is explicitly out of scope; see [Non-goals](#non-goals).
+Run tug on a node or control host whose engine is Podman (rootful first) through Podman's Docker-compatible API socket, with the engine identified, reported and verified by `tug doctor`. Docker Engine stays the default and the only engine tug installs. containerd is explicitly out of scope; see [Non-goals](#non-goals).
 
-Tug already speaks the Engine API through the `DockerApi` interface in `src/docker-api.ts`, so this is a compatibility and verification project, not a new backend. Do not add a general engine-abstraction layer: the seam exists, and a second implementation of it is only justified by an engine that lacks the Engine API.
+tug already speaks the Engine API through the `DockerApi` interface in `src/docker-api.ts`, so this is a compatibility and verification project, not a new backend. Do not add a general engine-abstraction layer: the seam exists, and a second implementation of it is only justified by an engine that lacks the Engine API.
 
 ## Findings that shape the plan
 
@@ -24,7 +24,7 @@ Tug already speaks the Engine API through the `DockerApi` interface in `src/dock
 | CLI dependency | Move `save`, `load`, `tag`, `image inspect` and `image rm` in control onto the Engine API through `DockerApi`, so control needs a CLI only for `build`, `manifest inspect` and Compose. Where a CLI remains, an engine setting (`docker` or `podman`) chooses the binary. |
 | Compose | None. `tug deploy` reads the Compose file itself and the control host runs control with `docker run` (or the engine's equivalent), so no Compose renderer is needed. |
 | Rootless | Not supported in the first release. Host-side health checks and container-IP reachability assume a routable bridge. Revisit only after the spike shows an acceptable design. |
-| Installer | Tug keeps installing Docker only. A pre-installed Podman is accepted when its socket answers and the doctor checks pass; the installer stops rejecting `podman-docker` when Podman is the working engine. No Podman installation path is added. |
+| Installer | tug keeps installing Docker only. A pre-installed Podman is accepted when its socket answers and the doctor checks pass; the installer stops rejecting `podman-docker` when Podman is the working engine. No Podman installation path is added. |
 
 ## Risks to verify
 
@@ -50,7 +50,7 @@ The spike (step 1) answers each before any code is written.
 6. [ ] Extend doctor with Podman-specific checks: restart service enabled, rootless detected (unsupported, clear error), socket mount and SELinux hint.
 7. [ ] Apply each workaround the spike requires, each with a test whose assertion message states the expected behavior.
 8. [ ] Add a Podman variant of the `tools/docker/fake-vps` integration tier and run it in the same tier as the Docker one; add the fixes for findings it surfaces to [Testing](testing.md)'s regression table.
-9. [ ] Update [Nodes](nodes.md) (installer behavior with a pre-installed Podman), [Getting started](getting-started.md), [Troubleshooting](troubleshooting.md), [Security](security.md) (the engine socket is host-administrator power under either engine), [Development](development.md) (runtime image CLI) and the README with an engine compatibility table.
+9. [ ] Update [Nodes](nodes.md) (installer behavior with a pre-installed Podman), [Getting started](getting-started.md), [Troubleshooting](troubleshooting.md), [Security](security-audit.md) (the engine socket is host-administrator power under either engine), [Development](development.md) (runtime image CLI) and the README with an engine compatibility table.
 10. [ ] Add a changeset; when it ships, fold this proposal into the compatibility table in the docs and delete it.
 
 ## Non-goals
@@ -59,4 +59,4 @@ The spike (step 1) answers each before any code is written.
 - **Rootless Podman** in the first release.
 - **CRI-O, Incus and Kubernetes runtimes.**
 - **Installing Podman** from `tug nodes`.
-- **Engine-specific feature surfaces** (pods, quadlets, systemd units). Tug manages containers through the Engine API only.
+- **Engine-specific feature surfaces** (pods, quadlets, systemd units). tug manages containers through the Engine API only.

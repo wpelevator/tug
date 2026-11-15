@@ -98,7 +98,7 @@ Services with `build:` upload the current directory and control builds and store
 
 `tests/integration/compose/docker-compose.sample.yml` is a three-service sample app with explicit placement: `web` on `vps-a`, `worker` on `vps-b`, `cache` on `vps-c`.
 
-`tests/integration/compose/docker-compose.integration.yml` starts a control plane and three fake VPSes. On macOS/Docker Desktop each fake VPS is a privileged Linux container with its own Docker daemon and Tug agent, so agents apply containers into isolated Docker environments through their own Engine API rather than the host daemon.
+`tests/integration/compose/docker-compose.integration.yml` starts a control plane and three fake VPSes. On macOS/Docker Desktop each fake VPS is a privileged Linux container with its own Docker daemon and tug agent, so agents apply containers into isolated Docker environments through their own Engine API rather than the host daemon.
 
 ```bash
 npm run test:integration
@@ -153,3 +153,9 @@ It starts a throwaway control on this machine whose certificate names `10.0.2.2`
 ## Running the agent outside Docker
 
 Run the agent in a container, as the installers do (`--network host`, the Docker socket mounted). An agent started as a plain host process, for example `node src/main.ts agent` on macOS, can create containers but cannot reach their IP addresses, so every TCP or HTTP health check times out and the deploy fails with a message such as `tcp timeout 172.21.0.2:3306` that does not mention where the agent runs. On Docker Desktop the Docker daemon lives in a VM, so container addresses are only reachable from inside it. When the agent is not in a container, a failed TCP or HTTP health check says so in its error and points at `docker run`; `doctor` does not check it separately.
+
+## CLI conventions
+
+The interface follows the conventions of `wp-release`: `tug <subject> <verb>` operations with the everyday project commands at the top level, kebab-case command and flag names, primary targets as positional arguments, named qualifiers with consistent meanings, and positive camelCase internal options (`--no-wait` becomes `wait: false`, never `noWait`). New structured CLI results use camelCase, and API responses printed unchanged may keep their database field names. Help, docs and tests change together when the interface changes.
+
+CLI adapters resolve configuration, parse arguments and format results. Build, archive, installation and API primitives receive explicit values and injectable runners, and they do not discover CLI config or read unrelated environment variables. Keep domain logic in ordinary module functions, and add stateful classes only when a multi-step workflow needs shared state. Only operations that use Docker or SSH require those tools. Validation completes before side effects, and stdout meant as a runnable artifact or JSON stays directly usable.

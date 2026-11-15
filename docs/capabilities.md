@@ -15,7 +15,7 @@ In scope, because they are the real failures of the current model:
 3. **Accidental overreach by humans.** Root is the daily driver, so a typo is a root typo.
 4. **Unattributable delegation.** A tool acting for a person records only the tool.
 
-Out of scope, consistent with the [product decisions](roadmap.md#product-decisions-and-reasoning): isolating mutually untrusted tenants. Shared kernels, builds on control and the host-level reach of deployers are unchanged, and [Security](security.md) still applies. The engine reduces blast radius and makes authority explicit and reviewable; it is not a sandbox against a hostile deployer. Where a grant is secretly root-equivalent, the engine says so ([Root-equivalence analysis](#root-equivalence-analysis)).
+Out of scope, consistent with the [product decisions](roadmap.md#product-decisions-and-reasoning): isolating mutually untrusted tenants. Shared kernels, builds on control and the host-level reach of deployers are unchanged, and [Security](security-audit.md) still applies. The engine reduces blast radius and makes authority explicit and reviewable; it is not a sandbox against a hostile deployer. Where a grant is secretly root-equivalent, the engine says so ([Root-equivalence analysis](#root-equivalence-analysis)).
 
 ## Where authorization sits today
 
@@ -68,7 +68,7 @@ A credential carries a list of grants. Evaluation is default deny and additive w
 - `ops`: exact names or `group.*`.
 - `on`: per dimension, exact names or a trailing-`*` prefix. An absent dimension means any value. A request whose dimension cannot be resolved is denied when a grant constrains that dimension, the rule that stops scoped credentials probing for IDs today. The `secret` dimension is project-qualified (`project/NAME`).
 - `where`: typed caveats from a closed set, not a policy language: `denyRisks` and `images` (deployments), `expires` and `notBefore`. There is no rate limit; expiry and gates bound a misbehaving consumer.
-- `gate`: `approval` turns the operation into a proposal ([Approvals](#approvals-and-the-plan-apply-split)).
+- `gate`: `approval` turns the operation into a proposal ([Approvals](#approvals-and-the-planapply-split)).
 
 A role-only credential has an implicit grant list equal to its preset, and today's `--project` scope becomes `on: { project: [...] }`, so existing credentials behave as before. The compact CLI form maps one to one: `--grant 'service.restart project=site service=web'` and `--grant 'deployment.create project=site deny=host-bind,privileged,build gate=approval'`.
 
@@ -156,8 +156,8 @@ The same risk vocabulary drives the plan output and the `denyRisks` caveat. It i
 
 | System | What it gives | Decision |
 | --- | --- | --- |
-| Cedar, OPA/Rego, Casbin | Expressive policy languages | Not adopted. The vocabulary is about 50 operations and 6 dimensions with typed caveats; a language adds a dependency (Tug leans on built-ins and a standalone binary), analysis burden and the chance to write an unsafe policy. The data stays Cedar-shaped for a later swap. |
-| OpenFGA, SpiceDB (Zanzibar) | Relationship-based access | Needs a service and a relation model Tug does not have |
+| Cedar, OPA/Rego, Casbin | Expressive policy languages | Not adopted. The vocabulary is about 50 operations and 6 dimensions with typed caveats; a language adds a dependency (tug leans on built-ins and a standalone binary), analysis burden and the chance to write an unsafe policy. The data stays Cedar-shaped for a later swap. |
+| OpenFGA, SpiceDB (Zanzibar) | Relationship-based access | Needs a service and a relation model tug does not have |
 | Macaroons, Biscuit | Offline attenuation by the holder | Introduce bearer tokens, against the model. Control is local and minting is a cheap call, so offline attenuation buys little. |
 | Kubernetes RBAC | Verbs × resources × names, access review | Closest in shape. Copy the review endpoint and additive rules; skip roles and bindings. |
 | AWS STS session policies | Effective authority is the intersection with the parent | Copied: it removes the need for a subset check |
@@ -187,7 +187,7 @@ The decision is a small closed-vocabulary engine with a pure decision function a
 ## Decisions
 
 - **No rate limits.** Expiry and gates bound a misbehaving consumer; there are no per-credential counters.
-- **Gating** applies only to hashable operations, as described under [Approvals](#approvals-and-the-plan-apply-split).
+- **Gating** applies only to hashable operations, as described under [Approvals](#approvals-and-the-planapply-split).
 - **Demoting `root` is opt-in first.** `tug control setup` keeps importing root unchanged: the quick start is frozen and root is the recovery path. `tug login` (a session with read, operate and workload but no admin) and `tug sudo` (a short admin session) are added, and interactive shells use `login` by default once it exists. A session needs its parent to renew, so while root sits on the same laptop this prevents accidents (threat 3), not theft. Changing setup is revisited only after real use, and only if root moves off the daily machine.
 - **Per-secret grants are included** with the grants step: `secret.list` stays read-level, and `secret.set` and `secret.delete` become grantable per project-qualified name pattern. The root-equivalence analysis flags `secret.set` with `deployment.create`.
 

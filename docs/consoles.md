@@ -1,6 +1,6 @@
 # Consoles and agent-built control planes
 
-**Status: proposed.** No console, MCP server or generated API description exists. This page records the design for letting users prompt an AI agent for the dashboard or control plane they want on top of the Tug controller, in the spirit of Laravel Cloud, Dokploy and Coolify but without a fixed UI. It depends on the authorization work in [Capabilities](capabilities.md), which is the part that applies to every consumer, not only dashboards. The work is tracked under [M16](roadmap.md#m16--capabilities-and-delegated-authority) and [Later](roadmap.md#later--only-if-needed).
+**Status: proposed.** No console, MCP server or generated API description exists. This page records the design for letting users prompt an AI agent for the dashboard or control plane they want on top of the tug controller, in the spirit of Laravel Cloud, Dokploy and Coolify but without a fixed UI. It depends on the authorization work in [Capabilities](capabilities.md), which is the part that applies to every consumer, not only dashboards. The work is tracked under [M16](roadmap.md#m16--capabilities-and-delegated-authority) and [Later](roadmap.md#later--only-if-needed).
 
 ## First principles
 
@@ -12,7 +12,7 @@ A prompted control plane has five parts, and only the first belongs to the contr
 4. **A generation loop**: a model with tools that writes and revises the UI.
 5. **A safety model** for two untrusted inputs: generated code, and content the model reads (container logs, event messages, versions, commit text) that can carry prompt injection.
 
-Tug already has the right split. The controller is a small single writer and the trust root ([Roadmap principle 4](roadmap.md#principles)); a product layer (users, teams, git, domains, templates, UI) is a client of it. Coolify and Dokploy fuse the two into one application and one database. For Tug the product layer stays out of the controller, because it would add a browser-facing surface, an LLM dependency and product state to the one process that holds the CA and master key.
+tug already has the right split. The controller is a small single writer and the trust root ([Roadmap principle 4](roadmap.md#principles)); a product layer (users, teams, git, domains, templates, UI) is a client of it. Coolify and Dokploy fuse the two into one application and one database. For tug the product layer stays out of the controller, because it would add a browser-facing surface, an LLM dependency and product state to the one process that holds the CA and master key.
 
 ## What the controller offers today
 
@@ -39,22 +39,22 @@ Not the controller's job: users, SSO, teams, dashboards and their versions, chat
 
 ## Existing patterns considered
 
-| Pattern | What it teaches | Limit for Tug |
+| Pattern | What it teaches | Limit for tug |
 | --- | --- | --- |
 | Coolify, Dokploy, Laravel Cloud, Render | A product layer covers git, environment, domains, databases and teams. Coolify has scoped API tokens with abilities (as I recall: read, read:sensitive, write, deploy, root). | The UI is fixed and product state lives with the engine. Not a model to copy. |
 | Kubernetes | The API is the product and UIs (Headlamp, Backstage) are clients. Discovery and OpenAPI, watch, server-side dry-run, impersonation headers, short-lived bound tokens, admission. | Each is a gap above in miniature. Copy the ideas, not the machinery. |
 | MCP | Tool discovery with JSON Schema, annotations (read-only, destructive, idempotent), elicitation for human confirmation, OAuth for remote servers. MCP Apps and Claude artifacts return UI from tools. | Needs an annotated, typed API underneath, which is the OpenAPI item above. |
 | Code mode (Cloudflare style) | An agent writing code against a typed SDK composes better than dozens of tool calls and keeps bulk data out of the context. | Run it inside the console sandbox against the session's own credential, never with a shared one. |
 | Declarative dashboards (Grafana JSON, Home Assistant Lovelace, Retool) | Safe, diffable, versionable and easy for an LLM to author. | Cannot express a custom workflow. Use as the default, with code as the escape hatch. |
-| Claude artifacts with data connectors | Prompt, get a sandboxed page bound to live data. This is the interaction users want. | Hosted elsewhere and per user. Tug needs the always-on, team-shared, self-hosted version. |
+| Claude artifacts with data connectors | Prompt, get a sandboxed page bound to live data. This is the interaction users want. | Hosted elsewhere and per user. tug needs the always-on, team-shared, self-hosted version. |
 
 The comparison to Coolify and Kubernetes is from general knowledge, not rechecked against current releases.
 
 ## Options
 
 - **A. MCP server only** (`tug mcp`, generated from the OpenAPI). The user's own agent builds ad hoc dashboards as artifacts and answers questions. Needs the operation table, grants and plans from [Capabilities](capabilities.md) and the generated API description. Cheapest, and the first proof that the API is agent-ready. No hosting, sharing or persistence.
-- **B. Console as a Tug project** on a node on the controller host. Caddy gives it TLS and Tug gives it rollout, rollback, secrets, logs and backups. A node on the control host is supported today, and control's port 8443 does not clash with Caddy's 80 and 443. The console deploys like any app, and its credential must exclude its own project.
-- **C. Console as a sidecar** in the control compose (`tug control setup --with-console`). Tight, but unmanaged by Tug, coupled to control upgrades and invisible to its own audit. B is better.
+- **B. Console as a tug project** on a node on the controller host. Caddy gives it TLS and tug gives it rollout, rollback, secrets, logs and backups. A node on the control host is supported today, and control's port 8443 does not clash with Caddy's 80 and 443. The console deploys like any app, and its credential must exclude its own project.
+- **C. Console as a sidecar** in the control compose (`tug control setup --with-console`). Tight, but unmanaged by tug, coupled to control upgrades and invisible to its own audit. B is better.
 - **D. Console embedded in `control.ts`.** Rejected: browser-facing HTTP breaks the one-mTLS-port model and puts an LLM dependency in the trust root.
 - **E. A separate product that runs anywhere** (a laptop or another host) with a credential file. Zero controller blast radius, good for a demo, no team hosting.
 
@@ -62,9 +62,9 @@ The recommendation is A first, then a demo console developed as E and deployed a
 
 ## Generic AI frontends and MCP
 
-Most users will not use a Tug-specific UI. They will use whatever AI frontend they already have, so the controller's agent surface has to be one every frontend can use. The frontends fall into five kinds, and each needs a different way in:
+Most users will not use a tug-specific UI. They will use whatever AI frontend they already have, so the controller's agent surface has to be one every frontend can use. The frontends fall into five kinds, and each needs a different way in:
 
-| Frontend | Examples | How it reaches Tug |
+| Frontend | Examples | How it reaches tug |
 | --- | --- | --- |
 | Agent with a shell | Claude Code, Codex | The CLI, under a [session](capabilities.md#sessions-delegation-with-attenuation) credential in `TUG_CREDENTIAL`. No MCP needed; the controller enforces the limits. |
 | Desktop and IDE chat | Claude Desktop, Cursor, VS Code | `tug mcp`, a local stdio MCP server the client spawns. |
@@ -77,20 +77,20 @@ Most users will not use a Tug-specific UI. They will use whatever AI frontend th
 - **A curated tool set, not one tool per route.** A model chooses poorly from 55 near-identical tools, so tools are task-shaped (`get_status`, `list_events`, `plan_deploy`, `rollback`, `restart`, `run_command`, `list_backups`), generated from the operation table and its effect classes, not written by hand. An escape hatch for the long tail is a code-mode tool that runs a script against the typed SDK inside a sandbox.
 - **Annotations come from the effect class.** `read` maps to the read-only hint, `destructive` and `escalates` to the destructive hint, and the operation's idempotence to the idempotent hint, so clients that ask for confirmation do it where it matters.
 - **The tool list follows the grants.** `whoami` decides what is advertised. A session that cannot run `exec` never sees an exec tool, so the model does not waste turns on it and a prompt cannot talk it into trying.
-- **Gated operations return a proposal.** A tool for a gated grant returns "pending approval" with the plan and the risk tags. Clients that support elicitation can ask the user in place; otherwise the user approves in the console or with `tug proposals approve`. The agent then repeats the call with the approval. See [Approvals](capabilities.md#approvals-and-the-plan-apply-split).
+- **Gated operations return a proposal.** A tool for a gated grant returns "pending approval" with the plan and the risk tags. Clients that support elicitation can ask the user in place; otherwise the user approves in the console or with `tug proposals approve`. The agent then repeats the call with the approval. See [Approvals](capabilities.md#approvals-and-the-planapply-split).
 - **Resources and prompts.** `status` and `events` are resources, with subscriptions backed by the [change feed](#controller-changes). Prompts carry runbooks such as "diagnose a failing deployment".
-- **Logs and event text are untrusted.** Tool results wrap them in a marked block, which helps little against a determined injection. The real defense is server-side: the grants the session holds and the gates on anything that mutates. The frontend's model is outside Tug's control.
+- **Logs and event text are untrusted.** Tool results wrap them in a marked block, which helps little against a determined injection. The real defense is server-side: the grants the session holds and the gates on anything that mutates. The frontend's model is outside tug's control.
 
 ### Authentication
 
 - **Local (stdio).** `tug mcp` never holds root. It mints a session at startup from the credential in the user's profile with explicit grants (`tug mcp --grant ... --ttl 8h`, defaulting to the read preset), so a stolen process or config exposes a short-lived narrow credential.
-- **Remote (HTTP).** A console component acts as the OAuth authorization server for the MCP client, with login through the console's own user store or OIDC. The consent screen lists the requested grants as the dashboard manifest does. Each client connection maps to one session, and the token is not a Tug credential; control still sees only certificates.
+- **Remote (HTTP).** A console component acts as the OAuth authorization server for the MCP client, with login through the console's own user store or OIDC. The consent screen lists the requested grants as the dashboard manifest does. Each client connection maps to one session, and the token is not a tug credential; control still sees only certificates.
 
 ### Dashboards built in a generic frontend
 
 A user can say "build me a dashboard of my sites' health" in any of these frontends, and there are two ways it ends up working:
 
-- **Ephemeral, in the frontend.** The frontend's own artifact or app mechanism renders a page that calls the MCP tools through the client under the user's session. Tug supplies only bounded JSON and the change feed for live updates. Nothing is hosted, shared or persisted; closing the chat loses it.
+- **Ephemeral, in the frontend.** The frontend's own artifact or app mechanism renders a page that calls the MCP tools through the client under the user's session. tug supplies only bounded JSON and the change feed for live updates. Nothing is hosted, shared or persisted; closing the chat loses it.
 - **Published, in the console.** A `publish_dashboard` tool, on the console's MCP server, saves the manifest and source as a versioned dashboard. The console hosts it in the sandbox, installs it as a session with exactly the manifest's grants, and a team can open it later without the chat.
 
 The second mode changes the demo console: the generation loop (part 4 of the [first principles](#first-principles)) can be the user's own frontend, so the console does not have to run its own agent, hold an LLM key or pay for tokens. It is host, authority and persistence only. A built-in runner is an optional extra for users with no frontend of their own.
