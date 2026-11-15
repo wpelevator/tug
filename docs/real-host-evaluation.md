@@ -386,3 +386,99 @@ The VM was upgraded to the branch (control and agent, `--build-local-image`); it
 
 Not run: lane order on a real node (a restore ahead of a manual backup ahead of a scheduled one is covered by tests with a fake Docker), cancelling a restore that is already restoring, and a host with under 3 GiB of memory (one job at a time).
 
+
+
+## 3.0.0 on Vultr with five frameworks, 15 November 2026
+
+The published `@wpelevator/tug@3.0.0` CLI and `ghcr.io/wpelevator/tug:3.0.0` image on three fresh Vultr VMs in Amsterdam, with Vultr Object Storage (Standard tier, `ams1`) for backups and for a chop media bucket. Every operator step went through `tug`. Direct SSH was used only for the host firewalls, for the Caddy log (which `tug logs` does not read), and for the benchmark load generator and `docker stats` sampling, because tug exposes none of them.
+
+| Host | Role | OS | Size |
+|---|---|---|---|
+| ctl | control | Ubuntu 24.04 | 1 vCPU, 2 GB |
+| n1 | node and ingress | Debian 12 | 2 vCPU, 2 GB |
+| n2 | node and ingress | Rocky Linux 9.8, SELinux enforcing, firewalld | 2 vCPU, 2 GB |
+
+The three VMs share one private network (10.50.0.0/24) and the nodes registered with their private addresses. Public hostnames are `<name>.<ip-with-dashes>.sslip.io` with Let's Encrypt certificates.
+
+### What ran
+
+| Project | Node | What it exercised | Result |
+|---|---|---|---|
+| `phpdb` | n1 | `php:8.3-apache` built on control, MariaDB 11.4.8 with a volume, a MariaDB dump backup to S3, restore | Served, backed up and restored |
+| `chop` | n2 | `ghcr.io/wpelevator/chop:latest`, `read_only`, `cap_drop: [ALL]`, originals read from an S3 bucket with `CHOP_ORIGIN=s3://…`, secrets from control | Served resized AVIF (`?w=640`, 13 KB from a 322 KB JPEG) |
+| `express` | n2 | Node 22 build on control, a secret, a redeploy | Served |
+| `laravel` | n1 | `examples/laravel`: MariaDB, Redis, `tug run web -- php artisan migrate --force` | Migration ran, `/health` 200 |
+| `django` | n2 | `examples/django`: PostgreSQL, Redis, gunicorn | `/health` 200 |
+| `nextjs` | n1 | Next.js 15 standalone, built on the 1 vCPU, 2 GB control | Served, build and deploy took 2 min 27 s |
+
+Install times from a bare VM: control 66 s including Docker, and a Debian node and a Rocky node each took under two minutes with Docker installed by tug (Rocky was the slower, its Docker package step ran for about 90 s). Deploys that built an image on control took 55 to 150 s. A deploy of an unchanged image with a changed secret took 14.8 s. `backup run` of the MariaDB dump finished in about 10 s. `restore run db --confirm` passed through `holding`, `safety_backup`, `restoring` and `verifying` to `succeeded` within seconds. The page's hit counter was the same after the restore as before, which does not prove the data went back, so this checks the workflow and not the content.
+
+### Overhead of tug on the machines
+
+All numbers are `docker stats` samples on the running hosts, after the six projects were deployed (about 940 MB of the 1.96 GB in use on each node, most of it the applications and the page cache).
+
+| Component | Idle CPU (average) | Memory | Under load or deploy |
+|---|---|---|---|
+| Control (ctl, six projects, two nodes) | 0.1 to 1.4 % | 55 MiB | 64 MiB and a 13.9 % CPU peak during a deploy |
+| Agent (n1, n2) | 0.15 to 0.6 % | 49 to 54 MiB | Average 2.2 % at 4,700 requests per second through the node, 5.6 % peak during a redeploy |
+| Caddy ingress | 0.07 to 0.45 % | 23 to 27 MiB | 44 MiB, and about 115 % of one core (of two) at 4,700 requests per second over HTTPS |
+
+The control and agent together are about 105 MiB and well under 1 % of a CPU on an idle node. The agent's cost does not grow with application traffic, since traffic goes through Caddy and the application containers, not through the agent.
+
+### Ingress overhead
+
+ApacheBench from the control VM (same datacenter, keep-alive, 20,000 requests): the first column hits the published port on the node's private address, the second goes through Caddy on the public HTTPS name.
+
+| Target | Concurrency | Direct | Through Caddy | Mean latency, direct → Caddy | p99, direct → Caddy |
+|---|---|---|---|---|---|
+| Express `/health` (single Node thread) | 10 | 3,177 rps | 3,142 rps | 3.1 → 3.2 ms | 11 → 11 ms |
+| Express `/health` | 50 | 3,370 rps | 3,087 rps | 14.8 → 16.2 ms | 34 → 47 ms |
+| Apache and PHP `/?health=1` | 10 | 6,194 rps | 2,741 rps | 1.6 → 3.6 ms | 7 → 12 ms |
+| Apache and PHP `/?health=1` | 50 | 3,817 rps | 2,791 rps | 13.1 → 17.9 ms | 528 → 72 ms |
+| chop `/healthz` | 10 | 9,600 rps | 5,019 rps | 1.0 → 2.0 ms | 3 → 7 ms |
+| chop `/healthz` | 50 | 11,631 rps | 4,614 rps | 4.3 → 10.8 ms | 10 → 39 ms |
+
+An application that is itself the bottleneck (Express) loses under 10 % through the ingress. A fast backend (chop) loses more than half its throughput, because Caddy terminating TLS on two vCPUs is then the limit. The ingress adds roughly 1 to 6 ms at the median. One direct PHP run had a 528 ms p99 that the proxied run did not, which is noise from a single run and not a conclusion.
+
+### Redeploy without a gap
+
+With the default `recreate` strategy, a redeploy of Express (a rotated secret, no rebuild) while a probe requested the public HTTPS name every 50 ms from the control VM: 492 probes, no failed or non-200 response, and a 1.07 s maximum latency. Caddy held the requests while the container was replaced. That is a measurement of a short, stateless container, so it does not contradict the documented advice to use `rollout: rolling` where an interruption is not acceptable.
+
+### Papercuts found
+
+None of these blocked the run. Each is listed with its fix in `plan-real-host-papercuts.md`.
+
+1. **`docs/backups.md` MariaDB and PostgreSQL recipes make `tug deploy` fail.** `restore: mariadb -uroot -p"$MARIADB_ROOT_PASSWORD"` has a single `$`, so control demands a value named `MARIADB_ROOT_PASSWORD` (`compose.yaml needs values that are not set on control`). The `examples/` files already use `$$`.
+2. **tug does not touch the host firewall.** Debian's default `ufw` blocked 80 and 443. Rocky's `firewalld` also had to allow 80 and 443, and both needed a rule for the private network before the control VM could reach published ports directly. `tug node add --ingress` and `tug doctor` reported everything `ok` while the sites were unreachable from outside.
+3. **Opening the ports late costs about 9 minutes.** Caddy's first ACME attempts failed with the ports closed, and Let's Encrypt then refused the same names for the rest of the hour after five failed authorizations (`retry after …`). Nothing in tug's output mentioned it.
+4. **`tug logs` cannot read the managed Caddy** (`service caddy not found in project chop`), so the ACME failure was only visible over SSH.
+5. **Every ingress node requests certificates for every project's hosts.** The Caddy on n2 kept trying (and failing) to validate `php.95-179-141-193.sslip.io`, a name that resolves to n1, and logged errors for it.
+6. **A host-port clash is only found when the agent applies the deployment.** `laravel` and `phpdb` both published host port 8080 on n1. `tug lint` and `deploy --dry-run` passed, the deployment ran for 2 min 18 s of building and then failed on `Bind for 10.50.0.4:8080 failed: port is already allocated`.
+7. **The first failed health deploy gives only the node's message.** The PHP project failed on `web: http 404` because the example path had no route. That is correct, but the message does not name the URL requested.
+8. **The deploy summary label does not change for a secret-only change.** `express git-bdf4dabe325f` was printed for both the original and the secret rotation, which are different deployments.
+9. **`tug doctor` fails the whole check on a machine without Docker.** The laptop had no Docker daemon, so the `docker` check printed `FAIL` and the command said `Problems found`, although Docker is needed on the laptop only for `--build-local`.
+10. **A stale `known_hosts` entry for a reused provider IP blocks the first SSH** (`Host key verification failed`). That is OpenSSH and not tug, but `tug node add` showed it as a connection failure.
+11. **tug exposes no host metrics.** The overhead above came from `docker stats` over SSH. `tug doctor --node` reports Docker and Caddy state but not CPU, memory or disk.
+
+### Rolling, rollback, upgrade and recovery
+
+Run on the same VMs, two extra 1 vCPU, 2 GB Ubuntu hosts for the upgrade and the recovery target.
+
+| Check | Setup | Result |
+|---|---|---|
+| Rolling rollout under load | Express with `rollout: { strategy: rolling, drain: 15s }`, a rebuilt v2 image deployed while ApacheBench held 20 connections (267,129 requests at 2,968 rps) and a probe requested the page every 50 ms | The deploy took 38 s. Of 424 probes none failed, 243 saw v1 and 181 saw v2. ApacheBench counted 10 failed requests of 267,129 (0.004 %) and no non-2xx responses. Its breakdown of the 10 was lost, so they are not classified |
+| Automatic rollback | v3 whose `/health` returns 500, `x-tug: { rollback: auto }`, the same load | The deploy failed after 10 health attempts (`web: http 500`) and took 66 s. All 564 probes returned 200 from v2 throughout, and control recorded a `rollback-git-…` deployment that ended `succeeded` with the node serving the previous version |
+| Upgrade from 2.0.0 | `@wpelevator/tug@2.0.0` installed control and a node on one VM, an nginx service with a secret and a volume file. `tug upgrade -y` from the 3.0.0 CLI | 36 s in total. Control and the agent moved to `ghcr.io/wpelevator/tug:3.0.0`, 168 of 168 probes every 200 ms returned 200, the volume file and the secret survived and `status` showed the service `serving`. A second `tug upgrade -y` printed `nothing to do` and `skipped` |
+| v3 value rules after the upgrade | A `.env` beside the file, then a `${UNSET_NAME}` | `deploy --dry-run` printed `Ignored .env next to compose.yaml (Tug reads values only from control)`, and the unset name was refused with the three ways to set it |
+| Control recovery on another host | A manual `tug control backup` to the Vultr bucket, the old control stopped, a new 3.0.0 control on a second VM, `control restore --from-destination … --password-stdin` (a dry run first, then `--confirm`), a restart, then `node replace` for each node | The dry run reported 6 projects, 2 nodes and 17 secrets. After the restart the restored control listed all six projects and the backup catalog, both nodes showed `stale` and then `online` after `node replace`, and a deploy through it built an image and updated Express. The sites served throughout, and the PHP hit counter kept growing |
+
+Two more findings from these runs:
+
+12. **There is no `tug` command to stop or restart control.** Isolating the old control needed `docker stop` over SSH, and the restart that `control restore` asks for (`restartRequired: true`) was done with `tug control upgrade <host> --force -y`, which works but is not what the restore output suggests.
+13. **The default version label comes from the Compose file only.** A source change under `build:` (v1, v2, v3, v4 of the Express app) printed `git-25bdc82f8359` every time, so the deploy summary and `status` cannot tell the builds apart. It is documented for `--version` but easy to misread in a rollback line.
+
+### Not covered
+
+- All sites share two small nodes, so the Caddy figures show how the ingress behaves on 2 vCPUs, not how it scales.
+- ARM hosts, Fedora and Debian 13 were not provisioned.
+- The direct-port numbers needed `ufw allow from 10.50.0.0/24` on Debian and the `trusted` zone for that subnet on Rocky, set by hand over SSH.

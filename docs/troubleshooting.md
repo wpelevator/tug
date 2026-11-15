@@ -23,6 +23,7 @@ tug doctor --nodes
 | `custom TLS secret <name> not found in project <project>; set it with tug secret set first` | `tls: custom` names a secret that does not exist | `tug secret set <name> --from-file ...` |
 | `timed out waiting for deployment <id>; it is still rolling out` | The wait ended, and the rollout continues on the nodes | `tug status`, or stop it with `tug deploy cancel <id>` |
 | `<image> is not published yet` from `tug setup` or `tug node add` | A release publishes the npm package a few minutes before its image | Retry shortly, or pass `--image ghcr.io/wpelevator/tug:latest` |
+| `Bind for <address>:<port> failed: port is already allocated` in a failed deployment | Another project on that node publishes the same host port. `tug lint` and `tug deploy --dry-run` cannot see other projects, so the deploy builds first and fails when the agent applies it | Change one published host port, or move one project to another node |
 | `operation requires --node because placement is ambiguous` | The service runs on several nodes | Add `--node <name>` |
 | `The control did not present a certificate signed by this credential's CA` | The credential file and the deployed control disagree about the CA | [Mismatches](#cli-control-version-or-credentialca-mismatches) |
 | A message naming `tug control upgrade` or `npm i -g @wpelevator/tug@<version>` | CLI and control run different versions | [Mismatches](#cli-control-version-or-credentialca-mismatches) |
@@ -58,7 +59,8 @@ Check these in order:
 
 1. **DNS** points at the ingress node's public IP.
 2. **Ingress** is enabled: `tug node ingress <node>`. `tug doctor` flags an ingress node that is not `serving`, and `tug status` shows ingress warnings.
-3. **Ports 80 and 443** are reachable from the internet, in the host firewall and the provider firewall. Without them automatic HTTPS cannot issue a certificate.
+3. **Ports 80 and 443** are reachable from the internet, in the host firewall and the provider firewall. Without them automatic HTTPS cannot issue a certificate. Some provider images ship with `ufw` or `firewalld` active and tug does not change either: on Debian run `ufw allow 80/tcp` and `ufw allow 443/tcp`, on Rocky run `firewall-cmd --permanent --add-service=http --add-service=https` and `firewall-cmd --reload`. `tug doctor` reports ingress `ok` when Caddy is running, whether or not the ports are reachable.
+   Let's Encrypt stops validating a name after five failed attempts in an hour, so a site can stay without a certificate for up to an hour after you open the ports. Caddy retries by itself, and `curl -v` shows `tlsv1 alert internal error` until it succeeds. `tug logs` reads project services only, so the ACME error is in the Caddy container's log on the ingress node (`docker logs tug-caddy`).
 4. **`x-tug.ingress.port`** is a published port of the service.
 5. **A direct port** such as `8080` binds to the node's private address or loopback unless you wrote a host IP. Check the node address and the firewall. See [Ingress](ingress.md#set-up-ingress) and [published ports](networking.md#published-ports-private-by-default).
 
