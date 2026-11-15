@@ -148,7 +148,9 @@ The project column says how a scoped credential's allowed projects are checked: 
 | `DELETE /api/v1/domains/:host` | `deploy` | Query |
 | `POST /api/v1/restart` | `deploy` | Body |
 | `POST /api/v1/logs` | `deploy` | Body |
-| `GET /api/v1/live` | `deploy` | First WebSocket frame |
+| `POST /api/v1/ingress/logs` | `admin` | Body; reads the managed Caddy container's output on an ingress node, which spans every project's hosts and, with `TUG_INGRESS_ACCESS_LOG`, their URLs and client IPs |
+| `GET /api/v1/ingress/tls` | `admin` | Every ingress node's per-host TLS state, which names the hosts of every project |
+| `GET /api/v1/live` | `deploy` | First WebSocket frame; an `ingress-logs` request needs `admin` |
 | `GET /api/v1/watch` | `read` | WebSocket, one-way; every frame is filtered to allowed projects; 8 sockets per credential |
 | `GET /api/v1/commands/:id` | `deploy` | Command's project; commands without a project (diagnostics) need `admin` |
 | `POST /api/v1/backups/run` | `deploy` | Body `project` |

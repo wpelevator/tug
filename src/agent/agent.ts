@@ -74,6 +74,8 @@ import { openAgentDb } from '../db/db.ts';
 import type { AppliedStateRow, Db, EventStateRow } from '../db/db.ts';
 import type { HttpClient } from './runners.ts';
 import { CADDY_CONTAINER, reconcileIngress, removeIngress } from '../ingress.ts';
+import { createTlsMonitor } from '../ingress-tls.ts';
+import type { TlsMonitor } from '../ingress-tls.ts';
 import type {
   Command,
   CommandResult,
@@ -115,6 +117,8 @@ export interface AgentContext {
   /** The node credential presented to control; absent only in tests with a fake `http`. */
   credential?: Credential;
   caddyImage?: string;
+  /** Per-host TLS observation for the ingress status; created on first use, injected by tests. */
+  tlsMonitor?: TlsMonitor;
   /** Host port range (`LOW-HIGH`) for rolling-rollout revisions; default 20000-20999. */
   rolloutPorts?: string;
   /** Sends an event over the open stream socket; false when there is none, and the event goes by HTTP instead. */
@@ -580,6 +584,22 @@ export class AgentLiveOperations {
       if (!this.ctx.apply) throw new Error('Live operations require an applying agent');
       if (request.node && request.node !== this.ctx.nodeName)
         throw new Error('Live request selected a different node');
+      if (request.operation === 'ingress-logs') {
+        // The ingress container belongs to no project: confirm it exists, then stream it like a service's logs.
+        const caddy = await this.ctx.docker.inspectContainer(CADDY_CONTAINER).catch((e) => {
+          if (isNotFound(e)) throw new Error('This node has no ingress container');
+          throw e;
+        });
+        await this.engine.start({
+          operation: 'logs',
+          sessionId: request.sessionId,
+          container: String(caddy.Id),
+          tail: request.tail,
+        });
+        if (current()) started();
+        else this.engine.cancel(request.sessionId);
+        return;
+      }
       if (
         typeof request.project !== 'string' ||
         !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(request.project)
@@ -919,6 +939,28 @@ export async function executeCommand(
     const { project, service } = payload;
     const id = await resolveLiveContainer(ctx, { project, service });
     const logs = await ctx.docker.logs(id, { follow: false, tail: Number(payload.tail || 200) });
+    const out: Buffer[] = [];
+    const err: Buffer[] = [];
+    logs.stdout.on('data', (d: Buffer) => out.push(d));
+    logs.stderr.on('data', (d: Buffer) => err.push(d));
+    await new Promise<void>((resolve, reject) => {
+      logs.on('error', reject);
+      logs.on('close', () => resolve());
+    });
+    return {
+      commandId: command.id,
+      state: 'succeeded',
+      result: {
+        stdout: Buffer.concat(out).toString('utf8'),
+        stderr: Buffer.concat(err).toString('utf8'),
+      },
+    };
+  }
+  if (command.type === 'ingress.logs') {
+    const logs = await ctx.docker.logs(CADDY_CONTAINER, {
+      follow: false,
+      tail: Number(payload.tail ?? 200),
+    });
     const out: Buffer[] = [];
     const err: Buffer[] = [];
     logs.stdout.on('data', (d: Buffer) => out.push(d));
@@ -1464,8 +1506,18 @@ export async function pollOnce(ctx: AgentContext = defaultContext()): Promise<Pr
   let ingress: IngressStatus | undefined;
   if (ctx.apply) {
     const ingressCtx = { docker: ctx.docker, stateDir: ctx.stateDir, caddyImage: ctx.caddyImage };
-    if (work.ingress) ingress = await reconcileIngress(ingressCtx, work.ingress);
-    else await removeIngress(ingressCtx).catch(() => false);
+    if (work.ingress) {
+      ingress = await reconcileIngress(ingressCtx, work.ingress);
+      if (ingress.state === 'serving') {
+        // Certificate state is advisory: a probe failure must never withhold the routing acknowledgement.
+        try {
+          ctx.tlsMonitor ??= createTlsMonitor();
+          ingress.certs = await ctx.tlsMonitor.check(work.ingress.routes, ctx.docker);
+        } catch (e) {
+          console.error(`ingress TLS check failed: ${errMessage(e)}`);
+        }
+      }
+    } else await removeIngress(ingressCtx).catch(() => false);
   }
   const commandResults: CommandResult[] = [];
   const jobs = jobRunnerFor(ctx);

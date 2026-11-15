@@ -58,7 +58,7 @@ Check these in order:
 
 1. **DNS** points at the ingress node's public IP.
 2. **Ingress** is enabled: `tug node ingress <node>`. `tug doctor` flags an ingress node that is not `serving`, and `tug status` shows ingress warnings.
-3. **Ports 80 and 443** are reachable from the internet, in the host firewall and the provider firewall. Without them automatic HTTPS cannot issue a certificate.
+3. **Ports 80 and 443** are reachable from the internet, in the host firewall and the provider firewall. Without them automatic HTTPS cannot issue a certificate. `tug ingress tls` shows which hosts have none and why, and `tug ingress logs <node>` shows Caddy's ACME attempts.
 4. **`x-tug.ingress.port`** is a published port of the service.
 5. **A direct port** such as `8080` binds to the node's private address or loopback unless you wrote a host IP. Check the node address and the firewall. See [Ingress](ingress.md#set-up-ingress) and [published ports](networking.md#published-ports-private-by-default).
 

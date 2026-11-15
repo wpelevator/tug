@@ -37,6 +37,16 @@ export const selectNode = (name?: string): Promise<string> =>
       label: `${node.name} (${node.disabled_at ? 'disabled' : node.status}, ${node.address || 'no address'}${node.ingress ? ', ingress' : ''}${node.labels.length ? `, ${node.labels.join(', ')}` : ''})`,
     }));
   });
+/** Offers only enabled ingress nodes: the picker for `tug ingress` commands. */
+export const selectIngressNode = (name?: string): Promise<string> =>
+  selectOne(name, 'Select an ingress node', async () => {
+    const { nodes } = await request<{
+      nodes: { name: string; status: string; disabled_at: string | null; ingress: number }[];
+    }>('GET', '/api/v1/nodes');
+    return nodes
+      .filter((node) => node.ingress && !node.disabled_at)
+      .map((node) => ({ value: node.name, label: `${node.name} (${node.status})` }));
+  });
 export const selectResource = (
   name: string | undefined,
   resource: 'secrets' | 'vars' | 'volumes' | 'credentials',

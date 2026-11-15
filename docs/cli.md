@@ -23,6 +23,7 @@ Commands read `tug <subject> <verb> [params]`, such as `tug node add` and `tug s
 | Manage volumes | `volume list`, `volume remove` | [Services and volumes](#services-and-volumes) |
 | Manage values | `secret`, `var` | [Secrets and variables](#secrets-and-variables) |
 | Map extra hostnames | `domain add`, `list`, `remove` | [Secrets and variables](#secrets-and-variables) |
+| Read the edge's logs, see which hosts have a certificate | `ingress logs`, `ingress tls` | [Ingress](#ingress) |
 | Back up and restore | `backup`, `restore` | [Backups](#backups) |
 | Back up and restore control | `control backup`, `control restore` | [Operations](#operations) |
 | Give CI or a teammate access | `credential create`, `list`, `revoke` | [Operator credentials](#operator-credentials) |
@@ -314,7 +315,7 @@ These use the resolved project. Live operations (`exec`, `run`, `inspect`, `logs
 
 | Command | Options | What it does |
 | --- | --- | --- |
-| `tug logs [service]` | `--tail <n>` (default `200`), `-f, --follow`, `--node <name>` | Fetches recent logs through the durable command queue, or follows live. `--node` applies to followed logs and is required when the service has more than one eligible node |
+| `tug logs [service]` | `--tail <n>` (default `200`), `-f, --follow`, `--node <name>`, `--ingress` | Fetches recent logs through the durable command queue, or follows live. `--node` applies to followed logs and is required when the service has more than one eligible node. `--ingress` reads an ingress node's Caddy container instead and is the same as [`tug ingress logs`](#ingress): it takes no service or project, and `--node` names the ingress node |
 | `tug exec [service] [-- <command>...]` | `-i, --interactive`, `-t, --tty`, `--node <name>` | Runs a command in the current service container, default `sh`. Arguments are passed without a shell. `-i` forwards stdin. `-t` allocates a terminal with resize and needs a local terminal |
 | `tug run [service] -- <command>...` | `--node <name>` | Runs a one-off command in a new container with the service's image, environment (secrets included), user, working directory, network and mounts, no published ports, removed when it ends. Non-interactive, exits with the command's exit code, needs `deploy`, and is recorded as a `job.run` event with its command line, hidden from `read` credentials. It shares mounts with the service and does not take the project lock |
 | `tug inspect [service]` | `--node <name>` | Prints the live Docker inspection as JSON with environment values redacted (names kept). Needs `deploy`, which grants access to the workload's secrets anyway |
@@ -343,9 +344,20 @@ Every `${NAME}` in the Compose file comes from control: a project secret, a proj
 | `tug var remove [name]` | | Deletes a variable |
 | `tug var import [file]` | `--secrets <names>`, `--select`, `--overwrite`, `-y` | Stores every entry as a variable unless `--secrets` names it |
 | `tug domain add <host> --service <service>` | | Serves an extra hostname (or `*.zone` wildcard) on a service's ingress route without a deployment. The service must already have a route, and a name belongs to one project. Needs `deploy` |
-| `tug domain list` (alias `ls`), `tug domain remove <host>` | | Lists or stops serving mapped domains. See [Mapped domains](ingress.md#mapped-domains-and-wildcard-zones) |
+| `tug domain list` (alias `ls`), `tug domain remove <host>` | | Lists or stops serving mapped domains, with the certificate state of each on every ingress node (`issued`, `pending`, `failed` or `unknown`). See [Mapped domains](ingress.md#mapped-domains-and-wildcard-zones) |
 
 Variables are read and written with `deploy`, and a change takes effect on the next deploy. A name cannot be both a secret and a variable.
+
+## Ingress
+
+Ingress nodes run one managed Caddy for every project (see [Ingress and HTTPS](ingress.md)). These commands read it, and both need an `admin` credential that is not limited to projects, because the container's output and the hosts it serves span every project. Enable the role with `node ingress`.
+
+| Command | Options | What it does |
+| --- | --- | --- |
+| `tug ingress logs [node]` | `--tail <n>` (default `200`), `-f, --follow` | Prints the `tug-caddy` container's logs on an ingress node: ACME attempts and failures, config reloads and, with `TUG_INGRESS_ACCESS_LOG`, access lines. Without `--follow` it goes through the durable command queue, like `tug logs`. `tug logs --ingress --node <node>` is the same command |
+| `tug ingress tls [node]` | `--json` | Lists every named host with automatic HTTPS on each ingress node, with its state, since when, and the reason when it has no certificate. See [Certificate status](ingress.md#certificate-status) |
+
+With no node, both commands offer the enabled ingress nodes in a terminal and need one outside it.
 
 ## Backups
 

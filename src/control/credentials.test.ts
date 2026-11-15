@@ -296,6 +296,8 @@ const SAMPLES: Record<string, { path: string; body?: unknown }> = {
   'POST /api/v1/holds/release': { path: '/api/v1/holds/release', body: {} },
   'POST /api/v1/images/prune': { path: '/api/v1/images/prune', body: { dryRun: true } },
   'POST /api/v1/control/restore': { path: '/api/v1/control/restore', body: {} },
+  'POST /api/v1/ingress/logs': { path: '/api/v1/ingress/logs', body: { node: 'ghost' } },
+  'GET /api/v1/ingress/tls': { path: '/api/v1/ingress/tls' },
   'GET /api/v1/diagnostics': { path: '/api/v1/diagnostics' },
   'POST /api/v1/diagnostics/nodes': { path: '/api/v1/diagnostics/nodes', body: {} },
   'POST /api/v1/credentials': { path: '/api/v1/credentials', body: {} },
@@ -413,6 +415,35 @@ test('the route table matches the live router, so a new /api/v1 route without a 
     const docs = await fs.readFile(path.resolve('docs/access-control.md'), 'utf8');
     for (const key of Object.keys(ROUTE_ROLES))
       assert.ok(docs.includes(`\`${key}\``), `docs/access-control.md should list ${key}`);
+  } finally {
+    await s.close();
+  }
+});
+
+test('ingress log fetches need an admin credential and an enabled ingress node', async () => {
+  const s = await makeServer();
+  try {
+    await s.call(OPERATOR, 'POST', '/api/v1/nodes/register', { name: 'edge' });
+    const deploy = await s.mint('d', 'deploy');
+    assert.equal(
+      (await s.call(deploy, 'POST', '/api/v1/ingress/logs', { node: 'edge' })).status,
+      403,
+      'a deploy credential must not read the edge logs shared by every project',
+    );
+    assert.equal(
+      (await s.call(OPERATOR, 'POST', '/api/v1/ingress/logs', { node: 'edge' })).status,
+      400,
+      'a node that is not an ingress node has no Caddy logs to fetch',
+    );
+    await s.call(OPERATOR, 'POST', '/api/v1/nodes/edge/ingress', { enabled: true });
+    assert.equal(
+      (await s.call(OPERATOR, 'POST', '/api/v1/ingress/logs', { node: 'edge', tail: -1 })).status,
+      400,
+      'a negative tail is rejected',
+    );
+    const ok = await s.call(OPERATOR, 'POST', '/api/v1/ingress/logs', { node: 'edge', tail: 5 });
+    assert.equal(ok.status, 200, 'an admin can queue a log fetch on an ingress node');
+    assert.ok(ok.body.commandId, 'the queued command id is returned for polling');
   } finally {
     await s.close();
   }

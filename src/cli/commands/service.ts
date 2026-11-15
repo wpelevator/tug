@@ -2,6 +2,7 @@ import { formatContainers } from '../observe-format.ts';
 import type { ContainerSummary } from '../observe-format.ts';
 import { formatLiveResult } from '../live.ts';
 import { selectService } from './selection.ts';
+import { ingressLogs } from './ingress.ts';
 import type { Command } from 'commander';
 import { projectOf, request, runLive, waitForCommand } from './context.ts';
 import type { CommonOpts } from './context.ts';
@@ -70,8 +71,18 @@ export function registerService(program: Command): void {
     .option('--tail <n>', 'number of lines', '200')
     .option('-f, --follow', 'follow live logs')
     .option('--node <name>', 'select a node for followed logs')
+    .option('--ingress', "read an ingress node's Caddy logs instead (same as `tug ingress logs`)")
     .action(
-      async (svc: string, o: CommonOpts & { tail: string; follow?: boolean; node?: string }) => {
+      async (
+        svc: string,
+        o: CommonOpts & { tail: string; follow?: boolean; node?: string; ingress?: boolean },
+      ) => {
+        if (o.ingress) {
+          if (svc || o.project)
+            throw new Error('--ingress reads the edge, which belongs to no project or service');
+          await ingressLogs(o.node, o);
+          return;
+        }
         if (o.node && !o.follow) throw new Error('--node requires --follow for logs');
         svc = await selectService(svc);
         if (o.follow) {

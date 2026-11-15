@@ -47,6 +47,8 @@ export const ROUTE_ROLES: Record<string, RouteRole> = {
   'POST /api/v1/scale': 'deploy',
   'POST /api/v1/restart': 'deploy',
   'POST /api/v1/logs': 'deploy',
+  'POST /api/v1/ingress/logs': 'admin',
+  'GET /api/v1/ingress/tls': 'admin',
   'GET /api/v1/commands/:id': 'deploy',
   'POST /api/v1/secrets': 'admin',
   'POST /api/v1/vars': 'deploy',

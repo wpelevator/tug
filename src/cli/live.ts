@@ -29,6 +29,12 @@ export function parseLiveRequest(
       );
     return value;
   };
+  if (operation === 'ingress-logs') {
+    const raw = String(input.tail ?? 200);
+    if (!/^\d+$/.test(raw) || !Number.isSafeInteger(Number(raw)))
+      throw new Error('tail must be a nonnegative safe integer');
+    return { operation, node: name(input.node, 'node'), follow: true, tail: Number(raw) };
+  }
   const common = {
     project: name(input.project, 'project'),
     ...(input.node === undefined ? {} : { node: name(input.node, 'node') }),

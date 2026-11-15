@@ -844,3 +844,122 @@ test('a list of declared hosts is served and owned like single hosts, beside CLI
     await s.close();
   }
 });
+
+test('ingress certificate state reaches doctor, status, domain list and the admin TLS report', async () => {
+  const s = await server();
+  try {
+    const edge = await s.register('edge');
+    await s.post('/api/v1/nodes/edge/ingress', { enabled: true });
+    await s.post('/api/v1/deployments', {
+      project: 'blog',
+      version: 'v1',
+      compose: {
+        services: {
+          web: {
+            ...stack.services.web,
+            'x-tug': { ...stack.services.web['x-tug'], placement: { nodes: ['edge'] } },
+          },
+        },
+      },
+    });
+    await s.report(edge.nodeId, 'edge', 'blog', ['web']);
+    assert.equal(
+      (
+        await s.post('/api/v1/domains', {
+          project: 'blog',
+          service: 'web',
+          host: 'map.example.org',
+        })
+      ).status,
+      200,
+      'a mapped domain should be accepted',
+    );
+    const get = async (route: string) =>
+      json(await fetch(`${s.base}${route}`, { headers: s.agent('op-net-token') }));
+    const doctor = async () =>
+      (await get('/api/v1/diagnostics')).checks.find((c: { name: string }) => c.name === 'ingress');
+    const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
+    const reportCerts = (certs: unknown) =>
+      s.post(
+        '/agent/v1/status',
+        {
+          node: 'edge',
+          projects: [],
+          commandResults: [],
+          ingress: { state: 'serving', configHash: 'h', routes: 1, certs },
+        },
+        s.agent(edge.nodeId),
+      );
+
+    await reportCerts([
+      { host: 'map.example.org', state: 'pending', since: ago(60_000), error: 'handshake refused' },
+    ]);
+    assert.equal(
+      (await doctor()).ok,
+      true,
+      'a host that has been pending for a minute is a new domain, not a failure',
+    );
+    const status = await get('/api/v1/status');
+    assert.equal(
+      status.nodes.find((n: { name: string }) => n.name === 'edge').tls_not_issued,
+      1,
+      'status counts hosts without a certificate so serving is not read as reachable',
+    );
+    const [domain] = (await get('/api/v1/domains?project=blog')).domains;
+    assert.equal(
+      domain.tls[0].state,
+      'pending',
+      'domain list shows the host state per ingress node',
+    );
+
+    await reportCerts([
+      { host: 'map.example.org', state: 'pending', since: ago(11 * 60_000), error: 'x' },
+    ]);
+    assert.equal((await doctor()).ok, false, 'doctor fails a host pending past the grace period');
+    await reportCerts([
+      { host: 'map.example.org', state: 'failed', since: ago(1000), error: 'connection refused' },
+    ]);
+    const failed = await doctor();
+    assert.match(
+      String(failed.error),
+      /map\.example\.org on edge \(failed: connection refused\)/,
+      'doctor names the host, node and issuance error',
+    );
+    const report = await get('/api/v1/ingress/tls');
+    assert.equal(report.nodes[0].certs[0].state, 'failed', 'the admin report lists per-host state');
+
+    await reportCerts([
+      {
+        host: 'map.example.org',
+        state: 'issued',
+        since: ago(1000),
+        notAfter: '2027-02-01T00:00:00.000Z',
+      },
+    ]);
+    assert.equal((await doctor()).ok, true, 'doctor passes once every host has a certificate');
+
+    await s.post(
+      '/agent/v1/status',
+      {
+        node: 'edge',
+        projects: [],
+        commandResults: [],
+        ingress: { state: 'serving', configHash: 'h', routes: 1 },
+      },
+      s.agent(edge.nodeId),
+    );
+    const [unknown] = (await get('/api/v1/domains?project=blog')).domains;
+    assert.equal(
+      unknown.tls[0].state,
+      'unknown',
+      'an agent that does not report certificates reads unknown, never issued',
+    );
+    assert.equal(
+      (await get('/api/v1/ingress/tls')).nodes[0].certs,
+      null,
+      'the admin report distinguishes no data from no hosts',
+    );
+  } finally {
+    await s.close();
+  }
+});

@@ -18,6 +18,8 @@ export interface StatusResponse {
     last_seen_at: string | null;
     /** Whether the node's agent holds its stream socket to control right now (absent from older controls). */
     connected?: boolean;
+    /** Ingress nodes only: named hosts without a served certificate yet (absent when the agent predates TLS reporting). */
+    tls_not_issued?: number;
   }[];
   statuses: {
     project_id: string;
@@ -83,7 +85,13 @@ export function formatStatus(status: StatusResponse): string {
   lines.push('', 'Nodes');
   if (!status.nodes.length) lines.push('  No nodes');
   for (const node of [...status.nodes].sort((a, b) => a.name.localeCompare(b.name)))
-    lines.push(`  ${node.name}: ${node.status}; last seen ${node.last_seen_at || 'never'}`);
+    lines.push(
+      `  ${node.name}: ${node.status}; last seen ${node.last_seen_at || 'never'}${
+        node.tls_not_issued
+          ? `; ${node.tls_not_issued} ${node.tls_not_issued === 1 ? 'host has' : 'hosts have'} no certificate yet (tug ingress tls)`
+          : ''
+      }`,
+    );
   return lines.join('\n');
 }
 
@@ -133,4 +141,39 @@ function serviceStateLines(serviceStates: object): string[] {
         return [`    ${name}: unstable — ${item.unstable}`];
       return [`    ${name}: ${item.rolloutState}${error}`];
     });
+}
+
+export interface IngressTlsNode {
+  node: string;
+  state: string;
+  reportedAt: string | null;
+  /** `null` when the node's agent does not report certificate state. */
+  certs: { host: string; state: string; since: string; notAfter?: string; error?: string }[] | null;
+}
+
+/** One row per host and ingress node; an agent that predates TLS reporting reads `unknown`, never `issued`. */
+export function formatIngressTls(nodes: IngressTlsNode[]): string {
+  if (!nodes.length) return 'No ingress nodes';
+  const rows = [['NODE', 'HOST', 'TLS', 'SINCE', 'DETAIL']];
+  for (const node of nodes) {
+    if (!node.certs)
+      rows.push([
+        node.node,
+        '-',
+        'unknown',
+        '-',
+        `ingress ${node.state}; agent does not report TLS state`,
+      ]);
+    else if (!node.certs.length)
+      rows.push([node.node, '-', '-', '-', 'no hosts with automatic HTTPS']);
+    for (const cert of node.certs ?? [])
+      rows.push([
+        node.node,
+        cert.host,
+        cert.state,
+        cert.since,
+        cert.state === 'issued' ? `valid until ${cert.notAfter ?? 'unknown'}` : cert.error || '-',
+      ]);
+  }
+  return formatTable(rows);
 }

@@ -392,6 +392,70 @@ test('live upgrades enforce roles and project scope before resolving desired sta
   }
 });
 
+test('ingress-logs live sessions reach only an enabled ingress node and need an unscoped admin', async () => {
+  const s = await liveFixture();
+  const open = { operation: 'ingress-logs', node: 'n1', follow: true, tail: 20 };
+  const clients: Awaited<ReturnType<typeof socket>>[] = [];
+  const attempt = async (token: string, request: unknown) => {
+    const client = await socket(s.base, '/api/v1/live', token);
+    clients.push(client);
+    client.send({ v: 1, type: 'live.open', request });
+    return client;
+  };
+  try {
+    const notIngress = await attempt(OPERATOR, open);
+    assert.match(
+      String((await notIngress.next()).message),
+      /not an enabled ingress node/,
+      'a node without the ingress role has no Caddy container to read',
+    );
+    assert.equal(
+      (await s.call('POST', '/api/v1/nodes/n1/ingress', { enabled: true })).status,
+      200,
+      'the node should accept the ingress role',
+    );
+    for (const [name, body] of [
+      ['deploy-unscoped', { role: 'deploy' }],
+      ['deploy-scoped', { role: 'deploy', projects: ['site'] }],
+    ] as const) {
+      const credential = await json(await s.call('POST', '/api/v1/credentials', { name, ...body }));
+      const denied = await attempt(credential.credential, open);
+      assert.match(
+        String((await denied.next()).message),
+        /forbidden/,
+        `${name} credentials must not read the edge's logs, which span every project`,
+      );
+    }
+    const allowed = await attempt(OPERATOR, open);
+    let opened = await s.agent.next();
+    // Enabling the ingress role woke the agent first; skip that hint to reach the live frame.
+    while (opened.type !== 'live.open') opened = await s.agent.next();
+    assert.deepEqual(
+      opened.request,
+      open,
+      'an admin ingress-logs request should reach the ingress node unchanged, without a project',
+    );
+    s.agent.send({ v: 1, type: 'live.started', sessionId: opened.sessionId });
+    assert.equal((await allowed.next()).type, 'live.started', 'the session should start');
+    for (const bad of [
+      { ...open, project: 'site' },
+      { ...open, tail: 10_001 },
+      { ...open, follow: false },
+    ]) {
+      const rejected = await attempt(OPERATOR, bad);
+      assert.match(
+        String((await rejected.next()).message),
+        /invalid ingress-logs live request/,
+        `a malformed ingress-logs request ${JSON.stringify(bad)} should be refused before routing`,
+      );
+    }
+  } finally {
+    for (const client of clients) client.ws.terminate();
+    s.agent.ws.terminate();
+    await s.close();
+  }
+});
+
 test('live exec routes binary-safe input/output, resize and exit alongside wake notifications', async () => {
   const s = await liveFixture();
   const operator = await socket(s.base, '/api/v1/live', OPERATOR);

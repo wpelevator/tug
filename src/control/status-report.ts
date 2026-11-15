@@ -1,6 +1,7 @@
 import { isPort } from '../node-address.ts';
 import type {
   CommandResult,
+  IngressCertStatus,
   IngressStatus,
   JobStatus,
   ProjectStatus,
@@ -141,6 +142,36 @@ function ingressStatus(value: unknown): IngressStatus {
     configHash: text(value.configHash, 'ingress.configHash')!,
     routes: value.routes,
     ...(value.error !== undefined && { error: text(value.error, 'ingress.error') }),
+    ...(value.certs !== undefined && {
+      certs: list(value.certs, 'ingress.certs')
+        .slice(0, MAX_INGRESS_CERTS)
+        .map((c, i) => ingressCert(c, `ingress.certs[${i}]`)),
+    }),
+  };
+}
+
+const MAX_INGRESS_CERTS = 256;
+function ingressCert(value: unknown, path: string): IngressCertStatus {
+  if (!isObject(value)) throw new StatusReportError(`${path} must be an object`);
+  if (value.state !== 'issued' && value.state !== 'pending' && value.state !== 'failed')
+    throw new StatusReportError(`${path}.state must be issued, pending or failed`);
+  const host = text(value.host, `${path}.host`)!;
+  if (host.length > 253) throw new StatusReportError(`${path}.host is too long`);
+  const since = text(value.since, `${path}.since`)!;
+  if (!Number.isFinite(Date.parse(since)))
+    throw new StatusReportError(`${path}.since must be a date`);
+  const notAfter = text(value.notAfter, `${path}.notAfter`, true);
+  if (notAfter !== undefined && !Number.isFinite(Date.parse(notAfter)))
+    throw new StatusReportError(`${path}.notAfter must be a date`);
+  const issuer = text(value.issuer, `${path}.issuer`, true);
+  const error = text(value.error, `${path}.error`, true);
+  return {
+    host,
+    state: value.state,
+    since,
+    ...(notAfter !== undefined && { notAfter }),
+    ...(issuer !== undefined && { issuer: issuer.slice(0, 100) }),
+    ...(error !== undefined && { error: error.slice(0, 300) }),
   };
 }
 

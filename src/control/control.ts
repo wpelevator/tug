@@ -160,6 +160,7 @@ import { eventForRole } from './event-redaction.ts';
 import type { RedactableEvent } from './event-redaction.ts';
 import type {
   BackupCredentialsResponse,
+  IngressCertStatus,
   LiveRequest,
   LiveInput,
   OperatorLiveMessage,
@@ -285,7 +286,24 @@ const liveDimension = (value: unknown) =>
 const liveBase64 = (value: unknown): value is string =>
   typeof value === 'string' &&
   /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value);
+/** How long a host may wait for its first certificate before `tug doctor` fails: DNS and port 80 can lag a new domain. */
+const PENDING_TLS_GRACE_MS = 10 * 60_000;
+
 function parseLiveRequest(value: unknown): LiveRequest {
+  if (objectFrame(value) && value.operation === 'ingress-logs') {
+    if (
+      !frameKeys(value, ['operation', 'node', 'follow', 'tail']) ||
+      typeof value.node !== 'string' ||
+      !PROJECT_NAME_PATTERN.test(value.node) ||
+      value.node.length > 128 ||
+      value.follow !== true ||
+      !Number.isSafeInteger(value.tail) ||
+      Number(value.tail) < 0 ||
+      Number(value.tail) > 10_000
+    )
+      throw new Error('invalid ingress-logs live request');
+    return value as unknown as LiveRequest;
+  }
   if (
     !objectFrame(value) ||
     typeof value.project !== 'string' ||
@@ -1410,6 +1428,17 @@ export async function createApp(
 
   const live = new LiveHub(
     async (actor, request) => {
+      if (request.operation === 'ingress-logs') {
+        // The ingress container serves every project, so only an unscoped admin may read it.
+        if (!hasRole(actor, 'admin') || actor.projects)
+          throw httpError(403, 'forbidden: this action requires the admin role');
+        const ingress = db.get<NodeRow>(
+          'SELECT * FROM nodes WHERE name=? AND ingress=1 AND disabled_at IS NULL',
+          request.node,
+        );
+        if (!ingress) throw httpError(404, `node ${request.node} is not an enabled ingress node`);
+        return ingress;
+      }
       assertProject(actor, request.project);
       const row = currentDesired(request.project);
       if (!row) throw httpError(404, missingProject(request.project));
@@ -2441,10 +2470,19 @@ export async function createApp(
     isReservedProject(String(req.query.project || 'site'))
       ? res.status(400).json({ error: 'project names starting with _ are reserved' })
       : res.json({
-          domains: db.all(
-            'SELECT project_id,service,host,created_at,created_by FROM project_domains WHERE project_id=? ORDER BY host',
-            String(req.query.project || 'site'),
-          ),
+          domains: db
+            .all<{ host: string }>(
+              'SELECT project_id,service,host,created_at,created_by FROM project_domains WHERE project_id=? ORDER BY host',
+              String(req.query.project || 'site'),
+            )
+            .map((domain) => ({
+              ...domain,
+              // One entry per ingress node: `unknown` when that node's agent does not report TLS state yet.
+              tls: ingressTlsReport().map(({ node, certs }) => {
+                const cert = certs?.find((c) => c.host === domain.host.toLowerCase());
+                return cert ? { node, ...cert, host: undefined } : { node, state: 'unknown' };
+              }),
+            })),
         }),
   );
   /**
@@ -4236,6 +4274,47 @@ export async function createApp(
     const cmdId = queueCommand(node.id, project, 'logs.fetch', { project, service, tail });
     res.json({ commandId: cmdId, nodeId: node.id });
   });
+  /** Each enabled ingress node's last report of per-host TLS state; `certs` is absent for an agent that predates it. */
+  function ingressTlsReport() {
+    return db
+      .all<Pick<NodeRow, 'name' | 'ingress_status_json'>>(
+        'SELECT name,ingress_status_json FROM nodes WHERE ingress=1 AND disabled_at IS NULL ORDER BY name',
+      )
+      .map((n) => {
+        const status = n.ingress_status_json
+          ? (JSON.parse(n.ingress_status_json) as {
+              state?: string;
+              reportedAt?: string;
+              certs?: IngressCertStatus[];
+            })
+          : undefined;
+        return {
+          node: n.name,
+          state: status?.state ?? 'unreported',
+          reportedAt: status?.reportedAt ?? null,
+          certs: status?.certs ?? null,
+        };
+      });
+  }
+  api('get', '/api/v1/ingress/tls', null, async (_req, res) =>
+    res.json({ nodes: ingressTlsReport() }),
+  );
+  api('post', '/api/v1/ingress/logs', null, async (req, res) => {
+    const name = String(req.body.node || '');
+    const node = db.get<Pick<NodeRow, 'id' | 'name' | 'ingress' | 'disabled_at'>>(
+      'SELECT id,name,ingress,disabled_at FROM nodes WHERE name=? OR id=?',
+      name,
+      name,
+    );
+    if (!node) return res.status(404).json({ error: 'node not found' });
+    if (!node.ingress || node.disabled_at)
+      return res.status(400).json({ error: `node ${node.name} is not an enabled ingress node` });
+    const tail = Number(req.body.tail ?? 200);
+    if (!Number.isSafeInteger(tail) || tail < 0 || tail > 10_000)
+      return res.status(400).json({ error: 'tail must be an integer from 0 to 10000' });
+    const cmdId = queueCommand(node.id, null, 'ingress.logs', { tail });
+    res.json({ commandId: cmdId, nodeId: node.id });
+  });
   api('get', '/api/v1/commands/:id', commandProject, async (req, res) =>
     res.json(db.get('SELECT * FROM commands WHERE id=?', String(req.params.id))),
   );
@@ -4313,6 +4392,11 @@ export async function createApp(
     const projects = projectScope(req.actor!, 'id');
     const deployments = projectScope(req.actor!, 'project_id');
     const statuses = projectScope(req.actor!, 's.project_id');
+    const tlsGaps = new Map(
+      ingressTlsReport()
+        .filter((n) => n.certs)
+        .map((n) => [n.node, n.certs!.filter((c) => c.state !== 'issued').length]),
+    );
     res.json({
       projects: db.all(`SELECT * FROM projects WHERE ${projects.where}`, ...projects.args),
       deployments: db.all(
@@ -4329,6 +4413,8 @@ export async function createApp(
           status: statusOf(row),
           last_seen_at: row.last_seen_at,
           connected: wakeHub.connected(row.id),
+          // A count only: host names span projects, so they stay behind `tug ingress tls` (admin).
+          ...(tlsGaps.has(row.name) && { tls_not_issued: tlsGaps.get(row.name) }),
         })),
       statuses: db.all(
         `SELECT s.*,n.name AS node FROM node_statuses s LEFT JOIN nodes n ON n.id=s.node_id WHERE ${statuses.where}`,
@@ -4459,6 +4545,17 @@ export async function createApp(
           )
           .map((n) => n.name);
         if (bad.length) throw new Error(`ingress nodes not serving: ${bad.join(', ')}`);
+        // A host that never got a certificate leaves its site returning a TLS error while everything reads serving.
+        const stuck = ingressTlsReport().flatMap(({ node, certs }) =>
+          (certs ?? [])
+            .filter(
+              (c) =>
+                c.state === 'failed' ||
+                (c.state === 'pending' && Date.now() - Date.parse(c.since) > PENDING_TLS_GRACE_MS),
+            )
+            .map((c) => `${c.host} on ${node} (${c.state}${c.error ? `: ${c.error}` : ''})`),
+        );
+        if (stuck.length) throw new Error(`no certificate for: ${stuck.join('; ')}`);
         return { nodes: ingressNodes.map((n) => n.name) };
       });
     }

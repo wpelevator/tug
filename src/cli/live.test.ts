@@ -123,6 +123,19 @@ test('live request parsing preserves argv and supplies explicit operation defaul
   );
 });
 
+test('ingress-logs requests carry a node and tail but no project or service', () => {
+  assert.deepEqual(
+    parseLiveRequest('ingress-logs', { project: 'ignored', node: 'n2', tail: '30' }),
+    { operation: 'ingress-logs', node: 'n2', follow: true, tail: 30 },
+    'the edge belongs to no project, so a configured project must not leak into the request',
+  );
+  assert.throws(
+    () => parseLiveRequest('ingress-logs', { project: 'site' }),
+    /node must be/,
+    'an ingress-logs request needs an explicit node',
+  );
+});
+
 test('live request parsing rejects malformed names, tail values and argv', () => {
   for (const project of ['', '../site', '-site', 'site\n'])
     assert.throws(

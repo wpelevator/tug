@@ -107,8 +107,34 @@ Every route with an upstream gets a `reverse_proxy` with:
 | Admin API | Caddy's admin endpoint on `127.0.0.1:2019`, used by `caddy reload` and the metrics, is unauthenticated and reachable by any process on the node and any container with host networking. It accepts configuration, including one that serves `/etc/caddy`. Run only trusted workloads on an ingress node |
 | Access log size | The `max-size 10m`, `max-file 3` log options apply only when the agent creates `tug-caddy`. A node with an existing container keeps Docker's unbounded default until it is recreated (`docker rm -f tug-caddy`, and the next poll recreates it and keeps certificates). Do this before enabling `TUG_INGRESS_ACCESS_LOG` |
 | `/etc/caddy` | Shared by every project on the node, including the keys of every `tls: custom` route. That is why ingress options are typed `x-tug.ingress` fields that control validates, not a raw Caddyfile fragment |
-| Certificate problems | Caddy retries a failed issuance with backoff and nothing in tug reports it. `tug domain list` says only that a domain is mapped, not that it is served. Adding many domains at once starts that many ACME orders, which Let's Encrypt limits. Point DNS first, add domains in moderate batches and check `docker logs tug-caddy` on the ingress node |
+| Certificate problems | Caddy retries a failed issuance with backoff. `tug ingress tls` shows which hosts have no certificate and why, and `tug ingress logs` shows Caddy's own attempts (see [Certificate status](#certificate-status)). Adding many domains at once starts that many ACME orders, which Let's Encrypt limits. Point DNS first and add domains in moderate batches |
 | Reserved loopback ports | Caddy listens on `127.0.0.1:2019` (admin) and `127.0.0.1:2021` (the ask site, only when a wildcard zone is routed). Control rejects a deployment whose service may land on an ingress node and publishes either host port. A service that already did so before the node became an ingress node, or another process on the host, makes Caddy's reload fail for every site, so free the port |
+
+### Certificate status
+
+`serving` in `tug status` means Caddy accepted the configuration, not that visitors get a certificate. While Caddy cannot issue one, for example because the host firewall blocks port 80, a visit fails with a TLS internal error and every other tug view still reads healthy.
+
+```bash
+tug ingress tls
+tug ingress logs n2 --tail 100
+```
+
+`tug ingress tls` lists one row per host and ingress node. The agent on each ingress node connects to its own Caddy on port 443 with the host as the server name and reads the certificate that comes back, so the state is what a client gets:
+
+| State | Meaning |
+| --- | --- |
+| `issued` | A certificate that covers the host and has not expired is served. The detail column shows its expiry |
+| `pending` | The handshake fails or the certificate does not cover the host, and Caddy has logged no issuance error for the host yet. A new domain stays here until DNS and port 80 are right |
+| `failed` | Pending, and the latest issuance error Caddy logged for the host is shown as the reason |
+| `unknown` | The node's agent predates this report, or has not reported yet. It never reads as `issued` |
+
+The same state appears elsewhere:
+
+- `tug domain list` adds a `tls` entry per ingress node to each mapped domain.
+- `tug status` adds a count to an ingress node with hosts that have no certificate yet, so `serving` is not read as reachable. It is a count because host names span projects, so the names stay behind `tug ingress tls`.
+- `tug doctor` fails the `ingress` check for a host that is `failed`, or `pending` for more than ten minutes, and names the host, the node and the reason.
+
+Only names Caddy issues itself are checked: `tls: auto` hosts and mapped domains. Wildcard names are skipped, because a probe would trigger on-demand issuance for a name nobody asked for, and so are `tls: custom` hosts, whose certificate you supply. The reason comes from Caddy's JSON log and is best effort: an unrecognized log format costs the reason, never the state. Probing is throttled to every twenty seconds for a host without a certificate and hourly for one with, so a fix shows within about half a minute.
 
 ### Wildcard hosts are issued name by name
 
