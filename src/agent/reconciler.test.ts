@@ -399,12 +399,14 @@ test('a service whose definition did not change is not restarted when a sibling 
 test('the port range is configurable and exhaustion rejects the rollout without touching the serving revision', async () => {
   const host = fakeHost();
   const ctx = await makeCtx(host, { rolloutPorts: '20100-20101' });
-  const v1 = await reconcile(desired(rolling('web:1'), 'v1'), ctx);
+  // The suite's 40ms drain is shorter than a slow runner's gap between two rollouts, so the draining revision would free its port before the third one. 500ms leaves room on both sides of the wait below.
+  const held = { rollout: { strategy: 'rolling', drain: '500ms' } };
+  const v1 = await reconcile(desired(rolling('web:1', held), 'v1'), ctx);
   assert.equal(v1.serviceStates?.web.port, 20100, 'the first port of the configured range is used');
-  const v2 = await reconcile(desired(rolling('web:2'), 'v2'), ctx);
+  const v2 = await reconcile(desired(rolling('web:2', held), 'v2'), ctx);
   assert.equal(v2.serviceStates?.web.port, 20101, 'the second revision takes the other port');
 
-  const v3 = await reconcile(desired(rolling('web:3'), 'v3'), ctx);
+  const v3 = await reconcile(desired(rolling('web:3', held), 'v3'), ctx);
   assert.equal(
     v3.health,
     'failed',
@@ -417,8 +419,8 @@ test('the port range is configurable and exhaustion rejects the rollout without 
   );
   assert.equal(v3.serviceStates?.web.port, 20101, 'the serving revision keeps being reported');
 
-  await sleep(60);
-  const v4 = await reconcile(desired(rolling('web:4'), 'v4'), ctx);
+  await sleep(700);
+  const v4 = await reconcile(desired(rolling('web:4', held), 'v4'), ctx);
   assert.equal(
     v4.health,
     'serving',

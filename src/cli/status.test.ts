@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { formatIngressTls, formatStatus } from './status.ts';
+import { deploymentsSharingLabel, formatIngressTls, formatStatus, labelKey } from './status.ts';
 import type { StatusResponse } from './status.ts';
 
 const status: StatusResponse = {
@@ -154,4 +154,64 @@ test('the ingress TLS table lists hosts, reasons and unknown agents', () => {
     'an old agent is unknown, not issued',
   );
   assert.equal(formatIngressTls([]), 'No ingress nodes', 'no ingress nodes says so');
+});
+
+test('status shows the deployment id when another deployment of the project has the same label, and omits it otherwise', () => {
+  const rows = [
+    {
+      id: 'dep_new',
+      version: 'git-25bdc82f8359',
+      state: 'succeeded',
+      error_message: null,
+      project_id: 'site',
+    },
+    {
+      id: 'dep_old',
+      version: 'git-25bdc82f8359',
+      state: 'succeeded',
+      error_message: null,
+      project_id: 'site',
+    },
+    {
+      id: 'dep_other',
+      version: 'git-25bdc82f8359',
+      state: 'succeeded',
+      error_message: null,
+      project_id: 'blog',
+    },
+  ];
+  const shared = formatStatus({
+    projects: [{ id: 'site', current_deployment_id: 'dep_new' }],
+    deployments: rows,
+    nodes: [],
+    statuses: [],
+  });
+  assert.match(
+    shared,
+    /Deployment: git-25bdc82f8359 \[dep_new\] \(succeeded\)/,
+    'two deployments with one label must be told apart by id in status',
+  );
+  const unique = formatStatus({
+    projects: [{ id: 'blog', current_deployment_id: 'dep_other' }],
+    deployments: [rows[2]],
+    nodes: [],
+    statuses: [],
+  });
+  assert.doesNotMatch(unique, /\[dep_other\]/, 'a label that is unique keeps the plain line');
+  assert.equal(
+    deploymentsSharingLabel(
+      [{ id: 'dep_1', version: 'git-abc', project_id: 'site' }],
+      'dep_2',
+      'site',
+      'rollback-git-abc-1731668000123',
+    ).join(),
+    'dep_1',
+    'a rollback label reads as the label of the deployment it replaced',
+  );
+  assert.equal(
+    labelKey('rollback-git-abc-1731668000123'),
+    'git-abc',
+    'the rollback prefix and timestamp are not part of the label',
+  );
+  assert.equal(labelKey('v1.2.3'), 'v1.2.3', 'a custom label is kept as written');
 });

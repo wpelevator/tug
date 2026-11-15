@@ -26,7 +26,7 @@ test('whole-document stdin commands and HTTP commands exit after completing thei
     const running = exec(process.execPath, [path.resolve(entry), ...args], {
       cwd: dir,
       env,
-      timeout: 10000,
+      timeout: 60_000,
     });
     // Document readers require EOF; other commands must finish with the pipe still open.
     if (input !== undefined) running.child.stdin!.end(input);

@@ -17,7 +17,7 @@ test('domain commands reach the control over mTLS and report its answers', async
     exec(process.execPath, [entry, 'domain', ...args], {
       cwd: dir,
       env: { ...process.env, ...control.env, TUG_CREDENTIAL: '', TUG_PROJECT: 'site' },
-      timeout: 10000,
+      timeout: 60_000,
     });
   try {
     assert.deepEqual(

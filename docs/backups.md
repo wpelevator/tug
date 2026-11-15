@@ -55,7 +55,13 @@ Restic runs in a helper container with a memory limit, labelled `tug.job` and re
 
 ## Recipes
 
-tug has no database support of its own. Each recipe is a command for the service container. In a Compose file, use `$$` for variables the container shell must expand, because a single `$` is read by `tug deploy` as a value to take from control. A single `$` in a `command` or `restore` fails the deploy with `compose.yaml needs values that are not set on control: MARIADB_ROOT_PASSWORD`. Read credentials from the container environment, write the data to standard output, and give `verify` the line the tool prints on success.
+tug has no database support of its own. Each recipe is a command for the service container. In a Compose file, use `$$` for variables the container shell must expand, because a single `$` is read by `tug deploy` as a value to take from control. A single `$` in a `command` or `restore` fails the deploy with `compose.yaml needs values that are not set on control: MARIADB_ROOT_PASSWORD`. When the unset name is used in an `x-tug.backup` field, the error adds a second line that says it may be a container variable and shows the field with `$$`:
+
+```text
+MARIADB_ROOT_PASSWORD is used in an x-tug.backup field. If it is a variable of the container and not a value from control, write $$MARIADB_ROOT_PASSWORD so the container expands it: mariadb-dump -uroot -p"$$MARIADB_ROOT_PASSWORD" --all-databases
+```
+
+Names outside `x-tug.backup` get only the first line. Read credentials from the container environment, write the data to standard output, and give `verify` the line the tool prints on success.
 
 ```yaml
 # MariaDB (use mysqldump and MYSQL_ROOT_PASSWORD for MySQL)
@@ -198,7 +204,7 @@ tug control backup -o recovery.tar.gz
 
 `-o <file>` implies `--local` and `--download` (`--download` alone picks a generated name), refuses to overwrite an existing file, and creates the copy `0600`. It prints the path, whether build images are included, and where the copy on control remains, because the download does not remove it. The archive holds the master key, every secret and the private CA key, which can issue credentials for the whole installation, so store it encrypted. Archives accumulate in `TUG_CONTROL_BACKUP_DIR`, and you delete old ones.
 
-To restore the exact file you kept, run `tug control restore --from-file recovery.tar.gz --confirm`. It uploads the file to the control being restored, so you do not copy it into that host's volume first. Without `--confirm` it only checks the file. A path on the control host works as a positional argument: `tug control restore <path> --confirm`. After a restore, restart control ([Control plane](control-plane.md#backup-and-restore)). Commands queued or in flight when the backup was taken are retired rather than delivered again, the workload backup runs they carried are closed (missed or failed, never left queued), and unfinished workload restores are marked failed or interrupted so you can resume or release them.
+To restore the exact file you kept, run `tug control restore --from-file recovery.tar.gz --confirm`. It uploads the file to the control being restored, so you do not copy it into that host's volume first. Without `--confirm` it only checks the file. A path on the control host works as a positional argument: `tug control restore <path> --confirm`. After a restore, restart control with `tug control restart` ([Control plane](control-plane.md#backup-and-restore)). Commands queued or in flight when the backup was taken are retired rather than delivered again, the workload backup runs they carried are closed (missed or failed, never left queued), and unfinished workload restores are marked failed or interrupted so you can resume or release them.
 
 ## Jobs on a node
 

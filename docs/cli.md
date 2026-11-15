@@ -84,7 +84,7 @@ Each key is the camelCase of the long flag it supplies a default for, with the s
 | Key | Flag | Commands |
 | --- | --- | --- |
 | `controlUrl` | `--control-url` | All. `control setup` also advertises it and writes it into control's environment |
-| `controlSsh` | `<ssh-target>` of the control host | `control upgrade`, `upgrade` |
+| `controlSsh` | `<ssh-target>` of the control host | `control upgrade`, `control stop`, `control restart`, `upgrade` |
 | `project` | `--project` | Project-scoped commands |
 | `credential` (overlay only) | `--credential` | All |
 | `file` | `-f, --file` | `deploy`, `lint` |
@@ -148,7 +148,7 @@ A choice never bypasses control's validation or confirmation: `restore run` stil
 
 Long operations report progress on stderr. In a terminal that is one live line, `[12s] Pulling the agent image · latest output`, and each finished stage stays as `[12s] label`. Without a terminal, or with `CI` set, it is one line per stage plus an elapsed-time line every ten seconds. Progress covers `deploy`, `rollback`, `backup run`, `restore run`, control backup and restore, `control setup`, node add, replace and repair, node teardown, and the command wait behind `restart`, non-followed `logs` and `doctor` node diagnostics. Timeouts and exit codes are unchanged, and `--no-wait` skips the remote wait and its progress. `node enroll` only prepares instructions and does not wait.
 
-Steps that run on a host over SSH (Docker installation, preflight, image transfer and load, installs) print nothing while they work, so a Docker pull is one stage, not one line per layer. A step that fails prints its last lines. `--verbose` or `TUG_VERBOSE=1` streams the output as it arrives. On `exec` and `run`, everything after the service belongs to the remote command, so put it before: `tug --verbose exec`. For the best display, SSH must authenticate without a prompt. A password or passphrase prompt is shown, but the status line stays hidden until the step prints.
+Steps that run on a host over SSH (Docker installation, preflight, image transfer and load, installs) print nothing while they work, so a Docker pull is one stage, not one line per layer. A step that fails prints its last lines. `--verbose` or `TUG_VERBOSE=1` streams the output as it arrives. On `exec` and `run`, everything after the service belongs to the remote command, so put it before: `tug --verbose exec`. For the best display, SSH must authenticate without a prompt. When OpenSSH refuses a host with `Host key verification failed`, as it does for a stale `~/.ssh/known_hosts` entry left by a provider that reused the IP, the command says so and prints the `ssh-keygen -R <host>` remedy, in every command that runs SSH. tug never edits `known_hosts` or turns off host key checking. A password or passphrase prompt is shown, but the status line stays hidden until the step prints.
 
 ## Setup
 
@@ -158,6 +158,8 @@ Steps that run on a host over SSH (Docker installation, preflight, image transfe
 | `tug setup <ssh-target>` | Shortcut for `tug control setup`. Installs control over SSH, issues the root credential and imports it, so no `init` follows |
 | `tug upgrade` | Runs `control upgrade` on `controlSsh`, then `node upgrade --all`. See [Upgrade control and nodes](upgrades.md) |
 | `tug control upgrade [<ssh-target>]` | Replaces the control container with one on another image |
+| `tug control stop [<ssh-target>]` | Stops the control container. See [`tug control stop` and `tug control restart`](#tug-control-stop-and-tug-control-restart) |
+| `tug control restart [<ssh-target>]` | Restarts the control container, or starts it when it is stopped |
 | `tug control migrate <ssh-target>` | Moves control data from a host directory into the `tug-control` volume. See [Control plane](control-plane.md#moving-control-data-into-the-volume-control-migrate) |
 
 ### `tug setup` and `tug control setup`
@@ -188,6 +190,20 @@ In a terminal, setup offers to install Docker, prints the plan and asks to confi
 | `-y, --yes` | Skip the confirmation |
 
 The SSH target defaults to `controlSsh`. The command carries over the published mTLS bindings, advertised URL and extra names, reuses the data volume, compares the CA before and after, tags the previous image `tug:rollback`, shows the plan, then waits for control to answer and prints its version. Run `tug control backup` first for a backup beyond the `tug.db.pre-v<N>.bak` copy the new control makes.
+
+### `tug control stop` and `tug control restart`
+
+```sh
+tug control stop root@control.example.com
+tug control restart root@control.example.com
+```
+
+Both run `docker stop` or `docker restart` on the control container that `control setup` created, over SSH. The SSH target defaults to `controlSsh`. Nothing else changes: the `tug-control` volume, the image and the published ports stay as they are, unlike `control upgrade --force`, which recreates the container. In a terminal each prints its plan and asks to confirm, and `-y, --yes` skips that. Each prints a JSON result on stdout, and fails with a pointer to `control setup` when the host has no control container.
+
+| Command | Use it to |
+| --- | --- |
+| `control stop` | Isolate an old control while its replacement takes over. Nodes keep serving their workloads and cannot get new work or report until a control runs. The container stays stopped, also after the host reboots |
+| `control restart` | Apply a `control restore`, which prints `restartRequired: true` and names this command, or start a stopped control. It waits for control to answer when a credential is configured |
 
 ### `tug upgrade`
 
@@ -276,18 +292,18 @@ By default it deploys the first of `compose.yaml`, `compose.yml`, `docker-compos
 | Option | Meaning | Default |
 | --- | --- | --- |
 | `-f, --file <file>` | Compose file | First match above |
-| `--version <version>` | Display version. Image identities stay immutable even when reused | `git-<Compose hash>` |
+| `--version <version>` | Display version. Image identities stay immutable even when reused. The default label hashes only the Compose file, so a change to a `build:` context, a secret or a variable keeps it; the summary and `tug status` then add the deployment id | `git-<Compose hash>` |
 | `--build-local` | Build on your Docker daemon and upload saved images without source. Single-platform, must match the node architecture | Build on control |
 | `--compose-cli` | Render with `docker compose config` (needs Docker Compose v2 locally), for files that use `include`, `!reset` or `!override` | tug's [native reader](compose.md#native-compose-reader) |
 | `--var <NAME=value>` | Value for this deploy only. Repeatable. A value may contain commas | none |
 | `--profile <name>` | Enable a Compose profile. Repeatable or comma-separated | none |
 | `--move <service>` | Acknowledge that a service with data placed on another node starts empty there. Repeatable or comma-separated | Such a deploy is refused |
-| `--dry-run` | Resolve every value, print each name with its source (secrets as `•••`) and stop before building or uploading. Never prompts or stores | off |
+| `--dry-run` | Resolve every value, print each name with its source (secrets as `•••`), ask control to check the file against other projects (a host port another project already publishes on the node, see [Checks against other projects](compose.md#checks-against-other-projects)) and stop before building or uploading. Never prompts or stores | off |
 | `--no-wait` | Return once desired state exists | wait |
 | `--timeout <seconds>` | Wait limit | `300` |
 
 - **Build input.** Services with `build:` upload the current directory for a remote build. Published-image-only apps upload no context. Control rejects a built service with no build input.
-- **Summary.** One line, `site git-ab12: deployment dep_1 succeeded, 3 services`. `--json` prints the full result with the desired state and the `values` record of where each `${NAME}` came from.
+- **Summary.** One line, `site git-ab12: deployment dep_1 succeeded, 3 services`. The default label `git-<Compose hash>` covers the Compose file and not the build context, secrets or variables, so two deployments can carry one label. When control's recent deployments of the project include another with the same label, the line ends with `(same label as dep_0; tell them apart by deployment id)`. A rollback deployment, whose label `rollback-git-ab12-<ms>` embeds the one it replaced, counts as the same label. `tug status` shows `[dep_1]` after the label in the same case. `--json` prints the full result with the desired state and the `values` record of where each `${NAME}` came from.
 - **Moved data.** After `--move`, the services that write to the moved one are held until you run `tug restore run` or `tug hold release`.
 - **Interruption.** If the wait is interrupted (control unreachable, timeout), the error names the deployment and `tug deploy cancel [id]`. A deploy refused because another is still rolling out names that one the same way.
 - **Project name.** `deploy` warns when the file's `name:` differs from the tug project, because secrets, backups and restores are scoped to the project.
@@ -303,7 +319,7 @@ To deploy CI-built images, push them to a registry and declare `image:`. Control
 | --- | --- | --- |
 | `tug rollback` | `--force`, `--no-wait`, `--timeout <seconds>` (default `300`) | Rolls the project back. `--force` permits it while a deployment is active. With `x-tug: { rollback: auto }` tug rolls back failed deployments itself, see [Automatic rollback](compose.md#automatic-rollback) |
 | `tug deploy cancel [deployment-id]` | | Cancels an active deployment. In a terminal, omit the id to choose from active ones |
-| `tug status` | `--json` | Each project's current deployment, node reports and errors, plus node status and last contact. A service whose container keeps restarting, or exited with an error and stays down, shows as `unstable` with the exit code, although its deployment reads as succeeded. Stale node health is the last report. Control-wide, credential-scoped |
+| `tug status` | `--json` | Each project's current deployment (with its id in brackets when another recent deployment of the project has the same label), node reports and errors, plus node status and last contact. A service whose container keeps restarting, or exited with an error and stays down, shows as `unstable` with the exit code, although its deployment reads as succeeded. Stale node health is the last report. Control-wide, credential-scoped |
 | `tug events` | `--limit <n>` (default `100`, values outside `1`-`500` are an error), `--all`, `--json` | Events newest first as time, level, type, actor and message, for the project, or every project with `--all` (including control events with no project). Terminal escapes are stripped. Control deletes events older than 30 days and keeps at most 100,000, see [Configuration](configuration.md#control-plane) |
 | `tug tui [view]` | `--once`, `--readonly`, `--json` | A live full-screen view. See [Watch your servers in a terminal](tui.md) |
 
@@ -405,7 +421,20 @@ Use a credential anywhere one works: `TUG_CREDENTIAL=<credential> tug deploy`.
 | `--timeout <seconds>` | Wait for node diagnostics | `60` |
 | `--json` | The full document, including output the summary leaves out such as `docker info` | off |
 
-It checks this machine (Node.js and Docker) and the control plane: SQLite, the CA and server certificate expiry, each node's certificate expiry and connectivity, each online node's observed clock skew (unknown when offline, see [Nodes](nodes.md#doctor-certificate-expiry-and-clock-skew)) and ingress status. Node diagnostics include `ports.public`, a warning that lists containers of tug projects listening on all interfaces or a public IP ([Networking](networking.md#published-ports-private-by-default)). It prints one `ok`, `warn` or `FAIL` line per check, grouped under this machine, control and each node, and exits nonzero when any check fails, so it works as a readiness probe.
+It checks this machine (Node.js and Docker) and the control plane: SQLite, the CA and server certificate expiry, each node's certificate expiry and connectivity, each online node's observed clock skew (unknown when offline, see [Nodes](nodes.md#doctor-certificate-expiry-and-clock-skew)) and ingress status. The local Docker check matters only for `deploy --build-local`. When no daemon answers on this machine it prints `skip` with `needed only for --build-local` and does not count toward `Problems found`; a reachable daemon prints `ok`. In `--json` the check is `{"name":"docker","ok":true,"skipped":"needed only for --build-local"}`.
+
+On ingress nodes, control opens a TCP connection to ports 80 and 443 on each node's address and fails `ingress_ports` for a port that does not answer, with the likely firewall cause and fix ([Port reachability](ingress.md#port-reachability)). tug does not change firewalls.
+
+Host resources are read-only values, shown under a `resources` check on control and a `host.resources` check on each node (they never fail the run, and tug sets no thresholds on them):
+
+| Field | Source | Meaning |
+| --- | --- | --- |
+| `load` | `/proc/loadavg` | One, five and fifteen minute load averages and the CPU count of the host |
+| `memory` | `/proc/meminfo` | `MemAvailable` and `MemTotal`, so reclaimable cache counts as available |
+| `disk` | `statfs` of the agent's state volume, or of control's data directory | Free and total space of the filesystem that holds it. Docker keeps volumes under its data root, so on a default install this is the disk Docker fills; `dockerRoot` names the data root the daemon reports |
+| `containers` | Docker stats, one sample | CPU as a percentage of one core and memory in use without page cache, for the `tug-agent` and managed `tug-caddy` containers on a node and for control's container on control. A container that is not running is listed with its error |
+
+Node diagnostics include `ports.public`, a warning that lists containers of tug projects listening on all interfaces or a public IP ([Networking](networking.md#published-ports-private-by-default)). It prints one `ok`, `warn` or `FAIL` line per check, grouped under this machine, control and each node, and exits nonzero when any check fails, so it works as a readiness probe.
 
 ### Control backup and restore
 
@@ -413,7 +442,7 @@ It checks this machine (Node.js and Docker) and the control plane: SQLite, the C
 | --- | --- | --- |
 | `tug control backup` | `--local`, `--no-images`, `--download`, `-o, --output <file>` | Stores a control-plane backup in the backup destination and prints the repository, snapshot id and `stored: destination`. It holds state, PKI and the master key, never build images or workload volumes. With no destination it fails and says how to make an archive. `--local` writes an archive on the control host (including retained build archives unless `--no-images`) and prints `stored: control-host`. `-o <file>` also saves it here (implies `--local` and `--download`), creates it `0600`, refuses to overwrite and prints the path. `--download` alone uses `./tug-control-backup-<id>.tar.gz`. Control also backs itself up every night. See [Control plane backup](backups.md#control-plane-backup) |
 | `tug control backup list` | `--json` | The control backups on the control host and the snapshots stored in the destination, read from the destination, with the ids that `--snapshot` takes |
-| `tug control restore <artifact-path>` | `--confirm` | Restores a control backup that is a path on the control host. Needs a control restart |
+| `tug control restore <artifact-path>` | `--confirm` | Restores a control backup that is a path on the control host. Needs a control restart with [`tug control restart`](#tug-control-stop-and-tug-control-restart) |
 | `tug control restore` | `--from-file <file>` | Uploads an archive from this machine and restores it |
 | `tug control restore` | `--from-destination <url>`, `--env <name>`, `--snapshot <id>`, `--password-stdin` | Restores the newest control backup in a destination, or the named snapshot. Credential variables are read like `backup destination set` reads them, then the control password from `tug backup password --control` (`TUG_CONTROL_BACKUP_PASSWORD`, or the first stdin line with `--password-stdin`, in which case the credential variables must be in the environment). Used for this restore only |
 

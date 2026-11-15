@@ -27,6 +27,12 @@ async function server() {
     fetch(`${base}${route}`, { method, headers, body: body ? JSON.stringify(body) : undefined });
   const reg = await json(await call('POST', '/api/v1/nodes/register', { name: 'n1' }));
   const node = { 'x-tug-test-node': reg.nodeId, 'content-type': 'application/json' };
+  // Each project publishes its own host port: two projects on one port on one node are refused (port-clash.test.ts).
+  const hostPorts = new Map<string, number>();
+  const hostPort = (project: string) => {
+    if (!hostPorts.has(project)) hostPorts.set(project, 8080 + hostPorts.size);
+    return hostPorts.get(project)!;
+  };
   return {
     deploy: (project: string, version: string, host: string, headers = operator) =>
       call(
@@ -39,7 +45,7 @@ async function server() {
             services: {
               web: {
                 image: 'nginx',
-                ports: ['8080:80'],
+                ports: [`${hostPort(project)}:80`],
                 'x-tug': { placement: { nodes: ['n1'] }, ingress: { host, port: 80 } },
               },
             },

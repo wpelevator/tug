@@ -23,7 +23,7 @@ tug doctor --nodes
 | `custom TLS secret <name> not found in project <project>; set it with tug secret set first` | `tls: custom` names a secret that does not exist | `tug secret set <name> --from-file ...` |
 | `timed out waiting for deployment <id>; it is still rolling out` | The wait ended, and the rollout continues on the nodes | `tug status`, or stop it with `tug deploy cancel <id>` |
 | `<image> is not published yet` from `tug setup` or `tug node add` | A release publishes the npm package a few minutes before its image | Retry shortly, or pass `--image ghcr.io/wpelevator/tug:latest` |
-| `Bind for <address>:<port> failed: port is already allocated` in a failed deployment | Another project on that node publishes the same host port. `tug lint` and `tug deploy --dry-run` cannot see other projects, so the deploy builds first and fails when the agent applies it | Change one published host port, or move one project to another node |
+| `ssh refused <host> because it could not verify the host key` after `Host key verification failed.` from `tug node add`, `tug control setup` or any other command that runs SSH | OpenSSH found a different key for the host in `~/.ssh/known_hosts`, which happens when a provider reuses an IP for a new server, or the host is unknown and there was no terminal to ask on. The connection itself worked | After checking that the server was rebuilt, `ssh-keygen -R <host>` and run the command again. For an unknown host, run `ssh <host>` once and accept the fingerprint. tug leaves `known_hosts` alone |
 | `operation requires --node because placement is ambiguous` | The service runs on several nodes | Add `--node <name>` |
 | `The control did not present a certificate signed by this credential's CA` | The credential file and the deployed control disagree about the CA | [Mismatches](#cli-control-version-or-credentialca-mismatches) |
 | A message naming `tug control upgrade` or `npm i -g @wpelevator/tug@<version>` | CLI and control run different versions | [Mismatches](#cli-control-version-or-credentialca-mismatches) |
@@ -39,8 +39,8 @@ tug logs web
 Read the error `tug deploy` printed first. Then work down this list:
 
 1. `tug logs <service>` shows why the container died or never became healthy. With several eligible nodes, add `--node <name>`.
-2. A health check that never passes usually has the wrong `port` or `path`, or too few `retries` for a slow start. The defaults are 10 attempts, 2 seconds apart. Raise `x-tug.health.retries` or `interval`, see [Health checks](healthchecks.md).
-3. A missing variable or secret fails the deploy with the names and the command that sets them. `tug deploy --dry-run` lists every `${NAME}` and where its value comes from.
+2. A health check that never passes usually has the wrong `port` or `path`, or too few `retries` for a slow start. The failure names the request the agent made, with the container address, port, path and query, and ends with the last HTTP status or connection error, for example `web: http health check GET http://172.18.0.3:80/health failed after 10 attempts: web: http 404`. Request that URL path from inside the container to see what the app answers. The defaults are 10 attempts, 2 seconds apart. Raise `x-tug.health.retries` or `interval`, see [Health checks](healthchecks.md).
+3. A missing variable or secret fails the deploy with the names and the command that sets them. `tug deploy --dry-run` lists every `${NAME}` and where its value comes from. When the missing name sits in an `x-tug.backup` command, it is usually a container variable that needs `$$` instead of `$`, see [Recipes](backups.md#recipes).
 4. A service that cannot reach its dependency usually needs a `depends_on` with `condition: service_healthy`, or connection retries in the app.
 
 **A deploy, rollback or control backup that sits queued** is waiting behind another build. Control runs one writer at a time, and a stuck build is killed after 30 minutes. `tug status` shows the deployment still building. `tug deploy cancel` marks it cancelled, but the build process itself ends only at that deadline, so a rollback can wait that long in the worst case.
@@ -59,7 +59,7 @@ Check these in order:
 
 1. **DNS** points at the ingress node's public IP.
 2. **Ingress** is enabled: `tug node ingress <node>`. `tug doctor` flags an ingress node that is not `serving`, and `tug status` shows ingress warnings.
-3. **Ports 80 and 443** are reachable from the internet, in the host firewall and the provider firewall. Without them automatic HTTPS cannot issue a certificate. Some provider images ship with `ufw` or `firewalld` active and tug does not change either: on Debian run `ufw allow 80/tcp` and `ufw allow 443/tcp`, on Rocky run `firewall-cmd --permanent --add-service=http --add-service=https` and `firewall-cmd --reload`. `tug ingress tls` shows which hosts have no certificate and why, `tug ingress logs <node>` shows Caddy's ACME attempts, and `tug doctor` fails the ingress check for a host that has gone ten minutes without a certificate. It cannot tell a closed port from a DNS mistake, so the error text decides.
+3. **Ports 80 and 443** are reachable from the internet, in the host firewall and the provider firewall. Without them automatic HTTPS cannot issue a certificate. Some provider images ship with `ufw` or `firewalld` active and tug does not change either: on Debian run `ufw allow 80/tcp` and `ufw allow 443/tcp`, on Rocky run `firewall-cmd --permanent --add-service=http --add-service=https` and `firewall-cmd --reload`. `tug ingress tls` shows which hosts have no certificate and why, `tug ingress logs <node>` shows Caddy's ACME attempts, and `tug doctor` fails `ingress_ports` for a port that does not answer from control and names the likely firewall and the fix ([Port reachability](ingress.md#port-reachability)), and fails the ingress check for a host that has gone ten minutes without a certificate. The certificate failure cannot tell a closed port from a DNS mistake, so the error text decides.
    Let's Encrypt stops validating a name after five failed attempts in an hour, so a site can stay without a certificate for up to an hour after you open the ports. Caddy retries by itself, and `curl -v` shows `tlsv1 alert internal error` until it succeeds.
 4. **`x-tug.ingress.port`** is a published port of the service.
 5. **A direct port** such as `8080` binds to the node's private address or loopback unless you wrote a host IP. Check the node address and the firewall. See [Ingress](ingress.md#set-up-ingress) and [published ports](networking.md#published-ports-private-by-default).
@@ -100,7 +100,8 @@ tug doctor
 `doctor` checks the control URL, the network path to TCP 8443 and your operator credential. Then:
 
 - **Re-addressed control:** [Moving the control plane](control-plane.md#moving-the-control-plane).
-- **Lost host:** recover the off-host control archive before restoring workload data, see [Recover control on another host](control-plane.md#recover-control-on-another-host).
+- **Lost host:** recover the off-host control archive before restoring workload data, see [Recover control on another host](control-plane.md#recover-control-on-another-host). A restore ends with `restartRequired: true`, and `tug control restart <ssh-target>` applies it.
+- **`control restored; restart required`:** a restored control rejects requests until it restarts. Run `tug control restart <ssh-target>`.
 - **Compromised credential or node:** [Lost or compromised something](control-plane.md#lost-or-compromised-something).
 
 ## CLI, control version or credential/CA mismatches

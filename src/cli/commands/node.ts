@@ -14,7 +14,7 @@ import type { AddressCandidate } from '../onboarding.ts';
 import { formatNodePlan, inferNodeName, isValidNodeName } from '../onboarding.ts';
 import { ask, canPrompt, confirm } from '../prompt.ts';
 import { terminalPicker } from '../pick.ts';
-import { runStep, STAGE_MARKER } from '../process.ts';
+import { runStep, SshHostKeyError, STAGE_MARKER } from '../process.ts';
 import type { Prompter } from '../prompt.ts';
 import { isNodeHost } from '../../node-address.ts';
 import { assertImagePublished, defaultImage, resolveImage } from '../../images/image.ts';
@@ -445,6 +445,7 @@ async function upgradeNode(
   try {
     current = parseAgentInspect(await runCapture('ssh', ['--', sshTarget, inspectAgentScript]));
   } catch (e) {
+    if (e instanceof SshHostKeyError) throw e;
     throw new Error(
       `no agent container on ${sshTarget} (${errMessage(e)}); \`tug node add\` installs one`,
       { cause: e },
@@ -913,15 +914,18 @@ export function registerNode(program: Command): void {
       'mark a node as an ingress node (managed Caddy on ports 80/443), or remove the role with --disable',
     )
     .option('--disable', 'stop acting as an ingress node')
-    .action(async (name: string, o: { disable?: boolean }) =>
+    .action(async (name: string, o: { disable?: boolean }) => {
+      const target = await selectNode(name);
       print(
-        await request(
-          'POST',
-          `/api/v1/nodes/${encodeURIComponent(await selectNode(name))}/ingress`,
-          {
-            enabled: !o.disable,
-          },
-        ),
-      ),
-    );
+        await request('POST', `/api/v1/nodes/${encodeURIComponent(target)}/ingress`, {
+          enabled: !o.disable,
+        }),
+      );
+      // Caddy starts on the node's next poll, so ports cannot be probed yet; tug never opens them either.
+      if (!o.disable) console.error(INGRESS_PORTS_HINT(target));
+    });
 }
+
+/** Printed to stderr after enabling ingress: tug does not change the host firewall, and `doctor` checks the ports once Caddy runs. */
+export const INGRESS_PORTS_HINT = (node: string) =>
+  `Ports 80 and 443 must be open on ${node} and in any provider firewall; tug does not change firewalls. Once the edge is up, run tug doctor to check that both answer.`;

@@ -19,7 +19,7 @@ export function composeHash(compose: ComposeFile): string {
 type PortEntry = NonNullable<ComposeService['ports']>[number];
 
 /** The host port one `ports` entry publishes for `port` (either side of the mapping), or null. */
-function entryPublishedPort(entry: PortEntry, port: number): number | null {
+export function entryPublishedPort(entry: PortEntry, port: number): number | null {
   if (typeof entry === 'number') return null;
   if (typeof entry === 'object') {
     const published = Number(entry.published);

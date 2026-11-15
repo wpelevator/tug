@@ -26,7 +26,7 @@ To choose a probe see [Health checks](healthchecks.md), and to choose where serv
 
 ## Checking the file with `tug lint`
 
-`tug lint` checks a Compose file against the `x-tug` schema with no control connection, credential or Docker. It reports what `tug deploy` makes control reject: the whole `x-tug` schema plus the unsupported Compose keys. Checks that depend on your node list still happen at deploy. A typo such as `ingresss:` fails in milliseconds here, with no server needed.
+`tug lint` checks a Compose file against the `x-tug` schema with no control connection, credential or Docker. It reports what `tug deploy` makes control reject: the whole `x-tug` schema plus the unsupported Compose keys. Checks that depend on your node list still happen at deploy, and so do the ones that depend on other projects (see below). A typo such as `ingresss:` fails in milliseconds here, with no server needed.
 
 ```sh
 tug lint
@@ -48,6 +48,25 @@ bad.yaml: web: x-tug.rollback is not supported (supported: placement, replicas, 
 ```
 
 `--json` prints `{ ok, file, errors }`.
+
+### Checks against other projects
+
+`tug lint` sees one file, so it cannot find a host port that another project already uses. Control checks it while it prepares a deploy, before any build, and refuses with HTTP 409 when another project's current deployment publishes the same host port and protocol on the same node and an overlapping address:
+
+```text
+web: host port 8080 on node n1 (10.50.0.4) is already published by web in project phpdb; publish a different host port or place one of them on another node
+```
+
+`tug deploy --dry-run` sends the resolved file to control for the same check and exits non-zero on a clash. What counts:
+
+- **Address.** A port without a host IP listens on the node's `address` (or on `127.0.0.1` for a node without one, and for the ingress port when only the managed Caddy dials it, see [Published ports](networking.md#published-ports-private-by-default)). Two binds clash when the addresses are equal or one is `0.0.0.0` or `::`. A loopback bind and a private-address bind of the same port do not clash.
+- **Node.** Only services placed on the same node clash. A service with no placement runs on the node that registered first.
+- **Same project.** A redeploy replaces the project's own current deployment, so its ports never clash with themselves.
+- **Rolling services.** A rolling service does not publish its declared host port. Each revision takes a port from `TUG_ROLLOUT_PORTS` on the agent, so only the ports of recreate services are compared.
+- **Ranges.** Every host port of a range such as `9000-9010:9000-9010` is compared. A container-only entry such as `"80"` gets a port from Docker and never clashes.
+- **Visibility.** A credential that cannot access the other project sees `another project` in place of its name.
+
+Control compares declared ports with the current deployment of every other project, so a failed deployment that is still current counts until you redeploy or roll it back. A port held by something that is not a tug project on the node, such as a host service, is found only when the agent applies the deployment.
 
 ## Editor autocomplete and squiggles
 
@@ -248,7 +267,7 @@ services:
         command: mariadb-dump -u root -p"$$MARIADB_ROOT_PASSWORD" --single-transaction --databases wordpress
         filename: wordpress.sql
         verify: "-- Dump completed"
-        restore: mariadb -uroot -p"$MARIADB_ROOT_PASSWORD"
+        restore: mariadb -uroot -p"$$MARIADB_ROOT_PASSWORD"
 
 volumes:
   uploads:
@@ -308,6 +327,7 @@ Reference a secret with `${NAME}` in a service's `environment`, `command`, `entr
 
 ## Example: an app and a database on one node
 
+<!-- tug-values: DB_PASSWORD, DB_ROOT_PASSWORD -->
 ```yaml
 # yaml-language-server: $schema=https://unpkg.com/@wpelevator/tug/x-tug.schema.json
 services:

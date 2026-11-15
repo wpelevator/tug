@@ -56,6 +56,7 @@ It does not schedule across a cluster, balance load between servers or replace a
 
 This WordPress example pins the app, the database and the database volume to `app1`. Placement can be omitted with one node, but explicit placement keeps the database on its chosen server when you add more nodes. Enable ingress with `tug node ingress app1`, point the hostname's DNS at the VPS, allow public ports 80 and 443, and replace the hostname with yours.
 
+<!-- tug-values: DB_ROOT_PASSWORD -->
 ```yaml
 # yaml-language-server: $schema=https://unpkg.com/@wpelevator/tug/x-tug.schema.json
 services:

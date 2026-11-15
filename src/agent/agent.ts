@@ -74,6 +74,7 @@ import { openAgentDb } from '../db/db.ts';
 import type { AppliedStateRow, Db, EventStateRow } from '../db/db.ts';
 import type { HttpClient } from './runners.ts';
 import { CADDY_CONTAINER, reconcileIngress, removeIngress } from '../ingress.ts';
+import { collectResources, ownContainer } from '../host-resources.ts';
 import { createTlsMonitor } from '../ingress-tls.ts';
 import type { TlsMonitor } from '../ingress-tls.ts';
 import type {
@@ -725,6 +726,8 @@ export async function waitForHealth(
   const retries = Number(health.retries || 10);
   const intervalMs = parseDuration(health.interval || '2s');
   let last: unknown;
+  // The URL of the last http request, with the container address the agent dialed.
+  let probed: string | undefined;
   for (let i = 0; i < retries; i++) {
     try {
       if (health.type === 'docker') {
@@ -742,7 +745,8 @@ export async function waitForHealth(
       } else if (health.type === 'http') {
         await assertRunning(ctx, container, service);
         const ip = await containerIp(ctx, project, container);
-        const res = await ctx.http(`http://${ip}:${health.port || 80}${health.path || '/'}`, {
+        probed = `http://${ip}:${health.port || 80}${health.path || '/'}`;
+        const res = await ctx.http(probed, {
           signal: AbortSignal.timeout(parseDuration(health.timeout || '2s')),
         });
         if (!res.ok) throw new Error(`${service}: http ${res.status}`);
@@ -754,7 +758,7 @@ export async function waitForHealth(
     }
   }
   throw new Error(
-    `${service}: ${describeHealthCheck(health)} failed after ${retries} attempt${retries === 1 ? '' : 's'}: ${describeError(last)}${outsideContainerHint(health)}`,
+    `${service}: ${describeHealthCheck(health, probed)} failed after ${retries} attempt${retries === 1 ? '' : 's'}: ${describeError(last)}${outsideContainerHint(health)}`,
   );
 }
 
@@ -793,9 +797,11 @@ function describeError(error: unknown): string {
   const cause = e?.cause?.code || e?.cause?.message;
   return cause ? `${e?.message ?? 'error'} (${cause})` : (e?.message ?? 'no response');
 }
-function describeHealthCheck(health: HealthCheck): string {
+function describeHealthCheck(health: HealthCheck, probed?: string): string {
   if (health.type === 'http')
-    return `http health check on port ${health.port || 80}${health.path || '/'}`;
+    return probed
+      ? `http health check GET ${probed}`
+      : `http health check on port ${health.port || 80}${health.path || '/'}`;
   if (health.type === 'tcp') return `tcp health check on port ${health.port}`;
   return 'docker health check';
 }
@@ -854,6 +860,23 @@ async function publicPortsCheck(ctx: AgentContext): Promise<DiagnosticCheck> {
   } catch (e) {
     return { name: 'ports.public', ok: false, error: errMessage(e).slice(-4000) };
   }
+}
+
+/** Read-only host resources for `tug doctor`; it reports values and never fails the diagnostics. */
+async function resourcesCheck(ctx: AgentContext): Promise<DiagnosticCheck> {
+  const containers: { id: string; label: string }[] = [];
+  const self = await ownContainer(ctx.docker, 'tug-agent');
+  if (self) containers.push({ id: self, label: self });
+  const ingress = await fs.stat(path.join(ctx.stateDir, 'ingress')).then(
+    () => true,
+    () => false,
+  );
+  if (ingress) containers.push({ id: CADDY_CONTAINER, label: CADDY_CONTAINER });
+  return {
+    name: 'host.resources',
+    ok: true,
+    resources: await collectResources(ctx.docker, { diskPath: ctx.stateDir, containers }),
+  };
 }
 
 const MIN_API_VERSION = API_VERSION.replace(/^v/, '');
@@ -920,6 +943,7 @@ export async function executeCommand(
       }
     }
     checks.push(await publicPortsCheck(ctx));
+    checks.push(await resourcesCheck(ctx));
     return {
       commandId: command.id,
       state: checks.every((c) => c.ok) ? 'succeeded' : 'failed',

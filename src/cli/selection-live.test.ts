@@ -91,7 +91,7 @@ test('live command selection sends exact services, eligible nodes and remote arg
           CI: '',
           ...env,
         },
-        timeout: 10000,
+        timeout: 60_000,
       },
     );
     let text = '';

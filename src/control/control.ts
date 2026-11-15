@@ -58,6 +58,7 @@ import {
   serviceSecretNames,
   validateCompose,
 } from '../compose/compose.ts';
+import { findPortClashes, portClashMessage } from '../compose/port-clash.ts';
 import { buildImage, unpackContext, run as runCommand } from '../images/build.ts';
 import { sentinelNames } from '../compose/normalize.ts';
 import {
@@ -87,7 +88,10 @@ import {
 } from '../pki.ts';
 import { EXPIRY_WARN_DAYS, certificateExpiry, diagnoseNode, nodeStatus } from './diagnostics.ts';
 import { serverTlsOptions } from './tls-server.ts';
-import { isNodeHost } from '../node-address.ts';
+import { isNodeHost, isPublicAddress } from '../node-address.ts';
+import { collectResources, ownContainer } from '../host-resources.ts';
+import { INGRESS_PORTS, describeClosedPort, probeTcpPort } from './port-probe.ts';
+import type { PortProbe } from './port-probe.ts';
 import {
   ASK_PORT,
   CADDY_ADMIN_PORT,
@@ -288,6 +292,8 @@ const liveBase64 = (value: unknown): value is string =>
   /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value);
 /** How long a host may lack a certificate, pending or failing its first attempts, before `tug doctor` fails: DNS and port 80 can lag a new domain. */
 const PENDING_TLS_GRACE_MS = 10 * 60_000;
+/** How long `doctor` waits for a TCP connect to an ingress node's port 80 or 443 before calling it unanswered. */
+const PORT_PROBE_TIMEOUT_MS = 3000;
 
 function parseLiveRequest(value: unknown): LiveRequest {
   if (objectFrame(value) && value.operation === 'ingress-logs') {
@@ -737,6 +743,8 @@ export async function createApp(
     images?: Partial<ControlImageOperations>;
     /** The Docker Engine control manages images and reports diagnostics through; defaults to the local socket. */
     docker?: DockerApi;
+    /** Test hook: replaces the TCP connect `doctor` uses to check ports 80 and 443 on ingress nodes. */
+    probePort?: PortProbe;
     openDatabase?: typeof openDb;
     /** Test hook: runs after each step of putting a restored backup in place and may throw to simulate a crash. */
     restoreAfterStep?: (step: ActivationStep) => void | Promise<void>;
@@ -1228,6 +1236,41 @@ export async function createApp(
             `${name}: host port ${port} is reserved for the managed Caddy on ingress node ${nodes[0]}; publish another port`,
           );
     }
+  }
+  /**
+   * Refuses a deployment that publishes a host port another project's current deployment already publishes on the
+   * same node and address: the agent could not start it, and with a build in between the operator would only learn
+   * that minutes later. The project's own current deployment is replaced by this one, so it never counts.
+   */
+  function assertNoPortClash(project: string, compose: ComposeFile, viewer?: Actor): void {
+    const rows = db.all<{ name: string; address: string | null }>(
+      'SELECT name,address FROM nodes WHERE disabled_at IS NULL ORDER BY created_at,name',
+    );
+    const candidate = buildDesiredState({
+      project,
+      version: 'check',
+      compose,
+      defaultNode: rows[0]?.name ?? null,
+    });
+    const address = new Map(rows.map((row) => [row.name, row.address]));
+    const clashes = findPortClashes(
+      candidate,
+      currentDesiredStates(),
+      nodeTopology(),
+      (node) => address.get(node) ?? null,
+    );
+    if (!clashes.length) return;
+    const messages = [
+      ...new Set(
+        clashes.map((clash) => {
+          const canSee =
+            viewer !== undefined &&
+            (!viewer.projects || viewer.projects.includes(clash.otherProject));
+          return portClashMessage(clash, canSee ? clash.otherProject : 'another project');
+        }),
+      ),
+    ];
+    throw httpError(409, messages.join('; '));
   }
   function hostnameConflict(
     host: string,
@@ -2817,6 +2860,19 @@ export async function createApp(
   await collectArtifacts();
   await markMissingArtifacts();
   const receiveDeployment = upload.any();
+  // The checks a deploy makes against other projects, without building or recording anything: `deploy --dry-run`.
+  api('post', '/api/v1/deployments/check', bodyProject, (req, res) => {
+    try {
+      const compose: ComposeFile | undefined = req.body?.compose;
+      if (!compose || typeof compose !== 'object') throw httpError(400, 'compose is required');
+      const project = String(req.body?.project || 'site');
+      resolvePlacement(compose);
+      assertNoPortClash(project, compose, req.actor);
+      res.json({ ok: true });
+    } catch (failure) {
+      sendError(res, failure);
+    }
+  });
   api('post', '/api/v1/deployments', null, (req, res) => {
     receiveDeployment(req, res, (error) => {
       void withWriter(() => deployRequest(req, res, error))
@@ -2914,6 +2970,49 @@ export async function createApp(
     return { ...rest, values };
   }
   /**
+   * Resolves label-based and global placement into concrete node lists (in place) and returns the enabled nodes.
+   * Stale nodes (agent not seen recently) are not scheduled onto, so a dead host cannot hold a rollout open.
+   */
+  function resolvePlacement(compose: ComposeFile): { name: string }[] {
+    const nodeRows = db.all<NodeRow>(
+      'SELECT name,labels_json,last_seen_at,created_at FROM nodes WHERE disabled_at IS NULL ORDER BY created_at,name',
+    );
+    const nodeInfos = nodeRows
+      .filter((row) => !isStale(row))
+      .map((row) => ({
+        name: row.name,
+        labels: row.labels_json ? (JSON.parse(row.labels_json) as string[]) : [],
+        created_at: row.created_at,
+      }));
+    // Resolve label-based and global placement into concrete node lists before validation.
+    for (const svc of Object.values(compose.services || {})) {
+      const ext = (svc['x-tug'] ||= {}) as {
+        placement?: { nodes?: string[]; labels?: string[] };
+        replicas?: number;
+        global?: boolean;
+      };
+      const placement = ext.placement || {};
+      const global = ext.global === true;
+      const labels = Array.isArray(placement.labels) ? placement.labels : [];
+      if (!placement.nodes?.length && (labels.length || global)) {
+        const matched = nodeInfos
+          .filter((node) => labels.every((label) => node.labels.includes(label)))
+          .sort((a, b) => a.name.localeCompare(b.name));
+        if (!matched.length) throw httpError(400, 'no nodes match placement labels');
+        let selected = matched;
+        if (!global) {
+          const replicas = ext.replicas || matched.length;
+          if (!Number.isInteger(replicas) || replicas < 1)
+            throw httpError(400, 'replicas must be a positive integer');
+          selected = matched.slice(0, Math.min(replicas, matched.length));
+        }
+        ext.placement = { ...placement, nodes: selected.map((node) => node.name) };
+        ext.replicas = selected.length;
+      }
+    }
+    return nodeRows.map((row) => ({ name: row.name }));
+  }
+  /**
    * Services that keep data on a node and are placed on different nodes by `compose` than by the current
    * deployment. Deploying such a change starts the service empty on the new node: the data does not move.
    */
@@ -2969,44 +3068,7 @@ export async function createApp(
           400,
           `version cannot start with "${ROLLBACK_VERSION_PREFIX}" (reserved for rollback deployments)`,
         );
-      const nodeRows = db.all<NodeRow>(
-        'SELECT name,labels_json,last_seen_at,created_at FROM nodes WHERE disabled_at IS NULL ORDER BY created_at,name',
-      );
-      // Stale nodes (agent not seen recently) are not scheduled onto, so a dead host cannot hold a rollout open.
-      const nodeInfos = nodeRows
-        .filter((row) => !isStale(row))
-        .map((row) => ({
-          name: row.name,
-          labels: row.labels_json ? (JSON.parse(row.labels_json) as string[]) : [],
-          created_at: row.created_at,
-        }));
-      // Resolve label-based and global placement into concrete node lists before validation.
-      for (const svc of Object.values(compose.services || {})) {
-        const ext = (svc['x-tug'] ||= {}) as {
-          placement?: { nodes?: string[]; labels?: string[] };
-          replicas?: number;
-          global?: boolean;
-        };
-        const placement = ext.placement || {};
-        const global = ext.global === true;
-        const labels = Array.isArray(placement.labels) ? placement.labels : [];
-        if (!placement.nodes?.length && (labels.length || global)) {
-          const matched = nodeInfos
-            .filter((node) => labels.every((label) => node.labels.includes(label)))
-            .sort((a, b) => a.name.localeCompare(b.name));
-          if (!matched.length) throw httpError(400, 'no nodes match placement labels');
-          let selected = matched;
-          if (!global) {
-            const replicas = ext.replicas || matched.length;
-            if (!Number.isInteger(replicas) || replicas < 1)
-              throw httpError(400, 'replicas must be a positive integer');
-            selected = matched.slice(0, Math.min(replicas, matched.length));
-          }
-          ext.placement = { ...placement, nodes: selected.map((node) => node.name) };
-          ext.replicas = selected.length;
-        }
-      }
-      const nodes = nodeRows.map((row) => ({ name: row.name }));
+      const nodes = resolvePlacement(compose);
       for (const [name, svc] of Object.entries(compose.services || {}))
         for (const node of svc['x-tug']?.placement?.nodes || [])
           if (!nodes.some((n) => n.name === node))
@@ -3021,6 +3083,7 @@ export async function createApp(
       }
       assertIngressHostsFree(project, compose, req.actor);
       assertNoReservedIngressPorts(compose);
+      assertNoPortClash(project, compose, req.actor);
       const misplaced = misplacedSecrets(compose);
       if (misplaced.length)
         throw httpError(
@@ -4581,8 +4644,69 @@ export async function createApp(
         return { nodes: ingressNodes.map((n) => n.name) };
       });
     }
+    if (ingressNodes.length) await check('ingress_ports', ingressPortsCheck);
+    await check('resources', async () => {
+      const self = await ownContainer(docker, 'tug-control-control-1');
+      return {
+        resources: await collectResources(docker, {
+          diskPath: DATA_DIR,
+          containers: self ? [{ id: self, label: self }] : [],
+        }),
+      };
+    });
     res.json({ ok: checks.every((c) => c.ok), checks });
   });
+  /**
+   * Opens a TCP connection from control to ports 80 and 443 on each online ingress node's address. This tests the
+   * path from control, which is the node's inter-node address and may be private, so it finds host firewalls
+   * but not a provider firewall that only filters the public address. It sends no data and changes nothing.
+   */
+  async function ingressPortsCheck(): Promise<Record<string, unknown>> {
+    const probe = options.probePort ?? probeTcpPort;
+    const staleSeconds = Number(process.env.TUG_STALE_SECONDS || 60);
+    const rows = db.all<NodeRow>(
+      'SELECT * FROM nodes WHERE ingress=1 AND disabled_at IS NULL ORDER BY name',
+    );
+    const problems: string[] = [];
+    const warnings: string[] = [];
+    const nodes = await Promise.all(
+      rows.map(async (n) => {
+        if (!n.address) {
+          warnings.push(
+            `${n.name}: no address is set, so ports 80 and 443 were not probed; set one with tug node address ${n.name} --to <address>`,
+          );
+          return { name: n.name, probed: false };
+        }
+        if (nodeStatus(n, Date.now(), staleSeconds) !== 'online') {
+          warnings.push(`${n.name}: not reporting, so ports 80 and 443 were not probed`);
+          return { name: n.name, address: n.address, probed: false };
+        }
+        const ports = await Promise.all(
+          INGRESS_PORTS.map(async (port) => ({
+            port,
+            state: await probe(n.address!, port, PORT_PROBE_TIMEOUT_MS),
+          })),
+        );
+        for (const { port, state } of ports)
+          if (state !== 'open') problems.push(describeClosedPort(n.name, n.address!, port, state));
+        return {
+          name: n.name,
+          address: n.address,
+          scope: isPublicAddress(n.address) ? 'public' : 'private',
+          probed: true,
+          ports,
+        };
+      }),
+    );
+    const probed = nodes.filter((n) => n.probed).map((n) => n.name);
+    return {
+      ok: problems.length === 0,
+      nodes,
+      ...(!problems.length && probed.length && { output: `80, 443 open on ${probed.join(', ')}` }),
+      ...(problems.length && { error: problems.join('; ') }),
+      ...(warnings.length && { warnings }),
+    };
+  }
   api('post', '/api/v1/diagnostics/nodes', null, async (req, res) => {
     const nodes = req.body.node
       ? db.all<Pick<NodeRow, 'id'>>(
