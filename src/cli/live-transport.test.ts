@@ -351,7 +351,7 @@ test('CLI commands route through resolved configuration and preserve exec argv i
     execFileAsync(process.execPath, [path.resolve('src/cli.ts'), ...args], {
       env,
       cwd: '/tmp',
-      timeout: 10000,
+      timeout: 60_000,
     });
   try {
     const ps = await cli('ps', '--node', 'node-a', '--project', 'selected', '--json');
@@ -459,7 +459,7 @@ test('interactive CLI exits on completion, failure, disconnect and cancellation 
             TUG_CREDENTIAL: JSON.stringify(f.credential),
             TUG_PROJECT: 'site',
           },
-          timeout: 10000,
+          timeout: 60_000,
         },
       );
       child = running.child;

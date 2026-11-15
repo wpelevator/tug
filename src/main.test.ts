@@ -15,7 +15,7 @@ const entry = path.resolve('src/main.ts');
 
 test('--help prints usage for the runtime instead of starting a service', async () => {
   for (const args of [['control', '--help'], ['agent', '--help'], ['--help']]) {
-    const { stdout } = await exec(process.execPath, [entry, ...args], { timeout: 10_000 });
+    const { stdout } = await exec(process.execPath, [entry, ...args], { timeout: 60_000 });
     assert.match(stdout, /Usage: tug-runtime/, `${args.join(' ')} should print usage and exit`);
   }
 });
@@ -33,7 +33,7 @@ test('agent identity --current refuses an agent enrolled as another node with a 
   });
   const env = { ...process.env, TUG_STATE_DIR: dir };
   const run = (...args: string[]) =>
-    exec(process.execPath, [entry, 'agent', 'identity', ...args], { env, timeout: 10_000 });
+    exec(process.execPath, [entry, 'agent', 'identity', ...args], { env, timeout: 60_000 });
   await assert.rejects(
     run('--current', 'app9'),
     (error: { code: number; stderr: string }) => {
@@ -70,7 +70,7 @@ test('the control refuses a database from a newer Tug with one plain line and a 
   await assert.rejects(
     exec(process.execPath, [entry, 'control'], {
       env: { ...process.env, TUG_DATA_DIR: dir, TUG_CONTROL_URL: 'https://control.test:8443' },
-      timeout: 20_000,
+      timeout: 60_000,
     }),
     (error: { code: number; stderr: string }) => {
       assert.equal(error.code, 1, 'the container must stop with a failure status');

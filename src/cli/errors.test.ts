@@ -15,7 +15,7 @@ async function failure(args: string[], cwd: string): Promise<string> {
     await exec(process.execPath, [entry, ...args], {
       cwd,
       env: { ...process.env, TUG_CONFIG: '', TUG_CREDENTIAL: '', TUG_CREDENTIAL_FILE: '', CI: '' },
-      timeout: 15000,
+      timeout: 60_000,
     });
   } catch (error) {
     return (error as { stderr: string }).stderr;

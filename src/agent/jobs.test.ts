@@ -131,6 +131,14 @@ test('results survive a restart until acknowledged, and a job interrupted by a r
   const { jobs, stateDir } = await runner(docker);
   await jobs.start(command('cmd_1', payload()));
   await settle(jobs, 1);
+  // The result is in memory before the runner writes it, and a restart only sees the file.
+  await until(
+    async () =>
+      (await fs.readFile(path.join(stateDir, 'job-results.json'), 'utf8').catch(() => '')).includes(
+        'cmd_1',
+      ),
+    'the finished result written to job-results.json',
+  );
   const restarted = new JobRunner({ docker, stateDir, fetchCredentials: async () => credentials });
   await restarted.start(command('cmd_bad', { ...payload(), repository: '' }));
   const ids = restarted

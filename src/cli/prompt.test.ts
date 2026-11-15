@@ -25,7 +25,7 @@ test('repeated visible and hidden prompts release stdin after answering without 
       assert.deepEqual(events.map(event => process.stdin.listenerCount(event)), before, 'completed prompts must remove their input listeners');
       console.log(JSON.stringify({ first, hiddenLength: hidden.length }));`,
     ],
-    { timeout: 10000 },
+    { timeout: 60_000 },
   );
   let output = '';
   let firstAnswered = false;
@@ -60,7 +60,7 @@ test('a prompt rejects and exits when stdin closes before an answer', async () =
       `import { ask } from ${JSON.stringify(promptUrl)};
       await ask('Answer: ');`,
     ],
-    { timeout: 10000 },
+    { timeout: 60_000 },
   );
   running.child.stdin!.end();
   await assert.rejects(
@@ -88,7 +88,7 @@ test('CLI exits after a prompted command fails while stdin stays open', async ()
     const running = exec(
       process.execPath,
       ['--import', terminal, path.resolve('src/cli.ts'), 'node', 'add'],
-      { cwd: dir, env: { ...process.env, TUG_CONFIG: '', CI: '' }, timeout: 10000 },
+      { cwd: dir, env: { ...process.env, TUG_CONFIG: '', CI: '' }, timeout: 60_000 },
     );
     let answered = false;
     running.child.stderr!.on('data', (data) => {

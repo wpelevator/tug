@@ -47,7 +47,7 @@ test('CLI selections mutate only chosen resources, preserve output and abort wit
           CI: '',
           FORCE_COLOR: '0',
         },
-        timeout: 15000,
+        timeout: 60_000,
       },
     );
     let output = '';

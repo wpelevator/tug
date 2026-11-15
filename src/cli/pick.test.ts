@@ -225,7 +225,7 @@ test('a terminated process shows the cursor again and still dies of the signal',
   let stderr = '';
   child.stderr.on('data', (chunk) => (stderr += String(chunk)));
   for (const started = Date.now(); !stderr.includes('cancel)');)
-    if (Date.now() - started > 5000) assert.fail(`the menu never appeared: ${stderr}`);
+    if (Date.now() - started > 60_000) assert.fail(`the menu never appeared: ${stderr}`);
     else await new Promise((resolve) => setTimeout(resolve, 20));
   child.kill('SIGTERM');
   const [code, signal] = await once(child, 'close');

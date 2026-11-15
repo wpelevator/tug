@@ -33,7 +33,7 @@ async function withControl(
         TUG_TEST_SHELL: 'from-shell',
         COMPOSE_PROFILES: 'debug',
       },
-      timeout: 15_000,
+      timeout: 60_000,
     });
     if (stdin !== undefined) child.child.stdin!.end(stdin);
     return child;

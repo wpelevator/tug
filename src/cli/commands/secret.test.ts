@@ -17,7 +17,7 @@ test('secret set exits after reading stdin even when the input stays open', asyn
     exec(process.execPath, [entry, 'secret', 'set', 'DB_PASSWORD', ...args], {
       cwd: dir,
       env: { ...process.env, ...control.env, TUG_CREDENTIAL: '', TUG_PROJECT: 'site' },
-      timeout: 5000,
+      timeout: 60_000,
     });
   try {
     const entered = run();

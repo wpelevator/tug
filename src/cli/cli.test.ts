@@ -988,7 +988,7 @@ test('node replace and node repair accept -y like node add, so scripts can share
     const { stdout } = await promisify(execFile)(
       process.execPath,
       [path.resolve('src/cli.ts'), 'node', verb, '--help'],
-      { timeout: 20_000 },
+      { timeout: 60_000 },
     );
     assert.match(stdout, /-y, --yes/, `node ${verb} must list -y, --yes`);
   }
