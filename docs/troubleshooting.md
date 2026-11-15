@@ -24,6 +24,7 @@ tug doctor --nodes
 | `timed out waiting for deployment <id>; it is still rolling out` | The wait ended, and the rollout continues on the nodes | `tug status`, or stop it with `tug deploy cancel <id>` |
 | `<image> is not published yet` from `tug setup` or `tug node add` | A release publishes the npm package a few minutes before its image | Retry shortly, or pass `--image ghcr.io/wpelevator/tug:latest` |
 | `Bind for <address>:<port> failed: port is already allocated` in a failed deployment | Another project on that node publishes the same host port. `tug lint` and `tug deploy --dry-run` cannot see other projects, so the deploy builds first and fails when the agent applies it | Change one published host port, or move one project to another node |
+| `ssh refused <host> because it could not verify the host key` after `Host key verification failed.` from `tug node add`, `tug control setup` or any other command that runs SSH | OpenSSH found a different key for the host in `~/.ssh/known_hosts`, which happens when a provider reuses an IP for a new server, or the host is unknown and there was no terminal to ask on. The connection itself worked | After checking that the server was rebuilt, `ssh-keygen -R <host>` and run the command again. For an unknown host, run `ssh <host>` once and accept the fingerprint. tug leaves `known_hosts` alone |
 | `operation requires --node because placement is ambiguous` | The service runs on several nodes | Add `--node <name>` |
 | `The control did not present a certificate signed by this credential's CA` | The credential file and the deployed control disagree about the CA | [Mismatches](#cli-control-version-or-credentialca-mismatches) |
 | A message naming `tug control upgrade` or `npm i -g @wpelevator/tug@<version>` | CLI and control run different versions | [Mismatches](#cli-control-version-or-credentialca-mismatches) |
@@ -100,7 +101,8 @@ tug doctor
 `doctor` checks the control URL, the network path to TCP 8443 and your operator credential. Then:
 
 - **Re-addressed control:** [Moving the control plane](control-plane.md#moving-the-control-plane).
-- **Lost host:** recover the off-host control archive before restoring workload data, see [Recover control on another host](control-plane.md#recover-control-on-another-host).
+- **Lost host:** recover the off-host control archive before restoring workload data, see [Recover control on another host](control-plane.md#recover-control-on-another-host). A restore ends with `restartRequired: true`, and `tug control restart <ssh-target>` applies it.
+- **`control restored; restart required`:** a restored control rejects requests until it restarts. Run `tug control restart <ssh-target>`.
 - **Compromised credential or node:** [Lost or compromised something](control-plane.md#lost-or-compromised-something).
 
 ## CLI, control version or credential/CA mismatches

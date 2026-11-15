@@ -7,7 +7,7 @@ import { AGENT_VOLUME } from '../migrate.ts';
 import { controlPortCheck, localImageBuildArgs, shellQuote as sh } from '../install.ts';
 import { LIST_ADDRESSES_COMMAND, parseAddressCandidates, sortCandidates } from '../onboarding.ts';
 import type { AddressCandidate } from '../onboarding.ts';
-import { runStep, STAGE_MARKER } from '../process.ts';
+import { runStep, sshHostKeyHint, STAGE_MARKER } from '../process.ts';
 import type { StepProgress } from '../process.ts';
 import { runCapture, templatesDir } from './context.ts';
 
@@ -122,23 +122,29 @@ export async function bootstrapDocker(target: string, progress?: StepProgress): 
   });
 }
 
+/** A probe that cannot get past ssh's host key check says so at once, instead of reading as "no Docker" or "no answer". */
+function probe(target: string, command: string) {
+  const args = ['--', target, command];
+  const result = spawnSync('ssh', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  const hint = sshHostKeyHint('ssh', args, String(result.stderr ?? ''));
+  if (hint) throw new Error(hint);
+  return result;
+}
+
 /** Whether the host already has a working Docker Engine. */
 export function hostHasDocker(target: string): boolean {
-  return (
-    spawnSync('ssh', ['--', target, 'docker version >/dev/null 2>&1'], { stdio: 'ignore' })
-      .status === 0
-  );
+  return probe(target, 'docker version >/dev/null 2>&1').status === 0;
 }
 
 /** The host's short hostname, or undefined when it cannot be read. */
 export function remoteHostname(target: string): string | undefined {
-  const result = spawnSync('ssh', ['--', target, 'hostname -s'], { encoding: 'utf8' });
+  const result = probe(target, 'hostname -s');
   return result.status === 0 ? String(result.stdout).trim() || undefined : undefined;
 }
 
 /** The host's global IPv4 addresses, private ones first; empty when the host cannot say. */
 export function discoverAddresses(target: string): AddressCandidate[] {
-  const result = spawnSync('ssh', ['--', target, LIST_ADDRESSES_COMMAND], { encoding: 'utf8' });
+  const result = probe(target, LIST_ADDRESSES_COMMAND);
   return result.status === 0 ? sortCandidates(parseAddressCandidates(String(result.stdout))) : [];
 }
 

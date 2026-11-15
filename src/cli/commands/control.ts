@@ -2,7 +2,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { withProgress } from '../progress.ts';
 import { formatBytes } from './backup.ts';
-import { runProcess, runStep, STAGE_MARKER } from '../process.ts';
+import { runProcess, runStep, SshHostKeyError, sshHostKeyHint, STAGE_MARKER } from '../process.ts';
 import type { Command } from 'commander';
 import { canPrompt, confirm } from '../prompt.ts';
 import { CONTROL_CONTAINER, defaultControlUrl, shellQuote as sh } from '../install.ts';
@@ -18,7 +18,9 @@ import {
   readControlCaScript,
   rollbackImageScript,
   rollbackTagNeeded,
+  restartControlScript,
   rollbackTagScript,
+  stopControlScript,
 } from '../upgrade.ts';
 import type { ControlInstall } from '../upgrade.ts';
 import { assertImagePublished, defaultImage, resolveImage } from '../../images/image.ts';
@@ -184,6 +186,7 @@ export async function runControlUpgrade(
     progress.stage(`Reading the control installation on ${sshTarget}`);
     const inspection = await runCapture('ssh', ['--', sshTarget, inspectControlScript]).catch(
       (e: unknown) => {
+        if (e instanceof SshHostKeyError) throw e;
         throw new Error(
           `no control installation to upgrade on ${sshTarget} (${errMessage(e)}); \`tug control setup <ssh-target>\` installs one`,
           { cause: e },
@@ -387,7 +390,15 @@ function addSetup(parent: Command, description: string): void {
             console.error(
               'control already has a root credential; upgrade complete (pass --recover-root to replace it)',
             );
-          else throw new Error(`issuing the root credential failed: ${String(out.stderr).trim()}`);
+          else
+            throw new Error(
+              [
+                `issuing the root credential failed: ${String(out.stderr).trim()}`,
+                sshHostKeyHint('ssh', ['--', sshTarget, issue], String(out.stderr)),
+              ]
+                .filter(Boolean)
+                .join('\n'),
+            );
         } else {
           const text = `${String(out.stdout).trim()}\n`;
           decodeCredential(text);
@@ -442,6 +453,83 @@ function addSetup(parent: Command, description: string): void {
     });
 }
 
+interface ContainerOpts {
+  yes?: boolean;
+}
+
+/**
+ * `control stop` and `control restart`: stop, or restart, the control container on the host over SSH. Only the
+ * container changes: the `tug-control` volume, the image and the published ports stay as they are, so a restart brings
+ * back the state on disk (after `control restore`, the restored one).
+ */
+export async function runControlContainer(
+  action: 'stop' | 'restart',
+  sshTargetArg: string | undefined,
+  o: ContainerOpts,
+): Promise<void> {
+  const cfg = await loadCfg();
+  const sshTarget = sshTargetArg ?? cfg.controlSsh;
+  if (!sshTarget)
+    throw new Error(
+      `control ${action} needs the control host: pass <ssh-target> or set controlSsh in ${cfg.file}`,
+    );
+  console.error(
+    [
+      action === 'stop' ? 'Control stop plan' : 'Control restart plan',
+      `  host:      ${sshTarget}`,
+      `  container: ${CONTROL_CONTAINER} (${action === 'stop' ? 'stopped' : 'restarted, or started when stopped'})`,
+      `  kept:      the ${CONTROL_VOLUME} volume, the image and the published ports`,
+      ...(action === 'stop'
+        ? [
+            '  note:      nodes keep serving their workloads, and cannot get new work or report until control runs; `tug control restart` starts it again',
+          ]
+        : []),
+    ].join('\n'),
+  );
+  if (
+    canPrompt() &&
+    !o.yes &&
+    !(await confirm(`${action === 'stop' ? 'Stop' : 'Restart'} control?`))
+  )
+    throw new Error('cancelled; nothing was changed');
+  await withProgress(
+    `${action === 'stop' ? 'Stopping' : 'Restarting'} control on ${sshTarget}`,
+    async (progress) => {
+      await runStep(
+        'ssh',
+        ['--', sshTarget, action === 'stop' ? stopControlScript : restartControlScript],
+        { progress },
+      );
+      if (action === 'stop') {
+        print({ ok: true, sshTarget, container: CONTROL_CONTAINER, stopped: true });
+        return;
+      }
+      progress.stage('Waiting for control to answer');
+      const version = await waitForControlVersion();
+      if (!version)
+        console.error(
+          `control restarted but did not answer yet (or no credential is configured); check \`tug doctor\` and \`docker logs ${CONTROL_CONTAINER}\` on ${sshTarget}`,
+        );
+      print({
+        ok: true,
+        sshTarget,
+        container: CONTROL_CONTAINER,
+        restarted: true,
+        ...(version ? { version } : {}),
+      });
+    },
+  );
+}
+
+const RESTART_NOTE =
+  'control must restart to use the restored state: run `tug control restart [<ssh-target>]` (the SSH target defaults to controlSsh) with your original operator credential';
+
+/** A restore that wants a restart names the command that does it. */
+function noteRestart(result: unknown): void {
+  if ((result as { restartRequired?: boolean } | null)?.restartRequired)
+    console.error(RESTART_NOTE);
+}
+
 export function registerControl(program: Command): void {
   const description =
     'install the control plane on a Docker-capable host over SSH and import the root credential into the local config; it listens for mTLS only, so front it with TCP passthrough rather than a terminating proxy';
@@ -469,6 +557,24 @@ export function registerControl(program: Command): void {
     .action(async (sshTarget: string | undefined, o: UpgradeOpts) => {
       if (!(await runControlUpgrade(sshTarget, o))) process.exitCode = 1;
     });
+  control
+    .command('stop [sshTarget]')
+    .description(
+      `stop the control container over SSH, for example to isolate an old control before a replacement takes over; it touches nothing else (the ${CONTROL_VOLUME} volume, the image and the published ports stay) and stays stopped, also after a reboot of the host, until \`tug control restart\`. The SSH target defaults to controlSsh in the config file`,
+    )
+    .option('-y, --yes', 'do not ask for confirmation in a terminal')
+    .action(async (sshTarget: string | undefined, o: ContainerOpts) =>
+      runControlContainer('stop', sshTarget, o),
+    );
+  control
+    .command('restart [sshTarget]')
+    .description(
+      `restart the control container over SSH (it starts it when it is stopped), as \`tug control restore\` asks; it keeps the ${CONTROL_VOLUME} volume, the image and the published ports, unlike \`control upgrade --force\`, which recreates the container. The SSH target defaults to controlSsh in the config file`,
+    )
+    .option('-y, --yes', 'do not ask for confirmation in a terminal')
+    .action(async (sshTarget: string | undefined, o: ContainerOpts) =>
+      runControlContainer('restart', sshTarget, o),
+    );
   control
     .command('migrate <sshTarget>')
     .description(
@@ -629,6 +735,7 @@ export function registerControl(program: Command): void {
                 o.fromFile!,
               );
               if (verify) console.error(PREVIEW_NOTE);
+              noteRestart(result);
               print(result);
             },
           );
@@ -677,6 +784,7 @@ export function registerControl(program: Command): void {
               verify,
             });
             if (verify) console.error(PREVIEW_NOTE);
+            noteRestart(result);
             print(result);
           },
         );

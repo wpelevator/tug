@@ -84,7 +84,7 @@ Each key is the camelCase of the long flag it supplies a default for, with the s
 | Key | Flag | Commands |
 | --- | --- | --- |
 | `controlUrl` | `--control-url` | All. `control setup` also advertises it and writes it into control's environment |
-| `controlSsh` | `<ssh-target>` of the control host | `control upgrade`, `upgrade` |
+| `controlSsh` | `<ssh-target>` of the control host | `control upgrade`, `control stop`, `control restart`, `upgrade` |
 | `project` | `--project` | Project-scoped commands |
 | `credential` (overlay only) | `--credential` | All |
 | `file` | `-f, --file` | `deploy`, `lint` |
@@ -148,7 +148,7 @@ A choice never bypasses control's validation or confirmation: `restore run` stil
 
 Long operations report progress on stderr. In a terminal that is one live line, `[12s] Pulling the agent image · latest output`, and each finished stage stays as `[12s] label`. Without a terminal, or with `CI` set, it is one line per stage plus an elapsed-time line every ten seconds. Progress covers `deploy`, `rollback`, `backup run`, `restore run`, control backup and restore, `control setup`, node add, replace and repair, node teardown, and the command wait behind `restart`, non-followed `logs` and `doctor` node diagnostics. Timeouts and exit codes are unchanged, and `--no-wait` skips the remote wait and its progress. `node enroll` only prepares instructions and does not wait.
 
-Steps that run on a host over SSH (Docker installation, preflight, image transfer and load, installs) print nothing while they work, so a Docker pull is one stage, not one line per layer. A step that fails prints its last lines. `--verbose` or `TUG_VERBOSE=1` streams the output as it arrives. On `exec` and `run`, everything after the service belongs to the remote command, so put it before: `tug --verbose exec`. For the best display, SSH must authenticate without a prompt. A password or passphrase prompt is shown, but the status line stays hidden until the step prints.
+Steps that run on a host over SSH (Docker installation, preflight, image transfer and load, installs) print nothing while they work, so a Docker pull is one stage, not one line per layer. A step that fails prints its last lines. `--verbose` or `TUG_VERBOSE=1` streams the output as it arrives. On `exec` and `run`, everything after the service belongs to the remote command, so put it before: `tug --verbose exec`. For the best display, SSH must authenticate without a prompt. When OpenSSH refuses a host with `Host key verification failed`, as it does for a stale `~/.ssh/known_hosts` entry left by a provider that reused the IP, the command says so and prints the `ssh-keygen -R <host>` remedy, in every command that runs SSH. tug never edits `known_hosts` or turns off host key checking. A password or passphrase prompt is shown, but the status line stays hidden until the step prints.
 
 ## Setup
 
@@ -158,6 +158,8 @@ Steps that run on a host over SSH (Docker installation, preflight, image transfe
 | `tug setup <ssh-target>` | Shortcut for `tug control setup`. Installs control over SSH, issues the root credential and imports it, so no `init` follows |
 | `tug upgrade` | Runs `control upgrade` on `controlSsh`, then `node upgrade --all`. See [Upgrade control and nodes](upgrades.md) |
 | `tug control upgrade [<ssh-target>]` | Replaces the control container with one on another image |
+| `tug control stop [<ssh-target>]` | Stops the control container. See [`tug control stop` and `tug control restart`](#tug-control-stop-and-tug-control-restart) |
+| `tug control restart [<ssh-target>]` | Restarts the control container, or starts it when it is stopped |
 | `tug control migrate <ssh-target>` | Moves control data from a host directory into the `tug-control` volume. See [Control plane](control-plane.md#moving-control-data-into-the-volume-control-migrate) |
 
 ### `tug setup` and `tug control setup`
@@ -188,6 +190,20 @@ In a terminal, setup offers to install Docker, prints the plan and asks to confi
 | `-y, --yes` | Skip the confirmation |
 
 The SSH target defaults to `controlSsh`. The command carries over the published mTLS bindings, advertised URL and extra names, reuses the data volume, compares the CA before and after, tags the previous image `tug:rollback`, shows the plan, then waits for control to answer and prints its version. Run `tug control backup` first for a backup beyond the `tug.db.pre-v<N>.bak` copy the new control makes.
+
+### `tug control stop` and `tug control restart`
+
+```sh
+tug control stop root@control.example.com
+tug control restart root@control.example.com
+```
+
+Both run `docker stop` or `docker restart` on the control container that `control setup` created, over SSH. The SSH target defaults to `controlSsh`. Nothing else changes: the `tug-control` volume, the image and the published ports stay as they are, unlike `control upgrade --force`, which recreates the container. In a terminal each prints its plan and asks to confirm, and `-y, --yes` skips that. Each prints a JSON result on stdout, and fails with a pointer to `control setup` when the host has no control container.
+
+| Command | Use it to |
+| --- | --- |
+| `control stop` | Isolate an old control while its replacement takes over. Nodes keep serving their workloads and cannot get new work or report until a control runs. The container stays stopped, also after the host reboots |
+| `control restart` | Apply a `control restore`, which prints `restartRequired: true` and names this command, or start a stopped control. It waits for control to answer when a credential is configured |
 
 ### `tug upgrade`
 
@@ -413,7 +429,7 @@ It checks this machine (Node.js and Docker) and the control plane: SQLite, the C
 | --- | --- | --- |
 | `tug control backup` | `--local`, `--no-images`, `--download`, `-o, --output <file>` | Stores a control-plane backup in the backup destination and prints the repository, snapshot id and `stored: destination`. It holds state, PKI and the master key, never build images or workload volumes. With no destination it fails and says how to make an archive. `--local` writes an archive on the control host (including retained build archives unless `--no-images`) and prints `stored: control-host`. `-o <file>` also saves it here (implies `--local` and `--download`), creates it `0600`, refuses to overwrite and prints the path. `--download` alone uses `./tug-control-backup-<id>.tar.gz`. Control also backs itself up every night. See [Control plane backup](backups.md#control-plane-backup) |
 | `tug control backup list` | `--json` | The control backups on the control host and the snapshots stored in the destination, read from the destination, with the ids that `--snapshot` takes |
-| `tug control restore <artifact-path>` | `--confirm` | Restores a control backup that is a path on the control host. Needs a control restart |
+| `tug control restore <artifact-path>` | `--confirm` | Restores a control backup that is a path on the control host. Needs a control restart with [`tug control restart`](#tug-control-stop-and-tug-control-restart) |
 | `tug control restore` | `--from-file <file>` | Uploads an archive from this machine and restores it |
 | `tug control restore` | `--from-destination <url>`, `--env <name>`, `--snapshot <id>`, `--password-stdin` | Restores the newest control backup in a destination, or the named snapshot. Credential variables are read like `backup destination set` reads them, then the control password from `tug backup password --control` (`TUG_CONTROL_BACKUP_PASSWORD`, or the first stdin line with `--password-stdin`, in which case the credential variables must be in the environment). Used for this restore only |
 

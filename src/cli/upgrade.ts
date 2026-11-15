@@ -150,6 +150,19 @@ export const inspectScript = (container: string): string => `docker inspect ${sh
 export const inspectControlScript = inspectScript(CONTROL_CONTAINER);
 export const inspectAgentScript = inspectScript('tug-agent');
 
+const noControlContainer = `echo 'there is no ${CONTROL_CONTAINER} container on this host: \`tug control setup\` installs control' >&2; exit 1`;
+
+/**
+ * `control stop` and `control restart` act on the container `control setup` created and nothing else: not the
+ * `tug-control` volume, the image or the published ports. A stopped container stays stopped, also across a reboot
+ * of the host, because it runs with `--restart unless-stopped`.
+ */
+export const stopControlScript = `docker inspect ${sh(CONTROL_CONTAINER)} >/dev/null 2>&1 || { ${noControlContainer}; }
+docker stop ${sh(CONTROL_CONTAINER)} >/dev/null`;
+/** Starts the container when it is stopped, and restarts it when it runs. */
+export const restartControlScript = `docker inspect ${sh(CONTROL_CONTAINER)} >/dev/null 2>&1 || { ${noControlContainer}; }
+docker restart ${sh(CONTROL_CONTAINER)} >/dev/null`;
+
 /** Tags the image the old container ran, so the upgrade can be undone; skipped when nothing changes image. */
 export function rollbackTagScript(imageId: string): string {
   return `docker tag ${sh(imageId)} ${sh(ROLLBACK_TAG)}`;

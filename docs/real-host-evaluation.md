@@ -457,7 +457,7 @@ None of these blocked the run. Each is listed with its fix in `plan-real-host-pa
 7. **The first failed health deploy gives only the node's message.** The PHP project failed on `web: http 404` because the example path had no route. That is correct, but the message does not name the URL requested.
 8. **The deploy summary label does not change for a secret-only change.** `express git-bdf4dabe325f` was printed for both the original and the secret rotation, which are different deployments.
 9. **`tug doctor` fails the whole check on a machine without Docker.** The laptop had no Docker daemon, so the `docker` check printed `FAIL` and the command said `Problems found`, although Docker is needed on the laptop only for `--build-local`.
-10. **A stale `known_hosts` entry for a reused provider IP blocks the first SSH** (`Host key verification failed`). That is OpenSSH and not tug, but `tug node add` showed it as a connection failure.
+10. **A stale `known_hosts` entry for a reused provider IP blocks the first SSH** (`Host key verification failed`). That is OpenSSH and not tug, but `tug node add` showed it as a connection failure. tug explains the refusal and prints the `ssh-keygen -R <host>` remedy, see [Troubleshooting](troubleshooting.md#find-the-message).
 11. **tug exposes no host metrics.** The overhead above came from `docker stats` over SSH. `tug doctor --node` reports Docker and Caddy state but not CPU, memory or disk.
 
 ### Rolling, rollback, upgrade and recovery
@@ -474,7 +474,7 @@ Run on the same VMs, two extra 1 vCPU, 2 GB Ubuntu hosts for the upgrade and the
 
 Two more findings from these runs:
 
-12. **There is no `tug` command to stop or restart control.** Isolating the old control needed `docker stop` over SSH, and the restart that `control restore` asks for (`restartRequired: true`) was done with `tug control upgrade <host> --force -y`, which works but is not what the restore output suggests.
+12. **There is no `tug` command to stop or restart control.** Isolating the old control needed `docker stop` over SSH, and the restart that `control restore` asks for (`restartRequired: true`) was done with `tug control upgrade <host> --force -y`, which works but is not what the restore output suggests. `tug control stop` and `tug control restart` now cover both, see [`tug control stop` and `tug control restart`](cli.md#tug-control-stop-and-tug-control-restart).
 13. **The default version label comes from the Compose file only.** A source change under `build:` (v1, v2, v3, v4 of the Express app) printed `git-25bdc82f8359` every time, so the deploy summary and `status` cannot tell the builds apart. It is documented for `--version` but easy to misread in a rollback line.
 
 ### Not covered
