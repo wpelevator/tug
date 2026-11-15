@@ -26,13 +26,17 @@ Before 1.0 semver gives no guarantees, so the whole `0.minor` is the compatibili
 
 ## Upgrading to 3.0: values come only from control
 
-`tug deploy` no longer reads the shell environment of the machine that runs it, the `.env` next to the Compose file, `env_file` entries or `COMPOSE_PROFILES`. A `${NAME}` is filled from a project secret, a project variable, `--var` or the default in the file ([Where values come from](compose.md#where-values-come-from)). Before upgrading the CLI that your laptop and CI use:
+`tug deploy` no longer reads the shell environment of the machine that runs it, the `.env` next to the Compose file, `env_file` entries or `COMPOSE_PROFILES`. A `${NAME}` is filled from a project secret, a project variable, `--var` or the default in the file ([Where values come from](compose.md#where-values-come-from)).
 
-1. Run `tug deploy --dry-run` with the 3.0 CLI in a copy of the project: it prints every name with its source and fails naming the ones control lacks.
-2. Move what you relied on into control: `tug secret import .env` (every entry becomes a secret unless `--vars` names it, and in a terminal you confirm the list or choose per entry with `--select`), or `tug secret set` and `tug var set` one by one. In CI, set variables with `tug var set` or pass `--var TAG=$GITHUB_SHA`.
-3. Replace each `env_file:` with `environment:` entries (`KEY: ${KEY}`) once its values are in control, and replace `COMPOSE_PROFILES=x` with `tug deploy --profile x` or `profile: [x]` in `tug.yml`.
+3.0 is a new major, so the CLI, control and agents move together. A 3.0 CLI is refused by a 2.x control, and a 2.x CLI refuses to run against a 3.0 control with `update the CLI with: npm i -g @wpelevator/tug@<version>`. Upgrade in this order:
 
-Control 3.0 reads the database written by 2.x and adds `project_vars` and a value record to deployments; deployments made before the upgrade have no record. A 2.x CLI keeps working against a 3.0 control, since the value record is optional, but it still resolves values on the machine that runs it.
+1. Install the 3.0 CLI on one machine and run `tug upgrade`. It upgrades control and then every node, see [Upgrade control and nodes](upgrades.md).
+2. Run `tug deploy --dry-run` in a copy of each project. It prints every name with its source and fails naming the ones control lacks. It needs a 3.0 control, so it comes after step 1.
+3. Move what you relied on into control: `tug secret import .env` (every entry becomes a secret unless `--vars` names it, and in a terminal you confirm the list or choose per entry with `--select`), or `tug secret set` and `tug var set` one by one. In CI, set variables with `tug var set` or pass `--var TAG=$GITHUB_SHA`.
+4. Replace each `env_file:` with `environment:` entries (`KEY: ${KEY}`) once its values are in control, and replace `COMPOSE_PROFILES=x` with `tug deploy --profile x` or `profile: [x]` in `tug.yml`.
+5. Update the CLI in CI and on every other laptop. Until you do, they are refused by the 3.0 control.
+
+Control 3.0 reads the database written by 2.x and adds `project_vars` and a value record to deployments. Deployments made before the upgrade have no record.
 
 ## What 1.0 freezes
 
