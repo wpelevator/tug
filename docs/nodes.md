@@ -68,7 +68,7 @@ tug --control-url https://127.0.0.1:18082 node add root@app1.example.com --name 
 
 ### Small hosts
 
-A 1 GB VPS is enough for one site (a database and WordPress together use a few hundred MB) and not for much else. Ubuntu's `unattended-upgrades` and `apt-check` can run for hours on such a host and starve Docker of memory and CPU until commands time out. During testing one pegged a 1 GB node at load 16. Tug does not manage host updates, so schedule them for a quiet window or disable the timers (`systemctl disable --now apt-daily.timer apt-daily-upgrade.timer`) and patch deliberately. A control plane and a node on the same host also compete for port 8443 if a service publishes it, which is why the WordPress example is not meant to share a host with control until [M15](design/roadmap.md#m15--flexible-node-roles).
+A 1 GB VPS is enough for one site (a database and WordPress together use a few hundred MB) and not for much else. Ubuntu's `unattended-upgrades` and `apt-check` can run for hours on such a host and starve Docker of memory and CPU until commands time out. During testing one pegged a 1 GB node at load 16. Tug does not manage host updates, so schedule them for a quiet window or disable the timers (`systemctl disable --now apt-daily.timer apt-daily-upgrade.timer`) and patch deliberately. A control plane and a node on the same host also compete for port 8443 if a service publishes it, which is why the WordPress example is not meant to share a host with control until [M15](roadmap.md#m15--flexible-node-roles).
 
 ## Certificates, renewal and recovery
 

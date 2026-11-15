@@ -127,7 +127,7 @@ A WordPress multisite can serve sites on different top-level domains (domain map
 
 ## Edge features
 
-The generated Caddyfile is small: per host one `reverse_proxy` with `lb_policy round_robin` and the resilience settings below, the TLS mode and the optional ACME email. It has no compression, response headers, timeouts or body limit. The proposals for more are in [Ingress edge features](design/ingress.md).
+The generated Caddyfile is small: per host one `reverse_proxy` with `lb_policy round_robin` and the resilience settings below, the TLS mode and the optional ACME email. It has no compression, response headers, timeouts or body limit. The proposals for more are in [Ingress edge features](ingress-features.md).
 
 It needs a current Caddy 2 image. The directives were tested against 2.11.7. A node that cached an older `caddy:2-alpine` is never re-pulled, so Caddy rejects the config, ingress reports `failed` and deployments for routed projects wait for it. Pull a newer image on that node, or set `TUG_CADDY_IMAGE` to a pinned tag, and recreate the container.
 
@@ -170,7 +170,7 @@ A `ports` entry such as `"3306:3306"` would listen on every interface of the nod
 
 A configured node `address` is the same one other nodes resolve the service to and the ingress dials, so cross-node names and upstreams keep working when the private network is reachable.
 
-"Only the managed Caddy on this node" means this node is the only ingress node, the service runs on it, and every service of the project runs only on nodes where this service also runs, so no other node reaches it through a service name. That is the [small reference topology](design/roadmap.md#reference-topology): app, database and Caddy on one node. Only the entry that publishes `x-tug.ingress.port` moves to loopback, and other ports of the service follow the rest of the table.
+"Only the managed Caddy on this node" means this node is the only ingress node, the service runs on it, and every service of the project runs only on nodes where this service also runs, so no other node reaches it through a service name. That is the [small reference topology](roadmap.md#reference-topology): app, database and Caddy on one node. Only the entry that publishes `x-tug.ingress.port` moves to loopback, and other ports of the service follow the rest of the table.
 
 | Detail | Behavior |
 | --- | --- |
@@ -227,4 +227,4 @@ sequenceDiagram
 
 ## Verifying
 
-`npm run test:integration:network` starts three privileged fake VPSes with plain numeric node `address` values (`vps-c` as ingress node), deploys `tests/integration/compose/docker-compose.network-sample.yml`, and checks a container on `vps-b` fetching `http://web:8080` by its cross-node service name, Caddy on `vps-c` serving `app.test` from `vps-a`, and published ports bound to the intended private node addresses. See [Development](contributing/development.md#integration-test).
+`npm run test:integration:network` starts three privileged fake VPSes with plain numeric node `address` values (`vps-c` as ingress node), deploys `tests/integration/compose/docker-compose.network-sample.yml`, and checks a container on `vps-b` fetching `http://web:8080` by its cross-node service name, Caddy on `vps-c` serving `app.test` from `vps-a`, and published ports bound to the intended private node addresses. See [Development](development.md#integration-test).

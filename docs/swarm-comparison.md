@@ -36,7 +36,7 @@ This is a source and documentation assessment, not a comparative benchmark or a 
 | One-off work | `tug exec`, service-derived `tug run`, scheduled backup commands and restore holds. | Replicated/global jobs are available through the service CLI. [D14] | Swarm has job primitives; Tug bundles application operating tasks. Neither fact implies a general built-in cron service. |
 | Diagnostics | JSON or human-readable status, events, doctor and live container commands; metrics, alerting and webhooks remain planned. | Task states, service inspection/logs and Docker events. [D15][D16] | Neither core product is a complete monitoring stack. |
 
-Tug evidence: [Architecture](../architecture.md), [Compose extensions](../compose.md), [Networking](../networking.md), [Access control](../access-control.md), [Control plane](../control-plane.md), [Backups](../backups.md) and [Observability](observability.md). Code references for the less obvious differences follow below. Docker references are listed under [Sources](#sources).
+Tug evidence: [Architecture](architecture.md), [Compose extensions](compose.md), [Networking](networking.md), [Access control](access-control.md), [Control plane](control-plane.md), [Backups](backups.md) and [Observability](observability.md). Code references for the less obvious differences follow below. Docker references are listed under [Sources](#sources).
 
 ## Where Tug is better suited
 
@@ -44,7 +44,7 @@ Tug evidence: [Architecture](../architecture.md), [Compose extensions](../compos
 
 Tug can accept a source context, build the application image on control, retain it as an immutable artifact and deliver it to agents over their existing authenticated connection. Local builds are also supported. An operator does not need to set up an application registry to use that path. Published third-party images still come from their upstream registries; this is not an offline deployment system.
 
-Swarm's stack workflow expects images to be built separately, and its documented distribution workflow uses a registry; `build` is ignored by stack deployment. [D2] A Swarm installation can add CI builds and a registry, but Tug already integrates those steps. Its corresponding cost is concentrating build execution, artifact bandwidth and storage on control. See [image delivery](../control-plane.md#image-delivery-without-a-registry) and [`src/images/build.ts`](../../src/images/build.ts).
+Swarm's stack workflow expects images to be built separately, and its documented distribution workflow uses a registry; `build` is ignored by stack deployment. [D2] A Swarm installation can add CI builds and a registry, but Tug already integrates those steps. Its corresponding cost is concentrating build execution, artifact bandwidth and storage on control. See [image delivery](control-plane.md#image-delivery-without-a-registry) and [`src/images/build.ts`](../src/images/build.ts).
 
 Tug also refuses to publish an unresolved image tag. Swarm can warn and let workers resolve it independently; explicit digest references avoid that fallback. [D4] This gives Tug a stricter default for published-image identity, rather than a unique ability to pin images.
 
@@ -52,7 +52,7 @@ Tug also refuses to publish an unresolved image tag. Swarm can warn and let work
 
 Tug combines hostname ownership checks, Caddy/ACME, per-project credentials, deployment audit history, scheduled restic backups, a backup catalog and guarded restores. This closely matches the work of operating WordPress sites. These are useful product integrations beyond the scheduling and service-networking primitives in Swarm's core. A fair alternative is Swarm plus a proxy, CI, backup tooling and an access layer; that assembled system can close much of the workflow gap, with more integration to own.
 
-Backup convenience is not a consistency guarantee. Database commands and file snapshots can describe different instants; live database files need an application-appropriate backup method. See [Backups](../backups.md). Likewise, a project rollback restores desired images/configuration, not database schema, uploads or external effects.
+Backup convenience is not a consistency guarantee. Database commands and file snapshots can describe different instants; live database files need an application-appropriate backup method. See [Backups](backups.md). Likewise, a project rollback restores desired images/configuration, not database schema, uploads or external effects.
 
 ### An outbound management channel
 
@@ -64,13 +64,13 @@ Swarm requires reachable manager endpoints and, for overlay networking, peer con
 
 Tug exposes a narrow application-oriented API with named actors and built-in roles/projects. This is more convenient than granting a deployment job unrestricted manager Docker access. Swarm's default authorization can be extended with plugins, so it is inaccurate to say Swarm cannot have scoped access. [D12] Docker events also exist; Tug's distinction is an application deployment history that records the acting credential, rather than the mere existence of events. [D16]
 
-These controls do not make Tug a hostile-tenant platform. Deployment authors must be trusted with their selectable hosts, co-located workloads and runtime secrets. See the current [access boundaries](../access-control.md) and [security findings](security-audit.md); some findings remain partial, and this report does not re-audit them.
+These controls do not make Tug a hostile-tenant platform. Deployment authors must be trusted with their selectable hosts, co-located workloads and runtime secrets. See the current [access boundaries](access-control.md) and [security findings](security-audit.md); some findings remain partial, and this report does not re-audit them.
 
 ## Where Tug is worse or more limited
 
 ### Scheduling is resolved at an operation, not continuously
 
-At deploy, [`src/control/control.ts`](../../src/control/control.ts) resolves label/global placement to named nodes. Label candidates are sorted by name and sliced to the requested count. `tug scale` also selects a concrete node list, using registration order. Agents reconcile that assignment; there is no controller continuously moving replicas to replace lost nodes or adding newly enrolled nodes to global services.
+At deploy, [`src/control/control.ts`](../src/control/control.ts) resolves label/global placement to named nodes. Label candidates are sorted by name and sliced to the requested count. `tug scale` also selects a concrete node list, using registration order. Agents reconcile that assignment; there is no controller continuously moving replicas to replace lost nodes or adding newly enrolled nodes to global services.
 
 There are several practical consequences:
 
@@ -80,27 +80,27 @@ There are several practical consequences:
 - CPU/memory settings can constrain individual containers, but Tug does not reserve capacity before placement. A deployment can overload a selected node.
 - `node disable` revokes management access and removes endpoints; it neither stops the existing containers nor drains them elsewhere.
 
-See [`src/control/placement.test.ts`](../../src/control/placement.test.ts), [`src/container-spec.ts`](../../src/container-spec.ts) and the [CLI](../cli.md). Swarm has continuing task replacement and resource-aware placement, and its drain operation moves eligible service tasks. [D3][D14][D18] These semantics matter more than both tools having a `replicas` field.
+See [`src/control/placement.test.ts`](../src/control/placement.test.ts), [`src/container-spec.ts`](../src/container-spec.ts) and the [CLI](cli.md). Swarm has continuing task replacement and resource-aware placement, and its drain operation moves eligible service tasks. [D3][D14][D18] These semantics matter more than both tools having a `replicas` field.
 
 ### Remote service names are a weaker contract
 
 Tug's remote names map to host addresses, require published ports and do not provide a service VIP or general load balancing. A changed hosts entry changes the client container definition, which can recreate or roll that client. This couples endpoint churn to otherwise unrelated application restarts.
 
-Rolling web services are especially constrained: the active host port changes per revision, but a hosts entry carries no port. A remote client must use the ingress hostname, rather than the declared service host port. On the same node, both old and new revisions can share the service alias during overlap, allowing local name traffic to reach a candidate before it is healthy. Only the ingress path supplies the documented readiness gate. See [Networking](../networking.md#rolling-services-and-service-names).
+Rolling web services are especially constrained: the active host port changes per revision, but a hosts entry carries no port. A remote client must use the ingress hostname, rather than the declared service host port. On the same node, both old and new revisions can share the service alias during overlap, allowing local name traffic to reach a candidate before it is healthy. Only the ingress path supplies the documented readiness gate. See [Networking](networking.md#rolling-services-and-service-names).
 
 Swarm's DNS/VIP and overlay remove the need to publish an internal database port to the host network and provide a stable service endpoint across task changes. [D5] This is a substantial advantage for applications with many cross-node dependencies.
 
 ### Web rollouts cover a narrower failure model
 
-Tug's candidate/drain mechanism is useful for ingress-fronted stateless services, and a rejected candidate leaves the prior revision serving. Deployment success also waits for enabled managed-ingress nodes to acknowledge the current routing configuration when routes change; this verifies applied configuration, not external DNS, certificate issuance or a successful public request. Without an enabled ingress node, convergence covers service health only. See [deployment convergence](../architecture.md#desired-state-and-reconciliation).
+Tug's candidate/drain mechanism is useful for ingress-fronted stateless services, and a rejected candidate leaves the prior revision serving. Deployment success also waits for enabled managed-ingress nodes to acknowledge the current routing configuration when routes change; this verifies applied configuration, not external DNS, certificate issuance or a successful public request. Without an enabled ingress node, convergence covers service health only. See [deployment convergence](architecture.md#desired-state-and-reconciliation).
 
 It is not a general rolling-update engine for workers, TCP-only services or services with several published ports. There is no configurable cluster-wide batch size or tolerated failure ratio. Swarm exposes those update controls. [D7]
 
-Local reconciliation also differs: [`ensureContainer` in `src/agent/reconciler.ts`](../../src/agent/reconciler.ts) restarts a stopped matching container but reuses a running matching container. Repeated failed health checks do not, by themselves, replace that unhealthy running container. Swarm replaces failed/unhealthy tasks. [D3] Neither approach establishes that a service is application-correct merely because a health check passes.
+Local reconciliation also differs: [`ensureContainer` in `src/agent/reconciler.ts`](../src/agent/reconciler.ts) restarts a stopped matching container but reuses a running matching container. Repeated failed health checks do not, by themselves, replace that unhealthy running container. Swarm replaces failed/unhealthy tasks. [D3] Neither approach establishes that a service is application-correct merely because a health check passes.
 
 ### One control plane is a real availability limit
 
-Tug intentionally has one writer. Existing containers and already-configured Caddy can keep serving during a control outage, but `pollOnce` fetches work before reconciling: without control, the agent does not keep applying an independently cached desired state. Docker restart policies can still restart configured containers. Deploys, endpoint/config updates and newly scheduled backup work wait for control to return. See [`src/agent/agent.ts`](../../src/agent/agent.ts) and [`src/backup/scheduler.ts`](../../src/backup/scheduler.ts).
+Tug intentionally has one writer. Existing containers and already-configured Caddy can keep serving during a control outage, but `pollOnce` fetches work before reconciling: without control, the agent does not keep applying an independently cached desired state. Docker restart policies can still restart configured containers. Deploys, endpoint/config updates and newly scheduled backup work wait for control to return. See [`src/agent/agent.ts`](../src/agent/agent.ts) and [`src/backup/scheduler.ts`](../src/backup/scheduler.ts).
 
 Swarm can run with one manager too; three managers are required to tolerate one manager loss while retaining quorum, not to run Swarm at all. Existing tasks continue if quorum is lost, but orchestration cannot proceed. [D13] Tug's backup/restore path is disaster recovery, not an equivalent to replicated managers.
 
@@ -152,7 +152,7 @@ Using Swarm as a backend is technically plausible: Tug could retain builds, acce
 
 ## Sources
 
-Tug implementation reviewed: [`src/control/control.ts`](../../src/control/control.ts) (deploy placement, scale, access checks, convergence), [`src/agent/agent.ts`](../../src/agent/agent.ts) (work fetch before reconciliation and live operations), [`src/agent/reconciler.ts`](../../src/agent/reconciler.ts) (local replacement and rollout state), [`src/container-spec.ts`](../../src/container-spec.ts) (resources and secret substitution), [`src/ingress.ts`](../../src/ingress.ts), [`src/pki.ts`](../../src/pki.ts), [`src/agent/credential.ts`](../../src/agent/credential.ts), [`src/backup/scheduler.ts`](../../src/backup/scheduler.ts) and [`src/backup/restore.ts`](../../src/backup/restore.ts). Existing behavior coverage includes [`src/control/placement.test.ts`](../../src/control/placement.test.ts), [`src/agent/reconciler.test.ts`](../../src/agent/reconciler.test.ts), [`src/control/rollout.test.ts`](../../src/control/rollout.test.ts), [`src/agent/network.test.ts`](../../src/agent/network.test.ts), [`src/control/mtls.test.ts`](../../src/control/mtls.test.ts) and [`tests/integration`](../../tests/integration).
+Tug implementation reviewed: [`src/control/control.ts`](../src/control/control.ts) (deploy placement, scale, access checks, convergence), [`src/agent/agent.ts`](../src/agent/agent.ts) (work fetch before reconciliation and live operations), [`src/agent/reconciler.ts`](../src/agent/reconciler.ts) (local replacement and rollout state), [`src/container-spec.ts`](../src/container-spec.ts) (resources and secret substitution), [`src/ingress.ts`](../src/ingress.ts), [`src/pki.ts`](../src/pki.ts), [`src/agent/credential.ts`](../src/agent/credential.ts), [`src/backup/scheduler.ts`](../src/backup/scheduler.ts) and [`src/backup/restore.ts`](../src/backup/restore.ts). Existing behavior coverage includes [`src/control/placement.test.ts`](../src/control/placement.test.ts), [`src/agent/reconciler.test.ts`](../src/agent/reconciler.test.ts), [`src/control/rollout.test.ts`](../src/control/rollout.test.ts), [`src/agent/network.test.ts`](../src/agent/network.test.ts), [`src/control/mtls.test.ts`](../src/control/mtls.test.ts) and [`tests/integration`](../tests/integration).
 
 Docker primary documentation, consulted 2 November 2026. The service CLI is used to verify actual Swarm options; the Compose specification describes policy vocabulary and does not imply that every current Compose feature is accepted by `docker stack deploy`.
 

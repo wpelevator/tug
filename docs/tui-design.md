@@ -20,8 +20,8 @@ The full screen needs a terminal on stdin and stdout; without one, `tug tui` say
 
 Feasible with what exists, and built without a controller change beyond one small read route. Four things shaped it:
 
-1. **Polling is the floor, push is the fast path.** `GET /api/v1/status` is one bounded read (projects, the 20 latest deployments, nodes, per-node project status), so polling it every 3 seconds is cheap and is the baseline. The screen also opens control's [watch channel](../architecture.md#operator-watch-channel) and, while it is open, refetches only what a hint names, takes new events from the stream without a request, and polls a quarter as often as a backstop. The header says `● live · push` then. Without the channel (an older control, a proxy that drops WebSockets) it polls at the normal rate and nothing else changes.
-2. **Live detail already has a channel.** `ps`, `inspect`, `logs --follow` and `exec -t` run through the WebSocket live channel ([CLI](../cli.md#services-and-volumes), `runCliLive` in `src/cli/live.ts`), including PTY resize. The screen reuses that transport for the log view, the inspection pane and the shell, so those features are not new protocol.
+1. **Polling is the floor, push is the fast path.** `GET /api/v1/status` is one bounded read (projects, the 20 latest deployments, nodes, per-node project status), so polling it every 3 seconds is cheap and is the baseline. The screen also opens control's [watch channel](architecture.md#operator-watch-channel) and, while it is open, refetches only what a hint names, takes new events from the stream without a request, and polls a quarter as often as a backstop. The header says `● live · push` then. Without the channel (an older control, a proxy that drops WebSockets) it polls at the normal rate and nothing else changes.
+2. **Live detail already has a channel.** `ps`, `inspect`, `logs --follow` and `exec -t` run through the WebSocket live channel ([CLI](cli.md#services-and-volumes), `runCliLive` in `src/cli/live.ts`), including PTY resize. The screen reuses that transport for the log view, the inspection pane and the shell, so those features are not new protocol.
 3. **Two things cannot be shown honestly yet.** CPU, memory, disk and restart counts need the agent stats of [M9](observability.md#node-and-service-stats-reported-by-agents); until then the screen shows container state from `ps` on demand and nothing resembling `top`. The caller's own role is not in the credential file (`Credential` holds only url, CA, certificate and key), so control gained `GET /api/v1/whoami` (`read`), which returns the credential name, role and project scope; a control without it leaves the role unknown and the screen lets the control decide.
 4. **Roles shape the screen.** `GET /api/v1/nodes`, diagnostics, credentials and backup destination are `admin`; `logs`, `exec`, `ps` and `inspect` are `deploy`; the rest is `read`. A `read` credential still gets nodes from `status`, but without address, ingress and labels, and the screen never asks for admin-only routes it cannot use.
 
@@ -49,7 +49,7 @@ Opened first, often daily, often left running on a second monitor. This is the s
 | --- | --- | --- |
 | Control reachable, and how stale this screen is | the poll itself | Show seconds since the last good poll; never show old data as current. |
 | Control version against the CLI version | `GET /api/v1/version` | Version skew between CLI and control is a known failure mode; show it in the header. |
-| Nodes online, stale, disabled, last seen | `status` | `stale` means no recent contact, not that the machine is off ([Nodes](../nodes.md#status-and-diagnostics)). |
+| Nodes online, stale, disabled, last seen | `status` | `stale` means no recent contact, not that the machine is off ([Nodes](nodes.md#status-and-diagnostics)). |
 | Per project: current deployment, version, state, age, who deployed | `status` | The current deployment can fall outside the 20 returned rows; show "not in recent results" rather than hide the project. |
 | Services serving against expected, per node | `status` (`serviceStates`) | `serving` is a rollout state, distinct from node connectivity and deployment state. |
 | Backup freshness per target, last failure | `backups` | The same signal as `tug backup list --check`: stale, failed or missed. A project with no backup targets shows `-` rather than a problem; only `--check` treats it as unprotected. |
@@ -81,7 +81,7 @@ Question: what, where, why, what do I do?
 
 The path is always the same, and the screen makes it a drill-down: attention line, project, service, node, detail.
 
-- Failure reason: `rolloutError`, the agent's `error`, the failing health check ([Health checks](../health-checks.md)).
+- Failure reason: `rolloutError`, the agent's `error`, the failing health check ([Health checks](health-checks.md)).
 - Placement: which nodes run this service, which of them are healthy.
 - Container truth: state, exit code, restarts, image digest, published port (`ps`, `inspect` through `live`; `inspect` redacts environment values).
 - Timeline: events for the project, newest first, with the acting credential.
@@ -93,7 +93,7 @@ Question: how bad, and what is on it?
 
 - Status, last seen, address, ingress capability, labels (`nodes`, admin), certificate expiry and clock skew (`diagnostics`, admin).
 - Blast radius: every project and service placed on it, and whether another node serves them (`status`).
-- Actions: run host diagnostics through its agent (admin, waits), disable (admin, confirm by typing the name). Replacing or repairing a node is an SSH flow ([Nodes](../nodes.md)); the screen prints the command to run rather than doing it, so it never needs a way into the host.
+- Actions: run host diagnostics through its agent (admin, waits), disable (admin, confirm by typing the name). Replacing or repairing a node is an SSH flow ([Nodes](nodes.md)); the screen prints the command to run rather than doing it, so it never needs a way into the host.
 
 ### 5. Are backups working, and can I restore?
 
@@ -117,7 +117,7 @@ Volumes and their nodes, secret names with versions (never values), credential l
 
 1. **Attention first.** The first screen is the ranked problems, not a menu of resources. K9s shows a resource table because Kubernetes has hundreds of objects; Tug has a dozen, so the screen can afford to judge.
 2. **Never display stale data as current.** Every pane carries its data age. A failed poll turns the header to "disconnected" and shows how old the data is; it never blanks or silently freezes.
-3. **Four states stay separate.** Node connectivity, project apply result, service rollout state and deployment state are different facts ([Terminology](../terminology.md)). Use their own words and columns; do not collapse them into one traffic light except in the summary, where the rule is written down.
+3. **Four states stay separate.** Node connectivity, project apply result, service rollout state and deployment state are different facts ([Terminology](terminology.md)). Use their own words and columns; do not collapse them into one traffic light except in the summary, where the rule is written down.
 4. **Read-only is the default posture.** Mutations appear only when the role allows them, are marked, and ask before acting. `--readonly` refuses them with a stated reason.
 5. **Nothing the CLI cannot do.** Every action maps to an existing command and API route, so the audit trail, project lock and role checks are the ones already tested. The screen adds no privileged path.
 6. **No new infrastructure.** No daemon, no extra port, no state on disk and no new dependency.
@@ -191,7 +191,7 @@ Confirmations are a `y/N` prompt naming the project and action, and only `y` con
 
 ## Architecture
 
-The screen is a thin client in `src/cli/tui/`, registered as `tug tui` in `src/cli/commands/tui.ts`, using the same config resolution and `request()` as `tug status`. It imports no control or agent code ([Architecture](../architecture.md#source-layout)). Everything that decides what is shown is a pure function of a snapshot, so it is tested without a terminal.
+The screen is a thin client in `src/cli/tui/`, registered as `tug tui` in `src/cli/commands/tui.ts`, using the same config resolution and `request()` as `tug status`. It imports no control or agent code ([Architecture](architecture.md#source-layout)). Everything that decides what is shown is a pure function of a snapshot, so it is tested without a terminal.
 
 | File | Role |
 | --- | --- |
@@ -235,10 +235,10 @@ No new runtime dependency. Alternatives considered:
 
 ### Prerequisites
 
-None blocked the first three phases. In order of value, each an additive minor under [the frozen contracts](../releases.md#what-10-freezes):
+None blocked the first three phases. In order of value, each an additive minor under [the frozen contracts](releases.md#what-10-freezes):
 
 1. **`GET /api/v1/whoami`** (`read`): done. It lets the screen hide actions the role cannot use instead of learning from a 403, and is useful to `tug` itself.
-2. **Events cursor and change feed** (`events?after=`, `GET /api/v1/watch`): done, see [Architecture](../architecture.md#operator-watch-channel).
+2. **Events cursor and change feed** (`events?after=`, `GET /api/v1/watch`): done, see [Architecture](architecture.md#operator-watch-channel).
 3. **Agent stats and `/metrics`** ([M9](observability.md)). Adds CPU, memory, disk, restarts and a sparkline column to services and nodes. Without it the screen does not pretend to be `top`.
 4. **A single summary endpoint**, only if the multi-call poll proves heavy. `status`, `backups` and `restores` for one screen are a few small reads; measure before adding a route.
 
@@ -252,7 +252,7 @@ None blocked the first three phases. In order of value, each an additive minor u
 
 ## Testing
 
-Per [Testing](../contributing/testing.md), with assertion messages that state the expected behavior. All of it runs in `npm test` without a terminal or Docker:
+Per [Testing](testing.md), with assertion messages that state the expected behavior. All of it runs in `npm test` without a terminal or Docker:
 
 - `derive.test.ts`: snapshots to attention lines and counters, covering failed applies, stale nodes whose last report must not count, unreachable control, failed, stuck and rolled-back deployments, backup problems, interrupted restores, version skew, an unreadable report and a never-connected node.
 - `render.test.ts`: frames at 100x26, 80x24, 60x14 and 40x8 are exactly the terminal's size and never wider than its columns; the overview order, the healthy and connecting states, a failing control, a short terminal, wide characters and escape sequences from workloads, colour and `NO_COLOR`, drill-down, placement detail, a deployment outside the returned rows, and filter syntax.
@@ -274,7 +274,7 @@ Not covered by automated tests: a full run against a live agent with a real cont
 
 ## Command name
 
-The name is part of the CLI contract, so it is hard to change after release ([Releases](../releases.md#what-10-freezes)). Candidates:
+The name is part of the CLI contract, so it is hard to change after release ([Releases](releases.md#what-10-freezes)). Candidates:
 
 | Name | For | Against |
 | --- | --- | --- |
@@ -286,7 +286,7 @@ The name is part of the CLI contract, so it is hard to change after release ([Re
 | `tug term`, `tug terminal` | Plain words. | In Tug a terminal is the interactive shell of `exec -t`, so these read as a way to open one; `term` also reads as terminology. |
 | `tug dash` | Short. | Same clash as `ui` with a future web dashboard. |
 | `tug console` | Matches Docker and Rails habits. | Collides with the [console](consoles.md) concept. |
-| `tug k9s`-like brand names | Instantly understood by Kubernetes users. | Borrowed branding; vocabulary [Terminology](../terminology.md) asks not to import. |
+| `tug k9s`-like brand names | Instantly understood by Kubernetes users. | Borrowed branding; vocabulary [Terminology](terminology.md) asks not to import. |
 
 Decided: `tug tui`. Revisit `top` only if metrics ship and the screen gains a usage-sorted mode, which can then be `tug tui --sort cpu` or a `top` alias added without breaking anything. Adding a name later is a minor; renaming is a major.
 

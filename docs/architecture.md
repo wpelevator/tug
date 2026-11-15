@@ -94,7 +94,7 @@ Control metadata and agent applied/event state use Node's built-in synchronous S
 
 SQL executes on the owning process's event loop. Busy waits, snapshots and integrity checks can pause APIs, WebSocket traffic and timers; backup blocking is described in [Control plane](control-plane.md#backup-and-restore). Database-only work does not return promises. Filesystem preparation and other asynchronous workflows retain their asynchronous interfaces.
 
-A Bun bundle of control or agent code needs no separate adapter today: Bun 1.4.4 implements `node:sqlite`, including the `errcode` values this adapter classifies, so the same module runs unchanged. If that ever stops holding, a `bun:sqlite` adapter can be supplied through the same factory, selected at build time, with the same factory-driven database contract tests. The CLI-only executable does not access SQLite. Hosting control on Bun is blocked elsewhere, by the missing peer certificate on HTTPS request sockets, and has a possible route through a raw TLS listener ([Standalone binary](design/standalone-binary.md#peer-certificate-under-bun)).
+A Bun bundle of control or agent code needs no separate adapter today: Bun 1.4.4 implements `node:sqlite`, including the `errcode` values this adapter classifies, so the same module runs unchanged. If that ever stops holding, a `bun:sqlite` adapter can be supplied through the same factory, selected at build time, with the same factory-driven database contract tests. The CLI-only executable does not access SQLite. Hosting control on Bun is blocked elsewhere, by the missing peer certificate on HTTPS request sockets, and has a possible route through a raw TLS listener ([Standalone binary](standalone-binary.md#peer-certificate-under-bun)).
 
 ## Lifecycles
 
@@ -300,7 +300,7 @@ Secrets are encrypted at rest with AES-256-GCM using the control master key, and
 
 Project variables (`tug var`) are the visible counterpart, kept in their own table (`project_vars`, encrypted at rest like secrets) so nothing that releases secrets can pick one up. A name is a secret or a variable in a project, never both. The CLI fetches the variable values with the `deploy` role and interpolates them while it reads the Compose file, so they are baked into the desired state and a rollback restores them; a secret is substituted by the agent from its current value. Each deployment also stores a record of every referenced name and its source (`deployments.values_json`, returned as `values`): control fills secret versions and variable values from its own rows, refuses a variable whose version changed while the CLI prepared the deployment, and never records a secret value. A rollback carries the record of the deployment it restores.
 
-A possible evolution is delivering secrets as read-only files under `/run/secrets/` instead of environment variables, which would keep values out of `Config.Env` and `docker inspect`; see [File-mounted workload secrets](design/workload-secrets.md).
+A possible evolution is delivering secrets as read-only files under `/run/secrets/` instead of environment variables, which would keep values out of `Config.Env` and `docker inspect`; see [File-mounted workload secrets](workload-secrets.md).
 
 ## Runtime paths
 

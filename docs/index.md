@@ -32,9 +32,9 @@ Find the page for what you want to do. New here: [Deploy your first service](get
 - [Architecture](architecture.md), components and every flow
 - [Control plane](control-plane.md), PKI, image delivery, backup and upgrade
 - [Terminal UI](tui.md), `tug tui`
-- [Tug compared with Docker Swarm](design/swarm-comparison.md)
+- [Tug compared with Docker Swarm](swarm-comparison.md)
 
 ## Contribute and read the design record
 
-- [Development](contributing/development.md), [Testing](contributing/testing.md) and [Releases](releases.md)
-- [Design records](design/index.md): the roadmap, security audit, real-host evaluation and proposals for features that are not built
+- [Development](development.md), [Testing](testing.md) and [Releases](releases.md)
+- [Design records](design-records.md): the roadmap, security audit, real-host evaluation and proposals for features that are not built

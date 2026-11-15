@@ -3,7 +3,7 @@
 ## 1. Run the commands
 
 - `tug lint` and every `--help` run with no server. Capture their output from the current build (`npm run build`, then `node dist/cli.js ...`).
-- Commands that need control or a node run against a Lima or QEMU VM, or the Docker stack in [development](../../../../docs/contributing/development.md). Run them from a pinned worktree, because other sessions switch branches in the shared checkout.
+- Commands that need control or a node run against a Lima or QEMU VM, or the Docker stack in [development](../../../../docs/development.md). Run them from a pinned worktree, because other sessions switch branches in the shared checkout.
 - With no host available, show the command and say what it does. Do not write output.
 - Normalize before pasting: `203.0.113.x` for addresses, `<digest>`, `<key>` and fixed dates.
 

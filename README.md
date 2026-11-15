@@ -58,11 +58,11 @@ Tug moves the checks earlier: your images are built (on control, or on your mach
 
 ## Is Tug right for you?
 
-Tug fits if you run Compose apps on one or a few VPSes, want deploys, rollbacks, secrets and backups handled in one tool, and are happy with a single control server that you back up. A server can host multiple apps as long as it has enough capacity; Tug does not automatically balance resource usage or replace a failed server. Node-to-node traffic travels over your own private network (Tailscale, a VPC, a LAN), so you own its firewalling and encryption. The goals, principles and planned milestones are in the [Roadmap](docs/design/roadmap.md).
+Tug fits if you run Compose apps on one or a few VPSes, want deploys, rollbacks, secrets and backups handled in one tool, and are happy with a single control server that you back up. A server can host multiple apps as long as it has enough capacity; Tug does not automatically balance resource usage or replace a failed server. Node-to-node traffic travels over your own private network (Tailscale, a VPC, a LAN), so you own its firewalling and encryption. The goals, principles and planned milestones are in the [Roadmap](docs/roadmap.md).
 
 ### Not for you if
 
-- You need Kubernetes-style scheduling, autoscaling, distributed storage, database failover, automatic rescheduling across a cluster or servers provisioned through a provider's API. See the [Docker Swarm comparison](docs/design/swarm-comparison.md).
+- You need Kubernetes-style scheduling, autoscaling, distributed storage, database failover, automatic rescheduling across a cluster or servers provisioned through a provider's API. See the [Docker Swarm comparison](docs/swarm-comparison.md).
 - Your workloads are not Compose and Docker, or you need to roll back the host itself. `tug rollback` reverts deployments, not host packages or kernel settings.
 - You run several servers with no private network between them. Management traffic works where inbound connections don't, but node-to-node service traffic needs a VPC, LAN or VPN.
 - You need to hide secrets from people who can deploy. A `deploy` credential can read secret values with `exec` or through deployed code; `inspect` redacts environment values, but not a secret you put in `command` or `labels`.
@@ -128,7 +128,7 @@ tug logs wordpress --follow
 
 The named volume holds data on `app1`; it is not copied to another node automatically. Back it up and restore or move its data deliberately if you replace the server.
 
-See the [examples directory](examples) for stack-specific applications and [local stack benchmarks](docs/contributing/testing.md#example-stack-benchmarks) for measured behavior of those examples. Everything `x-tug` can express is in [Compose extensions](docs/compose.md).
+See the [examples directory](examples) for stack-specific applications and [local stack benchmarks](docs/testing.md#example-stack-benchmarks) for measured behavior of those examples. Everything `x-tug` can express is in [Compose extensions](docs/compose.md).
 
 ## Everyday commands
 
@@ -184,7 +184,7 @@ Every command and option is in the [CLI reference](docs/cli.md). `tug status --j
 
 `tug deploy` reads your Compose file on your machine and sends it to the control plane, which stores it as an immutable desired state, builds application images when needed and pins published images to digests. Tug delivers its built images as archives; published images are pulled from their upstream registries. Each agent fetches the work for its node, applies it through the Docker Engine API, runs the health checks and reports back. The control plane marks the deployment done when every node reports it serving. Tug reads Compose files with its own built-in reader, so Docker Compose is not needed anywhere: nodes need only Docker Engine, and control runs as a container started with `docker run`. Cross-node workload traffic uses your own private network.
 
-Control serves mutual TLS directly on one port (`8443`). Every operator, CI job and node authenticates with a certificate from a private CA created at install, so the control address can be a bare IP and can change later. Do not terminate TLS in front of it. A `controlUrl` in `tug.yml` tells the CLI where control is (see [CLI configuration](docs/cli.md#config-file)). [Architecture](docs/architecture.md) covers every flow in detail, and [Security](docs/design/security-audit.md) the trust boundaries.
+Control serves mutual TLS directly on one port (`8443`). Every operator, CI job and node authenticates with a certificate from a private CA created at install, so the control address can be a bare IP and can change later. Do not terminate TLS in front of it. A `controlUrl` in `tug.yml` tells the CLI where control is (see [CLI configuration](docs/cli.md#config-file)). [Architecture](docs/architecture.md) covers every flow in detail, and [Security](docs/security-audit.md) the trust boundaries.
 
 ## Documentation
 
@@ -193,8 +193,8 @@ The [documentation index](docs/index.md) lists every page by task. The ones you 
 - **Start:** [Deploy your first service](docs/getting-started.md), then the [application examples](examples/README.md)
 - **Run it for real:** [Production checklist](docs/production-checklist.md), [Backups and recovery](docs/backups.md), [Upgrade control and nodes](docs/upgrades.md), [Troubleshooting](docs/troubleshooting.md)
 - **Look it up:** [CLI](docs/cli.md), [Compose extensions](docs/compose.md), [Configuration](docs/configuration.md), [Access control](docs/access-control.md)
-- **Understand it:** [Architecture](docs/architecture.md), [Docker Swarm comparison](docs/design/swarm-comparison.md), [Terminal UI](docs/tui.md)
-- **Contribute:** [Development](docs/contributing/development.md), [Testing](docs/contributing/testing.md), [Releases](docs/releases.md), and the [design records](docs/design/index.md) (roadmap, security audit, proposals)
+- **Understand it:** [Architecture](docs/architecture.md), [Docker Swarm comparison](docs/swarm-comparison.md), [Terminal UI](docs/tui.md)
+- **Contribute:** [Development](docs/development.md), [Testing](docs/testing.md), [Releases](docs/releases.md), and the [design records](docs/design-records.md) (roadmap, security audit, proposals)
 
 ## Development
 
@@ -205,4 +205,4 @@ npm run lint
 npm run test:integration
 ```
 
-See [Development](docs/contributing/development.md) for details. Database code uses direct SQLite queries; [SQLite storage](docs/architecture.md#sqlite-storage) describes query boundaries and synchronous transactions.
+See [Development](docs/development.md) for details. Database code uses direct SQLite queries; [SQLite storage](docs/architecture.md#sqlite-storage) describes query boundaries and synchronous transactions.

@@ -13,7 +13,7 @@ Docs here are task-first: each guide opens with a command and its real output, t
 - **Progressive disclosure.** See it (a command and its output), do it (the copy-paste path), shape it (recipes), look it up (tables and edge cases). Reference detail never sits above a result.
 - **Never invent output.** Run the command and paste what it prints. If you cannot run it (no VPS, no Docker), show the command without output. Normalize paths, addresses, keys, digests and dates.
 - **Decide the structure first.** Retitling pages keeps the old shape. List the reader's jobs, then split, merge, move and add pages, as in [references/structure.md](references/structure.md).
-- **Keep reader docs and contributor docs apart.** Guides and reference are for operators. Design proposals, audits, evaluations and benchmarks live in `docs/design/` or `docs/contributing/` and are never linked as the way to do something.
+- **Keep reader docs and contributor docs apart.** Guides and reference are for operators. Design proposals, audits, evaluations and benchmarks are listed in `docs/design-records.md` with a status line on each page, and are never linked as the way to do something.
 - **Don't make users do what a command can do.** Show `tug secret set`, not a file to write by hand.
 
 ## Workflow

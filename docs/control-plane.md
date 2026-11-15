@@ -133,14 +133,14 @@ Tug issues one node identity (key and certificate) per node. It does not push bu
 
 `tug control restore <artifactRef> --confirm` overwrites the database, master key and image store from such an archive. Restart control afterwards. Restore validates through a read-only connection before replacing live data, then rejects database-dependent requests with HTTP 503 until restart.
 
-- **Pauses.** SQLite snapshot creation and restore integrity checking run synchronously and pause control API traffic, WebSocket handling and timers. Duration grows with data size and storage speed, and the reference measurements are in [Testing](contributing/testing.md#sqlite-contract-and-blocking-measurements). Take larger backups outside latency-sensitive rollout windows, and keep project lease durations above the expected blocking time.
+- **Pauses.** SQLite snapshot creation and restore integrity checking run synchronously and pause control API traffic, WebSocket handling and timers. Duration grows with data size and storage speed, and the reference measurements are in [Testing](testing.md#sqlite-contract-and-blocking-measurements). Take larger backups outside latency-sensitive rollout windows, and keep project lease durations above the expected blocking time.
 - **Scope.** This backs up the control plane only. It does not capture workload volumes. Back up project data with `x-tug.backup`, see [Backups](backups.md).
 - **Nightly archive.** Once a backup destination is set, control also stores a nightly archive of itself, without images, in the `_control` repository of that destination, see [Control plane backup](backups.md#control-plane-backup). `tug control backup --download [-o <file>]` takes an on-demand copy to your machine.
 - **While control is down,** running containers keep serving, and agents cannot pick up new desired state until it is back.
 
 ### Recover control on another host
 
-For a planned move of the whole installation, including workloads, see [Migrating to new servers](migration.md). The procedure below recovers control onto a different host with the original operator credential and a `node replace` to repoint each agent. Exercise results and their limits are in the [real-host evaluation](design/real-host-evaluation.md#recovery-drill).
+For a planned move of the whole installation, including workloads, see [Migrating to new servers](migration.md). The procedure below recovers control onto a different host with the original operator credential and a `node replace` to repoint each agent. Exercise results and their limits are in the [real-host evaluation](real-host-evaluation.md#recovery-drill).
 
 Keep control's public host name when you move it, because credentials verify that name. Only the connect address may change. Restore workload data separately from its project backups. Keep the control backup encrypted off the host, and keep the original operator credential and backup repository passwords separately, because the control archive contains the master key and private CA.
 

@@ -10,7 +10,7 @@ tug tui --once          # print the attention summary and exit 1 when anything o
 tug tui --json          # the same summary as JSON (implies --once)
 ```
 
-The full screen needs a terminal on stdin and stdout; without one, `tug tui` says so and points at `--once`. It uses the resolved credential, control URL and project like every other command, and needs no more than the `read` role to look: keys that need a higher role are refused with the missing role named. `--once` is the form for cron, a shell prompt or a monitor, and answers with the same ranked list as the screen (see [Attention rules](design/tui.md#1-is-everything-fine-the-glance)); rank 4 items are shown but do not fail the exit code.
+The full screen needs a terminal on stdin and stdout; without one, `tug tui` says so and points at `--once`. It uses the resolved credential, control URL and project like every other command, and needs no more than the `read` role to look: keys that need a higher role are refused with the missing role named. `--once` is the form for cron, a shell prompt or a monitor, and answers with the same ranked list as the screen (see [Attention rules](tui-design.md#1-is-everything-fine-the-glance)); rank 4 items are shown but do not fail the exit code.
 
 ### Keys
 
@@ -49,4 +49,4 @@ Confirmations are a `y/N` prompt naming the project and action, and only `y` con
 
 ## Next steps
 
-The design record, with user flows, screen design and what is still proposed, is in [Terminal UI design](design/tui.md).
+The design record, with user flows, screen design and what is still proposed, is in [Terminal UI design](tui-design.md).

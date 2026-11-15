@@ -1,6 +1,6 @@
 # Capabilities
 
-**Status: proposed.** Nothing on this page is built. Today a credential has one of three cumulative roles and an optional project list ([Access control](../access-control.md)); every name, flag, route and field below is a design, not an interface. The work is [M16](roadmap.md#m16--capabilities-and-delegated-authority).
+**Status: proposed.** Nothing on this page is built. Today a credential has one of three cumulative roles and an optional project list ([Access control](access-control.md)); every name, flag, route and field below is a design, not an interface. The work is [M16](roadmap.md#m16--capabilities-and-delegated-authority).
 
 The problem is that the `root` credential `tug control setup` imports is an admin, so every consumer of the controller gets either everything or one of two coarser presets: CI, a teammate, a monitor, a script, a dashboard or an AI agent driving the CLI. This page designs a small capability engine so each consumer holds exactly the authority its job needs, and so the CLI stops being root by default.
 
@@ -20,7 +20,7 @@ Out of scope, consistent with the [product decisions](roadmap.md#product-decisio
 ## Where authorization sits today
 
 - A client certificate resolves to an `Actor { name, role, projects }`. The credential row holds the role and project list; the certificate carries only an ID and authorization follows the key hash.
-- `ROUTE_ROLES` in `src/control/credentials.ts` maps each `METHOD path` to a role, `createGuard` checks the role and then a project resolver, and handlers call `assertProject` and `projectScope` for what is known only after parsing. A test ties the table, the router and [the endpoint table](../access-control.md#endpoint-table) together.
+- `ROUTE_ROLES` in `src/control/credentials.ts` maps each `METHOD path` to a role, `createGuard` checks the role and then a project resolver, and handlers call `assertProject` and `projectScope` for what is known only after parsing. A test ties the table, the router and [the endpoint table](access-control.md#endpoint-table) together.
 - Revocation, expiry and key replacement are database state read on every request. The design keeps that property.
 
 The design below evolves this shape; it does not replace it.
@@ -118,7 +118,7 @@ A plan is required only when a grant is gated. `denyRisks` and `images` need no 
 
 - `GET /api/v1/whoami` returns name, preset, grants, lineage and expiry, so a consumer can discover what it may do and hide the rest.
 - `POST /api/v1/authz/check { op, on }` returns `{ allow, via, requires: ['approval'] }`, the equivalent of Kubernetes' SelfSubjectAccessReview.
-- A denial says what was missing for the requested thing (`deployment.create on project=blog`) and never whether it exists, keeping [the no-probing rule](../access-control.md#failures).
+- A denial says what was missing for the requested thing (`deployment.create on project=blog`) and never whether it exists, keeping [the no-probing rule](access-control.md#failures).
 - Allowed mutations record the matched grant and lineage in event metadata. Denials are recorded as `authz.deny`, aggregated per credential and operation so a looping agent cannot flood the table.
 - The CLI gains `tug whoami`, `tug can <op> [k=v...]` and `tug credential explain <name>`.
 
@@ -171,8 +171,8 @@ The decision is a small closed-vocabulary engine with a pure decision function a
 
 - One migration step, appended in `src/db/db.ts` with a previous-release fixture: `operator_credentials` gains `grants_json`, `parent_id`, `on_behalf_of` and `via`, and a `proposals` table arrives with approvals. Existing rows have NULL grants, meaning "the preset", so nothing changes for them.
 - `role` stays. A grants-only credential stores `custom`, and an older control that reads it fails closed (the role rank lookup is undefined, so every check denies).
-- The credential file (`v: 1`) is unchanged; grants live on control. `POST /api/v1/credentials` gains optional `grants`, `ttlSeconds` and `parent`, so the change is additive. Operations, grants and sessions are minors under [the 1.0 contracts](../releases.md#what-10-freezes); the `root` default is a separate decision ([below](#decisions)).
-- The endpoint table in [Access control](../access-control.md#endpoint-table) gains an operation and an effect column, and the test that compares the table with the router and the page keeps it honest.
+- The credential file (`v: 1`) is unchanged; grants live on control. `POST /api/v1/credentials` gains optional `grants`, `ttlSeconds` and `parent`, so the change is additive. Operations, grants and sessions are minors under [the 1.0 contracts](releases.md#what-10-freezes); the `root` default is a separate decision ([below](#decisions)).
+- The endpoint table in [Access control](access-control.md#endpoint-table) gains an operation and an effect column, and the test that compares the table with the router and the page keeps it honest.
 
 ## Tests
 

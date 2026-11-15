@@ -143,7 +143,7 @@ A backup you have not restored is a hope. Start with an isolated restore that ch
 
 ## Recover a site on a replacement node
 
-This is a manual procedure, not automatic failover. It was exercised with the published 0.9.0 release in the [real-host drill](design/real-host-evaluation.md#recovery-drill-with-the-published-090-release-2-november-2026) and again with S3-compatible backups and named volumes on the 1.0.0 candidate ([drill](design/real-host-evaluation.md#recovery-drill)). The original host was simulated as unavailable while control and the backup destination stayed available. Restore control first if it is also lost.
+This is a manual procedure, not automatic failover. It was exercised with the published 0.9.0 release in the [real-host drill](real-host-evaluation.md#recovery-drill-with-the-published-090-release-2-november-2026) and again with S3-compatible backups and named volumes on the 1.0.0 candidate ([drill](real-host-evaluation.md#recovery-drill)). The original host was simulated as unavailable while control and the backup destination stayed available. Restore control first if it is also lost.
 
 1. **Fence and enroll.** Fence the lost node, or otherwise ensure its old workloads cannot write to shared services. Enroll the replacement node and check that it is online. Keep the recovery site private while its database and volumes are empty, and never expose a fresh WordPress installer.
 2. **Move placement and deploy.** Change the project's service and volume placement to the replacement node and deploy the same project with the retained images, configuration and secrets. Tug refuses until you acknowledge that stateful services start empty: add `--move <service>` for each one it names (`--move db --move wordpress`). It then holds the services that write to them, including a writer that moved too. The replacement uses fresh local volumes, so deploying alone does not restore their contents.
@@ -210,7 +210,7 @@ A node runs backup and restore jobs in lanes: a restore and its safety backup fi
 
 | Limit | Detail |
 | --- | --- |
-| No push notifications | A failed night is a `backup.failed` or `backup.stale` event, until [webhooks](design/roadmap.md#m8--central-api-advantages-partly-done) exist. Run `tug backup list --check` from cron or a monitor. It exits nonzero when a target is stale, failed or missed, and when nothing is protected (pass `--allow-empty` for a project without data) |
+| No push notifications | A failed night is a `backup.failed` or `backup.stale` event, until [webhooks](roadmap.md#m8--central-api-advantages-partly-done) exist. Run `tug backup list --check` from cron or a monitor. It exits nonzero when a target is stale, failed or missed, and when nothing is protected (pass `--allow-empty` for a project without data) |
 | Control down | No backup starts. Running jobs finish and report when control returns, and a long gap yields one missed event and one catch-up run per target |
 | Consistency | Live volumes are crash-consistent, not application-consistent. Use a command backup for anything with its own consistency |
 | One node per volume | A volume is backed up from the node that holds it. A volume mounted from a file server with `driver_opts` is read through that node's mount, so back up the file server's own disk where you can |

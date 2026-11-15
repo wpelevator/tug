@@ -5,7 +5,7 @@ Decide the page set before writing a page.
 ## Decide the page set
 
 1. **List the jobs** in the reader's words: try it, deploy, add HTTPS, back up, roll back, add a server, move servers, upgrade, fix an error, look something up.
-2. **Split a page** when it passes about 150 lines of prose, serves two jobs, or mixes a how-to with design rationale. Move the rationale to `docs/design/`.
+2. **Split a page** when it passes about 150 lines of prose, serves two jobs, or mixes a how-to with design rationale. Move the rationale to its own design page and list it in `docs/design-records.md`.
 3. **Keep a page whole** when it is a short lookup readers scan (a CLI page, a settings table).
 4. **Merge a page** under about 20 lines that only points elsewhere.
 5. **Name files after titles** and update every link when a title changes.
@@ -19,17 +19,16 @@ File names are URL path elements, so they follow one scheme.
 - **A topic noun, not a verb or gerund.** `upgrades.md`, `backups.md`, `migration.md`, not `upgrading.md`. Command names that are nouns keep the command's name (`cli.md`, `tui.md`).
 - **Plural for a collection, singular for a mass topic or concept.** `backups`, `nodes`, `health-checks`, but `networking`, `migration`, `placement`.
 - **No qualifiers that describe the writing.** Not `*-reference`, `*-guide`, `*-overview`, `*-proposal`. The folder and the status line carry that.
-- **Every folder has an `index.md`**, never `README.md`, so every folder URL has the same shape. The repository root `README.md` is the only exception.
-- **The same topic keeps the same name across folders**, so `docs/tui.md` and `docs/design/tui.md` are the operator and design pages of one topic, and `docs/terminology.md` pairs with `docs/design/terminology.md`.
+- **No subfolders.** `docs/` is flat, so every page is `/docs/<name>`. `docs/index.md` is the only hub for operators, and `docs/design-records.md` is the hub for contributors and evaluators.
+- **A design page that shares a topic with an operator page takes a suffix that says what it is**, as in `tui.md` and `tui-design.md`, `terminology.md` and `terminology-review.md`, `networking.md` and `ingress-features.md`.
 - **Rename only when the job changes.** A rename breaks outside links, so name the old URLs in the pull request.
 
 ## Layout
 
-| Folder | Audience | Pages |
+| Group | Pages | Hub |
 |---|---|---|
-| `docs/` | Operators | `index.md` hub, getting started, guides by task, production checklist, troubleshooting, reference |
-| `docs/design/` | Contributors and evaluators | Proposals, audits, evaluations, comparisons of approaches. State at the top whether the page is a proposal, a record or shipped behavior |
-| `docs/contributing/` | Contributors | Development, testing |
+| Operators | Getting started, guides by task, production checklist, troubleshooting, reference | `index.md` |
+| Contributors and evaluators | Development, testing, roadmap, proposals, audits, evaluations and comparisons. State at the top of each design page whether it is a proposal, a record or shipped behavior | `design-records.md` for design pages, and `index.md` links development and testing |
 
 ## Reference pages
 

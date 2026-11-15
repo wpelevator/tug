@@ -1,6 +1,6 @@
 # Terminology
 
-The words Tug uses, and the one name for each concept. The [CLI reference](cli.md) is authoritative for command names. The naming review that produced them is in [Terminology review](design/terminology.md).
+The words Tug uses, and the one name for each concept. The [CLI reference](cli.md) is authoritative for command names. The naming review that produced them is in [Terminology review](terminology-review.md).
 
 ## Core concepts
 
