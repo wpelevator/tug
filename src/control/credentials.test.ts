@@ -222,6 +222,7 @@ const SAMPLES: Record<string, { path: string; body?: unknown }> = {
   'GET /api/v1/holds': { path: '/api/v1/holds' },
   'GET /api/v1/status': { path: '/api/v1/status' },
   'GET /api/v1/version': { path: '/api/v1/version' },
+  'GET /api/v1/readyz': { path: '/api/v1/readyz' },
   'GET /api/v1/whoami': { path: '/api/v1/whoami' },
   'GET /api/v1/events': { path: '/api/v1/events' },
   'GET /api/v1/projects/:project': { path: '/api/v1/projects/site' },

@@ -18,7 +18,7 @@ Verified against the code on `main`.
 | `tug doctor` | Local checks (Node.js and Docker), control checks (SQLite, CA and server certificate expiry, each node's certificate expiry and connectivity, each online node's observed clock skew, master key, Docker, ingress state, ports 80 and 443 on ingress nodes, and control's load, memory, disk and container CPU and memory) and, with `--nodes` or `--node`, host diagnostics through each agent, including the node's load, memory, free disk and the CPU and memory of the agent and Caddy containers. A local Docker daemon is checked only for `--build-local` and prints `skip` when absent. See [`tug doctor`](cli.md#tug-doctor). It waits for those results, prints one line per check (the full document with `--json`) and exits nonzero when a check fails. Clock skew is unknown, not zero, for a node that is offline. | A point-in-time check, not a time series. Resource values are one sample (CPU is measured over about a second) and have no thresholds |
 | `tug logs <service>` | Prints a service log tail; `--follow` streams logs through the live channel. | Following logs requires an active WebSocket session. |
 | `tug ingress logs <node>`, `tug ingress tls` | The ingress node's Caddy output, and per-host certificate state from a TLS handshake against that Caddy, shown also in `domain list`, `status` and `doctor`. See [Certificate status](ingress.md#certificate-status). | `admin` only. State is a probe every twenty seconds to an hour, not a stream |
-| Reachability | Control has no unauthenticated route, not even a health check: every request needs a client certificate. Monitor TCP reachability of the mTLS port for liveness, and use an authenticated read (`tug doctor`, `tug status`) for readiness. | A TCP check proves the listener accepts connections, not that the database works |
+| Reachability | Control has no unauthenticated route, not even a health check: every request needs a client certificate. Monitor TCP reachability of the mTLS port for liveness, and use authenticated `GET /api/v1/readyz` for control readiness ([Health endpoints](#health-endpoints)). | A TCP check proves the listener accepts connections, not that the database works |
 | Process logs | Control and agent write plain `console.log` and `console.error` text. | No timestamps, levels, structure or request ids |
 
 What does not exist: a `/metrics` endpoint, any history of CPU, memory or disk (`tug doctor` shows the current values only), restart data, request, build or poll metrics, structured or leveled logs, alerting, outbound webhooks (M8, unchecked) and a dashboard (M8, unchecked). The managed Caddy ingress enables Caddy's own metrics on the ingress node's loopback admin endpoint, but nothing collects them yet ([Ingress metrics](#ingress-metrics)).
@@ -40,7 +40,7 @@ Everything below is **Proposed** unless a status line says otherwise.
 | Structured logs | [Structured logs](#structured-logs) | Proposed |
 | Metrics on control | [Metrics on control](#metrics-on-control) | Proposed |
 | Node and service stats from agents | [Node and service stats reported by agents](#node-and-service-stats-reported-by-agents) | Proposed |
-| Readiness endpoint | [Health endpoints](#health-endpoints) | Proposed |
+| Readiness endpoint | [Health endpoints](#health-endpoints) | Implemented |
 | Ingress metrics | [Ingress metrics](#ingress-metrics) | Proposed, with open questions |
 | Sample alerts and webhooks | [Alerting](#alerting) | Proposed |
 | Live commands | [Live commands](#live-commands) | Partly built in M5 |
@@ -105,9 +105,9 @@ The alternative is scraping an exporter on each agent directly over the operator
 
 ### Health endpoints
 
-Status: proposed.
+Status: built.
 
-Control has no unauthenticated route (there is no `/healthz`), so liveness is TCP reachability of the mTLS port and the container restart policy. An authenticated `GET /api/v1/readyz` with the `read` role would return 200 only when control can do its job: it can read the database, and the writer queue is not stuck (the operation at the head of the queue has not been running longer than a limit). Otherwise it returns 503 with the names of the failing checks and nothing more. An external uptime check would present a `read` credential.
+Control has no unauthenticated route (there is no `/healthz`), so use TCP reachability of the mTLS port and the container restart policy for liveness. An authenticated `GET /api/v1/readyz` requires an operator credential with the `read` role and returns 200 when a SQLite read probe succeeds and the active writer has not exceeded its age limit; otherwise it returns 503 with `ready: false` and check states, without database error details. The writer is marked overdue after 35 minutes of active work, giving the default 30-minute deploy and control-backup operation deadlines a five-minute margin. This is an age-based signal for work that has exceeded those deadlines, not a test for normal queue depth; readiness does not wait for the writer. The database probe reads from the persisted `projects` table and does not claim that writes are available. During a restore that has closed the database, the control-wide restart-required response takes precedence until the process restarts. An external uptime check should present a `read` credential.
 
 ### Ingress metrics
 

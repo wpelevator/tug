@@ -166,6 +166,8 @@ Project commands sit at the top level and the rest read `tug <subject> <verb>`. 
 
 Control serves mutual TLS on one port (`8443`). Every operator, CI job and node authenticates with a certificate from a private CA created at install, so the control address can be a bare IP and can change later. Do not terminate TLS in front of it. [Architecture](docs/architecture.md) covers every flow, and the [security audit](docs/security-audit.md) covers the trust boundaries.
 
+Control readiness monitoring uses an authenticated `GET /api/v1/readyz` with a `read` credential; it checks database reads, overdue writer work and whether control needs a restart after restore. See [Health endpoints](docs/observability.md#health-endpoints) for its limits.
+
 ## Documentation
 
 The [documentation index](docs/index.md) lists every page by task. The ones you will reach for first:

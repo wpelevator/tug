@@ -28,6 +28,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { WebSocketServer, WebSocket } from 'ws';
 import { WatchHub } from './watch.ts';
+import { createWriterQueue, WRITER_OVERDUE_AFTER_MS } from './writer-queue.ts';
 import type tls from 'node:tls';
 import * as tar from 'tar';
 import { openDb, openSnapshotDb } from '../db/db.ts';
@@ -969,21 +970,12 @@ export async function createApp(
     next();
   });
   // Hold the writer for the operation lifetime, including after an HTTP disconnect.
-  let writer = Promise.resolve();
-  async function withWriter<T>(operation: () => T | Promise<T>): Promise<T> {
-    const previous = writer;
-    let release!: () => void;
-    writer = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    await previous;
-    try {
+  const writerQueue = createWriterQueue();
+  const withWriter = <T>(operation: () => T | Promise<T>): Promise<T> =>
+    writerQueue.run(() => {
       if (restartRequired) throw httpError(503, 'control restored; restart required');
-      return await operation();
-    } finally {
-      release();
-    }
-  }
+      return operation();
+    });
 
   let publication = Promise.resolve();
   async function withPublication<T>(operation: () => T): Promise<T> {
@@ -4496,6 +4488,18 @@ export async function createApp(
   // own family depends on.
   api('get', '/api/v1/version', null, async (req, res) => {
     res.json({ v: ownVersion });
+  });
+  api('get', '/api/v1/readyz', null, (_req, res) => {
+    let database = 'ok';
+    try {
+      db.get('SELECT id FROM projects LIMIT 1');
+    } catch {
+      database = 'failed';
+    }
+    const activeForMs = writerQueue.activeForMs();
+    const writer = activeForMs !== null && activeForMs > WRITER_OVERDUE_AFTER_MS ? 'overdue' : 'ok';
+    const ready = database === 'ok' && writer === 'ok';
+    res.status(ready ? 200 : 503).json({ ready, checks: { database, writer } });
   });
   // Lets a client such as `tug tui` offer only the actions its credential may use; nothing here is secret.
   api('get', '/api/v1/whoami', null, async (req, res) => {
