@@ -63,26 +63,30 @@ backup:
   command: mariadb-dump -u root -p"$$MARIADB_ROOT_PASSWORD" --single-transaction --quick --routines --events --triggers --add-drop-database --databases wordpress
   filename: wordpress.sql
   verify: "-- Dump completed"
+  restore: mariadb -uroot -p"$MARIADB_ROOT_PASSWORD"
 
 # PostgreSQL
 backup:
   command: pg_dump -U "$$POSTGRES_USER" --clean --if-exists "$$POSTGRES_DB"
   filename: app.sql
   verify: "PostgreSQL database dump complete"
+  restore: psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1
 
 # SQLite file in a volume mounted into the service
 backup:
   command: sqlite3 /data/app.db .dump
   filename: app.sql
   verify: COMMIT
+  restore: sqlite3 /data/app.db
 
 # A directory as a tar stream
 backup:
   command: tar -C /var/www/html -cf - wp-content/themes
   filename: themes.tar
+  restore: tar -C /var/www/html -xf -
 ```
 
-`mariadb-dump` and `mysqldump` do not dump users and grants, which come from the image's init environment. A service has one backup command, so to include PostgreSQL roles, chain them: `sh -c 'pg_dumpall --globals-only; pg_dump ...'`. Restore with the same tool: `restic dump <snapshot> wordpress.sql | mariadb ...`.
+`mariadb-dump` and `mysqldump` do not dump users and grants, which come from the image's init environment. A service has one backup command, so to include PostgreSQL roles, chain them: `sh -c 'pg_dumpall --globals-only; pg_dump ...'`. Each recipe has a `restore:` command that reads the stored file on standard input, so `tug restore run <service> --confirm` can load it back. Without `restore:`, Tug refuses to restore the service. To check a snapshot by hand, run `restic dump <snapshot> wordpress.sql | mariadb ...`.
 
 ## Watch your backups
 

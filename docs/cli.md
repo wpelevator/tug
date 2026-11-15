@@ -12,7 +12,7 @@ Commands read `tug <subject> <verb> [params]`, such as `tug node add` and `tug s
 
 | I want to | Command | Section |
 | --- | --- | --- |
-| Install control, import a credential | `setup`, `init`, `control setup` | [Setup](#setup) |
+| Install control, import a credential | `setup`, `init`, `control setup`, `control migrate` | [Setup](#setup) |
 | Upgrade control and nodes | `upgrade`, `control upgrade`, `node upgrade` | [Setup](#setup), [Upgrade](upgrades.md) |
 | Add, change or remove a server | `node add`, `list`, `replace`, `repair`, `remove`, `disable`, `ingress`, `address`, `register`, `enroll`, `migrate` | [Nodes](#nodes) |
 | Check a Compose file offline | `lint` | [Deployments](#deployments) |
@@ -63,7 +63,7 @@ Errors go to stderr and exit nonzero. Progress goes to stderr, so stdout stays u
 | `exec`, `run`, `logs` | Container output unchanged | No `--json` |
 | `inspect` | Live Docker data as JSON | Same |
 
-There is no global `--json` flag. It belongs to the command.
+Every command that produces a result takes `--json`, except `exec`, `run` and `logs`, which write container output unchanged. Commands not in the table print the API result as JSON already and accept the flag for consistency. There is no global `--json` flag, so put it after the command. `-y` is the short form of `--yes`.
 
 ## Config file
 
@@ -171,7 +171,7 @@ Steps that run on a host over SSH (Docker installation, preflight, image transfe
 | `--credential-out <file>` | Also save the credential to a `0600` file |
 | `--no-import` | Skip the import. Requires `--credential-out` |
 | `--recover-root` | Replace only root's key, from the control host |
-| `-y` | Skip the confirmation |
+| `-y, --yes` | Skip the confirmation |
 
 In a terminal, setup offers to install Docker, prints the plan and asks to confirm. Without a terminal it never prompts. The advertised address follows [Where control is](#where-control-is). See [Control plane](control-plane.md).
 
@@ -184,7 +184,7 @@ In a terminal, setup offers to install Docker, prints the plan and asks to confi
 | `--build-local-image` | Build from the checkout |
 | `--rollback` | Redeploy `tug:rollback`. Warns that a database already migrated by the newer control may not open |
 | `--force` | Reinstall even when control already runs the image |
-| `-y` | Skip the confirmation |
+| `-y, --yes` | Skip the confirmation |
 
 The SSH target defaults to `controlSsh`. The command carries over the published mTLS bindings, advertised URL and extra names, reuses the data volume, compares the CA before and after, tags the previous image `tug:rollback`, shows the plan, then waits for control to answer and prints its version. Run `tug control backup` first for a backup beyond the `tug.db.pre-v<N>.bak` copy the new control makes.
 
@@ -207,16 +207,16 @@ Details and recipes are in [Nodes](nodes.md). Options below are the ones that ch
 | `node disable [node]` | Blocks the node's key at once without SSH. Does not drain workloads, change placement or stop containers. `node replace` brings it back |
 | `node ingress [node] [--disable]` | Enables the managed Caddy ingress role, or removes it |
 | `node address [node] [address] [--to <address>]` | Updates the private address used for published-port binding and cross-node routing |
-| `node register <node> --csr <file> [--mode create\|replace]` | Signs a node-generated CSR and prints the identity. Installs nothing. Use `agent install-cert` on the host |
+| `node register <node> --csr <file> [--mode create\|replace]` | Signs a node-generated CSR and prints the identity. Takes `--address` and `--label` like `node add`. Installs nothing. Use `agent install-cert` on the host |
 | `node enroll --name <node>` | Prints the command that enrolls a host that runs it. See [Nodes](nodes.md#self-service-enrollment-node-enroll) |
 
 ### `node add`, `replace`, `repair`
 
 | Option | Meaning |
 | --- | --- |
-| `--name <node>` | Node name. Defaults to the first DNS label of the SSH host (`app1` for `root@app1.example.com`). With an IP, a terminal asks (default: the host's `hostname -s`) and a script must pass it |
+| `--name <node>` | `node add` only. Node name. Defaults to the first DNS label of the SSH host (`app1` for `root@app1.example.com`). With an IP, a terminal asks (default: the host's `hostname -s`) and a script must pass it |
 | `--address <ip>` | Private address for inter-node traffic. A terminal lists the host's global IPv4 addresses, private first, and never defaults to a public one |
-| `--ingress` | Give the node the ingress role. A terminal asks otherwise |
+| `--ingress` | `node add` only. Give the node the ingress role. A terminal asks otherwise |
 | `--install-docker` | Install Docker when missing |
 | `--label <label>` | Node label. Repeatable |
 | `--image <tag>` | Agent image |
@@ -224,13 +224,13 @@ Details and recipes are in [Nodes](nodes.md). Options below are the ones that ch
 | `--agent-control-url <url>` | Where the agent connects |
 | `--all` | Walk every node with an `ssh` entry, continue after failures, print per-node results |
 | `--no-wait` | Do not wait for the agent's first report |
-| `-y` | Skip the confirmation |
+| `-y, --yes` | Skip the confirmation |
 
 The SSH target defaults to `nodes.<node>.ssh`. The command checks for a control credential, then always prints the plan (node, SSH target, Docker, address, image, ingress) before changing anything. Without a terminal it never prompts, so scripts pass `--address`, `--ingress` and `--install-docker`, and the plan says Docker was not checked. Unless `--no-wait` is set, the result carries `reporting`. A node that has not reported after about a minute prints `reporting: false` and the command exits nonzero. Agents use host networking for TCP and HTTP health checks, without added capabilities.
 
 ### `node upgrade` and `node migrate`
 
-Both take `--all|--select`, `--image`, `--agent-control-url`, and `--force` and `--no-wait` for `upgrade`. `upgrade` also takes `--to <version>`, which is refused when newer than control. A node already on the image is skipped unless `--force`. A node control does not know, or a host with no agent, is refused (use `node add`). `--all` walks every node with an `ssh` entry, continues after failures and exits nonzero if one fails.
+Both take `--all|--select`, `--image`, `--build-local-image`, `--agent-control-url` and `--no-wait`. `upgrade` also takes `--force`, and `migrate` also takes `-y, --yes`. `upgrade` also takes `--to <version>`, which is refused when newer than control. A node already on the image is skipped unless `--force`. A node control does not know, or a host with no agent, is refused (use `node add`). `--all` walks every node with an `ssh` entry, continues after failures and exits nonzero if one fails.
 
 ### `node enroll`
 
@@ -251,7 +251,7 @@ It mints a single-use, name-bound join key. A saved cloud-init document contains
 | `--force` | Remove while the agent still reports |
 | `--teardown` | Clean the host over SSH after the record is gone: stop the agent and ingress, remove Tug containers and networks, delete the agent identity |
 | `--delete-data` | With `--teardown`, also delete project volumes and ingress certificates |
-| `-y` | Skip the confirmation. Required without a terminal |
+| `-y, --yes` | Skip the confirmation. Required without a terminal |
 
 It is refused while a current deployment places a service or volume on the node (deploy without it first), and refused for a host that runs the control plane. The node ID is retired and never reused. Without `--teardown`, stop the agent and remove its containers yourself. `--teardown` can be repeated if the cleanup failed after the record was removed. The SSH target defaults to `nodes.<name>.ssh`.
 
@@ -263,7 +263,7 @@ Checks a Compose file against the `x-tug` schema with no control connection, cre
 
 | Option | Meaning |
 | --- | --- |
-| `-f, --file <file>` | Compose file. Default `compose.yaml` (or `file:` in `tug.yml`) |
+| `-f, --file <file>` | Compose file. Default: the first of `compose.yaml`, `compose.yml`, `docker-compose.yaml` or `docker-compose.yml` in the working directory (or `file:` in `tug.yml`) |
 | `--json` | `{ ok, file, errors }` for scripts and editors |
 
 Findings go to stderr, one per line as `$FILE: $RULE`. The command exits nonzero when anything is wrong.
@@ -301,9 +301,9 @@ To deploy CI-built images, push them to a registry and declare `image:`. Control
 | Command | Options | What it does |
 | --- | --- | --- |
 | `tug rollback` | `--force`, `--no-wait`, `--timeout <seconds>` (default `300`) | Rolls the project back. `--force` permits it while a deployment is active. With `x-tug: { rollback: auto }` Tug rolls back failed deployments itself, see [Automatic rollback](compose.md#automatic-rollback) |
-| `tug deploy cancel <deployment-id>` | | Cancels an active deployment |
+| `tug deploy cancel [deployment-id]` | | Cancels an active deployment. In a terminal, omit the id to choose from active ones |
 | `tug status` | `--json` | Each project's current deployment, node reports and errors, plus node status and last contact. A service whose container keeps restarting, or exited with an error and stays down, shows as `unstable` with the exit code, although its deployment reads as succeeded. Stale node health is the last report. Control-wide, credential-scoped |
-| `tug events` | `--limit <n>` (default `100`, clamped to `1`-`500`), `--all`, `--json` | Events newest first as time, level, type, actor and message, for the project, or every project with `--all` (including control events with no project). Terminal escapes are stripped. Control deletes events older than 30 days and keeps at most 100,000, see [Configuration](configuration.md#control-plane) |
+| `tug events` | `--limit <n>` (default `100`, values outside `1`-`500` are an error), `--all`, `--json` | Events newest first as time, level, type, actor and message, for the project, or every project with `--all` (including control events with no project). Terminal escapes are stripped. Control deletes events older than 30 days and keeps at most 100,000, see [Configuration](configuration.md#control-plane) |
 | `tug tui [view]` | `--once`, `--readonly`, `--json` | A live full-screen view. See [Watch your servers in a terminal](tui.md) |
 
 Agents add a `service.*` event when a service changes, not on every poll: `pulling`, `starting`, `health_checking` and `serving` when a new revision, changed secrets or a changed rendered configuration are applied, one `failed` event when an apply fails, and one `serving` event when it recovers.
@@ -343,7 +343,7 @@ Every `${NAME}` in the Compose file comes from control: a project secret, a proj
 | `tug var remove [name]` | | Deletes a variable |
 | `tug var import [file]` | `--secrets <names>`, `--select`, `--overwrite`, `-y` | Stores every entry as a variable unless `--secrets` names it |
 | `tug domain add <host> --service <service>` | | Serves an extra hostname (or `*.zone` wildcard) on a service's ingress route without a deployment. The service must already have a route, and a name belongs to one project. Needs `deploy` |
-| `tug domain list`, `tug domain remove <host>` | | Lists or stops serving mapped domains. See [Mapped domains](ingress.md#mapped-domains-and-wildcard-zones) |
+| `tug domain list` (alias `ls`), `tug domain remove <host>` | | Lists or stops serving mapped domains. See [Mapped domains](ingress.md#mapped-domains-and-wildcard-zones) |
 
 Variables are read and written with `deploy`, and a change takes effect on the next deploy. A name cannot be both a secret and a variable.
 
@@ -356,11 +356,11 @@ Variables are read and written with `deploy`, and a change takes effect on the n
 | `tug backup destination set <url>` | `--env NAME` (repeatable) | Sets where backups go, for example `s3:https://s3.example.com/bucket/tug-backups` with `--env AWS_ACCESS_KEY_ID --env AWS_SECRET_ACCESS_KEY`. Each value is read from the environment variable of that name, else from a stdin line, never an argument. S3 needs both AWS variables. Values are stored encrypted and released only to a node running a backup. An absolute path works for development but is read per node and not shared. Replaces the previous destination |
 | `tug backup destination show` | | The URL and variable names, never values |
 | `tug backup destination remove` | | Removes the destination and its credentials. Existing backups stay in the repository |
-| `tug backup run [targets...]` | `--no-wait`, `--timeout <seconds>`, `--select` | Backs up the named services or volumes now, or every target, and waits. Exits nonzero if any backup fails or is missed. Needs `deploy` |
-| `tug backup list` | `--limit <n>`, `--check`, `--allow-empty` | Shows each target with node, schedule, last success and next run, then recent runs. Needs `read` |
+| `tug backup run [targets...]` | `--no-wait`, `--timeout <seconds>` (default `3600`), `--select` | Backs up the named services or volumes now, or every target, and waits. Exits nonzero if any backup fails or is missed. Needs `deploy` |
+| `tug backup list` | `--limit <n>` (recent runs, default `20`), `--check`, `--allow-empty` | Shows each target with node, schedule, last success and next run, then recent runs. Needs `read` |
 | `tug backup cancel <run>` | | Stops a queued or running backup. The run id is the last column of `backup list`. It is reported as cancelled and not retried |
 | `tug backup password` | `--control` | Prints the project's repository and password, or with `--control` the control repository and password, the one value to keep off the server for recovering control |
-| `tug restore run [target]` | `--from <id\|latest>`, `--scratch`, `--no-safety-backup`, `--writers <service,...>`, `--no-writers`, `--confirm`, `--select-snapshot`, `--select-writers` | Restores a service or volume. Without `--confirm` it prints the plan and changes nothing. `--from` takes a backup run id, a restic snapshot id or `latest`. It waits up to five minutes for stopped services to serve again, then finishes with a warning. See [Restore](backups.md#restore) |
+| `tug restore run [target]` | `--from <id\|latest>`, `--scratch`, `--no-safety-backup`, `--writers <service,...>`, `--no-writers`, `--confirm`, `--timeout <seconds>` (default `3600`), `--select-snapshot`, `--select-writers` | Restores a service or volume. Without `--confirm` it prints the plan and changes nothing. `--from` takes a backup run id, a restic snapshot id or `latest`. It waits up to five minutes for stopped services to serve again, then finishes with a warning. See [Restore](backups.md#restore) |
 | `tug restore list` | | Recent restores |
 | `tug restore cancel <id>` | | Stops a restore that is waiting on its safety backup (nothing has changed) or restoring (it is interrupted and its services stay stopped until `resume` or `release`) |
 | `tug restore resume [id]` | | Runs an interrupted restore again |

@@ -34,7 +34,7 @@ const labels = (): JsonSchema => ({
 
 const placement = (): JsonSchema => ({
   description:
-    'Where the service or volume runs. With one registered node it may be omitted; with several, every service chooses nodes or labels (see docs/service-placement.md).',
+    'Where the service or volume runs. With one registered node it may be omitted; with several, every service chooses nodes or labels (see docs/placement.md).',
   type: 'object',
   properties: {
     nodes: {

@@ -17,6 +17,7 @@ You need:
 
 - A VPS with a public IP and SSH access as root. Debian, Ubuntu, Fedora or a RHEL-compatible distribution lets Tug install Docker for you. On any other distribution, install Docker Engine first.
 - Node.js 22.18 or newer on your computer. Docker is needed there only for `--build-local`.
+- Enough room on the VPS. Setup fails its preflight check with under 2048 MB free under Docker's data root (usually `/var/lib/docker`), and adding the node needs 1024 MB free. About 1 GB of memory runs one small site, and control and the agent share the VPS with your app.
 - Outbound access from the VPS to pull images.
 - TCP 8443 open from your computer and the agent to control, and TCP 8080 open from your computer for this temporary example. Check the provider firewall as well as any host firewall.
 
@@ -59,7 +60,7 @@ Allow Tug to install Docker if necessary and confirm the plan. Setup installs co
 tug status
 ```
 
-You should see a control-wide status summary. If it cannot connect, check the address printed during setup and TCP 8443; see [Troubleshooting](troubleshooting.md).
+Success is a status summary with no error. Control is new, so it has no deployments and no nodes yet. If it cannot connect, check the address printed during setup and TCP 8443; see [Troubleshooting](troubleshooting.md).
 
 ## 2. Add the same VPS as a node
 
@@ -68,7 +69,7 @@ tug node add root@203.0.113.5 --name app1
 tug node list
 ```
 
-Accept Docker installation if prompted, choose an address belonging to the VPS and confirm the plan. You can decline managed ingress for this example and enable it later when you add a hostname. A private interface address is useful when you add a second server. The agent connects out to control and should appear in the node list with a recent contact time. The control plane and agent now share the VPS.
+`node add` waits about a minute for the agent's first report. Success is the node listed as `online` in `tug node list`. A node that has not reported prints `reporting: false` and the command exits nonzero, see [Troubleshooting](troubleshooting.md#a-node-is-stale-or-cannot-reach-a-service). Accept Docker installation if prompted, choose an address belonging to the VPS and confirm the plan. You can decline managed ingress for this example and enable it later when you add a hostname. A private interface address is useful when you add a second server. The agent connects out to control and should appear in the node list with a recent contact time. The control plane and agent now share the VPS.
 
 ## 3. Deploy and visit a service
 
@@ -95,9 +96,22 @@ tug logs web
 curl http://203.0.113.5:8080/
 ```
 
-The deploy should report success, status should show `web` serving on `app1`, and curl should return the nginx welcome page. The explicit `0.0.0.0` publishes the example on all IPv4 interfaces; restrict TCP 8080 to your computer in the provider firewall while trying it. For a real site, use [managed ingress and HTTPS](ingress.md#set-up-ingress), remove this explicit public binding, and redeploy. Tug otherwise binds published ports to the node address or loopback; a public node address can still make them public. See [port exposure](networking.md#published-ports-private-by-default).
+`tug deploy` prints one summary line that ends in `succeeded`, for example `site git-ab12: deployment dep_1 succeeded, 3 services`, with your own project, version, id and service count. Status should show `web` serving on `app1`, and curl should return the nginx welcome page. The explicit `0.0.0.0` publishes the example on all IPv4 interfaces; restrict TCP 8080 to your computer in the provider firewall while trying it. For a real site, use [managed ingress and HTTPS](ingress.md#set-up-ingress), remove this explicit public binding, and redeploy. Tug otherwise binds published ports to the node address or loopback; a public node address can still make them public. See [port exposure](networking.md#published-ports-private-by-default).
 
 With one node, omitted placement selects it automatically. The HTTP check verifies nginx responds before Tug marks it serving; see [Health checks](health-checks.md). If the deploy fails or the page is unreachable, start with [Troubleshooting](troubleshooting.md).
+
+## Deploy your own app
+
+Tug reads `tug.yml` only from the current directory, and `tug setup` wrote it in `my-first-tug`. To deploy from your app's repository, give that directory the credential setup saved under `~/.config/tug/credentials/` (the file name starts with the control host):
+
+```sh
+cd path/to/your-app
+tug init ~/.config/tug/credentials/<file>.json
+tug lint
+tug deploy
+```
+
+`tug init` creates `tug.yml` and a git-ignored `tug.local.yml` that points at the credential, so commit the first and keep the second out of git. For CI, set `TUG_CREDENTIAL` instead, see [Deploying from GitHub Actions](access-control.md#deploying-from-github-actions).
 
 ## Choose a next step
 

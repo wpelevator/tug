@@ -26,7 +26,7 @@ To choose a probe see [Health checks](health-checks.md), and to choose where ser
 
 ## Checking the file with `tug lint`
 
-`tug lint` checks a Compose file against the `x-tug` schema with no control connection, credential or Docker. It reports what `tug deploy` makes control reject: the whole `x-tug` schema plus the unsupported Compose keys. Checks that depend on your node list still happen at deploy. A typo such as `ingresss:` that deploy would silently ignore becomes a ten-millisecond error.
+`tug lint` checks a Compose file against the `x-tug` schema with no control connection, credential or Docker. It reports what `tug deploy` makes control reject: the whole `x-tug` schema plus the unsupported Compose keys. Checks that depend on your node list still happen at deploy. A typo such as `ingresss:` fails in milliseconds here, with no server needed.
 
 ```sh
 tug lint
@@ -248,6 +248,7 @@ services:
         command: mariadb-dump -u root -p"$$MARIADB_ROOT_PASSWORD" --single-transaction --databases wordpress
         filename: wordpress.sql
         verify: "-- Dump completed"
+        restore: mariadb -uroot -p"$MARIADB_ROOT_PASSWORD"
 
 volumes:
   uploads:

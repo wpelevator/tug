@@ -291,7 +291,7 @@ function addSetup(parent: Command, description: string): void {
     )
     .option(
       '--install-docker',
-      'install missing Docker Engine and Compose on supported Debian, Ubuntu, Fedora and RHEL-compatible hosts (root required); in a terminal you are asked when they are missing',
+      'install missing Docker Engine (and Buildx) on supported Debian, Ubuntu, Fedora and RHEL-compatible hosts (root required); in a terminal you are asked when they are missing',
     )
     .option(
       '--build-local-image',

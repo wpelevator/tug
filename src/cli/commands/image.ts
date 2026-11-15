@@ -6,9 +6,9 @@ export function registerImage(program: Command): void {
   image
     .command('prune')
     .description(
-      'delete build archives that rollback no longer needs: all but the newest N deployments of each project, the current one and any version a node still runs',
+      'delete build archives that rollback no longer needs: all but the newest N distinct builds of each project, the current one and any version a node still runs',
     )
-    .option('--keep <n>', 'deployments per project whose archives are kept', '5')
+    .option('--keep <n>', 'distinct builds per project whose archives are kept', '5')
     .option('--dry-run', 'list what would be deleted without deleting it')
     .action(async (o: { keep: string; dryRun?: boolean }) =>
       print(
