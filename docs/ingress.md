@@ -58,7 +58,7 @@ Control aggregates the `ingress` blocks of every project's current deployment. F
 
 ### The Caddy container
 
-The agent on an ingress node creates `tug-caddy` with host networking and three named volumes (`/data` for ACME accounts and certificates, `/config`, `/etc/caddy`), so certificates survive recreation and image updates. It uploads config through the Engine API archive endpoint, which works whether the agent runs on the host or in a container, and applies it with `caddy reload`. A reload swaps config without restarting the container or dropping in-flight HTTP requests (WebSockets stay open for a while, see [Edge features](#edge-features)). If Caddy rejects the config, the agent restores the last applied files, reports `failed` with Caddy's error in the node's ingress status and retries on the next poll. `tug doctor` flags ingress nodes that are not `serving`. Removing the ingress role removes the container but keeps the volumes. The image is `caddy:2-alpine`, overridable with `TUG_CADDY_IMAGE` on the agent.
+The agent on an ingress node creates `tug-caddy` with host networking and three named volumes (`/data` for ACME accounts and certificates, `/config`, `/etc/caddy`), so certificates survive recreation and image updates. It uploads config through the Engine API archive endpoint, which works whether the agent runs on the host or in a container, and applies it with `caddy reload`. A reload swaps config without restarting the container or dropping in-flight HTTP requests (WebSockets stay open for a while, see [Edge features](#edge-features)). If Caddy rejects the config, the agent restores the last applied files, reports `failed` with Caddy's error in the node's ingress status and retries on the next poll. `tug doctor` flags ingress nodes that are not `serving` and ones that do not answer on ports 80 and 443 ([Port reachability](#port-reachability)). Removing the ingress role removes the container but keeps the volumes. The image is `caddy:2-alpine`, overridable with `TUG_CADDY_IMAGE` on the agent.
 
 For `rolling` services the upstream port is the one the serving revision reports, not the declared published port.
 
@@ -136,6 +136,22 @@ The same state appears elsewhere:
 - `tug doctor` fails the `ingress` check for a host that has been `pending` or `failed` for more than ten minutes, which leaves time for DNS and port 80 to be fixed on a new domain, and names the host, the node and the reason.
 
 Only names Caddy issues itself are checked: `tls: auto` hosts and mapped domains. Wildcard names are skipped, because a probe would trigger on-demand issuance for a name nobody asked for, and so are `tls: custom` hosts, whose certificate you supply. The reason comes from Caddy's JSON log and is best effort: an unrecognized log format costs the reason, never the state. Probing is throttled to every twenty seconds for a host without a certificate and hourly for one with, and runs beside the agent's polling, so a slow handshake or log read never delays routing updates. A fix shows once Caddy issues the certificate, which can take minutes because Caddy retries failed orders with backoff. Control keeps the `since` time across agent restarts, and keeps the last results while an ingress reload is `failed`. The remembered failure reason lives in the agent process, so after a restart a failing host reads `pending` with the handshake error until Caddy logs its next attempt. An issued host needs two failed handshakes in a row to read `pending`, so a Caddy restart is not a flap.
+
+### Port reachability
+
+`tug doctor` fails the `ingress_ports` check when an enabled, online ingress node does not accept a TCP connection on port 80 or 443. Control opens the connection to the node's address (the `--address` registered with `tug node add`, see [Nodes](nodes.md)), sends nothing and closes it. The failure names the port and the node, the likely cause and the fix:
+
+| Result | Likely cause | What to do |
+| --- | --- | --- |
+| No answer within three seconds | A host firewall that drops packets (`ufw` does by default) or a provider firewall | Allow `80/tcp` and `443/tcp` on the host (`ufw allow 80,443/tcp`) and in the provider's firewall |
+| Connection refused | Nothing listens (the managed Caddy is not running, see `tug ingress logs <node>`) or a firewall rejects the connection | Start the edge, or allow the ports as above |
+| Host unreachable | A host firewall that rejects with `host-prohibited` (`firewalld` does by default) or a provider firewall | `firewall-cmd --permanent --add-service=http --add-service=https && firewall-cmd --reload`, and the provider's firewall |
+
+tug never changes a firewall, so the remedy is yours to run. A node with no address, or one that is not reporting, is a warning with the reason and is not probed.
+
+The check runs from control, because agents only dial out and no agent can see how the internet reaches its node. It tests the path from control to the node's address. When that address is private, which is usual when nodes share a private network, a firewall that filters only the public address is not seen, so `ingress_ports` is evidence that the host answers and not proof that the internet can reach it. The per-host certificate state above covers the public path, but it fails only after ten minutes. The JSON document lists `scope` (`public` or `private`) per node, so a script can tell which kind of address was probed.
+
+`tug node ingress <node>` does not probe, because Caddy starts on the node's next poll and would still be closed. It prints a reminder that the ports must be open and that `tug doctor` checks them.
 
 ### Wildcard hosts are issued name by name
 

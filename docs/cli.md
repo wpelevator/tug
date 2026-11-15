@@ -405,7 +405,20 @@ Use a credential anywhere one works: `TUG_CREDENTIAL=<credential> tug deploy`.
 | `--timeout <seconds>` | Wait for node diagnostics | `60` |
 | `--json` | The full document, including output the summary leaves out such as `docker info` | off |
 
-It checks this machine (Node.js and Docker) and the control plane: SQLite, the CA and server certificate expiry, each node's certificate expiry and connectivity, each online node's observed clock skew (unknown when offline, see [Nodes](nodes.md#doctor-certificate-expiry-and-clock-skew)) and ingress status. Node diagnostics include `ports.public`, a warning that lists containers of tug projects listening on all interfaces or a public IP ([Networking](networking.md#published-ports-private-by-default)). It prints one `ok`, `warn` or `FAIL` line per check, grouped under this machine, control and each node, and exits nonzero when any check fails, so it works as a readiness probe.
+It checks this machine (Node.js and Docker) and the control plane: SQLite, the CA and server certificate expiry, each node's certificate expiry and connectivity, each online node's observed clock skew (unknown when offline, see [Nodes](nodes.md#doctor-certificate-expiry-and-clock-skew)) and ingress status. The local Docker check matters only for `deploy --build-local`. When no daemon answers on this machine it prints `skip` with `needed only for --build-local` and does not count toward `Problems found`; a reachable daemon prints `ok`. In `--json` the check is `{"name":"docker","ok":true,"skipped":"needed only for --build-local"}`.
+
+On ingress nodes, control opens a TCP connection to ports 80 and 443 on each node's address and fails `ingress_ports` for a port that does not answer, with the likely firewall cause and fix ([Port reachability](ingress.md#port-reachability)). tug does not change firewalls.
+
+Host resources are read-only values, shown under a `resources` check on control and a `host.resources` check on each node (they never fail the run, and tug sets no thresholds on them):
+
+| Field | Source | Meaning |
+| --- | --- | --- |
+| `load` | `/proc/loadavg` | One, five and fifteen minute load averages and the CPU count of the host |
+| `memory` | `/proc/meminfo` | `MemAvailable` and `MemTotal`, so reclaimable cache counts as available |
+| `disk` | `statfs` of the agent's state volume, or of control's data directory | Free and total space of the filesystem that holds it. Docker keeps volumes under its data root, so on a default install this is the disk Docker fills; `dockerRoot` names the data root the daemon reports |
+| `containers` | Docker stats, one sample | CPU as a percentage of one core and memory in use without page cache, for the `tug-agent` and managed `tug-caddy` containers on a node and for control's container on control. A container that is not running is listed with its error |
+
+Node diagnostics include `ports.public`, a warning that lists containers of tug projects listening on all interfaces or a public IP ([Networking](networking.md#published-ports-private-by-default)). It prints one `ok`, `warn` or `FAIL` line per check, grouped under this machine, control and each node, and exits nonzero when any check fails, so it works as a readiness probe.
 
 ### Control backup and restore
 

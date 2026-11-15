@@ -9,6 +9,9 @@ import type { StatusResponse } from '../status.ts';
 import { loadCfg, print, request, runCapture, waitForCommand } from './context.ts';
 import type { CommonOpts } from './context.ts';
 
+/** Why `tug doctor` does not fail on a machine with no Docker daemon. */
+export const LOCAL_DOCKER_SKIP = 'needed only for --build-local';
+
 export function registerObserve(program: Command): void {
   program
     .command('status')
@@ -52,7 +55,13 @@ export function registerObserve(program: Command): void {
         if (o.nodes && o.node) throw new Error('--nodes and --node cannot be combined');
         if (o.node === true) o.node = await selectNode();
         const cfg = await loadCfg();
-        const local: { name: string; ok: boolean; output?: string; error?: string }[] = [];
+        const local: {
+          name: string;
+          ok: boolean;
+          output?: string;
+          error?: string;
+          skipped?: string;
+        }[] = [];
         for (const [name, cmd, args] of [
           ['node', 'node', ['--version']],
           ['docker', 'docker', ['version', '--format', '{{.Server.Version}}']],
@@ -60,7 +69,9 @@ export function registerObserve(program: Command): void {
           try {
             local.push({ name, ok: true, output: (await runCapture(cmd, args)).trim() });
           } catch (e) {
-            local.push({ name, ok: false, error: errMessage(e) });
+            // The operator's Docker daemon builds images only for `deploy --build-local`, so its absence is not a problem.
+            if (name === 'docker') local.push({ name, ok: true, skipped: LOCAL_DOCKER_SKIP });
+            else local.push({ name, ok: false, error: errMessage(e) });
           }
         }
         let controlDiagnostics:

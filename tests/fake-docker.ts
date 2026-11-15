@@ -8,6 +8,7 @@ import type {
   AttachedProcess,
   ContainerFilter,
   ContainerInspect,
+  ContainerStats,
   ContainerSummary,
   CreateContainerBody,
   DaemonInfo,
@@ -56,6 +57,8 @@ export class FakeDocker implements DockerApi {
   /** State a container is in after `startContainer`; `exited` simulates a crash on start. */
   startsAs: 'running' | 'exited' | 'restarting' = 'running';
   logOutput = new Map<string, string>();
+  /** Samples `stats` returns by container name; a container without one throws like a stopped container. */
+  statsByName = new Map<string, ContainerStats>();
   private seq = 0;
 
   /** Pre-seeds a local image. */
@@ -97,6 +100,12 @@ export class FakeDocker implements DockerApi {
   }
   async info() {
     return this.info_;
+  }
+  async stats(idOrName: string): Promise<ContainerStats> {
+    const name = this.resolve(idOrName).name;
+    const sample = this.statsByName.get(name);
+    if (!sample) throw new DockerError(409, `container ${name} is not running`);
+    return sample;
   }
 
   private summary(c: FakeContainer): ContainerSummary {

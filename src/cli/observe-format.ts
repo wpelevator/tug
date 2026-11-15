@@ -1,3 +1,4 @@
+import type { HostResources } from '../host-resources.ts';
 import { columnWidth, sanitizeTerminalText } from './width.ts';
 
 /** Left-aligned columns separated by two spaces, each as wide as its widest cell, without trailing spaces. */
@@ -109,6 +110,9 @@ interface Check {
   output?: string;
   value?: unknown;
   stdout?: string;
+  /** The reason a check did not run; the check then counts as neither passed nor failed. */
+  skipped?: string;
+  resources?: HostResources;
 }
 
 /** The `tug doctor` document; `--json` prints it unchanged. */
@@ -138,16 +142,54 @@ function detail(check: Check): string {
   return text && !text.includes('\n') && text.length <= 60 ? text : '';
 }
 
+const gib = (bytes: number) => `${(bytes / 2 ** 30).toFixed(1)} GiB`;
+const mib = (bytes: number) =>
+  bytes >= 2 ** 30
+    ? gib(bytes)
+    : `${(bytes / 2 ** 20).toFixed(bytes >= 100 * 2 ** 20 ? 0 : 1)} MiB`;
+
+/** The lines under a `resources` check: load, memory, disk and one line per container. */
+export function resourceLines(resources: HostResources): string[] {
+  const lines: string[] = [];
+  const { load, memory, disk } = resources;
+  if (load)
+    lines.push(
+      `load ${load.one.toFixed(2)} ${load.five.toFixed(2)} ${load.fifteen.toFixed(2)} on ${load.cpus} CPU${load.cpus === 1 ? '' : 's'}`,
+    );
+  if (memory)
+    lines.push(`memory ${gib(memory.availableBytes)} available of ${gib(memory.totalBytes)}`);
+  if (disk)
+    lines.push(
+      `disk ${gib(disk.freeBytes)} free of ${gib(disk.totalBytes)} (${disk.dockerRoot ? `Docker data root ${disk.dockerRoot}` : disk.path})`,
+    );
+  for (const c of resources.containers)
+    lines.push(
+      sanitizeTerminalText(
+        c.error
+          ? `${c.name} not measured: ${c.error.replace(/\s+/g, ' ').trim()}`
+          : `${c.name} ${c.cpuPercent === undefined ? 'CPU unknown' : `${c.cpuPercent.toFixed(1)}% CPU`}, ${c.memoryBytes === undefined ? 'memory unknown' : mib(c.memoryBytes)}`,
+      ),
+    );
+  return lines;
+}
+
 function checkLines(checks: Check[]): string[] {
   const rows = checks.map((check) => [
-    check.ok ? (check.warnings?.length ? 'warn' : 'ok') : 'FAIL',
+    check.skipped ? 'skip' : check.ok ? (check.warnings?.length ? 'warn' : 'ok') : 'FAIL',
     check.name,
-    check.ok ? detail(check) : (check.error ?? 'failed').replace(/\s+/g, ' ').trim(),
+    check.skipped
+      ? check.skipped
+      : check.ok
+        ? detail(check)
+        : (check.error ?? 'failed').replace(/\s+/g, ' ').trim(),
   ]);
   const lines = rows.length ? formatTable(rows).split('\n') : ['(no checks)'];
   return lines.flatMap((line, index) => [
     `  ${line}`,
     ...(checks[index]?.warnings ?? []).map((warning) => `        ${warning}`),
+    ...(checks[index]?.resources ? resourceLines(checks[index].resources!) : []).map(
+      (resource) => `        ${resource}`,
+    ),
   ]);
 }
 

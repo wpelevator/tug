@@ -182,3 +182,63 @@ test('formatDoctor groups checks by where they ran, shows failures and warnings,
     'No problems found.',
   );
 });
+
+test('formatDoctor prints a skipped check as skip with its reason and does not call it a problem', () => {
+  const out = formatDoctor({
+    ok: true,
+    local: [
+      { name: 'node', ok: true, output: 'v22.18.0' },
+      { name: 'docker', ok: true, skipped: 'needed only for --build-local' },
+    ],
+    control: { ok: true, checks: [] },
+  });
+  assert.match(
+    out,
+    /^ {2}skip {2}docker {2}needed only for --build-local$/m,
+    'a skipped check shows skip and why',
+  );
+  assert.ok(!out.includes('FAIL'), 'a skipped check is not a FAIL line');
+  assert.equal(
+    out.split('\n').at(-1),
+    'No problems found.',
+    'a skipped check does not count toward problems',
+  );
+});
+
+test('formatDoctor lists host resources under the resources check', () => {
+  const out = formatDoctor({
+    ok: true,
+    local: [],
+    control: {
+      ok: true,
+      checks: [
+        {
+          name: 'resources',
+          ok: true,
+          resources: {
+            load: { one: 0.5, five: 0.25, fifteen: 0.125, cpus: 2 },
+            memory: { totalBytes: 2 * 2 ** 30, availableBytes: 2 ** 30 },
+            disk: {
+              path: '/data',
+              freeBytes: 10 * 2 ** 30,
+              totalBytes: 20 * 2 ** 30,
+              dockerRoot: '/var/lib/docker',
+            },
+            containers: [
+              { name: 'tug-control', cpuPercent: 1.25, memoryBytes: 50 * 2 ** 20 },
+              { name: 'tug-caddy', error: 'No such container: tug-caddy' },
+            ],
+          },
+        },
+      ],
+    },
+  });
+  for (const expected of [
+    'load 0.50 0.25 0.13 on 2 CPUs',
+    'memory 1.0 GiB available of 2.0 GiB',
+    'disk 10.0 GiB free of 20.0 GiB (Docker data root /var/lib/docker)',
+    'tug-control 1.3% CPU, 50.0 MiB',
+    'tug-caddy not measured: No such container: tug-caddy',
+  ])
+    assert.ok(out.includes(`        ${expected}`), `doctor shows "${expected}" under its check`);
+});

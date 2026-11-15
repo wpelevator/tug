@@ -4,6 +4,7 @@
 
 import { deploymentLifecycle } from './db/lifecycles.ts';
 import { activeStates, terminalStates } from './db/lifecycle.ts';
+import type { HostResources } from './host-resources.ts';
 
 // ---- Compose input (what the operator deploys) -------------------------------------------------
 
@@ -326,6 +327,8 @@ export interface DiagnosticCheck {
   stderr?: string;
   error?: string;
   warning?: string;
+  /** Host resources, on the `host.resources` check only. */
+  resources?: HostResources;
 }
 
 export type CommandResultPayload =
