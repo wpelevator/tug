@@ -55,7 +55,7 @@ Restic runs in a helper container with a memory limit, labelled `tug.job` and re
 
 ## Recipes
 
-tug has no database support of its own. Each recipe is a command for the service container. In a Compose file, use `$$` for variables the container shell must expand, because a single `$` is interpolated on your machine before deployment. Read credentials from the container environment, write the data to standard output, and give `verify` the line the tool prints on success.
+tug has no database support of its own. Each recipe is a command for the service container. In a Compose file, use `$$` for variables the container shell must expand, because a single `$` is read by `tug deploy` as a value to take from control. A single `$` in a `command` or `restore` fails the deploy with `compose.yaml needs values that are not set on control: MARIADB_ROOT_PASSWORD`. Read credentials from the container environment, write the data to standard output, and give `verify` the line the tool prints on success.
 
 ```yaml
 # MariaDB (use mysqldump and MYSQL_ROOT_PASSWORD for MySQL)
@@ -63,14 +63,14 @@ backup:
   command: mariadb-dump -u root -p"$$MARIADB_ROOT_PASSWORD" --single-transaction --quick --routines --events --triggers --add-drop-database --databases wordpress
   filename: wordpress.sql
   verify: "-- Dump completed"
-  restore: mariadb -uroot -p"$MARIADB_ROOT_PASSWORD"
+  restore: mariadb -uroot -p"$$MARIADB_ROOT_PASSWORD"
 
 # PostgreSQL
 backup:
   command: pg_dump -U "$$POSTGRES_USER" --clean --if-exists "$$POSTGRES_DB"
   filename: app.sql
   verify: "PostgreSQL database dump complete"
-  restore: psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1
+  restore: psql -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" -v ON_ERROR_STOP=1
 
 # SQLite file in a volume mounted into the service
 backup:
