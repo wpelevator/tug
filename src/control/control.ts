@@ -87,7 +87,10 @@ import {
 } from '../pki.ts';
 import { EXPIRY_WARN_DAYS, certificateExpiry, diagnoseNode, nodeStatus } from './diagnostics.ts';
 import { serverTlsOptions } from './tls-server.ts';
-import { isNodeHost } from '../node-address.ts';
+import { isNodeHost, isPublicAddress } from '../node-address.ts';
+import { collectResources, ownContainer } from '../host-resources.ts';
+import { INGRESS_PORTS, describeClosedPort, probeTcpPort } from './port-probe.ts';
+import type { PortProbe } from './port-probe.ts';
 import {
   ASK_PORT,
   CADDY_ADMIN_PORT,
@@ -288,6 +291,8 @@ const liveBase64 = (value: unknown): value is string =>
   /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value);
 /** How long a host may lack a certificate, pending or failing its first attempts, before `tug doctor` fails: DNS and port 80 can lag a new domain. */
 const PENDING_TLS_GRACE_MS = 10 * 60_000;
+/** How long `doctor` waits for a TCP connect to an ingress node's port 80 or 443 before calling it unanswered. */
+const PORT_PROBE_TIMEOUT_MS = 3000;
 
 function parseLiveRequest(value: unknown): LiveRequest {
   if (objectFrame(value) && value.operation === 'ingress-logs') {
@@ -737,6 +742,8 @@ export async function createApp(
     images?: Partial<ControlImageOperations>;
     /** The Docker Engine control manages images and reports diagnostics through; defaults to the local socket. */
     docker?: DockerApi;
+    /** Test hook: replaces the TCP connect `doctor` uses to check ports 80 and 443 on ingress nodes. */
+    probePort?: PortProbe;
     openDatabase?: typeof openDb;
     /** Test hook: runs after each step of putting a restored backup in place and may throw to simulate a crash. */
     restoreAfterStep?: (step: ActivationStep) => void | Promise<void>;
@@ -4581,8 +4588,69 @@ export async function createApp(
         return { nodes: ingressNodes.map((n) => n.name) };
       });
     }
+    if (ingressNodes.length) await check('ingress_ports', ingressPortsCheck);
+    await check('resources', async () => {
+      const self = await ownContainer(docker, 'tug-control-control-1');
+      return {
+        resources: await collectResources(docker, {
+          diskPath: DATA_DIR,
+          containers: self ? [{ id: self, label: self }] : [],
+        }),
+      };
+    });
     res.json({ ok: checks.every((c) => c.ok), checks });
   });
+  /**
+   * Opens a TCP connection from control to ports 80 and 443 on each online ingress node's address. This tests the
+   * path from control, which is the node's inter-node address and may be private, so it finds host firewalls
+   * but not a provider firewall that only filters the public address. It sends no data and changes nothing.
+   */
+  async function ingressPortsCheck(): Promise<Record<string, unknown>> {
+    const probe = options.probePort ?? probeTcpPort;
+    const staleSeconds = Number(process.env.TUG_STALE_SECONDS || 60);
+    const rows = db.all<NodeRow>(
+      'SELECT * FROM nodes WHERE ingress=1 AND disabled_at IS NULL ORDER BY name',
+    );
+    const problems: string[] = [];
+    const warnings: string[] = [];
+    const nodes = await Promise.all(
+      rows.map(async (n) => {
+        if (!n.address) {
+          warnings.push(
+            `${n.name}: no address is set, so ports 80 and 443 were not probed; set one with tug node address ${n.name} --to <address>`,
+          );
+          return { name: n.name, probed: false };
+        }
+        if (nodeStatus(n, Date.now(), staleSeconds) !== 'online') {
+          warnings.push(`${n.name}: not reporting, so ports 80 and 443 were not probed`);
+          return { name: n.name, address: n.address, probed: false };
+        }
+        const ports = await Promise.all(
+          INGRESS_PORTS.map(async (port) => ({
+            port,
+            state: await probe(n.address!, port, PORT_PROBE_TIMEOUT_MS),
+          })),
+        );
+        for (const { port, state } of ports)
+          if (state !== 'open') problems.push(describeClosedPort(n.name, n.address!, port, state));
+        return {
+          name: n.name,
+          address: n.address,
+          scope: isPublicAddress(n.address) ? 'public' : 'private',
+          probed: true,
+          ports,
+        };
+      }),
+    );
+    const probed = nodes.filter((n) => n.probed).map((n) => n.name);
+    return {
+      ok: problems.length === 0,
+      nodes,
+      ...(!problems.length && probed.length && { output: `80, 443 open on ${probed.join(', ')}` }),
+      ...(problems.length && { error: problems.join('; ') }),
+      ...(warnings.length && { warnings }),
+    };
+  }
   api('post', '/api/v1/diagnostics/nodes', null, async (req, res) => {
     const nodes = req.body.node
       ? db.all<Pick<NodeRow, 'id'>>(

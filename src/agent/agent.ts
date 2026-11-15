@@ -74,6 +74,7 @@ import { openAgentDb } from '../db/db.ts';
 import type { AppliedStateRow, Db, EventStateRow } from '../db/db.ts';
 import type { HttpClient } from './runners.ts';
 import { CADDY_CONTAINER, reconcileIngress, removeIngress } from '../ingress.ts';
+import { collectResources, ownContainer } from '../host-resources.ts';
 import { createTlsMonitor } from '../ingress-tls.ts';
 import type { TlsMonitor } from '../ingress-tls.ts';
 import type {
@@ -856,6 +857,23 @@ async function publicPortsCheck(ctx: AgentContext): Promise<DiagnosticCheck> {
   }
 }
 
+/** Read-only host resources for `tug doctor`; it reports values and never fails the diagnostics. */
+async function resourcesCheck(ctx: AgentContext): Promise<DiagnosticCheck> {
+  const containers: { id: string; label: string }[] = [];
+  const self = await ownContainer(ctx.docker, 'tug-agent');
+  if (self) containers.push({ id: self, label: self });
+  const ingress = await fs.stat(path.join(ctx.stateDir, 'ingress')).then(
+    () => true,
+    () => false,
+  );
+  if (ingress) containers.push({ id: CADDY_CONTAINER, label: CADDY_CONTAINER });
+  return {
+    name: 'host.resources',
+    ok: true,
+    resources: await collectResources(ctx.docker, { diskPath: ctx.stateDir, containers }),
+  };
+}
+
 const MIN_API_VERSION = API_VERSION.replace(/^v/, '');
 /** The minor number of an Engine API version such as `1.41`; 0 when unparseable. */
 const apiMinor = (version: string | undefined): number => Number(version?.split('.')[1]) || 0;
@@ -920,6 +938,7 @@ export async function executeCommand(
       }
     }
     checks.push(await publicPortsCheck(ctx));
+    checks.push(await resourcesCheck(ctx));
     return {
       commandId: command.id,
       state: checks.every((c) => c.ok) ? 'succeeded' : 'failed',

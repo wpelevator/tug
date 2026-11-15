@@ -11,7 +11,10 @@ import type { AddressInfo } from 'node:net';
 import { json } from '../../tests/helpers.ts';
 import { until } from '../../tests/wait.ts';
 
-async function makeServer(docker = new FakeDocker()) {
+async function makeServer(
+  docker = new FakeDocker(),
+  extra: { probePort?: (host: string, port: number, timeoutMs: number) => Promise<any> } = {},
+) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-diag-'));
   process.env.TUG_DATA_DIR = dir;
   const app = await createApp({
@@ -19,6 +22,7 @@ async function makeServer(docker = new FakeDocker()) {
     identity: testIdentity,
     controlUrl: testControlUrl,
     images: { resolve: testImageResolver },
+    ...extra,
   });
   const srv = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));
@@ -171,6 +175,101 @@ test('the docker diagnostics check reports the engine version from the Engine AP
     const down = await check();
     assert.equal(down.ok, false, 'an unreachable engine socket fails the check');
     assert.match(down.error, /ENOENT/, 'the failure names why the socket did not answer');
+  } finally {
+    await s.close();
+  }
+});
+
+test('doctor checks ports 80 and 443 on online ingress nodes and names the closed port, cause and remedy', async () => {
+  const probed: string[] = [];
+  const closed = new Set<string>();
+  const s = await makeServer(new FakeDocker(), {
+    probePort: async (host, port) => {
+      probed.push(`${host}:${port}`);
+      return closed.has(`${host}:${port}`) ? 'timeout' : 'open';
+    },
+  });
+  try {
+    const call = (route: string, headers: Record<string, string>, body?: unknown) =>
+      fetch(`${s.base}${route}`, {
+        method: body === undefined ? 'GET' : 'POST',
+        headers,
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+    const portsCheck = async () => {
+      const diagnostics = await json(await call('/api/v1/diagnostics', op));
+      return diagnostics.checks.find((c: { name: string }) => c.name === 'ingress_ports');
+    };
+    assert.equal(await portsCheck(), undefined, 'without an ingress node there is no port check');
+    const register = async (name: string, address?: string) => {
+      const node = await json(await call('/api/v1/nodes/register', op, { name, address }));
+      await call(`/api/v1/nodes/${name}/ingress`, op, { enabled: true });
+      return node;
+    };
+    const online = (nodeId: string, name: string) =>
+      call(
+        '/agent/v1/status',
+        { 'x-tug-test-node': nodeId, 'content-type': 'application/json' },
+        { node: name, sentAt: new Date().toISOString(), projects: [], commandResults: [] },
+      );
+    const a = await register('a', '10.0.0.4');
+    await register('noaddr');
+    await register('silent', '10.0.0.9');
+    assert.equal((await online(a.nodeId, 'a')).status, 200, 'the status report is accepted');
+
+    let check = await portsCheck();
+    assert.equal(check.ok, true, 'open ports pass the check');
+    assert.deepEqual(
+      probed.sort(),
+      ['10.0.0.4:443', '10.0.0.4:80'],
+      'only the online node with an address is probed, on both ports and nothing else',
+    );
+    assert.equal(
+      check.nodes.find((n: { name: string }) => n.name === 'a').scope,
+      'private',
+      'a private address is labelled so the limit is visible in the document',
+    );
+    assert.equal(check.output, '80, 443 open on a', 'a passing check says what was verified');
+    assert.deepEqual(
+      check.warnings.map((w: string) => w.split(':')[0]).sort(),
+      ['noaddr', 'silent'],
+      'nodes that cannot be probed produce warnings, not failures',
+    );
+
+    closed.add('10.0.0.4:443');
+    check = await portsCheck();
+    assert.equal(check.ok, false, 'a closed port fails the check');
+    assert.match(
+      check.error,
+      /port 443 on ingress node a \(10\.0\.0\.4\)/,
+      'the failure names the port and node',
+    );
+    assert.doesNotMatch(check.error, /port 80 /, 'the open port is not reported');
+    assert.match(
+      check.error,
+      /host firewall.*provider firewall/,
+      'the failure names the likely cause',
+    );
+    assert.match(check.error, /ufw allow 80,443\/tcp/, 'the failure gives the remedy');
+  } finally {
+    await s.close();
+  }
+});
+
+test('control diagnostics report host resources without failing', async () => {
+  const s = await makeServer();
+  try {
+    const diagnostics = await json(await fetch(`${s.base}/api/v1/diagnostics`, { headers: op }));
+    const resources = diagnostics.checks.find((c: { name: string }) => c.name === 'resources');
+    assert.equal(resources.ok, true, 'reading resources never fails the diagnostics');
+    assert.ok(
+      resources.resources.disk.freeBytes > 0,
+      'free disk under the control data directory is reported',
+    );
+    assert.ok(
+      Array.isArray(resources.resources.containers),
+      'container usage is a list, empty outside a container',
+    );
   } finally {
     await s.close();
   }

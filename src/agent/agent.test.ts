@@ -675,8 +675,17 @@ test('executeCommand drives the Engine API for restart, logs, volume delete and 
   assert.deepEqual((diag.result as { node: string }).node, 'n1');
   assert.deepEqual(
     (diag.result as { checks: { name: string }[] }).checks.map((c) => c.name),
-    ['docker.info', 'docker.version', 'ports.public'],
-    'diagnostics query the daemon and no longer look for the Compose plugin',
+    ['docker.info', 'docker.version', 'ports.public', 'host.resources'],
+    'diagnostics query the daemon, check public ports and report host resources',
+  );
+  const resources = (
+    diag.result as {
+      checks: { name: string; resources?: { disk?: unknown; containers: unknown[] } }[];
+    }
+  ).checks.find((c) => c.name === 'host.resources');
+  assert.ok(
+    resources?.resources?.disk,
+    'host resources include free disk under the agent state volume',
   );
 });
 
@@ -755,8 +764,11 @@ test('executeCommand tolerates a missing volume, reports failing diagnostics, re
   const diag = await executeCommand({ id: 'c3', type: 'diagnostics.run' }, broken);
   assert.equal(diag.state, 'failed');
   assert.equal(
-    (diag.result as { checks: { ok: boolean }[] }).checks.every((c) => !c.ok),
+    (diag.result as { checks: { name: string; ok: boolean }[] }).checks
+      .filter((c) => c.name !== 'host.resources')
+      .every((c) => !c.ok),
     true,
+    'every daemon check fails with a broken daemon; reading host resources never fails the diagnostics',
   );
 
   const unknown = await executeCommand({ id: 'c4', type: 'nope' }, broken);

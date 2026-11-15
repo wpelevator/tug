@@ -89,9 +89,21 @@ export interface VolumeInspect {
 }
 export interface DaemonInfo {
   OSType?: string;
+  /** The daemon's data root, `/var/lib/docker` unless reconfigured. */
+  DockerRootDir?: string;
   Architecture?: string;
   ServerVersion?: string;
   [key: string]: unknown;
+}
+/** The fields of `GET /containers/{id}/stats?stream=false` that tug reads; the daemon sends two samples a second apart. */
+export interface ContainerStats {
+  cpu_stats?: {
+    cpu_usage?: { total_usage?: number };
+    system_cpu_usage?: number;
+    online_cpus?: number;
+  };
+  precpu_stats?: { cpu_usage?: { total_usage?: number }; system_cpu_usage?: number };
+  memory_stats?: { usage?: number; limit?: number; stats?: Record<string, number> };
 }
 export interface DaemonVersion {
   Version?: string;
@@ -187,6 +199,8 @@ export interface DockerApi {
   info(): Promise<DaemonInfo>;
   listContainers(filter?: ContainerFilter, all?: boolean): Promise<ContainerSummary[]>;
   inspectContainer(id: string): Promise<ContainerInspect>;
+  /** One CPU and memory sample of a running container, as `docker stats --no-stream` reads it. */
+  stats(id: string): Promise<ContainerStats>;
   createContainer(name: string, body: CreateContainerBody): Promise<string>;
   startContainer(id: string): Promise<void>;
   stopContainer(id: string, timeoutSeconds?: number): Promise<void>;
@@ -404,6 +418,10 @@ export class DockerEngine implements DockerApi {
   }
   inspectContainer = (id: string) =>
     this.json<ContainerInspect>('GET', `/containers/${encodeURIComponent(id)}/json`);
+  stats = (id: string) =>
+    this.json<ContainerStats>('GET', `/containers/${encodeURIComponent(id)}/stats`, {
+      query: { stream: 'false' },
+    });
   async createContainer(name: string, body: CreateContainerBody): Promise<string> {
     const created = await this.json<{ Id: string }>('POST', '/containers/create', {
       query: { name },
