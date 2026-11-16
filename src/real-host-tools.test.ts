@@ -374,3 +374,39 @@ test('versionFrom extracts the first capture group and marks other bodies as unm
     'a body without a match should be labelled unmatched',
   );
 });
+
+test('integration inspection retries only the known transient replacement gap', async () => {
+  const { inspectPublishedServices } = await import(
+    new URL('../tools/scripts/integration-verify-lib.mjs', import.meta.url).href
+  );
+  let attempts = 0;
+  const inspect = async () => {
+    if (++attempts === 1)
+      throw Object.assign(new Error('missing'), {
+        stderr: 'Service has no container on this node\n',
+      });
+    return [{ Config: { Image: 'nginx@sha256:' + 'a'.repeat(64) } }];
+  };
+  assert.equal(
+    await inspectPublishedServices(['cache'], inspect),
+    false,
+    'a replacement gap must retry within the existing convergence deadline',
+  );
+  assert.equal(
+    await inspectPublishedServices(['cache'], inspect),
+    true,
+    'a later inspection must still prove a pinned running container',
+  );
+  await assert.rejects(
+    inspectPublishedServices(['cache'], async () => [{ Config: { Image: 'nginx:latest' } }]),
+    /digest pinned/,
+    'an unpinned image must fail instead of being retried',
+  );
+  await assert.rejects(
+    inspectPublishedServices(['cache'], async () => {
+      throw Object.assign(new Error('denied'), { stderr: 'forbidden' });
+    }),
+    /denied/,
+    'unrelated inspection failures must fail immediately',
+  );
+});
