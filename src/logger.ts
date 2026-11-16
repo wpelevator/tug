@@ -32,6 +32,30 @@ export interface LoggerOptions {
   write?: (line: string, level: LogLevel) => void;
 }
 
+/** Remove common accidental credential disclosures from debug-only exception text. */
+function sanitizeFailureMessage(message: string): string {
+  const sanitized = message
+    .replace(
+      /-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/gi,
+      '[PEM REDACTED]',
+    )
+    .replace(
+      /\b(?:authorization|proxy-authorization)\s*[:=]\s*(?:Bearer|Basic)\s+[^\s,;]+/gi,
+      'authorization=[REDACTED]',
+    )
+    .replace(/\b(?:cookie|set-cookie)\s*:[^\r\n]*/gi, 'cookie=[REDACTED]')
+    .replace(/\b(?:https?|ftp):\/\/[^\s"'<>]+/gi, '[URL REDACTED]')
+    .replace(
+      /\b(?:authorization|proxy-authorization|cookie|set-cookie|credentials?|password|passwd|secret|token|api[_-]?key|access[_-]?key|client[_-]?secret)\b\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi,
+      (assignment) => `${assignment.slice(0, assignment.search(/[:=]/))}=[REDACTED]`,
+    )
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return sanitized.length > 500 ? `${sanitized.slice(0, 500)}…` : sanitized;
+}
+
 /** Create a logger whose messages are fixed descriptions and whose context is sanitized before output. */
 export function createLogger(options: LoggerOptions) {
   const format = options.format ?? (process.env.TUG_LOG_FORMAT === 'json' ? 'json' : 'text');
@@ -76,6 +100,27 @@ export function createLogger(options: LoggerOptions) {
     info: (message: string, context?: LogContext) => log('info', message, context),
     warn: (message: string, context?: LogContext) => log('warn', message, context),
     error: (message: string, context?: LogContext) => log('error', message, context),
+    /**
+     * Log safe classification at `level` and the sanitized cause only when debug logging is enabled.
+     * Set `TUG_LOG_LEVEL=debug` to opt in. Sanitization covers common patterns; it cannot detect every secret.
+     */
+    failure: (
+      message: string,
+      error: unknown,
+      context: LogContext = {},
+      level: 'warn' | 'error' = 'error',
+    ) => {
+      log(level, message, { ...context, ...failureContext(error) });
+      if (threshold <= levelValue.debug) {
+        const value = error && typeof error === 'object' ? (error as Record<string, unknown>) : {};
+        const detail = typeof value.message === 'string' ? value.message : String(error);
+        log('debug', 'failure cause', {
+          ...context,
+          failureEvent: message,
+          cause: sanitizeFailureMessage(detail),
+        });
+      }
+    },
   };
 }
 

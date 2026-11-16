@@ -785,18 +785,3 @@ test('bindMountWarnings names each service and host path that ties a service to 
     'a definition with only named volumes prints no warning',
   );
 });
-
-test('cross-node host identity is stable across endpoint order and duplicate addresses', () => {
-  const a = { node: 'a', address: '10.0.0.1' };
-  const b = { node: 'b', address: '10.0.0.2' };
-  assert.deepEqual(
-    crossNodeHosts('site', { db: [b, a, a] }, new Set()),
-    crossNodeHosts('site', { db: [a, b] }, new Set()),
-    'equivalent discovery sets must produce identical host configuration',
-  );
-  assert.notDeepEqual(
-    crossNodeHosts('site', { db: [a] }, new Set()),
-    crossNodeHosts('site', { db: [b] }, new Set()),
-    'a real endpoint address change must update host configuration',
-  );
-});

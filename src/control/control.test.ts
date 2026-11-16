@@ -386,3 +386,131 @@ test('webhook delivery cannot block readiness and omits private event details', 
     await s.close();
   }
 });
+
+test('configured writer admission returns Retry-After and preserves accepted deployments', async () => {
+  const previous = process.env.TUG_WRITER_MAX_PENDING;
+  process.env.TUG_WRITER_MAX_PENDING = '1';
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let entered = false;
+  let s: Awaited<ReturnType<typeof server>>;
+  try {
+    s = await server({
+      images: {
+        resolve: async (image) => {
+          entered = true;
+          await blocked;
+          return testImageResolver(image);
+        },
+      },
+    });
+  } finally {
+    if (previous === undefined) delete process.env.TUG_WRITER_MAX_PENDING;
+    else process.env.TUG_WRITER_MAX_PENDING = previous;
+  }
+  let first: Promise<Response> | undefined;
+  let second: Promise<Response> | undefined;
+  try {
+    await fetch(s.base + '/api/v1/nodes/register', {
+      method: 'POST',
+      headers: op(),
+      body: JSON.stringify({ name: 'n1' }),
+    });
+    const deploy = (project: string) =>
+      fetch(s.base + '/api/v1/deployments', {
+        method: 'POST',
+        headers: op(),
+        body: JSON.stringify({
+          project,
+          version: 'v1',
+          compose: { services: { web: { image: 'nginx' } } },
+        }),
+      });
+    first = deploy('first');
+    await until(() => entered, 'the first deployment to acquire the writer');
+    second = deploy('second');
+    await until(
+      async () =>
+        /tug_writer_queue_depth 1\b/.test(
+          await (await fetch(s.base + '/api/v1/metrics', { headers: op() })).text(),
+        ),
+      'the second deployment to enter the configured queue',
+    );
+    const overflow = await deploy('overflow');
+    assert.equal(
+      overflow.status,
+      503,
+      'excess operator work is refused before changing desired state',
+    );
+    assert.equal(
+      overflow.headers.get('retry-after'),
+      '5',
+      'overloaded clients get a bounded retry hint',
+    );
+    release();
+    assert.equal(
+      (await first).status,
+      200,
+      'active work completes despite refused excess admission',
+    );
+    assert.equal((await second).status, 200, 'accepted queued work completes in order');
+  } finally {
+    release();
+    await first;
+    await second;
+    await s.close();
+  }
+});
+
+test('invalid optional webhook configuration disables delivery without disabling control', async () => {
+  const s = await server({ webhook: { url: 'http://not-https.example.test', secret: 'private' } });
+  try {
+    const response = await fetch(s.base + '/api/v1/readyz', { headers: op() });
+    assert.equal(
+      response.status,
+      200,
+      'optional notification misconfiguration cannot take control offline',
+    );
+  } finally {
+    await s.close();
+  }
+});
+
+test('aborted requests are logged without their incomplete body', async (t) => {
+  const { request } = await import('node:http');
+  let entered = false;
+  const s = await server({
+    identity: (req, db) => {
+      entered = true;
+      return testIdentity(req, db);
+    },
+  });
+  const lines: string[] = [];
+  const original = process.stderr.write;
+  t.mock.method(process.stderr, 'write', (chunk: string | Uint8Array) => {
+    lines.push(String(chunk));
+    return true;
+  });
+  const pending = request(s.base + '/api/v1/deployments', { method: 'POST', headers: op() });
+  pending.on('error', () => {});
+  try {
+    pending.write('{"private":"never-log-this-body"');
+    await until(() => entered, 'the server to accept request headers before an aborted upload');
+    pending.destroy();
+    await until(
+      () => lines.some((line) => line.includes('request aborted')),
+      'an aborted request to be recorded without a finish event',
+    );
+    assert.doesNotMatch(
+      lines.join('\n'),
+      /never-log-this-body/,
+      'request diagnostics never serialize incomplete request bodies',
+    );
+  } finally {
+    pending.destroy();
+    process.stderr.write = original;
+    await s.close();
+  }
+});

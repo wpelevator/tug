@@ -76,7 +76,7 @@ import type { HttpClient } from './runners.ts';
 import { CADDY_CONTAINER, reconcileIngress, removeIngress } from '../ingress.ts';
 import { collectResources, ownContainer } from '../host-resources.ts';
 import { createTlsMonitor } from '../ingress-tls.ts';
-import { createLogger, failureContext } from '../logger.ts';
+import { createLogger } from '../logger.ts';
 import type { TlsMonitor } from '../ingress-tls.ts';
 import type {
   Command,
@@ -294,7 +294,7 @@ export class AgentWakeChannel {
         if (typeof frame.type === 'string' && frame.type.startsWith('live.')) {
           if (frame.v === 1)
             void Promise.resolve(this.handlers.onLive?.(message as AgentLiveControlFrame)).catch(
-              (error) => log.warn('agent live frame failed', { ...failureContext(error) }),
+              (error) => log.failure('agent live frame failed', error, {}, 'warn'),
             );
           return;
         }
@@ -1454,8 +1454,13 @@ export async function endpointAddressesForAgent(
               list.map(async (ep) => {
                 try {
                   return { ...ep, address: await resolve(ep.address) };
-                } catch {
-                  log.warn('could not resolve a cross-node service address', { service });
+                } catch (error) {
+                  log.failure(
+                    'could not resolve a cross-node service address',
+                    error,
+                    { service },
+                    'warn',
+                  );
                   return null;
                 }
               }),
@@ -1513,7 +1518,7 @@ export async function pollOnce(ctx: AgentContext = defaultContext()): Promise<Pr
           ctx.tlsMonitor ??= createTlsMonitor();
           ingress.tls = await ctx.tlsMonitor.check(work.ingress.routes, ctx.docker);
         } catch (e) {
-          log.warn('ingress TLS check failed', { ...failureContext(e) });
+          log.failure('ingress TLS check failed', e, {}, 'warn');
         }
       }
     } else await removeIngress(ingressCtx).catch(() => false);
@@ -1657,9 +1662,8 @@ export async function main(): Promise<void> {
       log.info('node certificate renewed', { node: NODE_NAME });
     } catch (e) {
       renewAt = Date.now() + RENEW_RETRY_MS;
-      log.error('certificate renewal failed; keeping the current certificate', {
+      log.failure('certificate renewal failed; keeping the current certificate', e, {
         node: NODE_NAME,
-        ...failureContext(e),
       });
     }
   };
@@ -1677,7 +1681,8 @@ export async function main(): Promise<void> {
     nodeName: ctx.nodeName,
     post: (event) => postEvent(ctx, event),
     wake: () => wake.poke(),
-    log: () => log.warn('docker event watcher reported a problem'),
+    log: (message) =>
+      log.failure('docker event watcher reported a problem', new Error(message), {}, 'warn'),
   });
   if (ctx.apply) watcher.start();
   for (;;) {
@@ -1685,12 +1690,12 @@ export async function main(): Promise<void> {
     try {
       await pollOnce(ctx);
     } catch (e) {
-      log.error('agent poll failed', { node: NODE_NAME, ...failureContext(e) });
+      log.failure('agent poll failed', e, { node: NODE_NAME });
     }
     try {
       await wake.wait(INTERVAL);
     } catch (e) {
-      log.warn('agent wake wait failed', { node: NODE_NAME, ...failureContext(e) });
+      log.failure('agent wake wait failed', e, { node: NODE_NAME }, 'warn');
       await new Promise((r) => setTimeout(r, INTERVAL));
     }
   }

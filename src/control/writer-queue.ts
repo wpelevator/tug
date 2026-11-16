@@ -10,6 +10,7 @@ export function createWriterQueue(now: () => number = Date.now, maxPending = 100
       if (pending >= maxPending)
         throw Object.assign(new Error('control writer queue is full; retry later'), {
           status: 503,
+          retryAfter: 5,
         });
       pending++;
       const previous = tail;

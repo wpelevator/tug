@@ -33,7 +33,7 @@ Containers that crash, are killed for memory or report unhealthy produce `contai
 
 ## Structured logs
 
-Control and agents write text logs by default at level `info`. Set `TUG_LOG_FORMAT=json` for one JSON object per line, or `TUG_LOG_LEVEL=debug|info|warn|error` to select the minimum level. JSON records include timestamp, level, component and a fixed message, with available project, deployment and node context. Control responses include `x-request-id`; the matching completion record includes that ID, method, route pattern, status and duration. Request bodies, query strings and raw error details are excluded. Allowlisted failure classes and codes, HTTP status and numeric SQLite codes retain diagnostic categories without arbitrary exception messages. Sensitive context keys are redacted, but a secret deliberately included in an arbitrary message or resource name is outside that protection. Logs are process output for your existing collector; tug does not store another log database.
+Control and agents write text logs by default at level `info`. Set `TUG_LOG_FORMAT=json` for one JSON object per line, or `TUG_LOG_LEVEL=debug|info|warn|error` to select the minimum level. JSON records include timestamp, level, component and a fixed message, with available project, deployment and node context. Control responses include `x-request-id`; the matching completion record includes that ID, method, route pattern, status and duration. Request bodies and query strings are excluded. Default logs exclude raw error details; `TUG_LOG_LEVEL=debug` adds a bounded cause with URLs, common credential assignments, private-key blocks and control characters sanitized. Pattern sanitization cannot identify every application secret, so enable debug deliberately and restrict access to those logs. Routine successful agent requests use debug; operator requests, failures and aborted requests remain visible at info/warn. Allowlisted failure classes and codes, HTTP status and numeric SQLite codes retain diagnostic categories without arbitrary exception messages. Sensitive context keys are redacted, but a secret deliberately included in an arbitrary message or resource name is outside that protection. Logs are process output for your existing collector; tug does not store another log database.
 
 ## Metrics on control
 
@@ -42,13 +42,14 @@ Scrape authenticated `GET /api/v1/metrics` using a `read` credential over mTLS. 
 | Metric | Meaning |
 |---|---|
 | `tug_node_reported` | Whether the node has ever reported; check this before interpreting poll age |
-| `tug_node_poll_age_seconds` | Age of its last report, zero when absent |
+| `tug_node_poll_age_seconds` | Age of its last report, `NaN` when absent |
 | `tug_deployments` | Recorded deployments grouped by project and state, including retained history |
 | `tug_backup_targets` | Enabled backup targets grouped by project and latest run state |
 | `tug_backup_has_success` | Whether a configured target has a successful snapshot; zero means protection has not been established |
-| `tug_backup_success_age_seconds` | Age of the target's last success; use with `has_success` |
+| `tug_backup_success_age_seconds` | Age of the target's last success, `NaN` when absent; use with `has_success` |
 | `tug_writer_queue_depth` | Operations waiting for the single control writer |
 | `tug_writer_active_age_seconds` | Age of active writer work, zero when idle |
+| `tug_webhook_enabled` | Whether optional notification delivery is configured and enabled |
 | `tug_webhook_delivered_total`, `tug_webhook_failed_total`, `tug_webhook_dropped_total`, `tug_webhook_pending` | Delivery outcomes, overflow and current backlog |
 
 Prometheus needs the CA, certificate and key from a read credential:
@@ -72,7 +73,7 @@ Authenticated `GET /api/v1/readyz` returns 200 when the persisted projects table
 
 ## Alerting
 
-Set both `TUG_WEBHOOK_URL` (an HTTPS receiver) and `TUG_WEBHOOK_SECRET` on control to enable notifications. Leaving both unset disables delivery; setting only one fails startup. Control checks committed events and deployment/node transitions every five seconds, independently of operator views. It sends actionable generic descriptions and resource identifiers for supported failures, backup results and stale/recovered nodes; raw event messages, commands and metadata are excluded. The observer processes up to 100 new events each tick and the latest 1000 deployment records; this is sized for tug’s small-server scope and is not a durable incident ledger.
+Set both `TUG_WEBHOOK_URL` (an HTTPS receiver) and `TUG_WEBHOOK_SECRET` on control to enable notifications. Leaving both unset disables delivery. An incomplete or invalid configuration logs a fixed error and disables notifications while control remains available; `tug_webhook_enabled` reports zero. Control checks committed events and deployment/node transitions every five seconds, independently of operator views. Never-seen nodes do not generate stale/recovered alerts. After startup, node notifications wait for the greater of 60 seconds and the configured stale threshold so agents can reconnect without an upgrade producing a fleet-wide page. It sends actionable generic descriptions and resource identifiers for supported failures, backup results and stale/recovered nodes; raw event messages, commands and metadata are excluded. The observer processes up to 100 new events each tick and the latest 1000 deployment records; this is sized for tug’s small-server scope and is not a durable incident ledger.
 
 Delivery runs outside the writer, with at most 100 pending/in-flight events, three attempts, a five-second timeout per attempt and exponential delays starting at 250 milliseconds capped at two seconds. Redirects are not followed. Shutdown aborts active delivery and discards queued work. Retries reuse the event ID; receivers should deduplicate it. An exhausted attempt or queue overflow is visible in metrics and delivery exhaustion is logged. The queue and event cursor are in memory: restart drops queued work and does not replay historical events. This is best-effort notification, so retain an independent availability check and schedule `tug backup list --check` as a protection backstop.
 
@@ -84,7 +85,7 @@ For an external reachability check from a source checkout:
 node tools/scripts/check-reachability.mjs https://blog.example.com/health
 ```
 
-Run it outside the workload host on a schedule and route a nonzero exit to your notification system. The script accepts URLs as arguments or comma/newline-separated `TUG_PROBE_URLS`; `TUG_PROBE_TIMEOUT_MS` defaults to 5000. It requires a 2xx response without following redirects, removes credentials and query strings from output, and exits 1 for a failed probe or 2 when no URLs are configured. Choose an application endpoint that exercises important dependencies; an HTTP success alone cannot establish business correctness.
+Run it outside the workload host on a schedule and route a nonzero exit to your notification system. The script accepts URLs as arguments or comma/newline-separated `TUG_PROBE_URLS`; `TUG_PROBE_TIMEOUT_MS` defaults to 5000. It requires a final 2xx response, follows up to five same-host redirects (including HTTP-to-HTTPS), rejects HTTPS downgrades and redirects to another host or port, removes query strings from output, rejects credentialed URLs, and exits 1 for a failed probe or 2 when no URLs are configured. Use the canonical URL when a site redirects to another hostname. Choose an application endpoint that exercises important dependencies; an HTTP success alone cannot establish business correctness.
 
 ## Node and service stats reported by agents
 

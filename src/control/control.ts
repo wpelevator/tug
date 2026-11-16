@@ -27,7 +27,7 @@ import https from 'node:https';
 import http from 'node:http';
 import path from 'node:path';
 import { WebSocketServer, WebSocket } from 'ws';
-import { createLogger, failureContext } from '../logger.ts';
+import { createLogger } from '../logger.ts';
 import { renderMetricsSnapshot } from './metrics.ts';
 import { createWebhookNotifier, webhookOptionsFromEnv } from './notifications.ts';
 import type { WebhookOptions } from './notifications.ts';
@@ -460,7 +460,7 @@ export class LiveHub {
           try {
             this.onAgentEvents(nodeId, frame.events);
           } catch (error) {
-            log.error('agent event persistence failed', { node: nodeId, ...failureContext(error) });
+            log.failure('agent event persistence failed', error, { node: nodeId }, 'error');
           }
           return;
         }
@@ -696,6 +696,7 @@ declare module 'express-serve-static-core' {
 
 interface HttpError extends Error {
   status?: number;
+  retryAfter?: number;
   lock?: LockRow;
 }
 const httpError = (status: number, message: string): HttpError =>
@@ -824,7 +825,7 @@ export async function createApp(
     if (raw === undefined || raw === '') return fallback;
     const value = Number(raw);
     if (Number.isInteger(value) && value >= 0) return value;
-    log.warn(`${name}=${JSON.stringify(raw)} is not a whole number; using ${fallback}`);
+    log.warn('invalid nonnegative integer setting; using default', { setting: name, fallback });
     return fallback;
   };
   const EVENT_RETENTION_DAYS = envCount('TUG_EVENT_RETENTION_DAYS', 30);
@@ -847,15 +848,17 @@ export async function createApp(
           EVENT_MAX_ROWS,
         ).changes ?? 0;
     if (removed)
-      log.info(
-        `removed ${removed} old events (kept ${EVENT_RETENTION_DAYS || 'any'} days, at most ${EVENT_MAX_ROWS || 'unlimited'} rows)`,
-      );
+      log.info('old events pruned', {
+        removed,
+        retentionDays: EVENT_RETENTION_DAYS,
+        maxRows: EVENT_MAX_ROWS,
+      });
     return removed;
   }
   try {
     pruneEvents();
   } catch (e) {
-    log.error('event pruning failed', { ...failureContext(e) });
+    log.failure('event pruning failed', e, {}, 'error');
   }
   const masterKey = await loadOrCreateMasterKey(masterKeyFile);
   // A CA is created only for a fresh installation; existing state with missing or mismatched CA material is a startup error.
@@ -871,16 +874,22 @@ export async function createApp(
   };
 
   const app = express();
-  const webhookConfig = options.webhook ?? webhookOptionsFromEnv();
-  const notifier = webhookConfig
-    ? createWebhookNotifier({
+  let notifier: ReturnType<typeof createWebhookNotifier> | undefined;
+  try {
+    const webhookConfig = options.webhook ?? webhookOptionsFromEnv();
+    if (webhookConfig)
+      notifier = createWebhookNotifier({
         ...webhookConfig,
         onError: () => log.warn('webhook delivery exhausted retries'),
-      })
-    : undefined;
+      });
+  } catch {
+    log.error(
+      'notifications disabled: configure both TUG_WEBHOOK_URL and TUG_WEBHOOK_SECRET with an HTTPS receiver',
+    );
+  }
   const monitor = notifier
     ? createReliabilityMonitor(db, (event) => {
-        notifier.enqueue(event);
+        notifier?.enqueue(event);
       })
     : undefined;
   const notificationTimer = monitor
@@ -903,15 +912,27 @@ export async function createApp(
     const requestId = crypto.randomUUID();
     res.setHeader('x-request-id', requestId);
     const started = performance.now();
-    res.on('finish', () =>
-      log.info('request completed', {
+    let recorded = false;
+    const recordRequest = (aborted: boolean) => {
+      if (recorded) return;
+      recorded = true;
+      const context = {
         requestId,
         method: req.method,
         route: req.route?.path ?? 'unmatched',
         status: res.statusCode,
         durationMs: Math.round(performance.now() - started),
-      }),
-    );
+        aborted,
+      };
+      if (aborted || res.statusCode >= 400)
+        log.warn(aborted ? 'request aborted' : 'request failed', context);
+      else if (req.path.startsWith('/agent/')) log.debug('request completed', context);
+      else log.info('request completed', context);
+    };
+    res.once('finish', () => recordRequest(false));
+    res.once('close', () => {
+      if (!res.writableFinished) recordRequest(true);
+    });
     next();
   });
   app.locals.pki = pki;
@@ -1025,7 +1046,14 @@ export async function createApp(
     next();
   });
   // Hold the writer for the operation lifetime, including after an HTTP disconnect.
-  const writerQueue = createWriterQueue(options.writerClock);
+  const configuredWriterLimit = Number(process.env.TUG_WRITER_MAX_PENDING ?? 100);
+  const writerLimit =
+    Number.isSafeInteger(configuredWriterLimit) && configuredWriterLimit >= 1
+      ? configuredWriterLimit
+      : 100;
+  if (writerLimit !== configuredWriterLimit)
+    log.warn('invalid writer queue limit; using default', { limit: 100 });
+  const writerQueue = createWriterQueue(options.writerClock, writerLimit);
   const withWriter = <T>(operation: () => T | Promise<T>): Promise<T> =>
     writerQueue.run(() => {
       if (restartRequired) throw httpError(503, 'control restored; restart required');
@@ -1101,7 +1129,7 @@ export async function createApp(
         deploymentId: event.deploymentId,
       });
     } catch (e) {
-      log.error('audit event failed', { ...failureContext(e) });
+      log.failure('audit event failed', e, {}, 'error');
     }
   };
   const projectScope = (actor: Actor, column: string) =>
@@ -1541,7 +1569,7 @@ export async function createApp(
           /* Best-effort audit event. */
         }
       }
-    })().catch((e) => log.error('auto rollback failed', { ...failureContext(e) }));
+    })().catch((e) => log.failure('auto rollback failed', e, {}, 'error'));
   }
 
   function currentDesired(projectId: string): DesiredStateRow | undefined {
@@ -1697,6 +1725,7 @@ export async function createApp(
   }
   function sendError(res: Response, e: unknown): void {
     const err = e as HttpError;
+    if (err.retryAfter) res.setHeader('Retry-After', String(err.retryAfter));
     res
       .status(restartRequired ? 503 : err.status || 500)
       .json({ error: err.message, lock: err.lock || undefined });
@@ -2252,7 +2281,7 @@ export async function createApp(
       controlDestinationTick();
       restores.advance();
     } catch (e) {
-      log.error('backup scheduler failed', { ...failureContext(e) });
+      log.failure('backup scheduler failed', e, {}, 'error');
     }
   }, backupTickMs);
   backupTimer.unref();
@@ -2271,7 +2300,7 @@ export async function createApp(
     backups.tick(); // catch up on slots missed while control was down
     restores.advance(); // re-adopt unfinished restores and keep their projects locked
   } catch (e) {
-    log.error('backup scheduler failed', { ...failureContext(e) });
+    log.failure('backup scheduler failed', e, {}, 'error');
   }
   api('post', '/api/v1/backups/run', bodyProject, async (req, res) => {
     const project = String(req.body.project || 'site');
@@ -2940,7 +2969,7 @@ export async function createApp(
           '--keep-storage',
           BUILD_CACHE_KEEP.replace(/\s/g, ''),
         ]);
-    })().catch((e) => log.error('image maintenance failed:', { ...failureContext(e) }));
+    })().catch((e) => log.failure('image maintenance failed', e, {}, 'error'));
   }
   await collectArtifacts();
   await markMissingArtifacts();
@@ -3541,9 +3570,7 @@ export async function createApp(
       releaseLock(lock);
       await Promise.all(files.map((file) => fs.rm(file.path, { force: true }).catch(() => {})));
       if (contextDir) await fs.rm(contextDir, { recursive: true, force: true });
-      await collectArtifacts().catch((e) =>
-        log.error('image cleanup failed:', { ...failureContext(e) }),
-      );
+      await collectArtifacts().catch((e) => log.failure('image cleanup failed', e, {}, 'error'));
     }
     if (responseError) sendError(res, responseError);
     else res.json(responseBody);
@@ -4066,7 +4093,7 @@ export async function createApp(
     const last = lastControlDestination(key, false);
     if (last?.state === 'failed' && at - Date.parse(last.created_at) < controlRetryMs()) return;
     void runControlDestination('schedule').catch((e) =>
-      log.error('control backup failed', { ...failureContext(e) }),
+      log.failure('control backup failed', e, {}, 'error'),
     );
   };
   api('get', '/api/v1/control/backups', null, async (_req, res) => {
@@ -4117,9 +4144,7 @@ export async function createApp(
       remote,
     });
   });
-  void sweepControlLeftovers().catch((e) =>
-    log.error('startup cleanup failed', { ...failureContext(e) }),
-  );
+  void sweepControlLeftovers().catch((e) => log.failure('startup cleanup failed', e, {}, 'error'));
   api('get', '/api/v1/control/backups/:id/download', null, async (req, res) => {
     const row = db.get<{ artifact_ref: string | null }>(
       "SELECT artifact_ref FROM backups WHERE id=? AND project_id='_control' AND target='control-plane'",
@@ -4560,6 +4585,12 @@ export async function createApp(
     const global = !req.actor!.projects;
     const queueAge = writerQueue.activeForMs();
     const metrics = renderMetricsSnapshot({
+      webhook: global
+        ? {
+            enabled: Boolean(notifier),
+            ...(notifier?.stats ?? { delivered: 0, failed: 0, dropped: 0, pending: 0 }),
+          }
+        : undefined,
       queue: global
         ? {
             depth: writerQueue.pending,
@@ -4596,21 +4627,7 @@ export async function createApp(
           succeededAt: row.last_success_at,
         })),
     });
-    let extra = '';
-    if (global) {
-      if (notifier)
-        for (const [key, value] of Object.entries(notifier.stats))
-          extra +=
-            '# TYPE tug_webhook_' +
-            key +
-            (key === 'pending'
-              ? ' gauge\ntug_webhook_' + key
-              : '_total counter\ntug_webhook_' + key + '_total') +
-            ' ' +
-            value +
-            '\n';
-    }
-    res.type('text/plain; version=0.0.4').send(metrics + extra);
+    res.type('text/plain; version=0.0.4').send(metrics);
   });
   api('get', '/api/v1/readyz', null, (_req, res) => {
     let database = 'ok';
@@ -5145,7 +5162,7 @@ export async function createApp(
     try {
       restores.advance();
     } catch (e) {
-      log.error('restore failed to advance', { ...failureContext(e) });
+      log.failure('restore failed to advance', e, {}, 'error');
     }
     const nextEndpointSnapshot = JSON.stringify(endpointsFor(currentDesiredStates()));
     if (nextEndpointSnapshot !== endpointSnapshot) {
@@ -5211,7 +5228,7 @@ export async function createApp(
       try {
         pruneEvents();
       } catch (e) {
-        log.error('event pruning failed', { ...failureContext(e) });
+        log.failure('event pruning failed', e, {}, 'error');
       }
   }
   post('/agent/v1/events', authAgent, async (req, res) => {
@@ -5441,7 +5458,7 @@ export async function listen(app: express.Express, port = PORT): Promise<https.S
     notAfter: number;
   }>;
   server.on('tlsClientError', (error) => {
-    log.warn('tls handshake refused', { ...failureContext(error) });
+    log.failure('tls handshake refused', error, {}, 'warn');
   });
   // Connection authorization gate: after a full handshake, refuse reused sessions and identities the database does not authorize.
   server.on('secureConnection', (socket) => {
@@ -5467,7 +5484,7 @@ export async function listen(app: express.Express, port = PORT): Promise<https.S
     try {
       (app.locals.reconcileSockets as () => void)();
     } catch (e) {
-      log.error('session sweep failed', { ...failureContext(e) });
+      log.failure('session sweep failed', e, {}, 'error');
     }
   }, 1000);
   const renew = setInterval(
@@ -5482,9 +5499,9 @@ export async function listen(app: express.Express, port = PORT): Promise<https.S
           }
           const left = pki.caNotAfter.getTime() - Date.now();
           if (left < 90 * 86_400_000)
-            log.warn(`control CA expires in ${Math.floor(left / 86_400_000)} days`);
+            log.warn('control CA expires soon', { daysRemaining: Math.floor(left / 86_400_000) });
         })
-        .catch((e) => log.error('server certificate renewal failed', { ...failureContext(e) }));
+        .catch((e) => log.failure('server certificate renewal failed', e, {}, 'error'));
     },
     Math.min(SERVER_LIFETIME_MS / 90, 3_600_000),
   );
@@ -5498,7 +5515,7 @@ export async function listen(app: express.Express, port = PORT): Promise<https.S
   });
   return new Promise((resolve) =>
     server.listen(port, () => {
-      log.info(`tug-control listening on ${port} (mTLS)`);
+      log.info('tug-control listening (mTLS)', { port });
       resolve(server);
     }),
   );

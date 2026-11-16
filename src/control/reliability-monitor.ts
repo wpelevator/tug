@@ -17,13 +17,8 @@ export function createReliabilityMonitor(
   );
   const nodes = new Map<string, boolean>();
   const ingressStates = new Map<string, string>();
-  let controlBackups = new Set(
-    db
-      .all<{ id: string }>(
-        "SELECT id FROM backups WHERE project_id='_control' ORDER BY created_at DESC LIMIT 100",
-      )
-      .map((row) => row.id),
-  );
+  const staleMs = Number(process.env.TUG_STALE_SECONDS || 60) * 1000;
+  const graceUntil = clock() + Math.max(60_000, staleMs);
   const event = (
     id: string,
     type: string,
@@ -61,22 +56,17 @@ export function createReliabilityMonitor(
           );
       }
       deployments = new Map(current.map((row) => [row.id, row.state]));
-      const recentBackups = db.all<{ id: string; state: string }>(
-        "SELECT id,state FROM backups WHERE project_id='_control' ORDER BY created_at DESC LIMIT 100",
-      );
-      for (const row of recentBackups)
-        if (!controlBackups.has(row.id) && row.state === 'failed')
-          emit(event('control-backup:' + row.id, 'control.backup_failed', null));
-      controlBackups = new Set(recentBackups.map((row) => row.id));
       const live = new Set<string>();
-      const staleMs = Number(process.env.TUG_STALE_SECONDS || 60) * 1000;
       for (const row of db.all<{
         id: string;
         last_seen_at: string | null;
         ingress_status_json: string | null;
       }>('SELECT id,last_seen_at,ingress_status_json FROM nodes WHERE disabled_at IS NULL')) {
         live.add(row.id);
-        const stale = !row.last_seen_at || clock() - Date.parse(row.last_seen_at) > staleMs;
+        const stale =
+          Boolean(row.last_seen_at) &&
+          clock() >= graceUntil &&
+          clock() - Date.parse(row.last_seen_at!) > staleMs;
         const before = nodes.get(row.id);
         if ((before === undefined && stale) || (before !== undefined && before !== stale))
           emit(

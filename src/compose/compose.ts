@@ -697,9 +697,8 @@ export function crossNodeHosts(
   const hosts: string[] = [];
   for (const [service, list] of Object.entries(endpoints).sort(([a], [b]) => a.localeCompare(b))) {
     if (local.has(service)) continue;
-    // Endpoint arrival order and duplicate addresses carry no configuration meaning.
-    for (const address of [...new Set(list.map((ep) => ep.address))].sort())
-      hosts.push(`${service}:${address}`, `${service}.${project}.tug:${address}`);
+    for (const ep of list)
+      hosts.push(`${service}:${ep.address}`, `${service}.${project}.tug:${ep.address}`);
   }
   return hosts;
 }

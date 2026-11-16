@@ -10,6 +10,13 @@ export interface MetricsSnapshot {
     succeededAt?: string | number | null;
   }>;
   queue?: { depth: number; activeSince?: string | number | null };
+  webhook?: {
+    enabled?: boolean;
+    delivered: number;
+    failed: number;
+    dropped: number;
+    pending: number;
+  };
 }
 
 const label = (value: string): string =>
@@ -26,9 +33,13 @@ const timestamp = (value: string | number | null | undefined): number | undefine
   return Number.isFinite(result) ? result : undefined;
 };
 
-const age = (now: number, since: string | number | null | undefined): number => {
+const age = (
+  now: number,
+  since: string | number | null | undefined,
+  unknown: number = Number.NaN,
+): number => {
   const time = timestamp(since);
-  return time === undefined ? 0 : Math.max(0, (now - time) / 1000);
+  return time === undefined ? unknown : Math.max(0, (now - time) / 1000);
 };
 
 const finiteState = (value: string, allowed: readonly string[]): string =>
@@ -48,7 +59,7 @@ const countLines = (
 export function renderMetricsSnapshot(snapshot: MetricsSnapshot): string {
   const now = snapshot.now ?? Date.now();
   const lines = [
-    '# HELP tug_node_poll_age_seconds Seconds since a node last reported status; zero means never reported.',
+    '# HELP tug_node_poll_age_seconds Seconds since a node last reported status; NaN means never reported.',
     '# TYPE tug_node_poll_age_seconds gauge',
     ...(snapshot.nodes ?? []).map(
       (node) =>
@@ -125,7 +136,7 @@ export function renderMetricsSnapshot(snapshot: MetricsSnapshot): string {
       'Configured backup target count by project and finite latest backup state in the supplied snapshot.',
       backupCounts,
     ),
-    '# HELP tug_backup_success_age_seconds Seconds since the most recent successful backup per project and target.',
+    '# HELP tug_backup_success_age_seconds Seconds since the most recent successful backup per project and target; NaN means no success is known.',
     '# TYPE tug_backup_success_age_seconds gauge',
     ...[...backupSuccesses.values()].map(
       (sample) => `tug_backup_success_age_seconds${labels(sample.labels)} ${sample.age}`,
@@ -147,9 +158,31 @@ export function renderMetricsSnapshot(snapshot: MetricsSnapshot): string {
       '# HELP tug_writer_active_age_seconds Seconds since the global control writer queue item started; zero means idle or unknown.',
       '# TYPE tug_writer_active_age_seconds gauge',
       ...(snapshot.queue
-        ? [`tug_writer_active_age_seconds ${age(now, snapshot.queue.activeSince)}`]
+        ? [`tug_writer_active_age_seconds ${age(now, snapshot.queue.activeSince, 0)}`]
         : []),
     );
+
+  if (snapshot.webhook) {
+    if (snapshot.webhook.enabled !== undefined)
+      lines.push(
+        '# HELP tug_webhook_enabled Whether webhook delivery is enabled.',
+        '# TYPE tug_webhook_enabled gauge',
+        `tug_webhook_enabled ${snapshot.webhook.enabled ? 1 : 0}`,
+      );
+    for (const key of ['delivered', 'failed', 'dropped'] as const) {
+      const name = `tug_webhook_${key}_total`;
+      lines.push(
+        `# HELP ${name} Total webhook ${key} events since control started.`,
+        `# TYPE ${name} counter`,
+        `${name} ${Math.max(0, Math.floor(snapshot.webhook[key]))}`,
+      );
+    }
+    lines.push(
+      '# HELP tug_webhook_pending Current number of webhook deliveries waiting or in progress.',
+      '# TYPE tug_webhook_pending gauge',
+      `tug_webhook_pending ${Math.max(0, Math.floor(snapshot.webhook.pending))}`,
+    );
+  }
 
   return `${lines.join('\n')}\n`;
 }

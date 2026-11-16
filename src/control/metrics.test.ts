@@ -35,6 +35,11 @@ test('metrics render ages, report presence, deployment outcomes, backup state an
   );
   assert.match(
     output,
+    /tug_node_poll_age_seconds\{node="edge-b"\} NaN/,
+    'unknown node poll age is represented as missing rather than fresh',
+  );
+  assert.match(
+    output,
     /tug_node_reported\{node="edge-b"\} 0/,
     'never-reported nodes are not presented as fresh',
   );
@@ -62,6 +67,11 @@ test('metrics render ages, report presence, deployment outcomes, backup state an
     output,
     /tug_backup_has_success\{project="shop",target="uploads"\} 0/,
     'configured targets without a success are explicit',
+  );
+  assert.match(
+    output,
+    /tug_backup_success_age_seconds\{project="shop",target="uploads"\} NaN/,
+    'unknown backup success age is represented as missing rather than fresh',
   );
   assert.match(
     output,
@@ -101,6 +111,41 @@ test('global queue values are rendered without project or resource labels', () =
   assert.match(output, /tug_writer_active_age_seconds 0/, 'idle global queue age is zero seconds');
 });
 
+test('optional webhook metrics use counters for totals and a gauge for pending work', () => {
+  const values = { delivered: 4, failed: 2, dropped: 1 };
+  const output = renderMetricsSnapshot({
+    webhook: { ...values, enabled: true, pending: 3 },
+  });
+  assert.match(output, /# HELP tug_webhook_enabled /, 'enabled metric has Prometheus HELP text');
+  assert.match(output, /# TYPE tug_webhook_enabled gauge/, 'enabled status is a gauge');
+  assert.match(output, /tug_webhook_enabled 1/, 'enabled webhook reports one');
+  for (const [key, value] of Object.entries(values)) {
+    assert.match(
+      output,
+      new RegExp(`# TYPE tug_webhook_${key}_total counter`),
+      `webhook ${key} total is a counter`,
+    );
+    assert.match(
+      output,
+      new RegExp(`tug_webhook_${key}_total ${value}`),
+      `webhook ${key} total is rendered`,
+    );
+  }
+  assert.match(output, /# HELP tug_webhook_pending /, 'pending metric has Prometheus HELP text');
+  assert.match(output, /# TYPE tug_webhook_pending gauge/, 'pending work is a gauge');
+  assert.match(output, /tug_webhook_pending 3/, 'pending work reports its current value');
+  assert.doesNotMatch(
+    renderMetricsSnapshot({ webhook: { ...values, enabled: false, pending: 0 } }),
+    /tug_webhook_enabled 1/,
+    'a disabled webhook reports zero enabled state',
+  );
+  assert.doesNotMatch(
+    renderMetricsSnapshot({}),
+    /tug_webhook_(?:enabled|delivered|failed|dropped|pending)/,
+    'webhook metrics are omitted when the snapshot has no global webhook stats',
+  );
+});
+
 test('omitting global queue values omits samples from project-scoped snapshots', () => {
   const output = renderMetricsSnapshot({ deployments: [{ project: 'shop', state: 'succeeded' }] });
   assert.doesNotMatch(
@@ -117,7 +162,10 @@ test('omitting global queue values omits samples from project-scoped snapshots',
 
 test('every exported metric family is documented for operators', async () => {
   const docs = await fs.readFile(new URL('../../docs/observability.md', import.meta.url), 'utf8');
-  const output = renderMetricsSnapshot({ queue: { depth: 0 } });
+  const output = renderMetricsSnapshot({
+    queue: { depth: 0 },
+    webhook: { enabled: false, delivered: 0, failed: 0, dropped: 0, pending: 0 },
+  });
   for (const match of output.matchAll(/^# HELP (\w+)/gm))
     assert.ok(docs.includes(match[1]), 'observability docs must explain ' + match[1]);
 });

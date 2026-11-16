@@ -2,4 +2,4 @@
 '@wpelevator/tug': patch
 ---
 
-Cover ENOSPC and interrupted restore activation recovery at each replacement boundary, plus repository damage recovery in the Docker backup drill.
+Document operational reliability and recovery responsibilities, and cover interrupted activation, ENOSPC, damaged-repository recovery, rollout behavior and integration convergence with regression tests.

@@ -2,4 +2,4 @@
 '@wpelevator/tug': minor
 ---
 
-Add a Prometheus metrics snapshot and configurable structured logging with `TUG_LOG_FORMAT` and `TUG_LOG_LEVEL`.
+Add authenticated control readiness and project-scoped Prometheus metrics, configurable bounded writer admission with retry hints, and structured control/agent logs with safe default failure classifications and opt-in sanitized debug causes.
