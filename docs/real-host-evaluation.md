@@ -536,3 +536,11 @@ TUG_LOG_FORMAT=json node tools/scripts/qemu-first-boot.js --image /tmp/tug-sre-v
 ```
 
 The new damaged-repository backup drill was not executed: this host has a Docker client but no daemon socket. Unit-level injected disk exhaustion and interrupted activation tests supply narrower failure evidence; they do not substitute for a Docker or physically full-host exercise.
+
+## Source-built agent logging on QEMU, 16 November 2026
+
+A second disposable Ubuntu 24.04.5 arm64 guest ran Docker 29.10.0. After published-agent enrollment and readiness/metrics checks, the current source was packaged from explicit Dockerfile inputs, built inside the guest, and used to replace only its agent while preserving the state volume, socket bind, networking and restart policy. The source-built agent emitted valid JSON startup records and remained online and connected to the throwaway control. Debug failure checks inside that image confirmed that synthetic bearer/basic credentials, cookie/token values, URL credentials/query strings and control characters were excluded from the diagnostic cause. These checks exercise known patterns, not arbitrary application-secret recognition.
+
+The built image was `sha256:863017764465b231d38e770ac53ed9fef625d711da4f9d86f3f4f190ce6b3b29`. Its logger SHA-256, `5f6be459cf42d4dcfd6d760e57d1e3ef7d3daae603a5d905792cc4e0abfd38a5`, matched the pushed logger source. The source archive SHA-256 was `e4e8f8f3afc1cdabc10ce83e44c750928e52d6894a7b639ff7032ccdaea212e8`. The guest, throwaway control, rollback container, temporary credentials and build artifacts were removed after verification.
+
+The damaged-repository backup drill also [passed in CI](https://github.com/wpelevator/tug/actions/runs/43955052052) after its root-owned config fixture was corrected. That run passed the complete Node and integration matrix; it supplies Docker evidence in addition to the local injected-failure tests.
