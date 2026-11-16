@@ -32,6 +32,7 @@ export const ROUTE_ROLES: Record<string, RouteRole> = {
   'GET /api/v1/status': 'read',
   'GET /api/v1/version': 'read',
   'GET /api/v1/readyz': 'read',
+  'GET /api/v1/metrics': 'read',
   'GET /api/v1/whoami': 'read',
   'GET /api/v1/events': 'read',
   'GET /api/v1/projects/:project': 'read',

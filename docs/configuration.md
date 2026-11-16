@@ -26,6 +26,10 @@ The CLI config is a YAML or JSON file that is safe to commit. It holds the contr
 |---|---|---|
 | `PORT` | `8443` | The single mTLS port. |
 | `TUG_CONTROL_URL` | required | Credential-free `https://` origin clients connect to by default, including the port. It is written into credentials and its host is added to the server certificate, but clients verify the generated control name, not this address. |
+| `TUG_LOG_FORMAT` | `text` | Process log format: `text` or `json`; applies to control and agents. |
+| `TUG_LOG_LEVEL` | `info` | Minimum process log level: `debug`, `info`, `warn`, `error`; applies to control and agents. |
+| `TUG_WEBHOOK_URL` | unset | HTTPS notification receiver; requires `TUG_WEBHOOK_SECRET`. See [Alerting](observability.md#alerting). |
+| `TUG_WEBHOOK_SECRET` | unset | HMAC-SHA256 signing secret; requires `TUG_WEBHOOK_URL`. Never place it in a URL. |
 | `TUG_WATCH_TICK_MS` | `1000` | How often the [watch channel](architecture.md#operator-watch-channel) looks for changes nothing announced (deployment, backup and restore states, stale nodes), while at least one operator is watching. Requests that change something trigger a look at once. |
 | `TUG_EXTRA_SANS` | unset | Comma-separated extra DNS names or IPs for the server certificate. |
 | `TUG_RENEW_MIN_INTERVAL_MS` | `3600000` | Minimum time between certificate renewals per node. |
@@ -48,7 +52,15 @@ The CLI config is a YAML or JSON file that is safe to commit. It holds the contr
 | `TUG_ACME_EMAIL` | unset | Email for ACME registration in rendered Caddy configs. |
 | `TUG_INGRESS_ACCESS_LOG` | unset (off) | Set `true` and each ingress site writes a JSON access log line per request to the `tug-caddy` container's output (`docker logs tug-caddy` on the ingress node). Caddy redacts cookies and `Authorization` headers, but URLs (including query-string tokens) and client IPs are logged. Docker's log cap applies only to a newly created container; see [Networking](ingress.md#edge-features). |
 
+The global writer admits at most 100 waiting operations; excess work receives HTTP 503 with a retry-later message. Active work continues, and readiness reports overdue writer work after 35 minutes. These bounds are fixed, rather than additional tuning variables.
+
+## External reachability probe
+
+The source-checkout tool `node tools/scripts/check-reachability.mjs` takes URLs as arguments or from `TUG_PROBE_URLS` (comma/newline-separated). `TUG_PROBE_TIMEOUT_MS` defaults to `5000`. It requires a 2xx response without redirects and exits nonzero on failure. Schedule it outside workload hosts; see [Alerting](observability.md#alerting).
+
 ## Agent
+
+Agents also honor `TUG_LOG_FORMAT` and `TUG_LOG_LEVEL` with the defaults above.
 
 | Variable | Default | Purpose |
 |---|---|---|

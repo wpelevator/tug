@@ -76,6 +76,7 @@ import type { HttpClient } from './runners.ts';
 import { CADDY_CONTAINER, reconcileIngress, removeIngress } from '../ingress.ts';
 import { collectResources, ownContainer } from '../host-resources.ts';
 import { createTlsMonitor } from '../ingress-tls.ts';
+import { createLogger, failureContext } from '../logger.ts';
 import type { TlsMonitor } from '../ingress-tls.ts';
 import type {
   Command,
@@ -105,6 +106,7 @@ let NODE_NAME = process.env.TUG_NODE_NAME || process.env.HOSTNAME || 'node1';
 const STATE_DIR = process.env.TUG_STATE_DIR || '/var/lib/tug';
 const APPLY = process.env.TUG_APPLY !== 'false';
 const INTERVAL = Number(process.env.TUG_POLL_INTERVAL_MS || 5000);
+const log = createLogger({ component: 'agent' });
 
 // Everything the reconcile/command logic needs from the outside world. Production wiring is
 // `defaultContext()`; tests pass a fake `docker` runner / `http` client and temp dirs.
@@ -292,7 +294,7 @@ export class AgentWakeChannel {
         if (typeof frame.type === 'string' && frame.type.startsWith('live.')) {
           if (frame.v === 1)
             void Promise.resolve(this.handlers.onLive?.(message as AgentLiveControlFrame)).catch(
-              (error) => console.error('agent live frame failed:', errMessage(error)),
+              (error) => log.warn('agent live frame failed', { ...failureContext(error) }),
             );
           return;
         }
@@ -1452,8 +1454,8 @@ export async function endpointAddressesForAgent(
               list.map(async (ep) => {
                 try {
                   return { ...ep, address: await resolve(ep.address) };
-                } catch (error) {
-                  console.error(errMessage(error));
+                } catch {
+                  log.warn('could not resolve a cross-node service address', { service });
                   return null;
                 }
               }),
@@ -1511,7 +1513,7 @@ export async function pollOnce(ctx: AgentContext = defaultContext()): Promise<Pr
           ctx.tlsMonitor ??= createTlsMonitor();
           ingress.tls = await ctx.tlsMonitor.check(work.ingress.routes, ctx.docker);
         } catch (e) {
-          console.error(`ingress TLS check failed: ${errMessage(e)}`);
+          log.warn('ingress TLS check failed', { ...failureContext(e) });
         }
       }
     } else await removeIngress(ingressCtx).catch(() => false);
@@ -1593,7 +1595,7 @@ async function enroll(joinKey: string): Promise<AgentDocument> {
     throw new Error('invalid join key (expected a base64url-encoded v2 join key)', { cause: e });
   }
   const transport = createTransport(decoded.credential, CONTROL_URL_OVERRIDE || decoded.connectUrl);
-  console.log(`enrolling with ${decoded.credential.url} as ${decoded.name}`);
+  log.info('enrolling with control', { node: decoded.name });
   const csr = await agentIdentityCsr(STATE_DIR);
   const body: EnrollRequest = {
     csr,
@@ -1607,7 +1609,7 @@ async function enroll(joinKey: string): Promise<AgentDocument> {
     });
     if (!res.ok) throw new Error(`enroll failed: ${res.status} ${await res.text()}`);
     const doc = await installIdentity(STATE_DIR, (await res.json()) as EnrollResponse);
-    console.log(`enrolled as node ${doc.nodeName}`);
+    log.info('enrolled', { node: doc.nodeName });
     return doc;
   } finally {
     void transport.close();
@@ -1631,7 +1633,7 @@ const RENEW_RETRY_MS = 15 * 60_000;
 export async function main(): Promise<void> {
   const doc = await loadOrEnroll();
   const ctx = defaultContext(doc);
-  console.log(`tug-agent node=${NODE_NAME} control=${ctx.controlUrl} apply=${APPLY}`);
+  log.info('agent started', { node: NODE_NAME, apply: APPLY });
   let renewAt = renewalTime(doc.cert);
   /** Renews with the same key, saves, then swaps the client and reconnects. Failure keeps the old identity until it expires. */
   const renewIfDue = async (): Promise<void> => {
@@ -1652,10 +1654,13 @@ export async function main(): Promise<void> {
       void previous;
       renewAt = renewalTime(next.cert);
       wake.close();
-      console.log('node certificate renewed');
+      log.info('node certificate renewed', { node: NODE_NAME });
     } catch (e) {
       renewAt = Date.now() + RENEW_RETRY_MS;
-      console.error(`certificate renewal failed (keeping the current one): ${errMessage(e)}`);
+      log.error('certificate renewal failed; keeping the current certificate', {
+        node: NODE_NAME,
+        ...failureContext(e),
+      });
     }
   };
   const wake = new AgentWakeChannel(ctx, undefined, {
@@ -1672,7 +1677,7 @@ export async function main(): Promise<void> {
     nodeName: ctx.nodeName,
     post: (event) => postEvent(ctx, event),
     wake: () => wake.poke(),
-    log: (message) => console.error(message),
+    log: () => log.warn('docker event watcher reported a problem'),
   });
   if (ctx.apply) watcher.start();
   for (;;) {
@@ -1680,12 +1685,12 @@ export async function main(): Promise<void> {
     try {
       await pollOnce(ctx);
     } catch (e) {
-      console.error(errMessage(e));
+      log.error('agent poll failed', { node: NODE_NAME, ...failureContext(e) });
     }
     try {
       await wake.wait(INTERVAL);
     } catch (e) {
-      console.error(`agent wake wait failed: ${errMessage(e)}`);
+      log.warn('agent wake wait failed', { node: NODE_NAME, ...failureContext(e) });
       await new Promise((r) => setTimeout(r, INTERVAL));
     }
   }

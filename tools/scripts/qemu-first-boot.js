@@ -2,7 +2,7 @@
 // Prototype: prove the cloud-init enrollment path on a real first boot, locally, with QEMU.
 //
 //   node tools/scripts/qemu-first-boot.js --image <cloud-image.qcow2> [--work <dir>] [--name app1] [--keep]
-//     [--ssh-user <user>] [--agent-image <tag>] [--block-docker-seconds N] [--timeout <seconds>]
+//     [--ssh-user <user>] [--agent-image <tag>] [--block-docker-seconds N] [--verify-reliability] [--timeout <seconds>]
 //
 // It runs a throwaway control on this machine, mints user-data with `tug node enroll --install-docker`, boots a cloud
 // image with that user-data as a NoCloud seed (a real first boot, not a `cloud-init clean` replay) and watches until the
@@ -349,6 +349,30 @@ try {
     timeoutSeconds,
   );
   log('SUCCESS: first-boot cloud-init enrolled the node');
+  if (flag('verify-reliability')) {
+    const { decodeCredential } = await import('../../src/pki.ts');
+    const { createTransport } = await import('../../src/transport.ts');
+    const client = createTransport(
+      decodeCredential(credential.stdout),
+      'https://127.0.0.1:' + port,
+    );
+    try {
+      const ready = await client.http(client.base + '/api/v1/readyz', {
+        signal: AbortSignal.timeout(5000),
+      });
+      if (ready.status !== 200 || !(await ready.json()).ready)
+        throw new Error('control readiness failed after guest enrollment');
+      const metrics = await client.http(client.base + '/api/v1/metrics', {
+        signal: AbortSignal.timeout(5000),
+      });
+      const body = await metrics.text();
+      if (metrics.status !== 200 || !body.includes('tug_node_reported{node="' + nodeName + '"} 1'))
+        throw new Error('metrics did not observe guest report');
+      log('SUCCESS: authenticated readiness and node-report metrics verified over mTLS');
+    } finally {
+      await client.close();
+    }
+  }
 } catch (error) {
   log(`FAILED: ${error.message}`);
   console.log('--- serial console (last 40 lines) ---');

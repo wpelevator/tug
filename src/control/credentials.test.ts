@@ -223,6 +223,7 @@ const SAMPLES: Record<string, { path: string; body?: unknown }> = {
   'GET /api/v1/status': { path: '/api/v1/status' },
   'GET /api/v1/version': { path: '/api/v1/version' },
   'GET /api/v1/readyz': { path: '/api/v1/readyz' },
+  'GET /api/v1/metrics': { path: '/api/v1/metrics' },
   'GET /api/v1/whoami': { path: '/api/v1/whoami' },
   'GET /api/v1/events': { path: '/api/v1/events' },
   'GET /api/v1/projects/:project': { path: '/api/v1/projects/site' },
@@ -531,6 +532,15 @@ test('project-scoped credentials only reach their own projects and learn nothing
       'a scoped credential cannot create a project outside its scope',
     );
 
+    const metrics = await s.call(viewer, 'GET', '/api/v1/metrics');
+    assert.equal(metrics.status, 200, 'a scoped read credential can scrape its metrics');
+    assert.ok(metrics.text.includes('project="a"'), 'metrics include the authorized project');
+    assert.ok(!metrics.text.includes('project="b"'), 'metrics exclude other projects');
+    assert.ok(
+      !metrics.text.includes('tug_writer_'),
+      'global writer state is hidden from scoped metrics',
+    );
+    assert.ok(!metrics.text.includes('node="'), 'global node names are hidden from scoped metrics');
     const status = (await s.call(viewer, 'GET', '/api/v1/status')).body;
     assert.deepEqual(
       status.projects.map((p: { id: string }) => p.id),

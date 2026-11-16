@@ -95,7 +95,7 @@ An `x-tug.type: nfs` volume type was built and verified on real hosts, then remo
 
 ### M8 — Central API advantages (partly done)
 
-Shipped: scoped operator credentials (`read`, `deploy`, `admin`, per project), a GitHub Actions deploy example and credential names in the audit trail ([Access control](access-control.md)). Remaining: outbound webhooks for deployment state changes, failed health checks and backup results (shared with M9 alerting). The read-only web dashboard is dropped to [Later](#later--only-if-needed): `tug status`, `/metrics` and webhooks cover the need.
+Shipped: scoped operator credentials (`read`, `deploy`, `admin`, per project), a GitHub Actions deploy example and credential names in the audit trail ([Access control](access-control.md)). Shipped: best-effort signed outbound webhooks for actionable state transitions, with bounded retries and delivery metrics (shared with M9 alerting). The read-only web dashboard is dropped to [Later](#later--only-if-needed): `tug status`, `/metrics` and webhooks cover the need.
 
 ### M9 — Observability
 
@@ -190,7 +190,7 @@ Claims must match verified behavior. Image rollback does not undo data, schema o
    4. **Staging that is more than a pattern.** `tug project delete` and a cross-project data copy.
    5. **Show the operator's scope.** Label control-wide views, show the resolved control and project before high-impact commands, give `ps`, `events` and `doctor` a compact human default.
    6. **Done: control is the only source of deployment values.** Operators could not tell whether `${NAME}` came from control, their shell or `.env`. Now every value comes from the project store (secrets through `tug secret`, visible values such as image tags, hosts and ports through `tug var`, one name space), an explicit `deploy --var`, or the default in the file; the shell, `.env`, `env_file` and `COMPOSE_PROFILES` are ignored, `deploy --dry-run` and the deployment record show each value's source, and `secret import` / `var import` move an existing `.env` in ([Where values come from](compose.md#where-values-come-from), [upgrade note](releases.md#upgrading-to-30-values-come-only-from-control)). A `major`.
-   7. **Then:** `x-tug.release` hooks, structured logs and a minimal `/metrics` set that supports the acceptance checks (demoted: notifications and external reachability come first), SEC-09 and SEC-06 as minors, and the `dnf` and two-node verification debt. Keep logs useful for diagnosing one failed operation and avoid per-deployment or per-request identifiers as metric labels.
+   7. **Then:** `x-tug.release` hooks, additional telemetry only when operating evidence demands it (the minimal structured logs, `/api/v1/metrics`, notifications and external probe are implemented), SEC-09 and SEC-06 as minors, and the `dnf` and two-node verification debt. Keep logs useful for diagnosing one failed operation and avoid per-deployment or per-request identifiers as metric labels.
 5. Reconsider flexible node roles, scaled WordPress, additional networking, dashboards and stronger isolation only for a demonstrated need. Co-locating control is attractive for small installations but requires an independently tested off-host recovery path and an explicit host trust model.
 
 ## Road to 1.0.0
@@ -231,13 +231,15 @@ The test layers, the metrics milestones are held to and the backlog of mocked te
 - [x] `tug tui` terminal UI phases 1 to 3: overview and attention list, live logs, inspect and shell, confirmed restart, rollback, cancel and backup, and `GET /api/v1/whoami` ([Terminal UI](tui.md))
 - [ ] `tug tui` phase 4 (admin actions typed-name confirmation, screen lock, preferences, credential contexts) and phase 5 (metrics columns with M9)
 - [x] M8 scoped operator credentials, CI deploy example, credential names in the audit trail ([Access control](access-control.md))
-- [ ] M8 outbound webhooks
+- [x] M8 best-effort signed outbound webhooks with bounded retries and delivery metrics
 - [x] M9 event hygiene ([Architecture](architecture.md#events)) and observability design ([Observability](observability.md))
 - [x] Streaming: Docker daemon events in the agent (crashes, OOM kills, crash loops), agent events over the stream socket, the operator watch channel (`GET /api/v1/watch`, `events?after=`) and node presence (`connected`) ([Architecture](architecture.md#operator-watch-channel))
-- [ ] M9 structured logs (`TUG_LOG_FORMAT`, `TUG_LOG_LEVEL`)
-- [ ] M9 `GET /metrics` on control (Prometheus text, `read` credential), with agent-reported node and service stats
+- [x] M9 structured logs (`TUG_LOG_FORMAT`, `TUG_LOG_LEVEL`), request IDs and bounded context
+- [x] M9 `GET /api/v1/metrics` on control (Prometheus text, `read` credential): project-filtered deployment and backup state, node report age, bounded writer queue and webhook delivery
+- [ ] M9 continuous agent-reported resource statistics, only when demonstrated necessary
 - [x] M9 authenticated `/api/v1/readyz`: database read, overdue writer and restart-required checks ([Observability](observability.md#health-endpoints))
-- [ ] M9 sample alert rules and the metrics documentation test gate
+- [x] M9 metrics authorization, missing-data, escaping and documentation checks; external reachability probe tool
+- [ ] M9 application-specific alert thresholds selected from measured operating objectives
 - [x] M10 published ports bound to the node address or loopback by default; `doctor` reports public listeners
 - [x] M11 spec written
 - [x] M11 `x-tug.backup` (generic: a command in a service, or a volume's files), scheduled backups to S3-compatible storage with restic, catalog, `backup run`, `backup list`, `restore` (verified against real Docker and on two real hosts with an S3-compatible server and a scheduled run: [Real-host evaluation](real-host-evaluation.md#generic-backups-restore-and-tug-run-on-fresh-hosts-1-november-2026); not yet against AWS S3)

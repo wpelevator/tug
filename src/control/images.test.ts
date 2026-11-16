@@ -1006,14 +1006,17 @@ test('image prune counts distinct builds, so redeploying an unchanged image keep
   }
 });
 
-test('a failing build-cache prune is logged without breaking later deploys', async () => {
+test('a failing build-cache prune is logged without breaking later deploys', async (t) => {
   const s = await server();
   try {
     const n1 = await s.node('n1');
     s.failMaintenance();
-    const originalError = console.error;
+    const originalWrite = process.stderr.write;
     const logged: string[] = [];
-    console.error = (...args: unknown[]) => void logged.push(args.join(' '));
+    t.mock.method(process.stderr, 'write', (chunk: string | Uint8Array) => {
+      logged.push(String(chunk));
+      return true;
+    });
     try {
       const first = await json(await s.deploy('v1'));
       await until(
@@ -1022,11 +1025,16 @@ test('a failing build-cache prune is logged without breaking later deploys', asy
       );
       await s.report(n1.nodeId, first.desiredState);
     } finally {
-      console.error = originalError;
+      process.stderr.write = originalWrite;
     }
     assert.ok(
-      logged.some((line) => line.includes('image maintenance failed: prune broke')),
-      'a failing maintenance step must be logged with its reason',
+      logged.some(
+        (line) =>
+          line.includes('image maintenance failed') &&
+          line.includes('failureCode=') &&
+          !line.includes('prune broke'),
+      ),
+      'a failing maintenance step is logged without arbitrary private error details',
     );
     assert.equal(
       (await s.deploy('v2')).status,

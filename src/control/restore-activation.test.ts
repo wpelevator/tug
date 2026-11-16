@@ -94,6 +94,41 @@ test('a failure at any step puts the whole previous generation back before the e
   }
 });
 
+test('an ENOSPC error while replacing the database restores the complete previous generation', async (t) => {
+  const { root, dataDir, restoreDir } = await setup();
+  try {
+    const copyFile = fs.copyFile.bind(fs);
+    t.mock.method(fs, 'copyFile', async (...args: Parameters<typeof fs.copyFile>) => {
+      if (args[0] === path.join(restoreDir, 'tug.db')) {
+        throw Object.assign(new Error('no space left on device'), { code: 'ENOSPC' });
+      }
+      return copyFile(...args);
+    });
+
+    await assert.rejects(
+      activateRestore({ dataDir, restoreDir }),
+      (error: NodeJS.ErrnoException) => error.code === 'ENOSPC',
+      'the storage exhaustion error reaches the caller',
+    );
+    assert.deepEqual(
+      [
+        await read(dataDir, 'tug.db'),
+        await read(dataDir, 'master.key'),
+        await read(dataDir, 'pki/ca.crt'),
+      ],
+      ['db-old', 'key-old', 'ca-old'],
+      'storage exhaustion leaves the previous generation complete',
+    );
+    assert.deepEqual(
+      (await names(dataDir)).filter((name) => name.startsWith('restore-')),
+      [],
+      'storage exhaustion leaves no journal or partial generation behind',
+    );
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test('a start that finds an interrupted activation rolls it back before opening anything', async () => {
   const { root, dataDir } = await setup();
   try {
@@ -122,6 +157,62 @@ test('a start that finds an interrupted activation rolls it back before opening 
     );
   } finally {
     await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a restart rolls back a process crash after each activation boundary', async () => {
+  for (const boundary of ['database', 'master-key', 'pki'] as const) {
+    const { root, dataDir, restoreDir } = await setup();
+    const previous = path.join(dataDir, `restore-previous-${boundary}`);
+    try {
+      await fs.mkdir(previous);
+      await fs.copyFile(path.join(dataDir, 'tug.db'), path.join(previous, 'tug.db'));
+      await fs.copyFile(path.join(dataDir, 'master.key'), path.join(previous, 'master.key'));
+      await fs.cp(path.join(dataDir, 'pki'), path.join(previous, 'pki'), { recursive: true });
+      const journal = {
+        state: 'applying',
+        previous,
+        startedAt: new Date().toISOString(),
+      };
+      await fs.writeFile(path.join(dataDir, 'restore-activation.json'), JSON.stringify(journal));
+
+      // Model the on-disk state left when the process exits immediately after this durable step.
+      await fs.copyFile(path.join(restoreDir, 'tug.db'), path.join(dataDir, 'tug.db'));
+      if (boundary !== 'database')
+        await fs.copyFile(path.join(restoreDir, 'master.key'), path.join(dataDir, 'master.key'));
+      if (boundary === 'pki') {
+        await fs.rm(path.join(dataDir, 'pki'), { recursive: true, force: true });
+        await fs.cp(path.join(restoreDir, 'pki'), path.join(dataDir, 'pki'), { recursive: true });
+      }
+      await fs.writeFile(path.join(dataDir, 'tug.db-wal'), 'partial wal');
+      await fs.writeFile(path.join(dataDir, 'tug.db-shm'), 'partial shm');
+
+      assert.equal(await recoverActivation(dataDir), null, `${boundary} crash is rolled back`);
+      assert.deepEqual(
+        [
+          await read(dataDir, 'tug.db'),
+          await read(dataDir, 'master.key'),
+          await read(dataDir, 'pki/ca.crt'),
+        ],
+        ['db-old', 'key-old', 'ca-old'],
+        `a crash after ${boundary} restores one complete previous generation`,
+      );
+      assert.deepEqual(
+        (await names(dataDir)).filter((name) => name.startsWith('restore-')),
+        [],
+        `a crash after ${boundary} leaves no activation journal or previous generation`,
+      );
+      await assert.rejects(
+        fs.stat(path.join(dataDir, 'tug.db-wal')),
+        `${boundary} rollback removes stale WAL`,
+      );
+      await assert.rejects(
+        fs.stat(path.join(dataDir, 'tug.db-shm')),
+        `${boundary} rollback removes stale SHM`,
+      );
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
   }
 });
 

@@ -5,6 +5,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { createApp } from './control.ts';
 import { testImageResolver, testControlUrl, testIdentity } from '../../tests/helpers.ts';
+import { until } from '../../tests/wait.ts';
+import { recordEvent } from './credentials.ts';
+import { WRITER_OVERDUE_AFTER_MS } from './writer-queue.ts';
 import { openDb } from '../db/db.ts';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -40,7 +43,7 @@ async function server(options: Parameters<typeof createApp>[0] = {}) {
     const s = app.listen(0, () => resolve(s));
   });
   const base = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`;
-  return { base, close: () => new Promise((resolve) => srv.close(resolve)) };
+  return { base, dir, close: () => new Promise((resolve) => srv.close(resolve)) };
 }
 function op() {
   return { 'x-tug-test-operator': 'operator', 'content-type': 'application/json' };
@@ -251,6 +254,135 @@ test('failed node status fails deployment and unblocks future deploys', async ()
     });
     assert.equal(res.status, 200);
   } finally {
+    await s.close();
+  }
+});
+
+test('readiness stays responsive behind an overdue deploy and recovers when the writer completes', async () => {
+  let time = 1000;
+  let entered = false;
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const s = await server({
+    writerClock: () => time,
+    images: {
+      resolve: async (...args) => {
+        entered = true;
+        await blocked;
+        return testImageResolver(args[0]);
+      },
+    },
+  });
+  let deployment: Promise<Response> | undefined;
+  try {
+    await fetch(s.base + '/api/v1/nodes/register', {
+      method: 'POST',
+      headers: op(),
+      body: JSON.stringify({ name: 'n1' }),
+    });
+    deployment = fetch(s.base + '/api/v1/deployments', {
+      method: 'POST',
+      headers: op(),
+      body: JSON.stringify({
+        project: 'site',
+        version: 'v1',
+        compose: {
+          services: { web: { image: 'nginx', 'x-tug': { placement: { nodes: ['n1'] } } } },
+        },
+      }),
+    });
+    await until(() => entered, 'deployment to hold the writer during image resolution');
+    let response = await fetch(s.base + '/api/v1/readyz', {
+      headers: op(),
+      signal: AbortSignal.timeout(5000),
+    });
+    assert.equal(response.status, 200, 'a normal in-progress deploy stays ready');
+    time += WRITER_OVERDUE_AFTER_MS + 1;
+    response = await fetch(s.base + '/api/v1/readyz', {
+      headers: op(),
+      signal: AbortSignal.timeout(5000),
+    });
+    assert.equal(
+      response.status,
+      503,
+      'an overdue active writer makes readiness fail without waiting',
+    );
+    assert.equal(
+      (await json(response)).checks.writer,
+      'overdue',
+      'readiness identifies the overdue writer',
+    );
+    release();
+    assert.equal(
+      (await deployment).status,
+      200,
+      'the deployment still completes after readiness failed',
+    );
+    response = await fetch(s.base + '/api/v1/readyz', { headers: op() });
+    assert.equal(response.status, 200, 'readiness recovers after writer completion');
+  } finally {
+    release();
+    await deployment;
+    await s.close();
+  }
+});
+
+test('webhook delivery cannot block readiness and omits private event details', async () => {
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const bodies: string[] = [];
+  const s = await server({
+    notificationTickMs: 10,
+    webhook: {
+      url: 'https://receiver.example.test/hooks',
+      secret: 'test-signing-key',
+      fetch: async (_url, options) => {
+        bodies.push(String(options?.body));
+        await blocked;
+        return new Response('', { status: 200 });
+      },
+    },
+  });
+  const db = await openDb(path.join(s.dir, 'tug.db'));
+  try {
+    recordEvent(db, {
+      actor: 'test',
+      type: 'backup.failed',
+      message: 'private-bucket-secret',
+      metadata: { command: 'private-password' },
+    });
+    await until(
+      () => bodies.length > 0,
+      'a committed backup failure to be delivered without a watcher',
+    );
+    const ready = await fetch(s.base + '/api/v1/readyz', {
+      headers: op(),
+      signal: AbortSignal.timeout(5000),
+    });
+    assert.equal(ready.status, 200, 'blocked receiver leaves readiness responsive');
+    const metrics = await (await fetch(s.base + '/api/v1/metrics', { headers: op() })).text();
+    assert.match(
+      metrics,
+      /# TYPE tug_webhook_delivered_total counter/,
+      'delivery totals use Prometheus counter semantics',
+    );
+    assert.match(
+      metrics,
+      /# TYPE tug_webhook_pending gauge/,
+      'pending delivery is a current-value gauge',
+    );
+    assert.ok(
+      !bodies[0].includes('private-'),
+      'outbound notification omits raw message and metadata',
+    );
+    release();
+  } finally {
+    release();
+    db.close();
     await s.close();
   }
 });

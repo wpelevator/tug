@@ -1,6 +1,6 @@
 # Observability
 
-**Status: mostly proposed.** tug today has an audit trail, a few read commands and a certificate and connectivity check, and nothing that measures CPU, memory, requests or latency. Sections marked **Proposed** describe a setup that is not built; the milestone is [M9](roadmap.md#m9--observability). Nothing marked proposed works yet, and none of the names, flags or environment variables in those sections exist in the code.
+**Status: minimal operational telemetry implemented.** Metrics, readiness, structured logs and best-effort webhooks cover control operations. Continuous resource and ingress request telemetry remain external.
 
 The aim is the smallest setup that answers the day-to-day questions: is every node reporting, did the last deployment succeed, did an automatic rollback happen, will a certificate expire, is the control database growing. It follows the shape of the rest of tug: one central control plane, agents that only dial out, and no required extra services.
 
@@ -19,9 +19,9 @@ Verified against the code on `main`.
 | `tug logs <service>` | Prints a service log tail; `--follow` streams logs through the live channel. | Following logs requires an active WebSocket session. |
 | `tug ingress logs <node>`, `tug ingress tls` | The ingress node's Caddy output, and per-host certificate state from a TLS handshake against that Caddy, shown also in `domain list`, `status` and `doctor`. See [Certificate status](ingress.md#certificate-status). | `admin` only. State is a probe every twenty seconds to an hour, not a stream |
 | Reachability | Control has no unauthenticated route, not even a health check: every request needs a client certificate. Monitor TCP reachability of the mTLS port for liveness, and use authenticated `GET /api/v1/readyz` for control readiness ([Health endpoints](#health-endpoints)). | A TCP check proves the listener accepts connections, not that the database works |
-| Process logs | Control and agent write plain `console.log` and `console.error` text. | No timestamps, levels, structure or request ids |
+| Process logs | Text or JSON records with levels and available operation context. | No integrated log retention or search |
 
-What does not exist: a `/metrics` endpoint, any history of CPU, memory or disk (`tug doctor` shows the current values only), restart data, request, build or poll metrics, structured or leveled logs, alerting, outbound webhooks (M8, unchecked) and a dashboard (M8, unchecked). The managed Caddy ingress enables Caddy's own metrics on the ingress node's loopback admin endpoint, but nothing collects them yet ([Ingress metrics](#ingress-metrics)).
+Continuous resource history, application request metrics and an integrated dashboard are not collected by tug. Managed Caddy enables its own loopback metrics; see [Ingress metrics](#ingress-metrics).
 
 ### Events
 
@@ -31,186 +31,73 @@ Before [PR #13](https://github.com/wpelevator/tug/pull/13) agents emitted those 
 
 Containers that crash, are killed for memory or report unhealthy produce `container.exited`, `container.oom`, `container.unhealthy` and, for repeated crashes, one `container.crashloop` event, from the Docker daemon's event stream rather than from the next poll ([Architecture](architecture.md#container-events-from-the-docker-daemon)). Restart counts and a restart-rate metric are still proposed under [node and service stats](#node-and-service-stats-reported-by-agents).
 
-## Proposed
+## Structured logs
 
-Everything below is **Proposed** unless a status line says otherwise.
+Control and agents write text logs by default at level `info`. Set `TUG_LOG_FORMAT=json` for one JSON object per line, or `TUG_LOG_LEVEL=debug|info|warn|error` to select the minimum level. JSON records include timestamp, level, component and a fixed message, with available project, deployment and node context. Control responses include `x-request-id`; the matching completion record includes that ID, method, route pattern, status and duration. Request bodies, query strings and raw error details are excluded. Allowlisted failure classes and codes, HTTP status and numeric SQLite codes retain diagnostic categories without arbitrary exception messages. Sensitive context keys are redacted, but a secret deliberately included in an arbitrary message or resource name is outside that protection. Logs are process output for your existing collector; tug does not store another log database.
 
-| Piece | Section | Status |
-| --- | --- | --- |
-| Structured logs | [Structured logs](#structured-logs) | Proposed |
-| Metrics on control | [Metrics on control](#metrics-on-control) | Proposed |
-| Node and service stats from agents | [Node and service stats reported by agents](#node-and-service-stats-reported-by-agents) | Proposed |
-| Readiness endpoint | [Health endpoints](#health-endpoints) | Implemented |
-| Ingress metrics | [Ingress metrics](#ingress-metrics) | Proposed, with open questions |
-| Sample alerts and webhooks | [Alerting](#alerting) | Proposed |
-| Live commands | [Live commands](#live-commands) | Partly built in M5 |
-| Metrics test gate | [Test gate](#test-gate) | Proposed |
+## Metrics on control
 
-### Structured logs
+Scrape authenticated `GET /api/v1/metrics` using a `read` credential over mTLS. Scoped credentials see only their projects' deployment and backup series; unscoped credentials also see nodes, control writer and webhook delivery. No deployment IDs, command IDs, error messages or raw URLs are metric labels. State counts come from SQLite and survive restarts; webhook delivery counters reset on restart; pending delivery is a gauge.
 
-Status: proposed.
+| Metric | Meaning |
+|---|---|
+| `tug_node_reported` | Whether the node has ever reported; check this before interpreting poll age |
+| `tug_node_poll_age_seconds` | Age of its last report, zero when absent |
+| `tug_deployments` | Recorded deployments grouped by project and state, including retained history |
+| `tug_backup_targets` | Enabled backup targets grouped by project and latest run state |
+| `tug_backup_has_success` | Whether a configured target has a successful snapshot; zero means protection has not been established |
+| `tug_backup_success_age_seconds` | Age of the target's last success; use with `has_success` |
+| `tug_writer_queue_depth` | Operations waiting for the single control writer |
+| `tug_writer_active_age_seconds` | Age of active writer work, zero when idle |
+| `tug_webhook_delivered_total`, `tug_webhook_failed_total`, `tug_webhook_dropped_total`, `tug_webhook_pending` | Delivery outcomes, overflow and current backlog |
 
-Control and agent would write one JSON object per line with `time`, `level`, `component`, `msg` and context fields where they apply: `requestId`, `node`, `project`, `service`, `deploymentId`. Two environment variables would select the output: `TUG_LOG_FORMAT=json|text` and `TUG_LOG_LEVEL` (`debug`, `info`, `warn`, `error`). Text would stay the default so existing installs read the same, and JSON is meant for `docker logs` piped to whatever the operator already uses.
-
-Credential private keys, join keys and secret values are never logged, and the logger would redact known field names as a second line of defence. The CLI keeps its human-readable output; only the long-running processes change. Every existing `console.log` and `console.error` in `src/control/control.ts` and `src/agent/agent.ts` would move to the logger.
-
-### Metrics on control
-
-Status: proposed.
-
-Control would serve `GET /metrics` in the Prometheus text format. It needs the `read` role from [Access control](access-control.md#roles), so Prometheus would present the client certificate and key of a `read` operator credential (`tls_config` with `cert_file`, `key_file` and `ca_file` extracted from the credential file); a credential limited to projects would see only those projects' series. Adding the route means adding it to `ROUTE_ROLES` in `src/control/credentials.ts` and to the endpoint table, which the existing test already requires.
-
-Naming follows the Prometheus conventions: a `tug_` prefix, base units (`_seconds`, `_bytes`), `_total` for counters. Labels are bounded: project, node and service names are operator-defined and few; route labels use the route pattern (`/api/v1/deployments/:id`), never the raw path; deployment IDs, command IDs, versions and error messages are never labels.
-
-| Metric | Type | Labels | Meaning |
-| --- | --- | --- | --- |
-| `tug_build_info` | gauge | `version` | Constant 1; the running control version |
-| `tug_deployments` | gauge | `project`, `state` | Deployments currently in each state (`building`, `rolling_out`, `succeeded`, `failed`, `build_failed`, `cancelled`) |
-| `tug_deployment_duration_seconds` | histogram | `project`, `outcome` | Time from creation to a terminal state |
-| `tug_rollout_outcomes_total` | counter | `project`, `outcome` | Rollout results: `rolled_out`, `rejected` (a candidate failed its health check while the old revision kept serving), `auto_rollback` |
-| `tug_nodes` | gauge | `status` | Registered nodes by `online` or `stale`, computed from `last_seen_at` at scrape time rather than stored |
-| `tug_node_poll_age_seconds` | gauge | `node` | Seconds since the node last reported |
-| `tug_api_requests_total` | counter | `route`, `method`, `status_class` | API requests by route pattern and status class (`2xx`, `4xx`, `5xx`) |
-| `tug_api_request_duration_seconds` | histogram | `route` | API request latency |
-| `tug_builds_total` | counter | `outcome` | Builds by result (`complete`, `failed`) |
-| `tug_build_duration_seconds` | histogram | none | Remote build duration |
-| `tug_image_archive_bytes` | gauge | none | Total size of retained image archives under the data directory |
-| `tug_db_size_bytes` | gauge | none | Size of the control SQLite database file |
-| `tug_events_rows` | gauge | none | Rows in the `events` table |
-| `tug_project_locks` | gauge | none | Project operation locks currently held |
-| `tug_writer_queue_depth` | gauge | none | Operations waiting for the single writer |
-
-Gauges that describe state (`tug_deployments`, `tug_nodes`, `tug_events_rows`, `tug_project_locks`) would be computed from the database at scrape time, so they stay correct across control restarts. Counters and histograms live in process memory and reset on restart, which Prometheus handles as a counter reset.
-
-### Node and service stats reported by agents
-
-Status: proposed.
-
-Agents already send a status report on every poll. The proposal adds a `stats` block to that report and has control expose it on the same `/metrics` endpoint, so one scrape target covers everything:
-
-| Metric | Type | Labels | Meaning |
-| --- | --- | --- | --- |
-| `tug_service_cpu_seconds_total` | counter | `node`, `project`, `service` | CPU time used by the service's containers |
-| `tug_service_memory_bytes` | gauge | `node`, `project`, `service` | Memory in use |
-| `tug_service_up` | gauge | `node`, `project`, `service` | 1 when the container is running, 0 otherwise |
-| `tug_service_restarts_total` | counter | `node`, `project`, `service` | Container restarts since the container was created |
-| `tug_node_disk_free_bytes` | gauge | `node`, `path` | Free space on the Docker data and tug state paths |
-| `tug_node_load1` | gauge | `node` | One-minute load average |
-
-The agent would read these from `docker stats --no-stream` and `docker inspect`, and control would drop series for services that no longer exist. A node that stops reporting keeps its last values, so alerts use `tug_node_poll_age_seconds` to tell fresh data from stale data.
-
-Why report through control: agents sit behind NAT and only dial out, so Prometheus often cannot reach them. Reporting through the existing authenticated channel needs no inbound port, no extra credential and no firewall change, and adds one scrape target regardless of node count. The cost is resolution: values are as fresh as the poll interval (`TUG_POLL_INTERVAL_MS`), and the status report grows with the number of services.
-
-The alternative is scraping an exporter on each agent directly over the operator's private network from [Networking](networking.md#bring-your-own-network). It gives finer resolution and keeps control out of the data path, but it requires a listener on every node, firewall rules that admit only Prometheus and a service-discovery list. It does not work where Prometheus cannot route to the node addresses, including nodes behind NAT. If both are ever wanted, the metric names above can be reused so dashboards do not change.
-
-### Health endpoints
-
-Status: built.
-
-Control has no unauthenticated route (there is no `/healthz`), so use TCP reachability of the mTLS port and the container restart policy for liveness. An authenticated `GET /api/v1/readyz` requires an operator credential with the `read` role and returns 200 when a SQLite read probe succeeds and the active writer has not exceeded its age limit; otherwise it returns 503 with `ready: false` and check states, without database error details. The writer is marked overdue after 35 minutes of active work, giving the default 30-minute deploy and control-backup operation deadlines a five-minute margin. This is an age-based signal for work that has exceeded those deadlines, not a test for normal queue depth; readiness does not wait for the writer. The database probe reads from the persisted `projects` table and does not claim that writes are available. During a restore that has closed the database, the control-wide restart-required response takes precedence until the process restarts. An external uptime check should present a `read` credential.
-
-### Ingress metrics
-
-Status: Caddy's metrics are enabled on the ingress node's loopback admin endpoint; the status-report and control re-export below are proposed, with open questions.
-
-The managed Caddy enables its metrics with the global option `metrics { per_host }` in the generated Caddyfile (see `renderCaddyfile` in `src/ingress.ts`). They are served at `/metrics` on Caddy's admin endpoint, which listens on `localhost:2019` and, because the container uses host networking, is reachable on the ingress node's loopback only (`curl http://127.0.0.1:2019/metrics` there, or a local exporter or agent). A request-count series carries a `host` label, so cardinality is bounded by the number of routes. That gives request counts by status class and request duration histograms. To reach the same scrape target, the agent on the ingress node would read the admin metrics and include a filtered subset (request counts, status classes, latency buckets, certificate expiry per host) in its status report, and control would re-export it as `tug_ingress_*` series labelled by `node` and `host`.
-
-Open questions:
-
-- Whether re-exporting parsed Caddy metrics through the status report is worth the complexity, compared with publishing Caddy's admin metrics port on a private node address, firewalling it to Prometheus and scraping it directly.
-- Which certificate expiry signal Caddy exposes reliably across versions; the alert below assumes a `tug_ingress_certificate_expiry_timestamp_seconds` gauge that may have to be derived from the certificate files.
-- Label cardinality: one `host` label per route is bounded by the number of routes, but per-upstream labels are not planned.
-
-### Alerting
-
-Status: proposed.
-
-tug would not bundle Prometheus or Alertmanager. A sample scrape configuration:
+Prometheus needs the CA, certificate and key from a read credential:
 
 ```yaml
 scrape_configs:
   - job_name: tug
-    metrics_path: /metrics
+    metrics_path: /api/v1/metrics
     scheme: https
     tls_config:
       ca_file: /etc/prometheus/tug-ca.pem
       cert_file: /etc/prometheus/tug-read.crt
       key_file: /etc/prometheus/tug-read.key
     static_configs:
-      - targets: ['control.example.com']
+      - targets: ['control.example.com:8443']
 ```
 
-Sample alert rules, written against the proposed metric names:
+### Health endpoints
 
-```yaml
-groups:
-  - name: tug
-    rules:
-      - alert: TugNodeStale
-        expr: tug_node_poll_age_seconds > 120
-        for: 2m
-        annotations: { summary: "Node {{ $labels.node }} has not reported for over two minutes" }
-      - alert: TugDeploymentFailed
-        expr: increase(tug_deployment_duration_seconds_count{outcome=~"failed|build_failed"}[10m]) > 0
-        annotations: { summary: "A deployment of {{ $labels.project }} failed" }
-      - alert: TugAutomaticRollback
-        expr: increase(tug_rollout_outcomes_total{outcome="auto_rollback"}[10m]) > 0
-        annotations: { summary: "{{ $labels.project }} was rolled back automatically" }
-      - alert: TugCertificateExpiresSoon
-        expr: tug_ingress_certificate_expiry_timestamp_seconds - time() < 14 * 86400
-        annotations: { summary: "Certificate for {{ $labels.host }} expires in under 14 days" }
-      - alert: TugDatabaseGrowing
-        expr: predict_linear(tug_db_size_bytes[6h], 7 * 86400) > 5 * 1024 ^ 3
-        annotations: { summary: "Control database is on track to pass 5 GiB within a week" }
-      - alert: TugAgentPollAgeHigh
-        expr: tug_node_poll_age_seconds > 30
-        for: 10m
-        annotations: { summary: "Node {{ $labels.node }} polls much slower than its interval" }
+Authenticated `GET /api/v1/readyz` returns 200 when the persisted projects table can be read and active writer work has not exceeded 35 minutes. This gives default 30-minute operation deadlines a five-minute margin. It returns 503 with sanitized check states when those checks fail, without waiting behind the writer. The read probe does not establish database writeability. After control restore closes the database, the existing generic restart-required 503 takes precedence until restart. Monitor this endpoint externally: a dead control cannot notify you of its own failure. A TCP connection to the mTLS port establishes listener liveness only.
+
+## Alerting
+
+Set both `TUG_WEBHOOK_URL` (an HTTPS receiver) and `TUG_WEBHOOK_SECRET` on control to enable notifications. Leaving both unset disables delivery; setting only one fails startup. Control checks committed events and deployment/node transitions every five seconds, independently of operator views. It sends actionable generic descriptions and resource identifiers for supported failures, backup results and stale/recovered nodes; raw event messages, commands and metadata are excluded. The observer processes up to 100 new events each tick and the latest 1000 deployment records; this is sized for tug’s small-server scope and is not a durable incident ledger.
+
+Delivery runs outside the writer, with at most 100 pending/in-flight events, three attempts, a five-second timeout per attempt and exponential delays starting at 250 milliseconds capped at two seconds. Redirects are not followed. Shutdown aborts active delivery and discards queued work. Retries reuse the event ID; receivers should deduplicate it. An exhausted attempt or queue overflow is visible in metrics and delivery exhaustion is logged. The queue and event cursor are in memory: restart drops queued work and does not replay historical events. This is best-effort notification, so retain an independent availability check and schedule `tug backup list --check` as a protection backstop.
+
+Each POST body is JSON with `timestamp` and `event`. Verify `x-tug-webhook-signature` against `sha256=` followed by the hex HMAC-SHA256 of `<x-tug-webhook-timestamp>.<exact request body>`, using the configured secret. Reject timestamps outside your replay window and compare signatures in constant time. `x-tug-webhook-id` identifies the event. Treat this as a control-wide integration: the receiver sees identifiers across projects.
+
+For an external reachability check from a source checkout:
+
+```sh
+node tools/scripts/check-reachability.mjs https://blog.example.com/health
 ```
 
-Thresholds are starting points. The last rule assumes the default poll interval and should be set from `TUG_POLL_INTERVAL_MS`.
+Run it outside the workload host on a schedule and route a nonzero exit to your notification system. The script accepts URLs as arguments or comma/newline-separated `TUG_PROBE_URLS`; `TUG_PROBE_TIMEOUT_MS` defaults to 5000. It requires a 2xx response without following redirects, removes credentials and query strings from output, and exits 1 for a failed probe or 2 when no URLs are configured. Choose an application endpoint that exercises important dependencies; an HTTP success alone cannot establish business correctness.
 
-Outbound webhooks (M8) are the lightweight alternative for operators without Prometheus: control would POST a signed JSON body to configured URLs. The events worth sending are a deployment reaching `succeeded`, `failed`, `build_failed` or `cancelled`, a rollout candidate rejected, an automatic rollback, a node going stale and recovering, and an ingress node reporting `failed`. Webhooks send state changes, never metrics, and depend on event hygiene so that an event always means something happened.
+## Node and service stats reported by agents
 
-### Live commands
+Continuous CPU, memory, disk and restart series remain outside this minimal slice. `tug doctor --nodes` supplies point-in-time resource diagnostics. Use node_exporter or cAdvisor when you need resource history. Agent-reported aggregation through control remains a possible extension for nodes behind NAT.
 
-Status: non-TTY container commands built in M5; agent/daemon logs and `top` remain proposed.
+## Ingress metrics
 
-`tug logs <service>` keeps its durable tail through the command queue, while `-f` follows the current container over the live channel. `tug exec`, `tug run`, `tug ps` and `tug inspect <service>` use that channel too; `exec`, `run` and `logs -f` data is flow-controlled end to end, so piping large input or output through it works ([Architecture](architecture.md#agent-wake-channel)). Agent and daemon log streams are still proposed for troubleshooting. These commands answer what is happening right now on a node and complement metrics, which answer what has been happening. An optional `tug top` would render the agent-reported stats as a refreshing table of CPU, memory and restarts per service, reading `GET /metrics` or a read-only JSON view rather than a new data path.
+Caddy exposes per-host metrics on its loopback admin endpoint; tug does not collect or re-export them. Use a collector on the ingress host or private network. Keep Caddy's admin endpoint private. Request latency, traffic and error-rate objectives belong at this application boundary, separately from tug's deployment state.
 
-### Test gate
+## Live commands
 
-Status: proposed.
+`tug logs`, `logs -f`, `exec`, `run`, `ps` and `inspect` supply current evidence. Streaming stdin/stdout has end-to-end flow control. Agent/daemon log streaming through the control API and a `top` view remain proposed; process logs are available through Docker today.
 
-Modelled on madplay's `@magplay/observability` package: metrics sit behind a small injectable interface whose default is a no-op, so unit tests of control and agent logic need no registry; a small closed outcome taxonomy (`success`, `failure`, `timeout`, `rejected`, `cancelled`) with one helper that maps an error to an outcome; and a CI check (`test:observability`) that fails when the code and the documentation disagree.
+## Test gate
 
-For tug the equivalent check would assert:
-
-- every metric registered in code appears in this page's metric tables with the same name, type and label set, and every row in the tables is registered in code;
-- every label name is on an allow-list, and none is `id`, `version`, `error`, `path` or `message`, so cardinality stays bounded;
-- `GET /metrics` with a certificate for an unknown key returns 401 and with a `read` credential returns 200, and `ROUTE_ROLES` lists the route;
-- a scrape after a credential is created and used contains no credential private key, join key or secret value;
-- with the no-op default, the existing control and agent tests behave unchanged.
-
-## Rollout order
-
-1. Event hygiene (done, [PR #13](https://github.com/wpelevator/tug/pull/13)). Independent of everything else.
-2. Structured logs and the `/metrics` endpoint on control with the control-side metrics and the readiness endpoint, plus the test gate so later metrics cannot ship undocumented.
-3. Agent-reported node and service stats, then ingress metrics once the open questions are settled.
-4. Sample alert rules (they need steps 2 and 3) and outbound webhooks.
-
-Dependencies: the remaining agent/daemon live log streams and TTY backend extend M5, while webhooks and the dashboard are M8 items. Steps 1 to 3 need neither.
-
-## Open questions and non-goals
-
-Open questions:
-
-- Where the first dashboard JSON would live: in this repository (for example a `dashboards/` directory) or published separately, and whether the M8 read-only web dashboard makes it unnecessary.
-- Whether agents should send stats on every poll or on a slower interval of their own.
-- Whether `/metrics` should accept the `root` admin credential as well as named `read` credentials (an admin passes every role check today).
-- How the ingress metrics reach control (see [Ingress metrics](#ingress-metrics)).
-- Whether control should keep a short history of stats for `tug top` and a dashboard without Prometheus.
-
-Non-goals: a log aggregation system (JSON on stdout is the interface), distributed tracing, and a bundled Prometheus, Alertmanager or Grafana. tug would expose metrics and document how to scrape them; running the monitoring stack is the operator's choice.
-
-See also [Architecture](architecture.md), [Control plane](control-plane.md), [Networking](networking.md), [Testing](testing.md) and the [Roadmap](roadmap.md).
+Renderer tests cover finite states, label escaping, missing observations and success history. HTTP authorization tests verify project filtering and exclusion of global node/writer state. Notification tests cover signing, sanitization, queue bounds, deduplication and retries. Readiness is tested with a blocked real deployment, an injected clock, database failure and recovery. Fault-test evidence and remaining runtime coverage are in [Testing](testing.md).

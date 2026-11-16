@@ -182,6 +182,39 @@ test(
         'a wrong repository password fails and does not re-initialize',
       );
 
+      // A damaged repository must fail closed; restoring its real config should make a later run recover.
+      const config = path.join(repo, 'config');
+      const savedConfig = await fs.readFile(config);
+      const snapshotsBeforeDamage = snapshots(repo).length;
+      await fs.writeFile(config, 'damaged repository config');
+      await assert.rejects(
+        runBackupJob(base(repo, { command: service }), 'cmd_damaged', {
+          docker: engine,
+          credentials: credentials(),
+        }),
+        /repository check failed/,
+        'a damaged repository is reported instead of initialized as a replacement',
+      );
+      assert.equal(
+        await fs.readFile(config, 'utf8'),
+        'damaged repository config',
+        'a failed check does not replace the damaged repository with a new one',
+      );
+      await fs.writeFile(config, savedConfig);
+      const recovered = await runBackupJob(base(repo, { command: service }), 'cmd_recovered', {
+        docker: engine,
+        credentials: credentials(),
+      });
+      assert.ok(
+        recovered.snapshotId,
+        'restoring the repository config allows a later backup to succeed',
+      );
+      assert.equal(
+        snapshots(repo).length,
+        snapshotsBeforeDamage + 1,
+        'the recovered repository retains its history and adds the new snapshot',
+      );
+
       docker(
         'volume',
         'create',

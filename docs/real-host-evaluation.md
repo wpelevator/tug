@@ -521,3 +521,18 @@ Disposable Ubuntu 24.04.5 arm64 guests ran under QEMU 11.1.3 with HVF on Apple S
 The empty `env_file: []` fixture exposed a diagnostic defect: the rejection suggests `tug secret import undefined`. The fixture was removed from the upgrade runner because v3 refuses `env_file`; the product diagnostic was not changed.
 
 Interrupted control activation, corrupted repositories, workload recovery on a replacement node, database content recovery, network partitions, migration into staging, monitoring-system integration and public DNS/ACME were not exercised in this run. The recovery drivers were scratch scripts; only first boot and the upgrade rehearsal have committed QEMU runners. Keep these results separate from automated coverage of those missing scenarios.
+
+## Reliability control smoke on QEMU, 16 November 2026
+
+A disposable Ubuntu 24.04 arm64 cloud guest enrolled through cloud-init against the current source control process with JSON logging. The official image matched its published SHA256SUMS; the checksum file was not independently signature-verified. The harness reported enrollment and successful authenticated readiness and node-report metrics over mTLS at 115 seconds. The guest used the published agent image, so this run establishes current control behavior and enrollment compatibility, not validation of the modified agent logger or a workload restore. The harness cleans up the guest and control processes by default.
+
+```sh
+TUG_LOG_FORMAT=json node tools/scripts/qemu-first-boot.js --image /tmp/tug-sre-vm/ubuntu-24.04-server-cloudimg-arm64.img --work /tmp/tug-sre-vm/final --port 18444 --ssh-port 12223 --timeout 600 --verify-reliability
+```
+
+```text
+[ 115s] SUCCESS: first-boot cloud-init enrolled the node
+[ 115s] SUCCESS: authenticated readiness and node-report metrics verified over mTLS
+```
+
+The new damaged-repository backup drill was not executed: this host has a Docker client but no daemon socket. Unit-level injected disk exhaustion and interrupted activation tests supply narrower failure evidence; they do not substitute for a Docker or physically full-host exercise.

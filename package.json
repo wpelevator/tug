@@ -28,7 +28,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "schema": "node tools/scripts/write-x-tug-schema.js",
     "prepack": "npm run build",
-    "test": "node --test 'src/**/*.test.ts'",
+    "test": "node --test 'src/**/*.test.ts' tools/scripts/check-reachability.test.mjs",
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write . && eslint . --fix",
     "test:integration": "bash tools/scripts/integration-test.sh",
@@ -44,7 +44,8 @@
     "test:integration:no-registry": "node tools/scripts/integration-no-registry.js",
     "test:smoke:image": "node tools/scripts/smoke-runtime-image.js",
     "test:benchmarks": "node --test 'benchmarks/**/*.test.mjs'",
-    "benchmark:examples": "node benchmarks/examples/run.mjs"
+    "benchmark:examples": "node benchmarks/examples/run.mjs",
+    "check:reachability": "node tools/scripts/check-reachability.mjs"
   },
   "dependencies": {
     "@peculiar/x509": "^3.1.0",
