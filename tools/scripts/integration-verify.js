@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import assert from 'node:assert/strict';
+import { inspectPublishedServices } from './integration-verify-lib.mjs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { loadCredential, mtlsFetch } from './mtls-fetch.js';
@@ -37,22 +37,22 @@ while (Date.now() - started < timeoutMs) {
       .map((s) => s.node),
   );
   if (deployment && nodes.every((n) => seenNodes.has(n))) {
-    for (const service of ['web', 'worker', 'cache']) {
-      const { stdout } = await exec(process.execPath, [
-        'src/cli.ts',
-        'inspect',
-        service,
-        '--project',
-        project,
-      ]);
-      const containers = JSON.parse(stdout);
-      assert.ok(containers.length > 0, 'each published service must have a running container');
-      for (const container of containers)
-        assert.match(
-          container.Config.Image,
-          /@sha256:[a-f0-9]{64}$/,
-          'running containers must use the digest pinned by control',
-        );
+    const inspected = await inspectPublishedServices(
+      ['web', 'worker', 'cache'],
+      async (service) => {
+        const { stdout } = await exec(process.execPath, [
+          'src/cli.ts',
+          'inspect',
+          service,
+          '--project',
+          project,
+        ]);
+        return JSON.parse(stdout);
+      },
+    );
+    if (!inspected) {
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      continue;
     }
     console.log(
       JSON.stringify({ ok: true, version: deployment.version, nodes: [...seenNodes] }, null, 2),

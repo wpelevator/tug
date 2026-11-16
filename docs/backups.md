@@ -25,7 +25,7 @@ tug backup password
 
 The password is derived from control's master key, so losing both the password and the master key makes the repository unreadable. Credentials are encrypted on control and released only to a node running a backup. Each project has its own repository under `<destination>/<project>`, and commands use the [resolved project](cli.md#arguments-options-and-configuration).
 
-Control also backs itself up to the same destination every night, see [Control plane backup](#control-plane-backup). No backup notification is pushed, so monitor `tug backup list --check`.
+Control also backs itself up to the same destination every night, see [Control plane backup](#control-plane-backup). Configure [signed webhooks](observability.md#alerting) for backup failures, missed protection and recovery notifications. Delivery is best effort; keep an independent scheduled `tug backup list --check`.
 
 ## Plan for recovery
 
@@ -220,7 +220,7 @@ A node runs backup and restore jobs in lanes: a restore and its safety backup fi
 
 | Limit | Detail |
 | --- | --- |
-| No push notifications | A failed night is a `backup.failed` or `backup.stale` event, until [webhooks](roadmap.md#m8--central-api-advantages-partly-done) exist. Run `tug backup list --check` from cron or a monitor. It exits nonzero when a target is stale, failed or missed, and when nothing is protected (pass `--allow-empty` for a project without data) |
+| Best-effort notification | A failed night produces a `backup.failed` or `backup.stale` event and a [configured webhook](observability.md#alerting). Delivery may be lost across control outages or shutdown. Run `tug backup list --check` from cron or a monitor. It exits nonzero when a target is stale, failed or missed, and when nothing is protected (pass `--allow-empty` for a project without data) |
 | Control down | No backup starts. Running jobs finish and report when control returns, and a long gap yields one missed event and one catch-up run per target |
 | Consistency | Live volumes are crash-consistent, not application-consistent. Use a command backup for anything with its own consistency |
 | One node per volume | A volume is backed up from the node that holds it. A volume mounted from a file server with `driver_opts` is read through that node's mount, so back up the file server's own disk where you can |

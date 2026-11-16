@@ -182,6 +182,64 @@ test(
         'a wrong repository password fails and does not re-initialize',
       );
 
+      // A damaged repository must fail closed; restoring its real config should make a later run recover.
+      const repositoryFile = (...args: string[]) =>
+        docker('run', '--rm', '-v', `${dir}:/work`, 'alpine', ...args);
+      const snapshotsBeforeDamage = snapshots(repo).length;
+      const damage = repositoryFile(
+        'sh',
+        '-c',
+        'cp /work/repo/config /work/config.saved && printf %s "damaged repository config" > /work/repo/config',
+      );
+      assert.equal(
+        damage.status,
+        0,
+        'the disposable root helper can save and damage the root-owned repository config: ' +
+          damage.stderr,
+      );
+      try {
+        await assert.rejects(
+          runBackupJob(base(repo, { command: service }), 'cmd_damaged', {
+            docker: engine,
+            credentials: credentials(),
+          }),
+          /repository check failed/,
+          'a damaged repository is reported instead of initialized as a replacement',
+        );
+        const damaged = repositoryFile('cat', '/work/repo/config');
+        assert.equal(
+          damaged.status,
+          0,
+          'the root helper can read the damaged config: ' + damaged.stderr,
+        );
+        assert.equal(
+          damaged.stdout,
+          'damaged repository config',
+          'a failed check does not replace the damaged repository with a new one',
+        );
+      } finally {
+        const restored = repositoryFile('mv', '/work/config.saved', '/work/repo/config');
+        assert.equal(
+          restored.status,
+          0,
+          'the saved repository config is restored with its original permissions: ' +
+            restored.stderr,
+        );
+      }
+      const recovered = await runBackupJob(base(repo, { command: service }), 'cmd_recovered', {
+        docker: engine,
+        credentials: credentials(),
+      });
+      assert.ok(
+        recovered.snapshotId,
+        'restoring the repository config allows a later backup to succeed',
+      );
+      assert.equal(
+        snapshots(repo).length,
+        snapshotsBeforeDamage + 1,
+        'the recovered repository retains its history and adds the new snapshot',
+      );
+
       docker(
         'volume',
         'create',

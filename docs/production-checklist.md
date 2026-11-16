@@ -23,10 +23,24 @@ tug backup list --check
 
 ## After launch
 
-- Look at `tug status`, `tug events` and `tug backup list --check` on a schedule. No backup notification is pushed automatically.
+- Schedule `tug status`, `tug events` and `tug backup list --check`; route nonzero backup-check exits to an operator. Configure [signed notifications](observability.md#alerting) and monitor delivery failures; delivery is best effort, so retain the scheduled backup check.
+- Treat workload health and user impact as separate checks. `tug status` reports the last node observation and service health; verify the public ingress URL from outside the node when customer reachability matters. A healthy container does not prove DNS, TLS, ingress routing or an upstream dependency works.
+- Keep an operator path to the control host, node access, backup destination credentials and repository passwords. Use the matrix below to decide what to check and what evidence closes an incident.
 - Watch expiry. Operator credentials last at most 365 days, and `tug doctor` warns before the CA, the server certificate and node certificates expire. Agents renew node certificates themselves.
 - Upgrade control and nodes together with [`tug upgrade`](upgrades.md), and run `tug doctor` afterwards.
 - Know the limits. `tug rollback` cannot undo database writes or schema changes, and it does not roll back the host. One control plane is one point of failure for operations, though running containers keep serving while it is down. See [Not for you if](https://github.com/wpelevator/tug/blob/main/README.md#not-for-you-if).
+
+## Failure response and recovery evidence
+
+| Failure | Expected impact and responsibility | Operator action | Evidence to close the incident |
+|---|---|---|---|
+| Control host or process is unavailable | Existing containers can keep serving, but tug operations, new deployment work, agent coordination and control-hosted recovery material are unavailable. Restore the control host and its state; tug does not provide a second control plane. | Check the host and disk, restore control from an off-host archive using [control recovery](control-plane.md#recover-control-on-another-host), then let agents reconnect. | `tug status` reaches control, expected projects and nodes appear, agents report recently, and an external request to each important ingress host succeeds. |
+| Node is permanently lost | Services on that node stop. tug does not reschedule a node-pinned service or copy its local volume to another node. The operator owns host replacement and workload-data recovery. | Replace or repair the node as appropriate, restore workload data from its backup or recover the host, and follow [migrating to a new server](migration.md). | The replacement node reports online, the service and its data are restored, and an external request to the service succeeds. |
+| Control-to-node network path is partitioned | The last node report may be stale; workloads already running may still serve, while reconciliation, deploys and node-local backup work cannot complete. The operator owns host and network repair. | Check `tug status`, `tug doctor --nodes`, host reachability and the provider firewall; restore the path and let the agent reconcile. | The node reports again, unchanged desired services are healthy, and an external request to affected services succeeds. |
+| Node or control data disk is full | Writes, image transfers, logs or backup jobs may fail; existing workload responses can continue until their own storage is affected. tug does not free operator data or guarantee a safe cleanup. | Check free space with `tug doctor --nodes` and host tools; identify the consuming data before deleting anything. Restore capacity, then retry the failed operation or backup. | Free space is available, the failed operation completes, and `tug backup list --check` passes for protected targets. |
+| Backup destination is unavailable | Running workloads are not stopped by a destination outage, but scheduled workload and control backups cannot become recoverable copies. Configured notifications report backup failures and stale protection; a dead control still needs an external monitor. | Alert on scheduled `tug backup list --check` failures; verify destination reachability and credentials, then run `tug backup run` and `tug control backup list`. | New workload snapshots pass `backup list --check`; a control archive is present off-host in `tug control backup list`. A restore drill is separate evidence that contents are usable. |
+
+These checks define observable recovery evidence, not recovery-time or data-loss guarantees. Set such targets only after repeated exercises on representative hosts and data.
 
 ## Next steps
 

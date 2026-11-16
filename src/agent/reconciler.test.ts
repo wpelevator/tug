@@ -336,22 +336,62 @@ test('a revision that fails its health check is removed and the old revision kee
   );
 });
 
-test('repeated reconciliation of the same desired state creates nothing new', async () => {
+test('the first rolling deployment starts one revision and unchanged reconciliation starts none', async () => {
   const host = fakeHost();
   const ctx = await makeCtx(host);
   const first = await reconcile(desired(rolling('web:1'), 'v1'), ctx);
+  assert.equal(
+    host.docker.calls.filter((call) => call.startsWith('create tug-proj-web-')).length,
+    1,
+    'the first rolling deployment starts exactly one revision',
+  );
   const ids = [...host.docker.containers.keys()];
   host.docker.calls.length = 0;
   await reconcile(desired(rolling('web:1'), 'v1'), ctx);
   const third = await reconcile(desired(rolling('web:1'), 'v1'), ctx);
 
   assert.deepEqual([...host.docker.containers.keys()], ids, 'no container is created or recreated');
+  assert.deepEqual(
+    host.docker.calls.filter((call) => call.startsWith('create tug-proj-web-')),
+    [],
+    'unchanged reconciliation starts no additional rolling revision',
+  );
   assert.deepEqual([...host.docker.calls], [], 'steady state issues no mutating call');
   assert.equal(third.serviceStates?.web.port, 20000, 'the port is stable');
   assert.equal(
     third.serviceStates?.web.rolloutRevision,
     first.serviceStates?.web.rolloutRevision,
     'the revision identity is stable',
+  );
+});
+
+test('a cross-node endpoint appearing after the first poll changes the revision definition', async () => {
+  const host = fakeHost();
+  const ctx = await makeCtx(host);
+  const compose = rolling('web:1');
+  compose.services.db['x-tug'] = { placement: { nodes: ['n2'] } };
+  const state = desired(compose, 'v1');
+
+  await reconcile(state, ctx);
+  const initial = host.docker.service('proj', 'web')[0];
+  assert.deepEqual(
+    initial.body.HostConfig?.ExtraHosts,
+    undefined,
+    'the first revision has no cross-node host entry before the remote service is serving',
+  );
+
+  await reconcile(state, ctx, { db: [{ node: 'n2', address: '10.0.0.2' }] });
+  const revisions = host.docker.service('proj', 'web');
+  assert.equal(
+    host.docker.calls.filter((call) => call.startsWith('create tug-proj-web-')).length,
+    2,
+    'an endpoint appearing later changes the container definition and starts another revision',
+  );
+  assert.ok(
+    revisions.some((container) =>
+      (container.body.HostConfig?.ExtraHosts as string[] | undefined)?.includes('db:10.0.0.2'),
+    ),
+    'the replacement revision receives the newly available cross-node service name',
   );
 });
 

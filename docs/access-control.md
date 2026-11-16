@@ -129,6 +129,8 @@ The project column says how a scoped credential's allowed projects are checked: 
 | `GET /api/v1/holds` | `admin` | Query; deployment move holds only |
 | `GET /api/v1/status` | `read` | Response is filtered to allowed projects |
 | `GET /api/v1/version` | `read` | None; reports control's own version |
+| `GET /api/v1/metrics` | `read` | Project-scoped workload series; global node, writer and webhook metrics only for unscoped credentials |
+| `GET /api/v1/readyz` | `read` | None; database read and writer age checks, without database error details |
 | `GET /api/v1/whoami` | `read` | None; reports the caller's credential name, role and project scope |
 | `GET /api/v1/events` | `read` | `project` query, or filtered to allowed projects; `after` follows the log by `seq`, and `cursor` is only ever from rows the caller can read |
 | `GET /api/v1/watch` | `read` | WebSocket; hints and new events filtered to allowed projects |

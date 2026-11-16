@@ -189,6 +189,10 @@ test('with a destination control backs itself up into it without images and keep
     );
     const create = docker.calls.filter((c) => c.startsWith('create tug-control-backup'));
     assert.equal(create.length, 1, 'one helper container runs the backup');
+    await until(
+      async () => (await fs.readdir(path.join(s.dir, 'control-backups'))).length === 0,
+      'the completed backup archive to be removed from control',
+    );
     assert.deepEqual(
       await fs.readdir(path.join(s.dir, 'control-backups')),
       [],
@@ -985,7 +989,7 @@ test('after a restore the commands it carried are retired, not delivered to agen
       artifactRef: artifact,
       confirm: true,
     });
-    assert.equal(res.status, 200, 'the restore succeeds');
+    assert.equal(res.status, 200, 'the restore succeeds: ' + (await res.text()));
   } finally {
     await target.close(true);
   }
