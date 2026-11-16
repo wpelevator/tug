@@ -183,24 +183,49 @@ test(
       );
 
       // A damaged repository must fail closed; restoring its real config should make a later run recover.
-      const config = path.join(repo, 'config');
-      const savedConfig = await fs.readFile(config);
+      const repositoryFile = (...args: string[]) =>
+        docker('run', '--rm', '-v', `${dir}:/work`, 'alpine', ...args);
       const snapshotsBeforeDamage = snapshots(repo).length;
-      await fs.writeFile(config, 'damaged repository config');
-      await assert.rejects(
-        runBackupJob(base(repo, { command: service }), 'cmd_damaged', {
-          docker: engine,
-          credentials: credentials(),
-        }),
-        /repository check failed/,
-        'a damaged repository is reported instead of initialized as a replacement',
+      const damage = repositoryFile(
+        'sh',
+        '-c',
+        'cp /work/repo/config /work/config.saved && printf %s "damaged repository config" > /work/repo/config',
       );
       assert.equal(
-        await fs.readFile(config, 'utf8'),
-        'damaged repository config',
-        'a failed check does not replace the damaged repository with a new one',
+        damage.status,
+        0,
+        'the disposable root helper can save and damage the root-owned repository config: ' +
+          damage.stderr,
       );
-      await fs.writeFile(config, savedConfig);
+      try {
+        await assert.rejects(
+          runBackupJob(base(repo, { command: service }), 'cmd_damaged', {
+            docker: engine,
+            credentials: credentials(),
+          }),
+          /repository check failed/,
+          'a damaged repository is reported instead of initialized as a replacement',
+        );
+        const damaged = repositoryFile('cat', '/work/repo/config');
+        assert.equal(
+          damaged.status,
+          0,
+          'the root helper can read the damaged config: ' + damaged.stderr,
+        );
+        assert.equal(
+          damaged.stdout,
+          'damaged repository config',
+          'a failed check does not replace the damaged repository with a new one',
+        );
+      } finally {
+        const restored = repositoryFile('mv', '/work/config.saved', '/work/repo/config');
+        assert.equal(
+          restored.status,
+          0,
+          'the saved repository config is restored with its original permissions: ' +
+            restored.stderr,
+        );
+      }
       const recovered = await runBackupJob(base(repo, { command: service }), 'cmd_recovered', {
         docker: engine,
         credentials: credentials(),
