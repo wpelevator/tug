@@ -1,16 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { promisify } from 'node:util';
 import { startMtlsControl, writeStubDocker } from '../../../tests/helpers.ts';
 import { createCsr, generateKeyPair } from '../../pki.ts';
 import { defaultImage } from '../../images/image.ts';
-
-const execFileAsync = promisify(execFile);
-const cliEntry = path.resolve('src/cli.ts');
+import { execCli } from '../../../tests/cli-inprocess.ts';
 
 /** A stub `ssh` that logs every script and answers the agent inspection and identity steps. */
 async function stubSsh(dir: string) {
@@ -53,8 +49,7 @@ test('node upgrade replaces an enrolled agent, keeps its connect URL, skips curr
     TUG_STUB_AGENT_INSPECT: inspectFile,
   };
   await fs.writeFile(env.TUG_CONFIG as string, '{}');
-  const cli = (...args: string[]) =>
-    execFileAsync(process.execPath, [cliEntry, ...args], { env, cwd: dir });
+  const cli = (...args: string[]) => execCli([...args], { env, cwd: dir });
   const script = () => fs.readFile(ssh.log, 'utf8');
   try {
     await cli('node', 'add', 'root@node.test', '--name', 'n-up', '--no-wait');

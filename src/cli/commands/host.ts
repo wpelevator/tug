@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { saveImageArchive } from '../../images/artifacts.ts';
+import { assertImagePublished } from '../../images/image.ts';
 import { AGENT_VOLUME } from '../migrate.ts';
 import { controlPortCheck, localImageBuildArgs, shellQuote as sh } from '../install.ts';
 import { LIST_ADDRESSES_COMMAND, parseAddressCandidates, sortCandidates } from '../onboarding.ts';
@@ -10,8 +11,10 @@ import type { AddressCandidate } from '../onboarding.ts';
 import { runStep, sshHostKeyHint, STAGE_MARKER } from '../process.ts';
 import type { StepProgress } from '../process.ts';
 import { runCapture, templatesDir } from './context.ts';
+import type { CliRuntime } from '../runtime.ts';
 
 export async function preflightRemote(
+  rt: CliRuntime,
   target: string,
   {
     controlUrl,
@@ -54,7 +57,7 @@ export async function preflightRemote(
   const script = `set -e
 ${checks.map(([name, cmd, fix]) => `echo "preflight: ${name}"; (${cmd}) || { echo "FAILED ${name}: ${fix}" >&2; exit 20; }`).join('\n')}
 `;
-  await runStep('ssh', ['--', target, script], { progress });
+  await runStep(rt, 'ssh', ['--', target, script], { progress });
 }
 
 /**
@@ -67,6 +70,7 @@ export function immutableLocalTag(imageTag: string, imageId: string): string {
 
 /** Builds the runtime image from the checkout, copies it to the host and returns the immutable tag to run. */
 export async function transferTugImage(
+  rt: CliRuntime,
   target: string,
   imageTag: string,
   progressOrStage: StepProgress | ((label: string) => void),
@@ -79,19 +83,22 @@ export async function transferTugImage(
   const archive = path.join(directory, 'image.tar.gz');
   const remote = `/tmp/${path.basename(directory)}.tar.gz`;
   try {
-    const uname = await runCapture('ssh', ['--', target, 'uname -m']);
+    const uname = await runCapture(rt, 'ssh', ['--', target, 'uname -m']);
     stage(`Building Tug image ${imageTag}`);
-    await runStep('docker', localImageBuildArgs(imageTag, uname), { progress });
+    await runStep(rt, 'docker', localImageBuildArgs(imageTag, uname), { progress });
     const runTag = immutableLocalTag(
       imageTag,
-      (await runCapture('docker', ['image', 'inspect', '--format', '{{.Id}}', imageTag])).trim(),
+      (
+        await runCapture(rt, 'docker', ['image', 'inspect', '--format', '{{.Id}}', imageTag])
+      ).trim(),
     );
     stage(`Exporting Tug image ${imageTag}`);
-    await saveImageArchive(imageTag, archive);
+    await saveImageArchive(imageTag, archive, rt.env);
     stage(`Transferring Tug image to ${target}`);
-    await runStep('scp', ['-q', '--', archive, `${target}:${remote}`], { progress });
+    await runStep(rt, 'scp', ['-q', '--', archive, `${target}:${remote}`], { progress });
     stage(`Loading Tug image on ${target}`);
     await runStep(
+      rt,
       'ssh',
       [
         '--',
@@ -116,35 +123,60 @@ export function bootstrapCommand(script: string): string {
 }
 
 /** Installs Docker Engine over SSH. */
-export async function bootstrapDocker(target: string, progress?: StepProgress): Promise<void> {
-  await runStep('ssh', ['--', target, bootstrapCommand(await dockerBootstrap())], {
+export async function bootstrapDocker(
+  rt: CliRuntime,
+  target: string,
+  progress?: StepProgress,
+): Promise<void> {
+  await runStep(rt, 'ssh', ['--', target, bootstrapCommand(await dockerBootstrap())], {
     progress,
   });
 }
 
 /** A probe that cannot get past ssh's host key check says so at once, instead of reading as "no Docker" or "no answer". */
-function probe(target: string, command: string) {
+function probe(rt: CliRuntime, target: string, command: string) {
   const args = ['--', target, command];
-  const result = spawnSync('ssh', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  const result = spawnSync('ssh', args, {
+    encoding: 'utf8',
+    env: rt.env,
+    cwd: rt.cwd,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
   const hint = sshHostKeyHint('ssh', args, String(result.stderr ?? ''));
   if (hint) throw new Error(hint);
   return result;
 }
 
+/**
+ * Fails before any host is touched when the published image does not exist yet; see `assertImagePublished`. The
+ * manifest is looked up with this run's environment, so a Docker on its PATH is the one that answers.
+ */
+export function assertPublished(rt: CliRuntime, image: string): void {
+  assertImagePublished(image, (ref) => {
+    const result = spawnSync('docker', ['manifest', 'inspect', ref], {
+      encoding: 'utf8',
+      timeout: 20_000,
+      env: rt.env,
+      cwd: rt.cwd,
+    });
+    return { status: result.status, stderr: String(result.stderr ?? '') };
+  });
+}
+
 /** Whether the host already has a working Docker Engine. */
-export function hostHasDocker(target: string): boolean {
-  return probe(target, 'docker version >/dev/null 2>&1').status === 0;
+export function hostHasDocker(rt: CliRuntime, target: string): boolean {
+  return probe(rt, target, 'docker version >/dev/null 2>&1').status === 0;
 }
 
 /** The host's short hostname, or undefined when it cannot be read. */
-export function remoteHostname(target: string): string | undefined {
-  const result = probe(target, 'hostname -s');
+export function remoteHostname(rt: CliRuntime, target: string): string | undefined {
+  const result = probe(rt, target, 'hostname -s');
   return result.status === 0 ? String(result.stdout).trim() || undefined : undefined;
 }
 
 /** The host's global IPv4 addresses, private ones first; empty when the host cannot say. */
-export function discoverAddresses(target: string): AddressCandidate[] {
-  const result = probe(target, LIST_ADDRESSES_COMMAND);
+export function discoverAddresses(rt: CliRuntime, target: string): AddressCandidate[] {
+  const result = probe(rt, target, LIST_ADDRESSES_COMMAND);
   return result.status === 0 ? sortCandidates(parseAddressCandidates(String(result.stdout))) : [];
 }
 

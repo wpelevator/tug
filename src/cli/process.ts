@@ -2,7 +2,8 @@ import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { RUN_OUTPUT_LIMIT } from '../images/build.ts';
 import { suspendProgress } from './progress.ts';
-import { markWorkStarted } from './usage.ts';
+import { markWorkStarted } from './runtime.ts';
+import type { CliRuntime } from './runtime.ts';
 
 const HOST_KEY_FAILED = /Host key verification failed/i;
 
@@ -44,32 +45,41 @@ function sshFailure(message: string, cmd: string, args: string[], output: string
 
 /** Keep the event loop free for progress timers during SSH, Docker and file transfers. */
 export function runProcess(
+  rt: CliRuntime,
   cmd: string,
   args: string[],
   { capture = false, input }: { capture?: boolean; input?: string } = {},
 ): Promise<{ status: number | null; stdout: string; stderr: string }> {
-  markWorkStarted();
+  markWorkStarted(rt);
   // ssh and scp may prompt on the terminal even when their output is captured.
-  const mayPrompt = Boolean(process.stdin.isTTY) && (cmd === 'ssh' || cmd === 'scp');
-  const resume = capture && !mayPrompt ? () => {} : suspendProgress();
+  const mayPrompt = Boolean(rt.stdin.isTTY) && (cmd === 'ssh' || cmd === 'scp');
+  const resume = capture && !mayPrompt ? () => {} : suspendProgress(rt);
   const mirror = !capture && (cmd === 'ssh' || cmd === 'scp');
   return new Promise<{ status: number | null; stdout: string; stderr: string }>(
     (resolve, reject) => {
+      // Output goes straight to this process's terminal only when the runtime's streams are the real ones;
+      // otherwise it is piped and forwarded, so an in-process run captures it like any other output.
+      const through = rt.inheritStdio ? 'inherit' : 'pipe';
       const child = spawn(cmd, args, {
+        env: rt.env,
+        cwd: rt.cwd,
         stdio: [
-          input === undefined ? 'inherit' : 'pipe',
-          capture ? 'pipe' : 'inherit',
+          input === undefined ? (rt.inheritStdio ? 'inherit' : 'ignore') : 'pipe',
+          capture ? 'pipe' : through,
           // ssh and scp stderr is mirrored to the terminal and kept, so a failure can be explained.
-          capture || mirror ? 'pipe' : 'inherit',
+          capture || mirror ? 'pipe' : through,
         ],
       });
+      if (!capture && !rt.inheritStdio) child.stdout?.on('data', (chunk) => rt.stdout.write(chunk));
+      if (!capture && !mirror && !rt.inheritStdio)
+        child.stderr?.on('data', (chunk) => rt.stderr.write(chunk));
       let stdout = '';
       let stderr = '';
       child.stdout?.on('data', (chunk) => {
         stdout = (stdout + String(chunk)).slice(-RUN_OUTPUT_LIMIT);
       });
       child.stderr?.on('data', (chunk) => {
-        if (mirror) process.stderr.write(chunk);
+        if (mirror) rt.stderr.write(chunk);
         stderr = (stderr + String(chunk)).slice(-RUN_OUTPUT_LIMIT);
       });
       child.on('error', reject);
@@ -85,18 +95,19 @@ export function runProcess(
   ).finally(resume);
 }
 
-export async function runLocal(cmd: string, args: string[]): Promise<void> {
-  const result = await runProcess(cmd, args);
+export async function runLocal(rt: CliRuntime, cmd: string, args: string[]): Promise<void> {
+  const result = await runProcess(rt, cmd, args);
   if (result.status !== 0)
     throw sshFailure(`${cmd} failed (exit ${result.status})`, cmd, args, result.stderr);
 }
 
 export async function runCapture(
+  rt: CliRuntime,
   cmd: string,
   args: string[],
   opts: { input?: string } = {},
 ): Promise<string> {
-  const result = await runProcess(cmd, args, { ...opts, capture: true });
+  const result = await runProcess(rt, cmd, args, { ...opts, capture: true });
   if (result.status !== 0)
     throw sshFailure(
       `${cmd} failed (exit ${result.status})\n${result.stderr}`,
@@ -105,12 +116,6 @@ export async function runCapture(
       result.stderr,
     );
   return result.stdout;
-}
-
-let verbose = ['1', 'true'].includes(process.env.TUG_VERBOSE ?? '');
-/** `--verbose` (or `TUG_VERBOSE=1`): stream the output of quiet steps instead of keeping it for failures. */
-export function setVerbose(value: boolean): void {
-  verbose = value;
 }
 
 /**
@@ -139,15 +144,16 @@ export interface StepProgress {
  * failure reports the last lines it printed. With `--verbose` every line is streamed as it arrives.
  */
 export async function runStep(
+  rt: CliRuntime,
   cmd: string,
   args: string[],
   { progress, input }: { progress?: StepProgress; input?: string } = {},
 ): Promise<void> {
-  markWorkStarted();
+  markWorkStarted(rt);
   const tail: string[] = [];
   // ssh and scp may ask for a password or passphrase on the terminal, which a redrawn status line would wipe: keep the
   // line off the screen until the step produces its first output.
-  const mayPrompt = Boolean(process.stdin.isTTY) && (cmd === 'ssh' || cmd === 'scp');
+  const mayPrompt = Boolean(rt.stdin.isTTY) && (cmd === 'ssh' || cmd === 'scp');
   let resumed = !mayPrompt;
   const resume = () => {
     if (resumed) return;
@@ -156,8 +162,10 @@ export async function runStep(
   };
   if (mayPrompt) progress?.suspend?.();
   const emit = (text: string) =>
-    progress?.print ? progress.print(text) : void process.stderr.write(`${text}\n`);
+    progress?.print ? progress.print(text) : void rt.stderr.write(`${text}\n`);
   const child = spawn(cmd, args, {
+    env: rt.env,
+    cwd: rt.cwd,
     stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
   });
   const lines = (stream: NodeJS.ReadableStream) => {
@@ -168,7 +176,7 @@ export async function runStep(
       if (!text) return;
       resume();
       if (text.startsWith(STAGE_MARKER)) return progress?.stage(text.slice(STAGE_MARKER.length));
-      if (verbose) emit(text);
+      if (rt.state.verbose) emit(text);
       tail.push(text);
       if (tail.length > TAIL_LINES) tail.shift();
       progress?.detail?.(text);
@@ -197,7 +205,7 @@ export async function runStep(
   });
   if (status !== 0)
     throw sshFailure(
-      `${cmd} failed (exit ${status})${verbose || !tail.length ? '' : `\n${tail.join('\n')}`}`,
+      `${cmd} failed (exit ${status})${rt.state.verbose || !tail.length ? '' : `\n${tail.join('\n')}`}`,
       cmd,
       args,
       tail.join('\n'),

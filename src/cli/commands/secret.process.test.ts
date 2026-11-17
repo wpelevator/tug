@@ -6,15 +6,15 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { startMtlsControl } from '../../../tests/helpers.ts';
+import { cliEntry } from '../../../tests/cli-process.ts';
 
 const exec = promisify(execFile);
-const entry = path.resolve('src/cli.ts');
 
 test('secret set exits after reading stdin even when the input stays open', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-secret-exit-'));
   const control = await startMtlsControl(dir);
   const run = (...args: string[]) =>
-    exec(process.execPath, [entry, 'secret', 'set', 'DB_PASSWORD', ...args], {
+    exec(process.execPath, [cliEntry, 'secret', 'set', 'DB_PASSWORD', ...args], {
       cwd: dir,
       env: { ...process.env, ...control.env, TUG_CREDENTIAL: '', TUG_PROJECT: 'site' },
       timeout: 60_000,

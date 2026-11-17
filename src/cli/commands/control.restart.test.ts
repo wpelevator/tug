@@ -1,13 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { promisify } from 'node:util';
-
-const exec = promisify(execFile);
-const entry = path.resolve('src/cli.ts');
+import { execCli } from '../../../tests/cli-inprocess.ts';
 
 /** A fake `docker` that logs every call; `inspect` succeeds only when the control container exists in $FAKE_DIR. */
 const FAKE_DOCKER = `#!/bin/sh
@@ -44,7 +40,7 @@ async function withHost(
     await run({
       control: async (...args) => {
         try {
-          const { stdout, stderr } = await exec(process.execPath, [entry, 'control', ...args], {
+          const { stdout, stderr } = await execCli(['control', ...args], {
             cwd: dir,
             env: {
               ...process.env,

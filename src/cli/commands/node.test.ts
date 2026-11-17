@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { agentIdentityArgs, planNodeAdd } from './node.ts';
+import { testRuntime } from '../../../tests/cli-runtime.ts';
 import type { NodeIdentityOpts, PlanDeps } from './node.ts';
 
 const opts = (over: Partial<NodeIdentityOpts> = {}): NodeIdentityOpts => ({
@@ -30,15 +31,8 @@ function deps(over: Partial<PlanDeps>, answers: string[] = []): PlanDeps & { ask
   };
 }
 
-const quiet = async <T>(run: () => Promise<T>): Promise<T> => {
-  const original = console.error;
-  console.error = () => {};
-  try {
-    return await run();
-  } finally {
-    console.error = original;
-  }
-};
+// Everything the plan prints goes to this runtime's streams, not the test output.
+const { rt } = testRuntime();
 
 test('without a terminal node add neither probes the host nor asks anything', async () => {
   let probed = false;
@@ -48,7 +42,7 @@ test('without a terminal node add neither probes the host nor asks anything', as
     discover: () => ((probed = true), []),
   });
   const o = opts();
-  await quiet(() => planNodeAdd('root@app1', 'app1', o, d));
+  await planNodeAdd(rt, 'root@app1', 'app1', o, d);
   assert.deepEqual(d.asked, [], 'a script must never be prompted');
   assert.equal(probed, false, 'a script run must not SSH to probe Docker or addresses');
   assert.deepEqual(
@@ -61,7 +55,7 @@ test('without a terminal node add neither probes the host nor asks anything', as
 test('flags answer the questions so a terminal asks only what is still open', async () => {
   const d = deps({ discover: () => assert.fail('an explicit --address needs no discovery') }, ['']);
   const o = opts({ installDocker: true, address: '10.0.0.7', ingress: true, yes: true });
-  await quiet(() => planNodeAdd('root@app1', 'app1', o, d));
+  await planNodeAdd(rt, 'root@app1', 'app1', o, d);
   assert.deepEqual(d.asked, [], 'every choice was given by a flag and -y skips the confirmation');
 });
 
@@ -77,7 +71,7 @@ test('a terminal offers Docker, a private address first, ingress and a final con
     ['y', 'y', ''],
   );
   const o = opts();
-  await quiet(() => planNodeAdd('root@app1', 'app1', o, d));
+  await planNodeAdd(rt, 'root@app1', 'app1', o, d);
   assert.equal(o.installDocker, true, 'accepting the offer installs Docker');
   assert.equal(o.address, '10.0.0.7', 'enter on the highlighted entry takes the private address');
   assert.equal(o.ingress, true, 'accepting the ingress question enables ingress');
@@ -89,14 +83,14 @@ test('a public-only host defaults to leaving the address unset', async () => {
     discover: () => [{ interface: 'eth0', address: '203.0.113.7', private: false }],
   });
   const o = opts({ ingress: false, yes: true });
-  await quiet(() => planNodeAdd('root@app1', 'app1', o, d));
+  await planNodeAdd(rt, 'root@app1', 'app1', o, d);
   assert.equal(o.address, undefined, 'a public address is never the default');
 });
 
 test('declining the final confirmation cancels before anything changes', async () => {
   const d = deps({}, ['n']);
   await assert.rejects(
-    quiet(() => planNodeAdd('root@app1', 'app1', opts({ ingress: false, address: '10.0.0.7' }), d)),
+    planNodeAdd(rt, 'root@app1', 'app1', opts({ ingress: false, address: '10.0.0.7' }), d),
     /cancelled; nothing was changed/,
     'saying no stops node add with a clear message',
   );

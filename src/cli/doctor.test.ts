@@ -3,12 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { startMtlsControl } from '../../tests/helpers.ts';
-
-const exec = promisify(execFile);
-const entry = path.resolve('src/cli.ts');
+import { execCli } from '../../tests/cli-inprocess.ts';
 
 test('doctor waits for the node diagnostic instead of returning the queued command id', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-doctor-'));
@@ -20,7 +16,7 @@ test('doctor waits for the node diagnostic instead of returning the queued comma
     const env: NodeJS.ProcessEnv = { ...process.env, ...control.env };
     delete env.TUG_CONFIG;
     await assert.rejects(
-      exec(process.execPath, [entry, 'doctor', '--node', 'n1', '--timeout', '1'], {
+      execCli(['doctor', '--node', 'n1', '--timeout', '1'], {
         cwd: dir,
         env,
       }),
@@ -50,7 +46,7 @@ test('enabling ingress tells the operator to open ports 80 and 443 and that tug 
     assert.equal((await control.registerNode('n1')).status, 200, 'the node should register');
     const env: NodeJS.ProcessEnv = { ...process.env, ...control.env };
     delete env.TUG_CONFIG;
-    const enabled = await exec(process.execPath, [entry, 'node', 'ingress', 'n1'], {
+    const enabled = await execCli(['node', 'ingress', 'n1'], {
       cwd: dir,
       env,
     });
@@ -64,7 +60,7 @@ test('enabling ingress tells the operator to open ports 80 and 443 and that tug 
       /tug does not change firewalls/,
       'the hint says tug leaves firewalls alone',
     );
-    const disabled = await exec(process.execPath, [entry, 'node', 'ingress', 'n1', '--disable'], {
+    const disabled = await execCli(['node', 'ingress', 'n1', '--disable'], {
       cwd: dir,
       env,
     });
@@ -86,7 +82,7 @@ test('doctor prints a missing local Docker daemon as skipped and does not count 
     const env: NodeJS.ProcessEnv = { ...process.env, ...control.env, PATH: bin };
     delete env.TUG_CONFIG;
     const run = async (args: string[]) =>
-      exec(process.execPath, [entry, 'doctor', ...args], { cwd: dir, env }).then(
+      execCli(['doctor', ...args], { cwd: dir, env }).then(
         (r) => ({ ...r, code: 0 }),
         (e: { stdout: string; stderr: string; code: number }) => e,
       );

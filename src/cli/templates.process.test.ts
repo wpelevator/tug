@@ -10,10 +10,9 @@ import { createCsr, generateKeyPair } from '../pki.ts';
 import { defaultImage } from '../images/image.ts';
 import { createTransport } from '../transport.ts';
 import * as yaml from 'js-yaml';
+import { cliEntry } from '../../tests/cli-process.ts';
 
 const execFileAsync = promisify(execFile);
-// `src/cli.ts` in dev; `CLI_ENTRY=dist/cli.js npm run test:smoke:dist` checks the built output.
-const cliEntry = path.resolve(process.env.CLI_ENTRY || 'src/cli.ts');
 // Install template variables are upper-case ({{CONTROL_URL}}); Go-template braces such as {{end}} in docker --format strings are not.
 const unrenderedVariable = /\{\{[A-Z][A-Z0-9_]*\}\}/;
 

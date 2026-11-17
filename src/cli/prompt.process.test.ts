@@ -6,18 +6,22 @@ import path from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
 import { pathToFileURL } from 'node:url';
+import { cliEntry } from '../../tests/cli-process.ts';
 
 const exec = promisify(execFile);
 
 test('repeated visible and hidden prompts release stdin after answering without EOF', async () => {
   const promptUrl = pathToFileURL(path.resolve('src/cli/prompt.ts')).href;
+  const runtimeUrl = pathToFileURL(path.resolve('src/cli/runtime.ts')).href;
   const running = exec(
     process.execPath,
     [
       '--input-type=module',
       '-e',
-      `import { ask } from ${JSON.stringify(promptUrl)};
+      `import { prompter } from ${JSON.stringify(promptUrl)};
+      import { processRuntime } from ${JSON.stringify(runtimeUrl)};
       import assert from 'node:assert/strict';
+      const ask = prompter(processRuntime('0.0.0'));
       const events = ['keypress', 'end', 'error'];
       const before = events.map(event => process.stdin.listenerCount(event));
       const first = await ask('First answer: ');
@@ -52,13 +56,15 @@ test('repeated visible and hidden prompts release stdin after answering without 
 
 test('a prompt rejects and exits when stdin closes before an answer', async () => {
   const promptUrl = pathToFileURL(path.resolve('src/cli/prompt.ts')).href;
+  const runtimeUrl = pathToFileURL(path.resolve('src/cli/runtime.ts')).href;
   const running = exec(
     process.execPath,
     [
       '--input-type=module',
       '-e',
-      `import { ask } from ${JSON.stringify(promptUrl)};
-      await ask('Answer: ');`,
+      `import { prompter } from ${JSON.stringify(promptUrl)};
+      import { processRuntime } from ${JSON.stringify(runtimeUrl)};
+      await prompter(processRuntime('0.0.0'))('Answer: ');`,
     ],
     { timeout: 60_000 },
   );
@@ -85,11 +91,11 @@ test('CLI exits after a prompted command fails while stdin stays open', async ()
     'process.stdin.isTTY = true; process.stdout.isTTY = true;',
   )}`;
   try {
-    const running = exec(
-      process.execPath,
-      ['--import', terminal, path.resolve('src/cli.ts'), 'node', 'add'],
-      { cwd: dir, env: { ...process.env, TUG_CONFIG: '', CI: '' }, timeout: 60_000 },
-    );
+    const running = exec(process.execPath, ['--import', terminal, cliEntry, 'node', 'add'], {
+      cwd: dir,
+      env: { ...process.env, TUG_CONFIG: '', CI: '' },
+      timeout: 60_000,
+    });
     let answered = false;
     running.child.stderr!.on('data', (data) => {
       if (!answered && String(data).includes('Node name')) {

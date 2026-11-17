@@ -1,27 +1,34 @@
-import { selectMany, selectOne } from '../selection.ts';
+import { selectMany as pickMany, selectOne as pickOne, terminalSelection } from '../selection.ts';
 import type { Choice } from '../selection.ts';
+import type { CliRuntime } from '../runtime.ts';
 import { projectOf, request } from './context.ts';
 
-export const projectQuery = async (): Promise<string> =>
-  `project=${encodeURIComponent(await projectOf({}))}`;
+type Load = () => Promise<Choice[]>;
+const one = (rt: CliRuntime, value: string | undefined, question: string, load: Load) =>
+  pickOne(value, question, load, terminalSelection(rt));
+const many = (rt: CliRuntime, question: string, load: Load) =>
+  pickMany(question, load, terminalSelection(rt));
+
+export const projectQuery = (rt: CliRuntime): string =>
+  `project=${encodeURIComponent(projectOf(rt, {}))}`;
 export interface ServiceChoice {
   name: string;
   nodes: { name: string; status: string }[];
 }
-export async function services(): Promise<ServiceChoice[]> {
+export async function services(rt: CliRuntime): Promise<ServiceChoice[]> {
   return (
-    await request<{ services: ServiceChoice[] }>('GET', `/api/v1/services?${await projectQuery()}`)
+    await request<{ services: ServiceChoice[] }>(rt, 'GET', `/api/v1/services?${projectQuery(rt)}`)
   ).services;
 }
-export const serviceChoices = async (): Promise<Choice[]> =>
-  (await services()).map((service) => ({
+export const serviceChoices = async (rt: CliRuntime): Promise<Choice[]> =>
+  (await services(rt)).map((service) => ({
     value: service.name,
     label: `${service.name} (${service.nodes.map((node) => `${node.name}: ${node.status}`).join(', ') || 'no nodes'})`,
   }));
-export const selectService = (name?: string): Promise<string> =>
-  selectOne(name, 'Select a service', serviceChoices);
-export const selectNode = (name?: string): Promise<string> =>
-  selectOne(name, 'Select a node', async () => {
+export const selectService = (rt: CliRuntime, name?: string): Promise<string> =>
+  one(rt, name, 'Select a service', () => serviceChoices(rt));
+export const selectNode = (rt: CliRuntime, name?: string): Promise<string> =>
+  one(rt, name, 'Select a node', async () => {
     const { nodes } = await request<{
       nodes: {
         name: string;
@@ -31,27 +38,28 @@ export const selectNode = (name?: string): Promise<string> =>
         ingress: number;
         labels: string[];
       }[];
-    }>('GET', '/api/v1/nodes');
+    }>(rt, 'GET', '/api/v1/nodes');
     return nodes.map((node) => ({
       value: node.name,
       label: `${node.name} (${node.disabled_at ? 'disabled' : node.status}, ${node.address || 'no address'}${node.ingress ? ', ingress' : ''}${node.labels.length ? `, ${node.labels.join(', ')}` : ''})`,
     }));
   });
 /** Offers only enabled ingress nodes: the picker for `tug ingress` commands. */
-export const selectIngressNode = (name?: string): Promise<string> =>
-  selectOne(name, 'Select an ingress node', async () => {
+export const selectIngressNode = (rt: CliRuntime, name?: string): Promise<string> =>
+  one(rt, name, 'Select an ingress node', async () => {
     const { nodes } = await request<{
       nodes: { name: string; status: string; disabled_at: string | null; ingress: number }[];
-    }>('GET', '/api/v1/nodes');
+    }>(rt, 'GET', '/api/v1/nodes');
     return nodes
       .filter((node) => node.ingress && !node.disabled_at)
       .map((node) => ({ value: node.name, label: `${node.name} (${node.status})` }));
   });
 export const selectResource = (
+  rt: CliRuntime,
   name: string | undefined,
   resource: 'secrets' | 'vars' | 'volumes' | 'credentials',
 ): Promise<string> =>
-  selectOne(name, `Select a ${resource.slice(0, -1)}`, async () => {
+  one(rt, name, `Select a ${resource.slice(0, -1)}`, async () => {
     const listing = await request<
       Record<
         string,
@@ -70,7 +78,7 @@ export const selectResource = (
           projects?: string[] | null;
         }[]
       >
-    >('GET', `/api/v1/${resource}${resource === 'credentials' ? '' : `?${await projectQuery()}`}`);
+    >(rt, 'GET', `/api/v1/${resource}${resource === 'credentials' ? '' : `?${projectQuery(rt)}`}`);
     return listing[resource]
       .filter((row) => !row.revokedAt && !row.usedBy?.length)
       .map((row) => {
@@ -89,18 +97,18 @@ export const selectResource = (
         return { value: row.name, label: details ? `${row.name} (${details})` : row.name };
       });
   });
-export const selectDeployment = (id?: string): Promise<string> =>
-  selectOne(id, 'Select an active deployment to cancel', async () => {
+export const selectDeployment = (rt: CliRuntime, id?: string): Promise<string> =>
+  one(rt, id, 'Select an active deployment to cancel', async () => {
     const { deployments } = await request<{
       deployments: { id: string; version: string; state: string; created_at: string }[];
-    }>('GET', `/api/v1/deployments?${await projectQuery()}`);
+    }>(rt, 'GET', `/api/v1/deployments?${projectQuery(rt)}`);
     return deployments.map((row) => ({
       value: row.id,
       label: `${row.version} (${row.state}, ${row.created_at}, ${row.id})`,
     }));
   });
-export const selectRestore = (id?: string): Promise<string> =>
-  selectOne(id, 'Select an interrupted restore', async () => {
+export const selectRestore = (rt: CliRuntime, id?: string): Promise<string> =>
+  one(rt, id, 'Select an interrupted restore', async () => {
     const { restores } = await request<{
       restores: {
         id: string;
@@ -110,7 +118,7 @@ export const selectRestore = (id?: string): Promise<string> =>
         started_at: string;
         error: string | null;
       }[];
-    }>('GET', `/api/v1/restores?${await projectQuery()}&state=interrupted`);
+    }>(rt, 'GET', `/api/v1/restores?${projectQuery(rt)}&state=interrupted`);
     return restores
       .filter((row) => row.state === 'interrupted')
       .map((row) => ({
@@ -118,7 +126,7 @@ export const selectRestore = (id?: string): Promise<string> =>
         label: `${row.target} (${row.started_at}, snapshot ${row.snapshot_id}, ${row.id}${row.error ? `, ${row.error}` : ''})`,
       }));
   });
-export const backupChoices = async (): Promise<Choice[]> => {
+export const backupChoices = async (rt: CliRuntime): Promise<Choice[]> => {
   const { targets } = await request<{
     targets: {
       target: string;
@@ -126,7 +134,7 @@ export const backupChoices = async (): Promise<Choice[]> => {
       node: string | null;
       lastSuccessAt: string | null;
     }[];
-  }>('GET', `/api/v1/backups?${await projectQuery()}`);
+  }>(rt, 'GET', `/api/v1/backups?${projectQuery(rt)}`);
   return targets
     .filter((row) => row.enabled)
     .map((row) => ({
@@ -134,14 +142,14 @@ export const backupChoices = async (): Promise<Choice[]> => {
       label: `${row.target} (${row.node || 'no node'}, last success ${row.lastSuccessAt || 'never'})`,
     }));
 };
-export const selectBackup = (target?: string): Promise<string> =>
-  selectOne(target, 'Select a backup target', backupChoices);
-export const selectBackups = (): Promise<string[]> =>
-  selectMany('Select backup targets', backupChoices);
-export const selectSnapshot = (target: string): Promise<string> =>
-  selectOne(undefined, 'Select a backup snapshot', async () => {
+export const selectBackup = (rt: CliRuntime, target?: string): Promise<string> =>
+  one(rt, target, 'Select a backup target', () => backupChoices(rt));
+export const selectBackups = (rt: CliRuntime): Promise<string[]> =>
+  many(rt, 'Select backup targets', () => backupChoices(rt));
+export const selectSnapshot = (rt: CliRuntime, target: string): Promise<string> =>
+  one(rt, undefined, 'Select a backup snapshot', async () => {
     // Resolve short target names the same way as the restore endpoint, but reject ambiguity.
-    const targets = await backupChoices();
+    const targets = await backupChoices(rt);
     const matching = targets.filter(
       (row) => row.value === target || row.value.split(':').slice(1).join(':') === target,
     );
@@ -156,28 +164,30 @@ export const selectSnapshot = (target: string): Promise<string> =>
         trigger: string;
       }[];
     }>(
+      rt,
       'GET',
-      `/api/v1/backup/snapshots?${await projectQuery()}&target=${encodeURIComponent(matching[0].value)}`,
+      `/api/v1/backup/snapshots?${projectQuery(rt)}&target=${encodeURIComponent(matching[0].value)}`,
     );
     return snapshots.map((row) => ({
       value: row.id,
       label: `${row.finished_at} (${row.snapshot_id}, ${row.size_bytes ?? '?'} bytes, ${row.trigger}, ${row.id})`,
     }));
   });
-export const selectHolds = (): Promise<string[]> =>
-  selectMany('Select move holds to release', async () => {
+export const selectHolds = (rt: CliRuntime): Promise<string[]> =>
+  many(rt, 'Select move holds to release', async () => {
     const { holds } = await request<{
       holds: { service: string; reason: string; created_at: string }[];
-    }>('GET', `/api/v1/holds?${await projectQuery()}`);
+    }>(rt, 'GET', `/api/v1/holds?${projectQuery(rt)}`);
     return holds.map((row) => ({
       value: row.service,
       label: `${row.service} (${row.reason}, ${row.created_at})`,
     }));
   });
 
-export const selectNodes = (configured: string[]): Promise<string[]> =>
-  selectMany('Select nodes to replace or repair', async () => {
+export const selectNodes = (rt: CliRuntime, configured: string[]): Promise<string[]> =>
+  many(rt, 'Select nodes to replace or repair', async () => {
     const { nodes } = await request<{ nodes: { name: string; status: string }[] }>(
+      rt,
       'GET',
       '/api/v1/nodes',
     );

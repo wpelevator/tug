@@ -8,18 +8,20 @@ import { formatStatus } from '../status.ts';
 import type { StatusResponse } from '../status.ts';
 import { loadCfg, print, request, runCapture, waitForCommand } from './context.ts';
 import type { CommonOpts } from './context.ts';
+import { out } from '../runtime.ts';
+import type { CliRuntime } from '../runtime.ts';
 
 /** Why `tug doctor` does not fail on a machine with no Docker daemon. */
 export const LOCAL_DOCKER_SKIP = 'needed only for --build-local';
 
-export function registerObserve(program: Command): void {
+export function registerObserve(rt: CliRuntime, program: Command): void {
   program
     .command('status')
     .description('summarize projects, deployments and nodes')
     .option('--json', 'print the raw status as JSON for scripts')
     .action(async (o: { json?: boolean }) => {
-      const status = await request<StatusResponse>('GET', '/api/v1/status');
-      console.log(o.json ? JSON.stringify(status, null, 2) : formatStatus(status));
+      const status = await request<StatusResponse>(rt, 'GET', '/api/v1/status');
+      out(rt, o.json ? JSON.stringify(status, null, 2) : formatStatus(status));
     });
   program
     .command('events')
@@ -34,12 +36,12 @@ export function registerObserve(program: Command): void {
     .option('--json', 'print the raw API result as JSON for scripts')
     .action(async (o: CommonOpts & { limit: string; all?: boolean; json?: boolean }) => {
       if (o.all && o.project) throw new Error('--all and --project cannot be combined');
-      const cfg = await loadCfg();
+      const cfg = loadCfg(rt);
       const project = o.all ? undefined : o.project || cfg.project;
       const query = `limit=${encodeURIComponent(o.limit)}${project ? `&project=${encodeURIComponent(project)}` : ''}`;
-      const result = await request<{ events: EventRow[] }>('GET', `/api/v1/events?${query}`);
-      if (o.json) print(result);
-      else console.log(formatEvents(result.events, { showProject: !project }));
+      const result = await request<{ events: EventRow[] }>(rt, 'GET', `/api/v1/events?${query}`);
+      if (o.json) print(rt, result);
+      else out(rt, formatEvents(result.events, { showProject: !project }));
     });
   program
     .command('doctor')
@@ -53,8 +55,8 @@ export function registerObserve(program: Command): void {
     .action(
       async (o: { nodes?: boolean; node?: string | boolean; timeout: string; json?: boolean }) => {
         if (o.nodes && o.node) throw new Error('--nodes and --node cannot be combined');
-        if (o.node === true) o.node = await selectNode();
-        const cfg = await loadCfg();
+        if (o.node === true) o.node = await selectNode(rt);
+        const cfg = loadCfg(rt);
         const local: {
           name: string;
           ok: boolean;
@@ -67,7 +69,7 @@ export function registerObserve(program: Command): void {
           ['docker', 'docker', ['version', '--format', '{{.Server.Version}}']],
         ] as [string, string, string[]][]) {
           try {
-            local.push({ name, ok: true, output: (await runCapture(cmd, args)).trim() });
+            local.push({ name, ok: true, output: (await runCapture(rt, cmd, args)).trim() });
           } catch (e) {
             // The operator's Docker daemon builds images only for `deploy --build-local`, so its absence is not a problem.
             if (name === 'docker') local.push({ name, ok: true, skipped: LOCAL_DOCKER_SKIP });
@@ -77,7 +79,7 @@ export function registerObserve(program: Command): void {
         let controlDiagnostics:
           { ok: boolean; checks?: { name: string; warnings?: string[] }[] } | undefined;
         try {
-          controlDiagnostics = await request('GET', '/api/v1/diagnostics');
+          controlDiagnostics = await request(rt, 'GET', '/api/v1/diagnostics');
         } catch (error) {
           // Name both fingerprints on a trust mismatch, so the operator can compare the credential with the server in one look.
           const code = caTrustCode(error);
@@ -123,13 +125,14 @@ export function registerObserve(program: Command): void {
         };
         if (o.nodes || o.node) {
           const queued = await request<{ commands: { commandId: string; nodeId: string }[] }>(
+            rt,
             'POST',
             '/api/v1/diagnostics/nodes',
             { node: o.node || null },
           );
           const commands = [];
           for (const command of queued.commands) {
-            const finished = await waitForCommand(command.commandId, Number(o.timeout));
+            const finished = await waitForCommand(rt, command.commandId, Number(o.timeout));
             commands.push({
               nodeId: command.nodeId,
               state: finished.state,
@@ -139,9 +142,9 @@ export function registerObserve(program: Command): void {
           output.nodeDiagnostics = { commands };
           if (commands.some((command) => command.state !== 'succeeded')) output.ok = false;
         }
-        if (o.json) print(output);
-        else console.log(formatDoctor(output as DoctorReport));
-        if (!output.ok) process.exitCode = 1;
+        if (o.json) print(rt, output);
+        else out(rt, formatDoctor(output as DoctorReport));
+        if (!output.ok) rt.exitCode = 1;
       },
     );
 }

@@ -434,6 +434,7 @@ export async function writeInitConfig(
   config: ResolvedCliConfig,
   credentialFile: string,
   explicit: ConnectionOptions,
+  env: NodeJS.ProcessEnv,
   credentialUrl?: string,
 ): Promise<string[]> {
   const written: string[] = [];
@@ -469,14 +470,14 @@ export async function writeInitConfig(
   await fs.writeFile(config.localFile, serialize(config.localFile, local), { mode: 0o600 });
   await fs.chmod(config.localFile, 0o600);
   written.push(config.localFile);
-  await gitIgnore(config.localFile);
+  await gitIgnore(config.localFile, env);
   return written;
 }
 
 /** Add `file` to the .gitignore next to it when it sits in a git work tree and is not ignored yet. */
-async function gitIgnore(file: string): Promise<void> {
+async function gitIgnore(file: string, env: NodeJS.ProcessEnv): Promise<void> {
   const cwd = path.dirname(file);
-  const ignored = spawnSync('git', ['check-ignore', '-q', '--', file], { cwd });
+  const ignored = spawnSync('git', ['check-ignore', '-q', '--', file], { cwd, env });
   if (ignored.status !== 1) return; // 0: already ignored; anything else: not a git checkout
   const ignoreFile = path.join(cwd, '.gitignore');
   let current = '';

@@ -10,7 +10,12 @@ type HttpClient = (url: string, init?: RequestInit) => Promise<Response>;
  * A client pinned to the credential's CA that presents its certificate. `connectUrl` only changes where the TCP
  * connection goes; the server name is still verified against the credential's public host. Redirects are refused.
  */
-export function createTransport(credential: Credential, connectUrl?: string) {
+/** `clientVersion` is what every request declares to the control; the CLI passes its runtime's, the default is this package's. */
+export function createTransport(
+  credential: Credential,
+  connectUrl?: string,
+  clientVersion: string = packageVersion(),
+) {
   const dispatcher = new Agent({ connect: clientTlsOptions(credential) as never });
   const base = new URL(connectUrl ?? credential.url).origin;
   const http: HttpClient = (url, init) => {
@@ -20,7 +25,7 @@ export function createTransport(credential: Credential, connectUrl?: string) {
     // must not learn the Tug version.
     const headers = new Headers(init?.headers);
     if (!headers.has(CLIENT_VERSION_HEADER) && new URL(url).origin === base)
-      headers.set(CLIENT_VERSION_HEADER, packageVersion());
+      headers.set(CLIENT_VERSION_HEADER, clientVersion);
     let request = { ...init, headers } as RequestInit;
     // The runtime's FormData is not the undici package's FormData, which would stringify it. Serialize it with the
     // runtime's own Response and stream the result.

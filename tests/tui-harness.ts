@@ -26,7 +26,8 @@ export function fakeTerminal(columns = 100, rows = 30) {
   stdout.rows = rows;
   let output = '';
   stdout.on('data', (chunk: Buffer) => (output += chunk.toString()));
-  return { stdin, stdout, rawModes, output: () => output };
+  const stderr = new PassThrough();
+  return { stdin, stdout, stderr, rawModes, output: () => output };
 }
 
 export { until } from './wait.ts';

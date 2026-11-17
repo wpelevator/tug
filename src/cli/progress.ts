@@ -1,5 +1,6 @@
 import { clipToColumns, plainText } from './width.ts';
-import { markWorkStarted } from './usage.ts';
+import { markWorkStarted } from './runtime.ts';
+import type { CliRuntime } from './runtime.ts';
 
 /** Where a live (terminal) status line is drawn. */
 export interface LiveOutput {
@@ -12,14 +13,14 @@ export interface LiveOutput {
 const CLEAR_LINE = '\r\x1b[K';
 
 /** A single rewritten status line only makes sense on an interactive stderr outside CI. */
-function terminalOutput(): LiveOutput | undefined {
-  if (!process.stderr.isTTY || process.env.CI) return undefined;
-  const raw = process.stderr.write.bind(process.stderr);
+function terminalOutput(rt: CliRuntime): LiveOutput | undefined {
+  if (!rt.stderr.isTTY || rt.env.CI) return undefined;
+  const raw = rt.stderr.write.bind(rt.stderr);
   return {
     write: (text) => void raw(text),
-    columns: () => process.stderr.columns || 80,
+    columns: () => rt.stderr.columns || 80,
     intercept(hook) {
-      const restores = [process.stdout, process.stderr].map((stream) => {
+      const restores = [rt.stdout, rt.stderr].map((stream) => {
         const original = stream.write;
         const wrapped = function (this: unknown, ...args: unknown[]) {
           hook.before();
@@ -46,26 +47,27 @@ function terminalOutput(): LiveOutput | undefined {
   };
 }
 
-let current: ReturnType<typeof createProgress> | undefined;
-
 /**
  * Progress on stderr, so stdout results stay clean. On a terminal it is one live line, `[12s] label · latest output`, and a
  * finished stage stays behind as `[Ns] label`; other output written meanwhile appears above it. Without a terminal (or in
  * CI) it prints a line per stage plus an elapsed-time heartbeat, which reads well in logs.
  */
-export function createProgress({
-  write = (line: string): void => {
-    process.stderr.write(`${line}\n`);
-  },
-  now = Date.now,
-  intervalMs = 10_000,
-  live = terminalOutput(),
-}: {
-  write?: (line: string) => void;
-  now?: () => number;
-  intervalMs?: number;
-  live?: LiveOutput;
-} = {}) {
+export function createProgress(
+  rt: CliRuntime,
+  {
+    write = (line: string): void => {
+      rt.stderr.write(`${line}\n`);
+    },
+    now = Date.now,
+    intervalMs = 10_000,
+    live = terminalOutput(rt),
+  }: {
+    write?: (line: string) => void;
+    now?: () => number;
+    intervalMs?: number;
+    live?: LiveOutput;
+  } = {},
+) {
   let label = '';
   let detail = '';
   let started = now();
@@ -75,7 +77,7 @@ export function createProgress({
   let partial = false;
   let timer: ReturnType<typeof setInterval> | undefined;
   let undoIntercept: (() => void) | undefined;
-  let outer: typeof current;
+  let outer: Progress | undefined;
   const elapsed = () => `[${Math.floor((now() - started) / 1000)}s] ${label}`;
   const clear = () => {
     if (live && drawn) live.write(CLEAR_LINE);
@@ -100,8 +102,8 @@ export function createProgress({
       detail = '';
       started = now();
       if (!timer) {
-        outer = current;
-        current = self;
+        outer = rt.state.progress;
+        rt.state.progress = self;
         timer = setInterval(report, live ? 1000 : intervalMs);
         timer.unref();
         undoIntercept = live?.intercept?.({
@@ -142,7 +144,7 @@ export function createProgress({
       clearInterval(timer);
       if (timer) {
         timer = undefined;
-        if (current === self) current = outer;
+        if (rt.state.progress === self) rt.state.progress = outer;
       }
       undoIntercept?.();
       undoIntercept = undefined;
@@ -156,19 +158,20 @@ export function createProgress({
 export type Progress = ReturnType<typeof createProgress>;
 
 /** Run a process, prompt or menu that writes straight to the terminal without the live status line scribbling over it. */
-export function suspendProgress(): () => void {
-  const progress = current;
+export function suspendProgress(rt: CliRuntime): () => void {
+  const progress = rt.state.progress;
   progress?.suspend();
   return () => progress?.resume();
 }
 
 /** Own the timer for one operation, including failures and early returns. */
 export async function withProgress<T>(
+  rt: CliRuntime,
   label: string,
   operation: (progress: Progress) => Promise<T>,
 ): Promise<T> {
-  markWorkStarted();
-  const progress = createProgress();
+  markWorkStarted(rt);
+  const progress = createProgress(rt);
   try {
     progress.stage(label);
     return await operation(progress);

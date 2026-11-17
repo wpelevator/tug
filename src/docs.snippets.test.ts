@@ -52,7 +52,7 @@ export async function undeclaredValues(snippet: Snippet): Promise<string[]> {
   try {
     const file = path.join(dir, 'compose.yaml');
     fs.writeFileSync(file, snippet.source);
-    return await findMissingValues(file, new Set(snippet.declared));
+    return await findMissingValues(process.cwd(), file, new Set(snippet.declared));
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -197,7 +197,7 @@ test('every example Compose file takes only values its README tells the reader t
         (match) => match[1] ?? match[2],
       ),
     );
-    const missing = await findMissingValues(compose, listed);
+    const missing = await findMissingValues(process.cwd(), compose, listed);
     if (missing.length)
       problems.push(
         `examples/${dir.name} needs ${missing.join(', ')} from control but its README does not list them: use $$ for container-shell variables or add the name to the README`,

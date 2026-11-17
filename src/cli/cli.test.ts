@@ -10,6 +10,7 @@ import * as tar from 'tar';
 import { writeCredentialFile } from '../../tests/helpers.ts';
 import { resolveCliConfig, integerOption } from './config.ts';
 import { createLocalBuildSnapshot, createSourceArchive, prepareLocalImages } from './build.ts';
+import { execCli } from '../../tests/cli-inprocess.ts';
 import {
   controlPortCheck,
   dockerPlatform,
@@ -20,7 +21,6 @@ import {
 } from './install.ts';
 
 const exec = promisify(execFile);
-const entry = path.resolve('src/cli.ts');
 
 test('connection resolution consistently uses explicit options, then environment, then selected config', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-config-'));
@@ -154,7 +154,7 @@ test('CLI exposes flat commands and rejects malformed invocations before side ef
     TUG_CONTROL_URL: 'https://unreachable.invalid',
   };
   try {
-    const { stdout } = await exec(process.execPath, [entry, '--help'], { env, cwd: dir });
+    const { stdout } = await execCli(['--help'], { env, cwd: dir });
     for (const name of ['setup', 'control', 'node', 'secret', 'backup', 'restore', 'credential'])
       assert.match(stdout, new RegExp(`^  ${name}\\b`, 'm'), `help should list ${name}`);
     assert.doesNotMatch(
@@ -188,7 +188,7 @@ test('CLI exposes flat commands and rejects malformed invocations before side ef
       ['control', 'restore', '--snapshot', 'abcd1234'],
     ]) {
       await assert.rejects(
-        exec(process.execPath, [entry, ...args], { env, cwd: dir }),
+        execCli([...args], { env, cwd: dir }),
         (error) => {
           const stderr = (error as Error & { stderr: string }).stderr;
           assert.doesNotMatch(
@@ -201,7 +201,7 @@ test('CLI exposes flat commands and rejects malformed invocations before side ef
         `${args.join(' ')} should be rejected`,
       );
     }
-    const help = await exec(process.execPath, [entry, 'deploy', '--help'], { env, cwd: dir });
+    const help = await execCli(['deploy', '--help'], { env, cwd: dir });
     assert.match(
       help.stdout,
       /--config/,
@@ -223,10 +223,8 @@ test('init applies global options after the command without relying on Docker or
     const file = path.join(dir, 'new.json');
     const source = path.join(dir, 'source-cred.json');
     await writeCredentialFile(source);
-    await exec(
-      process.execPath,
+    await execCli(
       [
-        entry,
         'init',
         '--config',
         file,
@@ -328,6 +326,7 @@ test('local application builds skip published images and produce unique file-bac
     '/source',
     '/temp',
     {
+      cleanupWarning: () => {},
       nonce: () => 'unique-build',
       build: async (options) => {
         assert.equal(
@@ -985,11 +984,7 @@ test('network failures name their cause instead of only "fetch failed"', async (
 
 test('node replace and node repair accept -y like node add, so scripts can share the flags', async () => {
   for (const verb of ['replace', 'repair']) {
-    const { stdout } = await promisify(execFile)(
-      process.execPath,
-      [path.resolve('src/cli.ts'), 'node', verb, '--help'],
-      { timeout: 60_000 },
-    );
+    const { stdout } = await execCli(['node', verb, '--help']);
     assert.match(stdout, /-y, --yes/, `node ${verb} must list -y, --yes`);
   }
 });

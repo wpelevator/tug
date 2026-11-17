@@ -3,12 +3,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { startMtlsControl } from '../../tests/helpers.ts';
+import { execCli } from '../../tests/cli-inprocess.ts';
 
-const exec = promisify(execFile);
-const entry = path.resolve('src/cli.ts');
 const OPERATOR = 'op-cli-tokens';
 
 test('token commands reject malformed invocations before contacting control', async () => {
@@ -19,16 +16,13 @@ test('token commands reject malformed invocations before contacting control', as
     TUG_CONTROL_URL: 'http://unreachable.invalid',
   };
   try {
-    const help = (await exec(process.execPath, [entry, '--help'], { env, cwd: dir })).stdout;
+    const help = (await execCli(['--help'], { env, cwd: dir })).stdout;
     assert.ok(help.includes('credential'), 'help should list the credential group');
-    const groups = (
-      await exec(process.execPath, [entry, 'credential', '--help'], { env, cwd: dir })
-    ).stdout;
+    const groups = (await execCli(['credential', '--help'], { env, cwd: dir })).stdout;
     for (const name of ['create', 'list', 'revoke'])
       assert.ok(groups.includes(name), `help for the credential group should list ${name}`);
-    const createHelp = (
-      await exec(process.execPath, [entry, 'credential', 'create', '--help'], { env, cwd: dir })
-    ).stdout;
+    const createHelp = (await execCli(['credential', 'create', '--help'], { env, cwd: dir }))
+      .stdout;
     assert.match(createHelp, /--role/, 'credential create help should document --role');
     assert.match(createHelp, /--expires-in-days/, 'credential create help should document expiry');
     for (const args of [
@@ -47,7 +41,7 @@ test('token commands reject malformed invocations before contacting control', as
       ['events', '--all', '--project', 'site'],
     ]) {
       await assert.rejects(
-        exec(process.execPath, [entry, ...args], { env, cwd: dir }),
+        execCli([...args], { env, cwd: dir }),
         (error) => {
           const stderr = (error as Error & { stderr: string }).stderr;
           assert.doesNotMatch(
@@ -69,7 +63,7 @@ test('credential create, credential list and credential revoke work against cont
   const data = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-cli-tokens-'));
   const control = await startMtlsControl(data);
   const tug = (credential: string, ...args: string[]) =>
-    exec(process.execPath, [entry, ...args], {
+    execCli([...args], {
       env: {
         ...process.env,
         ...control.env,
@@ -193,7 +187,7 @@ test('backup commands are listed in help', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-backup-help-'));
   const env = { ...process.env, TUG_CONFIG: path.join(dir, 'missing.json') };
   const groupHelp = async (...group: string[]) =>
-    (await exec(process.execPath, [entry, ...group, '--help'], { env, cwd: dir })).stdout;
+    (await execCli([...group, '--help'], { env, cwd: dir })).stdout;
   for (const [group, verbs] of [
     ['backup', ['run', 'list', 'password', 'destination']],
     ['backup destination', ['set', 'show', 'remove']],
@@ -204,7 +198,7 @@ test('backup commands are listed in help', async () => {
       assert.match(help, new RegExp(`^  ${verb}\\b`, 'm'), `${group} help should list ${verb}`);
   }
   assert.match(
-    (await exec(process.execPath, [entry, '--help'], { env, cwd: dir })).stdout,
+    (await execCli(['--help'], { env, cwd: dir })).stdout,
     /^ {2}run\b/m,
     'help should list the one-off run command',
   );
@@ -220,7 +214,7 @@ test('backup destination commands set, show and remove the destination without e
     AWS_SECRET_ACCESS_KEY: 'cli-secret-value',
   };
   delete (env as Record<string, unknown>).TUG_CONFIG;
-  const run = (...args: string[]) => exec(process.execPath, [entry, ...args], { env, cwd: dir });
+  const run = (...args: string[]) => execCli([...args], { env, cwd: dir });
   try {
     const set = await run(
       'backup',

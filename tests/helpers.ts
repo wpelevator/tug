@@ -150,17 +150,28 @@ export async function startMtlsControl(
   dir: string,
   options: { eventPruneIntervalMs?: number } = {},
 ) {
-  process.env.TUG_DATA_DIR = dir;
   const { createApp, listen } = await import('../src/control/control.ts');
   const { issueHostCredential } = await import('../src/control/credential-issue.ts');
   const { createTransport } = await import('../src/transport.ts');
   const controlUrl = 'https://localhost:8443';
-  const app = await createApp({ images: { resolve: testImageResolver }, controlUrl, ...options });
-  const server = await listen(app, 0);
+  // Control reads its data directory from the environment while it starts and while the root credential is issued;
+  // set it for exactly that, so no test leaves it behind for the next one.
+  const previousDataDir = process.env.TUG_DATA_DIR;
+  process.env.TUG_DATA_DIR = dir;
+  let app: Awaited<ReturnType<typeof createApp>>;
+  let server: Awaited<ReturnType<typeof listen>>;
+  let root: ReturnType<typeof decodeCredential>;
+  try {
+    app = await createApp({ images: { resolve: testImageResolver }, controlUrl, ...options });
+    server = await listen(app, 0);
+    root = decodeCredential(
+      await issueHostCredential({ name: 'root', role: 'admin', replace: false, controlUrl }),
+    );
+  } finally {
+    if (previousDataDir === undefined) delete process.env.TUG_DATA_DIR;
+    else process.env.TUG_DATA_DIR = previousDataDir;
+  }
   const url = `https://127.0.0.1:${(server.address() as { port: number }).port}`;
-  const root = decodeCredential(
-    await issueHostCredential({ name: 'root', role: 'admin', replace: false, controlUrl }),
-  );
   const credentialFile = path.join(dir, 'root.credential.json');
   await fs.writeFile(credentialFile, JSON.stringify(root), { mode: 0o600 });
   /** Registers a node the way `tug node add` does and returns its credential. */

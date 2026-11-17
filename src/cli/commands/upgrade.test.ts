@@ -1,13 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { promisify } from 'node:util';
-
-const exec = promisify(execFile);
-const entry = path.resolve('src/cli.ts');
+import { execCli } from '../../../tests/cli-inprocess.ts';
 
 /** A fake `docker` that logs every call and answers the few queries `control upgrade` makes from files in $FAKE_DIR. */
 const FAKE_DOCKER = `#!${process.execPath}
@@ -104,19 +101,15 @@ async function withHost(
     await fs.writeFile(path.join(dir, 'calls.log'), '');
     const upgrade = async (...args: string[]) => {
       try {
-        const { stdout, stderr } = await exec(
-          process.execPath,
-          [entry, 'control', 'upgrade', ...args],
-          {
-            cwd: dir,
-            env: {
-              ...process.env,
-              PATH: `${bin}:${process.env.PATH}`,
-              FAKE_DIR: dir,
-              TUG_CONFIG: 'tug.yml',
-            },
+        const { stdout, stderr } = await execCli(['control', 'upgrade', ...args], {
+          cwd: dir,
+          env: {
+            ...process.env,
+            PATH: `${bin}:${process.env.PATH}`,
+            FAKE_DIR: dir,
+            TUG_CONFIG: 'tug.yml',
           },
-        );
+        });
         return { code: 0, stdout, stderr };
       } catch (e) {
         const err = e as { code: number; stdout: string; stderr: string };
@@ -373,7 +366,7 @@ test('control upgrade needs a host and an existing installation', async () => {
 test('tug upgrade needs controlSsh before it touches anything', async () => {
   await withHost(
     async ({ dir, calls }) => {
-      const result = await exec(process.execPath, [entry, 'upgrade', '--yes'], {
+      const result = await execCli(['upgrade', '--yes'], {
         cwd: dir,
         env: {
           ...process.env,
@@ -400,10 +393,8 @@ test('tug upgrade needs controlSsh before it touches anything', async () => {
 test('control setup over an existing control says which of its settings the run changes', async () => {
   await withHost(async ({ dir }) => {
     const setup = (...args: string[]) =>
-      exec(
-        process.execPath,
+      execCli(
         [
-          entry,
           'control',
           'setup',
           'ops@control.test',

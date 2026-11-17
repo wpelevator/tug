@@ -12,12 +12,12 @@ import {
 } from '../install.ts';
 import type { AddressCandidate } from '../onboarding.ts';
 import { formatNodePlan, inferNodeName, isValidNodeName } from '../onboarding.ts';
-import { ask, canPrompt, confirm } from '../prompt.ts';
+import { canPrompt, confirm, prompter } from '../prompt.ts';
 import { terminalPicker } from '../pick.ts';
 import { runStep, SshHostKeyError, STAGE_MARKER } from '../process.ts';
 import type { Prompter } from '../prompt.ts';
 import { isNodeHost } from '../../node-address.ts';
-import { assertImagePublished, defaultImage, resolveImage } from '../../images/image.ts';
+import { defaultImage, resolveImage } from '../../images/image.ts';
 import {
   alreadyRunning,
   assertNotAheadOfControl,
@@ -51,6 +51,7 @@ import {
 } from './context.ts';
 import type { InstallOpts } from './context.ts';
 import {
+  assertPublished,
   bootstrapDocker,
   discoverAddresses,
   remoteHostname,
@@ -61,6 +62,8 @@ import {
   transferTugImage,
 } from './host.ts';
 import fs from 'node:fs/promises';
+import { out, err, resolvePath } from '../runtime.ts';
+import type { CliRuntime } from '../runtime.ts';
 
 /** Everything the SSH-assisted node commands share. */
 export interface NodeIdentityOpts extends InstallOpts {
@@ -115,6 +118,7 @@ export function agentIdentityArgs(mode: 'create' | 'replace', name: string): str
 }
 
 async function installNodeIdentity(
+  rt: CliRuntime,
   sshTarget: string,
   name: string,
   mode: 'create' | 'replace',
@@ -123,32 +127,32 @@ async function installNodeIdentity(
   /** False in batch mode, where only the final per-node results are printed. */
   printResult = true,
 ): Promise<boolean> {
-  return withProgress(`Preparing node ${name}`, async (progress) => {
-    const cfg = await loadCfg();
+  return withProgress(rt, `Preparing node ${name}`, async (progress) => {
+    const cfg = loadCfg(rt);
     const connectUrl = o.agentControlUrl ? normalizeControlUrl(o.agentControlUrl) : undefined;
     // Fail before touching the host: no credential, or a control older than this CLI (not after Docker is installed).
-    await transportFor(cfg, 'probe').then((t) => t.close());
-    assertImagePublished(resolveImage(o.image, o.buildLocalImage));
+    await transportFor(rt, cfg, 'probe').then((t) => t.close());
+    assertPublished(rt, resolveImage(o.image, o.buildLocalImage, rt.version));
     if (o.installDocker) {
       progress.stage(`Installing Docker on node ${name}`);
-      await bootstrapDocker(sshTarget, progress);
+      await bootstrapDocker(rt, sshTarget, progress);
     }
     progress.stage(`Checking host ${name}`);
-    await preflightRemote(sshTarget, {
+    await preflightRemote(rt, sshTarget, {
       controlUrl: connectUrl ?? cfg.credential?.url,
       progress,
     });
-    const requestedImage = resolveImage(o.image, o.buildLocalImage);
+    const requestedImage = resolveImage(o.image, o.buildLocalImage, rt.version);
     const image = o.buildLocalImage
-      ? await transferTugImage(sshTarget, requestedImage, progress)
+      ? await transferTugImage(rt, sshTarget, requestedImage, progress)
       : requestedImage;
     const started = new Date().toISOString();
     // Before anything is written: a host that still keeps its state in the old directory must migrate first, or the
     // agent would start on an empty volume.
     progress.stage(`Checking agent state on ${name}`);
-    await runStep('ssh', ['--', sshTarget, agentGuardScript(image, name)], { progress });
+    await runStep(rt, 'ssh', ['--', sshTarget, agentGuardScript(image, name)], { progress });
     if (repair)
-      await runLocal('ssh', [
+      await runLocal(rt, 'ssh', [
         '--',
         sshTarget,
         `docker run --rm --entrypoint sh -v ${AGENT_VOLUME}:/s ${sh(image)} -c 'cd /s && for f in agent.json agent-pending.json; do [ -e "$f" ] && mv "$f" "$f.corrupt-$(date +%s)"; done; true'`,
@@ -158,13 +162,18 @@ async function installNodeIdentity(
     progress.stage(`Creating identity for node ${name}`);
     // Adding a node the host is already enrolled as reuses its key, so re-running `node add` upgrades the agent in place;
     // `node replace` and `node repair` deliberately ask for a new key.
-    const csr = await runCapture('ssh', ['--', sshTarget, agent(agentIdentityArgs(mode, name))]);
+    const csr = await runCapture(rt, 'ssh', [
+      '--',
+      sshTarget,
+      agent(agentIdentityArgs(mode, name)),
+    ]);
     const response = await request<IdentityResponse>(
+      rt,
       'POST',
       `/api/v1/nodes/${encodeURIComponent(name)}/identity`,
       { csr, mode, address: o.address, labels: o.label },
     );
-    await runCapture('ssh', ['--', sshTarget, agent('install-cert', true)], {
+    await runCapture(rt, 'ssh', ['--', sshTarget, agent('install-cert', true)], {
       input: JSON.stringify(response),
     });
     progress.stage(`Installing agent on node ${name}`);
@@ -176,9 +185,11 @@ async function installNodeIdentity(
       MARKER: STAGE_MARKER,
       RUN_FLAGS: `${HOST_NETWORK_FLAG} `,
     });
-    await runStep('ssh', ['--', sshTarget, remote], { progress });
+    await runStep(rt, 'ssh', ['--', sshTarget, remote], { progress });
     if (o.ingress)
-      await request('POST', `/api/v1/nodes/${encodeURIComponent(name)}/ingress`, { enabled: true });
+      await request(rt, 'POST', `/api/v1/nodes/${encodeURIComponent(name)}/ingress`, {
+        enabled: true,
+      });
     const result = { ok: true, node: response.node, ...(o.ingress ? { ingress: true } : {}) };
     let reporting = !o.wait;
     if (o.wait) {
@@ -186,6 +197,7 @@ async function installNodeIdentity(
       // A report from the new identity: wait for a report after the install began, not a replaced node's stale status.
       for (let i = 0; i < 30; i++) {
         const { nodes } = await request<{ nodes: { name: string; last_seen_at: string | null }[] }>(
+          rt,
           'GET',
           '/api/v1/nodes',
         );
@@ -197,11 +209,9 @@ async function installNodeIdentity(
         await new Promise((r) => setTimeout(r, 2000));
       }
       if (!reporting)
-        console.error(
-          `node ${name} has not reported yet; check \`docker logs tug-agent\` on the host`,
-        );
+        err(rt, `node ${name} has not reported yet; check \`docker logs tug-agent\` on the host`);
     }
-    if (printResult) print(o.wait ? { ...result, reporting } : result);
+    if (printResult) print(rt, o.wait ? { ...result, reporting } : result);
     return reporting;
   });
 }
@@ -216,12 +226,12 @@ export interface PlanDeps {
   pickOne: (question: string, labels: readonly string[], initial: number) => Promise<number>;
 }
 
-const realPlanDeps = (): PlanDeps => ({
-  interactive: canPrompt(),
-  hasDocker: (target) => hostHasDocker(target),
-  discover: discoverAddresses,
-  prompt: ask,
-  pickOne: (question, labels, initial) => terminalPicker.one(question, labels, initial),
+const realPlanDeps = (rt: CliRuntime): PlanDeps => ({
+  interactive: canPrompt(rt),
+  hasDocker: (target) => hostHasDocker(rt, target),
+  discover: (target) => discoverAddresses(rt, target),
+  prompt: prompter(rt),
+  pickOne: (question, labels, initial) => terminalPicker(rt).one(question, labels, initial),
 });
 
 /**
@@ -229,14 +239,16 @@ const realPlanDeps = (): PlanDeps => ({
  * ingress role are asked about, never assumed. Without a terminal nothing is probed or asked and only the plan is printed.
  */
 export async function planNodeAdd(
+  rt: CliRuntime,
   sshTarget: string,
   name: string,
   o: NodeIdentityOpts,
-  deps: PlanDeps = realPlanDeps(),
+  deps: PlanDeps = realPlanDeps(rt),
 ): Promise<void> {
   const { interactive, prompt } = deps;
   if (interactive && !o.installDocker && !deps.hasDocker(sshTarget))
     o.installDocker = await confirm(
+      rt,
       `Docker is not installed on ${sshTarget}. Install it now (needs root)?`,
       true,
       prompt,
@@ -262,11 +274,13 @@ export async function planNodeAdd(
   }
   if (interactive && o.ingress === undefined)
     o.ingress = await confirm(
+      rt,
       `Should ${name} handle ingress (managed Caddy on ports 80 and 443)?`,
       false,
       prompt,
     );
-  console.error(
+  err(
+    rt,
     formatNodePlan({
       name,
       ssh: sshTarget,
@@ -274,10 +288,10 @@ export async function planNodeAdd(
       probed: interactive,
       address: o.address,
       ingress: o.ingress,
-      image: resolveImage(o.image, o.buildLocalImage),
+      image: resolveImage(o.image, o.buildLocalImage, rt.version),
     }),
   );
-  if (interactive && !o.yes && !(await confirm(`Add ${name}?`, true, prompt)))
+  if (interactive && !o.yes && !(await confirm(rt, `Add ${name}?`, true, prompt)))
     throw new Error('cancelled; nothing was changed');
 }
 
@@ -285,28 +299,31 @@ export async function planNodeAdd(
  * A name for a node when the SSH host does not suggest one (an IP address): in a terminal ask for it, offering the
  * host's own hostname as the default. Without a terminal there is nobody to ask.
  */
-async function promptNodeName(sshTarget?: string): Promise<string | undefined> {
-  if (!canPrompt()) return undefined;
-  const suggestion = sshTarget ? remoteHostname(sshTarget) : undefined;
+async function promptNodeName(rt: CliRuntime, sshTarget?: string): Promise<string | undefined> {
+  if (!canPrompt(rt)) return undefined;
+  const suggestion = sshTarget ? remoteHostname(rt, sshTarget) : undefined;
   const fallback = suggestion && isValidNodeName(suggestion) ? suggestion : undefined;
   for (;;) {
-    const answer = (await ask(`Node name${fallback ? ` (${fallback})` : ''}: `)).trim() || fallback;
+    const answer =
+      (await prompter(rt)(`Node name${fallback ? ` (${fallback})` : ''}: `)).trim() || fallback;
     if (!answer) continue;
     if (isValidNodeName(answer)) return answer;
-    console.error(
+    err(
+      rt,
       'Use letters, numbers, dots, underscores or hyphens, starting with a letter or number.',
     );
   }
 }
 
 async function runNodeIdentity(
+  rt: CliRuntime,
   positional: { name?: string; ssh?: string },
   o: NodeIdentityOpts,
   mode: 'create' | 'replace',
   command: Command,
   repair = false,
 ): Promise<void> {
-  const cfg = await loadCfg();
+  const cfg = loadCfg(rt);
   const verb = repair ? 'node repair' : mode === 'create' ? 'node add' : 'node replace';
   if (o.select && o.all) throw new Error('--select and --all cannot be combined');
   if (o.all || o.select) {
@@ -314,7 +331,10 @@ async function runNodeIdentity(
       throw new Error(`${verb} --all/--select cannot be combined with a node or SSH target`);
     const results: { node: string; ok: boolean; reporting?: boolean; error?: string }[] = [];
     const names = o.select
-      ? await selectNodes(Object.keys(cfg.nodes).filter((name) => cfg.nodes[name].ssh))
+      ? await selectNodes(
+          rt,
+          Object.keys(cfg.nodes).filter((name) => cfg.nodes[name].ssh),
+        )
       : Object.keys(cfg.nodes);
     for (const name of names) {
       const settings = cfg.nodes[name];
@@ -323,19 +343,19 @@ async function runNodeIdentity(
       const merged = { ...o, name };
       applyConfigDefaults(command, merged, nodeSettings(cfg, name));
       try {
-        const reporting = await installNodeIdentity(target, name, mode, merged, repair, false);
+        const reporting = await installNodeIdentity(rt, target, name, mode, merged, repair, false);
         results.push({ node: name, ok: true, ...(merged.wait ? { reporting } : {}) });
       } catch (e) {
         results.push({ node: name, ok: false, error: errMessage(e) });
       }
     }
-    print({ results });
-    if (results.some((r) => !r.ok || r.reporting === false)) process.exitCode = 1;
+    print(rt, { results });
+    if (results.some((r) => !r.ok || r.reporting === false)) rt.exitCode = 1;
     return;
   }
   let name = positional.name ?? (positional.ssh ? inferNodeName(positional.ssh) : undefined);
-  if (!name && mode === 'replace') name = await selectNode();
-  if (!name && mode === 'create') name = await promptNodeName(positional.ssh);
+  if (!name && mode === 'replace') name = await selectNode(rt);
+  if (!name && mode === 'create') name = await promptNodeName(rt, positional.ssh);
   if (!name)
     throw new Error(
       mode === 'create'
@@ -352,10 +372,10 @@ async function runNodeIdentity(
     );
   if (mode === 'create') {
     if (o.agentControlUrl) normalizeControlUrl(o.agentControlUrl);
-    await transportFor(cfg, 'probe').then((t) => t.close()); // no questions about a host this CLI cannot enroll
-    await planNodeAdd(sshTarget, name, o);
+    await transportFor(rt, cfg, 'probe').then((t) => t.close()); // no questions about a host this CLI cannot enroll
+    await planNodeAdd(rt, sshTarget, name, o);
   }
-  if (!(await installNodeIdentity(sshTarget, name, mode, o, repair))) process.exitCode = 1;
+  if (!(await installNodeIdentity(rt, sshTarget, name, mode, o, repair))) rt.exitCode = 1;
 }
 
 /**
@@ -365,45 +385,54 @@ async function runNodeIdentity(
  * carried over unless one is given.
  */
 async function migrateNode(
+  rt: CliRuntime,
   sshTarget: string,
   name: string,
   o: NodeIdentityOpts,
   printResult = true,
 ): Promise<boolean> {
   if (!o.agentControlUrl) {
-    const legacy = (await runCapture('ssh', ['--', sshTarget, readLegacyControlUrlScript])).trim();
+    const legacy = (
+      await runCapture(rt, 'ssh', ['--', sshTarget, readLegacyControlUrlScript])
+    ).trim();
     if (legacy) {
-      console.error(`keeping the agent's connect URL ${legacy} from /etc/tug/agent.env`);
+      err(rt, `keeping the agent's connect URL ${legacy} from /etc/tug/agent.env`);
       o.agentControlUrl = legacy;
     }
   }
   // Everything that can fail before the agent is reinstalled is checked first: once the old agent is stopped, a node
   // that cannot be reinstalled (no credential, an http:// connect URL, an unreachable control) would be left down.
-  await withProgress(`Checking node ${name} before migrating`, async (progress) => {
-    const cfg = await loadCfg();
-    await transportFor(cfg, 'probe').then((t) => t.close());
-    assertImagePublished(resolveImage(o.image, o.buildLocalImage));
+  await withProgress(rt, `Checking node ${name} before migrating`, async (progress) => {
+    const cfg = loadCfg(rt);
+    await transportFor(rt, cfg, 'probe').then((t) => t.close());
+    assertPublished(rt, resolveImage(o.image, o.buildLocalImage, rt.version));
     const connectUrl = o.agentControlUrl ? normalizeControlUrl(o.agentControlUrl) : undefined;
-    await preflightRemote(sshTarget, { controlUrl: connectUrl ?? cfg.credential?.url, progress });
+    await preflightRemote(rt, sshTarget, {
+      controlUrl: connectUrl ?? cfg.credential?.url,
+      progress,
+    });
   });
   await withProgress(
+    rt,
     `Copying agent state of node ${name} into the ${AGENT_VOLUME} volume`,
     (progress) =>
       runStep(
+        rt,
         'ssh',
-        ['--', sshTarget, agentMigrateScript(resolveImage(o.image, o.buildLocalImage))],
+        ['--', sshTarget, agentMigrateScript(resolveImage(o.image, o.buildLocalImage, rt.version))],
         { progress },
       ),
   );
-  const reporting = await installNodeIdentity(sshTarget, name, 'create', o, false, false);
+  const reporting = await installNodeIdentity(rt, sshTarget, name, 'create', o, false, false);
   if (printResult)
-    print({
+    print(rt, {
       ok: true,
       node: name,
       ...(o.wait ? { reporting } : {}),
       leftover: AGENT_LEFTOVERS,
     });
-  console.error(
+  err(
+    rt,
     `node ${name}: the old ${LEGACY_AGENT_DIR} and /etc/tug are no longer used; remove them on the host once the node reports online`,
   );
   return reporting;
@@ -434,6 +463,7 @@ type UpgradeResult = {
  * (read from the running container) unchanged. A node already on the target image is skipped.
  */
 async function upgradeNode(
+  rt: CliRuntime,
   sshTarget: string,
   name: string,
   o: NodeUpgradeOpts,
@@ -443,7 +473,7 @@ async function upgradeNode(
     throw new Error(`node ${name} is not registered with control; \`tug node add\` enrolls it`);
   let current: AgentInstall;
   try {
-    current = parseAgentInspect(await runCapture('ssh', ['--', sshTarget, inspectAgentScript]));
+    current = parseAgentInspect(await runCapture(rt, 'ssh', ['--', sshTarget, inspectAgentScript]));
   } catch (e) {
     if (e instanceof SshHostKeyError) throw e;
     throw new Error(
@@ -451,17 +481,24 @@ async function upgradeNode(
       { cause: e },
     );
   }
-  const image = resolveImage(o.image ?? (o.to ? defaultImage(o.to) : undefined), o.buildLocalImage);
-  const targetId = parseImageId(await runCapture('ssh', ['--', sshTarget, imageIdScript(image)]));
+  const image = resolveImage(
+    o.image ?? (o.to ? defaultImage(o.to) : undefined),
+    o.buildLocalImage,
+    rt.version,
+  );
+  const targetId = parseImageId(
+    await runCapture(rt, 'ssh', ['--', sshTarget, imageIdScript(image)]),
+  );
   if (alreadyRunning(current.imageId, targetId, o.force) && !o.buildLocalImage) {
-    console.error(`node ${name} already runs ${image}; skipped (--force reinstalls it)`);
+    err(rt, `node ${name} already runs ${image}; skipped (--force reinstalls it)`);
     return { node: name, ok: true, upgraded: false };
   }
   const agentControlUrl = o.agentControlUrl ?? current.controlUrl;
   if (!o.agentControlUrl && current.controlUrl)
-    console.error(`node ${name}: keeping the agent's connect URL ${current.controlUrl}`);
-  console.error(`node ${name}: ${current.image} -> ${image}`);
+    err(rt, `node ${name}: keeping the agent's connect URL ${current.controlUrl}`);
+  err(rt, `node ${name}: ${current.image} -> ${image}`);
   const reporting = await installNodeIdentity(
+    rt,
     sshTarget,
     name,
     'create',
@@ -481,11 +518,12 @@ async function upgradeNode(
 
 /** `node upgrade`, also what `tug upgrade` runs for every configured node once control is upgraded. */
 export async function runNodeUpgrade(
+  rt: CliRuntime,
   positional: { name?: string; ssh?: string },
   o: NodeUpgradeOpts,
   command: Command,
 ): Promise<boolean> {
-  const cfg = await loadCfg();
+  const cfg = loadCfg(rt);
   if (o.select && o.all) throw new Error('--select and --all cannot be combined');
   if ((o.all || o.select) && (positional.name || positional.ssh))
     throw new Error('node upgrade --all/--select cannot be combined with a node or SSH target');
@@ -495,15 +533,18 @@ export async function runNodeUpgrade(
     );
   if (o.agentControlUrl) normalizeControlUrl(o.agentControlUrl);
   // Fail before touching any host: no credential, a control older than this CLI, or --to newer than the control.
-  const control = await transportFor(cfg, 'probe');
+  const control = await transportFor(rt, cfg, 'probe');
   await control.close();
   if (o.to)
-    assertNotAheadOfControl(o.to, (await request<{ v: string }>('GET', '/api/v1/version')).v);
-  const { nodes } = await request<{ nodes: { name: string }[] }>('GET', '/api/v1/nodes');
+    assertNotAheadOfControl(o.to, (await request<{ v: string }>(rt, 'GET', '/api/v1/version')).v);
+  const { nodes } = await request<{ nodes: { name: string }[] }>(rt, 'GET', '/api/v1/nodes');
   const registered = new Set(nodes.map((n) => n.name));
   if (o.all || o.select) {
     const names = o.select
-      ? await selectNodes(Object.keys(cfg.nodes).filter((name) => cfg.nodes[name].ssh))
+      ? await selectNodes(
+          rt,
+          Object.keys(cfg.nodes).filter((name) => cfg.nodes[name].ssh),
+        )
       : Object.keys(cfg.nodes);
     const results: UpgradeResult[] = [];
     for (const name of names) {
@@ -512,15 +553,15 @@ export async function runNodeUpgrade(
       const merged = { ...o, name };
       applyConfigDefaults(command, merged, nodeSettings(cfg, name));
       try {
-        results.push(await upgradeNode(target, name, merged, registered));
+        results.push(await upgradeNode(rt, target, name, merged, registered));
       } catch (e) {
         results.push({ node: name, ok: false, error: errMessage(e) });
       }
     }
-    print({ results });
+    print(rt, { results });
     return !results.some((r) => !r.ok || r.reporting === false);
   }
-  const name = positional.name ?? (await selectNode());
+  const name = positional.name ?? (await selectNode(rt));
   o.name = name;
   applyConfigDefaults(command, o, nodeSettings(cfg, name));
   const sshTarget = positional.ssh ?? (nodeSettings(cfg, name).ssh as string | undefined);
@@ -528,24 +569,28 @@ export async function runNodeUpgrade(
     throw new Error(
       `node upgrade needs an SSH target: pass <ssh-target> or set nodes.${name}.ssh in ${cfg.file}`,
     );
-  const result = await upgradeNode(sshTarget, name, o, registered);
-  print(result);
+  const result = await upgradeNode(rt, sshTarget, name, o, registered);
+  print(rt, result);
   return result.reporting !== false;
 }
 
 async function runNodeMigrate(
+  rt: CliRuntime,
   positional: { name?: string; ssh?: string },
   o: NodeIdentityOpts,
   command: Command,
 ): Promise<void> {
-  const cfg = await loadCfg();
+  const cfg = loadCfg(rt);
   if (o.select && o.all) throw new Error('--select and --all cannot be combined');
   if (o.all || o.select) {
     if (positional.name || positional.ssh)
       throw new Error('node migrate --all/--select cannot be combined with a node or SSH target');
     const results: { node: string; ok: boolean; reporting?: boolean; error?: string }[] = [];
     const names = o.select
-      ? await selectNodes(Object.keys(cfg.nodes).filter((name) => cfg.nodes[name].ssh))
+      ? await selectNodes(
+          rt,
+          Object.keys(cfg.nodes).filter((name) => cfg.nodes[name].ssh),
+        )
       : Object.keys(cfg.nodes);
     for (const name of names) {
       const target = cfg.nodes[name].ssh as string | undefined;
@@ -553,17 +598,17 @@ async function runNodeMigrate(
       const merged = { ...o, name };
       applyConfigDefaults(command, merged, nodeSettings(cfg, name));
       try {
-        const reporting = await migrateNode(target, name, merged, false);
+        const reporting = await migrateNode(rt, target, name, merged, false);
         results.push({ node: name, ok: true, ...(merged.wait ? { reporting } : {}) });
       } catch (e) {
         results.push({ node: name, ok: false, error: errMessage(e) });
       }
     }
-    print({ results });
-    if (results.some((r) => !r.ok || r.reporting === false)) process.exitCode = 1;
+    print(rt, { results });
+    if (results.some((r) => !r.ok || r.reporting === false)) rt.exitCode = 1;
     return;
   }
-  const name = positional.name ?? (await selectNode());
+  const name = positional.name ?? (await selectNode(rt));
   o.name = name;
   applyConfigDefaults(command, o, nodeSettings(cfg, name));
   const sshTarget = positional.ssh ?? (nodeSettings(cfg, name).ssh as string | undefined);
@@ -572,10 +617,10 @@ async function runNodeMigrate(
       `node migrate needs an SSH target: pass <ssh-target> or set nodes.${name}.ssh in ${cfg.file}`,
     );
   if (o.agentControlUrl) normalizeControlUrl(o.agentControlUrl);
-  if (!(await migrateNode(sshTarget, name, o))) process.exitCode = 1;
+  if (!(await migrateNode(rt, sshTarget, name, o))) rt.exitCode = 1;
 }
 
-export function registerNode(program: Command): void {
+export function registerNode(rt: CliRuntime, program: Command): void {
   const node = program.command('node').description('add, inspect, repair and remove nodes');
 
   addNodeIdentityOptions(
@@ -588,7 +633,7 @@ export function registerNode(program: Command): void {
       .option('--ingress', 'also make the node an ingress node (managed Caddy on ports 80/443)')
       .option('-y, --yes', 'do not ask for confirmation in a terminal'),
   ).action(async (ssh: string | undefined, o: NodeIdentityOpts, command: Command) =>
-    runNodeIdentity({ name: o.name, ssh }, o, 'create', command),
+    runNodeIdentity(rt, { name: o.name, ssh }, o, 'create', command),
   );
 
   for (const [verb, description, repair] of [
@@ -621,7 +666,7 @@ export function registerNode(program: Command): void {
           ssh: string | undefined,
           o: NodeIdentityOpts,
           command: Command,
-        ) => runNodeIdentity({ name, ssh }, o, 'replace', command, repair),
+        ) => runNodeIdentity(rt, { name, ssh }, o, 'replace', command, repair),
       );
   }
 
@@ -654,7 +699,7 @@ export function registerNode(program: Command): void {
         o: NodeUpgradeOpts,
         command: Command,
       ) => {
-        if (!(await runNodeUpgrade({ name, ssh }, o, command))) process.exitCode = 1;
+        if (!(await runNodeUpgrade(rt, { name, ssh }, o, command))) rt.exitCode = 1;
       },
     );
 
@@ -688,7 +733,7 @@ export function registerNode(program: Command): void {
         ssh: string | undefined,
         o: NodeIdentityOpts,
         command: Command,
-      ) => runNodeMigrate({ name, ssh }, { ...o, label: [] }, command),
+      ) => runNodeMigrate(rt, { name, ssh }, { ...o, label: [] }, command),
     );
 
   node
@@ -699,9 +744,9 @@ export function registerNode(program: Command): void {
     )
     .option('--json', 'print the raw API result as JSON')
     .action(async (o: { json?: boolean }) => {
-      const result = await request<{ nodes: NodeListing[] }>('GET', '/api/v1/nodes');
-      if (o.json) print(result);
-      else console.log(formatNodes(result.nodes));
+      const result = await request<{ nodes: NodeListing[] }>(rt, 'GET', '/api/v1/nodes');
+      if (o.json) print(rt, result);
+      else out(rt, formatNodes(result.nodes));
     });
 
   node
@@ -741,14 +786,15 @@ export function registerNode(program: Command): void {
         cmd: Command,
       ) => {
         if (!o.name) {
-          o.name = await promptNodeName();
+          o.name = await promptNodeName(rt);
           if (!o.name) throw new Error('node enroll needs --name');
-          applyConfigDefaults(cmd, o, nodeSettings(await loadCfg(), o.name));
+          applyConfigDefaults(cmd, o, nodeSettings(loadCfg(rt), o.name));
         }
         if (o.address !== undefined && !isNodeHost(o.address))
           throw new Error('address must be an IP address or hostname without a port');
         const connectUrl = o.agentControlUrl ? normalizeControlUrl(o.agentControlUrl) : undefined;
         const minted = await request<EnrollmentCredentialResponse>(
+          rt,
           'POST',
           '/api/v1/nodes/enrollment-credential',
           {
@@ -764,12 +810,16 @@ export function registerNode(program: Command): void {
           ...(connectUrl ? { connectUrl } : {}),
         };
         const joinKey = Buffer.from(JSON.stringify(keyPayload)).toString('base64url');
-        const command = dockerRunSnippet(resolveImage(o.image), joinKey, o.address);
+        const command = dockerRunSnippet(
+          resolveImage(o.image, false, rt.version),
+          joinKey,
+          o.address,
+        );
         const cloudInit = o.installDocker
           ? enrollmentCloudInit(await dockerBootstrap(), command)
           : undefined;
         if (o.json) {
-          print({
+          print(rt, {
             name: minted.name,
             expiresAt: minted.expiresAt,
             joinKey,
@@ -779,13 +829,14 @@ export function registerNode(program: Command): void {
           return;
         }
         if (cloudInit) {
-          process.stdout.write(cloudInit);
+          rt.stdout.write(cloudInit);
           return;
         }
-        console.log(
+        out(
+          rt,
           `# Join key for ${minted.name} valid until ${minted.expiresAt}, single use. Run on the fresh host:\n`,
         );
-        console.log(command);
+        out(rt, command);
       },
     );
 
@@ -802,9 +853,12 @@ export function registerNode(program: Command): void {
       async (name: string, o: { csr: string; mode: string; address?: string; label: string[] }) => {
         if (o.mode !== 'create' && o.mode !== 'replace')
           throw new Error("--mode must be 'create' or 'replace'");
-        const csr = o.csr === '-' ? await readStdin() : await fs.readFile(o.csr, 'utf8');
+        const csr =
+          o.csr === '-' ? await readStdin(rt) : await fs.readFile(resolvePath(rt, o.csr), 'utf8');
         print(
+          rt,
           await request<IdentityResponse>(
+            rt,
             'POST',
             `/api/v1/nodes/${encodeURIComponent(name)}/identity`,
             { csr, mode: o.mode, address: o.address, labels: o.label },
@@ -821,9 +875,10 @@ export function registerNode(program: Command): void {
       address = address || o.to || '';
       if (!address)
         throw new Error('node address needs an address; use --to when selecting a node');
-      name = await selectNode(name);
+      name = await selectNode(rt, name);
       return print(
-        await request('POST', `/api/v1/nodes/${encodeURIComponent(name)}/address`, { address }),
+        rt,
+        await request(rt, 'POST', `/api/v1/nodes/${encodeURIComponent(name)}/address`, { address }),
       );
     });
   node
@@ -833,9 +888,11 @@ export function registerNode(program: Command): void {
     )
     .action(async (name: string) =>
       print(
+        rt,
         await request(
+          rt,
           'POST',
-          `/api/v1/nodes/${encodeURIComponent(await selectNode(name))}/disable`,
+          `/api/v1/nodes/${encodeURIComponent(await selectNode(rt, name))}/disable`,
           {},
         ),
       ),
@@ -864,47 +921,58 @@ export function registerNode(program: Command): void {
         if (!o.teardown) {
           if (ssh || o.deleteData || o.yes)
             throw new Error('an SSH target, --delete-data and --yes need --teardown');
-          name = await selectNode(name);
+          name = await selectNode(rt, name);
           return print(
+            rt,
             await request(
+              rt,
               'DELETE',
               `/api/v1/nodes/${encodeURIComponent(name)}${o.force ? '?force=true' : ''}`,
             ),
           );
         }
-        name = await selectNode(name);
-        const cfg = await loadCfg();
+        name = await selectNode(rt, name);
+        const cfg = loadCfg(rt);
         const sshTarget = ssh ?? (nodeSettings(cfg, name).ssh as string | undefined);
         if (!sshTarget)
           throw new Error(
             `--teardown needs an SSH target: pass <ssh-target> or set nodes.${name}.ssh in ${cfg.file}`,
           );
         if (!o.yes) {
-          if (!canPrompt())
+          if (!canPrompt(rt))
             throw new Error(
               '--teardown deletes data on the host; pass -y to confirm without a terminal',
             );
-          console.error(
+          err(
+            rt,
             `This will stop the Tug agent on ${sshTarget}, remove its Tug containers and networks and delete the agent's identity (the ${AGENT_VOLUME} volume, and /etc/tug and /var/lib/tug on a host not yet migrated)${
               o.deleteData
                 ? ', and DELETE every project volume and the ingress certificates'
                 : ' (project volumes are kept)'
             }.`,
           );
-          if (!(await confirm('Continue?', false))) throw new Error('cancelled');
+          if (!(await confirm(rt, 'Continue?', false))) throw new Error('cancelled');
         }
         // The control record goes first: it refuses a node that is still placed in a current deployment before any
         // host is touched. A node control no longer knows is cleaned anyway, so a failed cleanup can be retried.
         let removed: unknown = { ok: true, node: name, alreadyRemoved: true };
         try {
-          removed = await request('DELETE', `/api/v1/nodes/${encodeURIComponent(name)}?force=true`);
+          removed = await request(
+            rt,
+            'DELETE',
+            `/api/v1/nodes/${encodeURIComponent(name)}?force=true`,
+          );
         } catch (error) {
           if (!/node not found/.test(errMessage(error))) throw error;
         }
-        await withProgress(`Cleaning node host ${sshTarget}`, async () => {
-          await runLocal('ssh', ['--', sshTarget, teardownScript(Boolean(o.deleteData))]);
+        await withProgress(rt, `Cleaning node host ${sshTarget}`, async () => {
+          await runLocal(rt, 'ssh', ['--', sshTarget, teardownScript(Boolean(o.deleteData))]);
         });
-        print({ ...(removed as object), teardown: sshTarget, deleteData: Boolean(o.deleteData) });
+        print(rt, {
+          ...(removed as object),
+          teardown: sshTarget,
+          deleteData: Boolean(o.deleteData),
+        });
       },
     );
 
@@ -915,14 +983,15 @@ export function registerNode(program: Command): void {
     )
     .option('--disable', 'stop acting as an ingress node')
     .action(async (name: string, o: { disable?: boolean }) => {
-      const target = await selectNode(name);
+      const target = await selectNode(rt, name);
       print(
-        await request('POST', `/api/v1/nodes/${encodeURIComponent(target)}/ingress`, {
+        rt,
+        await request(rt, 'POST', `/api/v1/nodes/${encodeURIComponent(target)}/ingress`, {
           enabled: !o.disable,
         }),
       );
       // Caddy starts on the node's next poll, so ports cannot be probed yet; tug never opens them either.
-      if (!o.disable) console.error(INGRESS_PORTS_HINT(target));
+      if (!o.disable) err(rt, INGRESS_PORTS_HINT(target));
     });
 }
 

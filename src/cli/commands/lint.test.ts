@@ -1,14 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { promisify } from 'node:util';
 import { lintComposeFile } from './lint.ts';
-
-const exec = promisify(execFile);
-const entry = path.resolve('src/cli.ts');
+import { execCli } from '../../../tests/cli-inprocess.ts';
 
 const writeFile = async (dir: string, name: string, text: string): Promise<string> => {
   const file = path.join(dir, name);
@@ -43,7 +39,7 @@ test('lintComposeFile passes a well-written file and reports its path', async ()
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-lint-'));
   try {
     const file = await writeFile(dir, 'compose.yml', GOOD);
-    const result = await lintComposeFile(file);
+    const result = await lintComposeFile(file, process.cwd());
     assert.deepEqual(
       [result.file, result.errors],
       [file, []],
@@ -51,6 +47,7 @@ test('lintComposeFile passes a well-written file and reports its path', async ()
     );
     const normalized = await lintComposeFile(
       await writeFile(dir, 'short.yml', GOOD.replace('      - "8080:80"\n', '      - "8080:80"\n')),
+      process.cwd(),
     );
     assert.deepEqual(normalized.errors, [], 'short syntax is what operators write');
   } finally {
@@ -80,7 +77,7 @@ volumes:
       persistant: true
 `,
     );
-    const result = await lintComposeFile(file);
+    const result = await lintComposeFile(file, process.cwd());
     assert.ok(
       result.errors.some((e) => e === 'web: x-tug.health.type must be docker, tcp or http'),
       'the health type is checked against its enum',
@@ -101,16 +98,29 @@ volumes:
 test('lint reports an unreadable, invalid or empty file instead of throwing', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-lint-'));
   try {
-    const missing = await lintComposeFile(path.join(dir, 'nope.yml'));
+    const missing = await lintComposeFile(path.join(dir, 'nope.yml'), process.cwd());
     assert.equal(missing.errors.length, 1, 'one finding for a missing file');
     assert.match(
       missing.errors[0],
       /could not be read/,
       'the finding says the file could not be read',
     );
-    const broken = await lintComposeFile(await writeFile(dir, 'broken.yml', 'services: [unclosed'));
+    const relative = await lintComposeFile('nope.yml', dir);
+    assert.match(
+      relative.errors[0],
+      /open 'nope\.yml'/,
+      'a file named relative to the working directory is reported as it was typed, not as an absolute path',
+    );
+    assert.ok(
+      !relative.errors[0].includes(dir),
+      'the finding must not leak the directory the path was resolved against',
+    );
+    const broken = await lintComposeFile(
+      await writeFile(dir, 'broken.yml', 'services: [unclosed'),
+      process.cwd(),
+    );
     assert.match(broken.errors[0], /is not valid YAML/, 'a YAML syntax error is a lint finding');
-    const empty = await lintComposeFile(await writeFile(dir, 'empty.yml', ''));
+    const empty = await lintComposeFile(await writeFile(dir, 'empty.yml', ''), process.cwd());
     assert.deepEqual(
       empty.errors,
       ['compose file must define services'],
@@ -125,7 +135,7 @@ test('tug lint exits nonzero with findings on stderr and prints ok on a passing 
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-lint-'));
   try {
     await writeFile(dir, 'compose.yml', GOOD);
-    const okRun = await exec(process.execPath, [entry, 'lint'], {
+    const okRun = await execCli(['lint'], {
       cwd: dir,
       env: { ...process.env },
     });
@@ -136,7 +146,7 @@ test('tug lint exits nonzero with findings on stderr and prints ok on a passing 
       'bad.yml',
       'services:\n  web:\n    image: nginx\n    x-tug:\n      replicas: 0\n',
     );
-    const error = (await exec(process.execPath, [entry, 'lint', '-f', 'bad.yml'], {
+    const error = (await execCli(['lint', '-f', 'bad.yml'], {
       cwd: dir,
       env: { ...process.env },
     }).catch((e: Error & { stdout?: string; stderr?: string }) => e)) as Error & {
@@ -164,14 +174,10 @@ test('tug lint --json prints a machine-readable result and no human summary', as
       'bad.yml',
       'services:\n  web:\n    image: nginx\n    x-tug:\n      health:\n        type: htp\n',
     );
-    const { stdout } = await exec(
-      process.execPath,
-      [entry, 'lint', '--file', 'bad.yml', '--json'],
-      {
-        cwd: dir,
-        env: { ...process.env },
-      },
-    ).catch((e: Error & { stdout?: string }) => e as never);
+    const { stdout } = await execCli(['lint', '--file', 'bad.yml', '--json'], {
+      cwd: dir,
+      env: { ...process.env },
+    }).catch((e: Error & { stdout?: string }) => e as never);
     const result = JSON.parse(String(stdout));
     assert.deepEqual(
       { ok: result.ok, file: path.basename(result.file), errors: result.errors },
@@ -185,7 +191,7 @@ test('tug lint --json prints a machine-readable result and no human summary', as
     const good = await writeFile(dir, 'compose.yml', GOOD);
     const ok = JSON.parse(
       (
-        await exec(process.execPath, [entry, 'lint', '--json'], {
+        await execCli(['lint', '--json'], {
           cwd: dir,
           env: { ...process.env },
         }).catch((e: Error & { stdout?: string }) => e as never)
@@ -212,7 +218,7 @@ test('the tug.yml file setting defaults the file lint looks at', async () => {
     await writeFile(dir, 'compose.yml', 'services:\n  web:\n    x-tug: 5\n');
     const alt = await writeFile(dir, 'compose.alt.yml', GOOD);
     await writeFile(dir, 'tug.yml', 'file: compose.alt.yml\n');
-    const { stdout } = await exec(process.execPath, [entry, 'lint', '--json'], {
+    const { stdout } = await execCli(['lint', '--json'], {
       cwd: dir,
       env: { ...process.env },
     });
@@ -236,7 +242,7 @@ test('lint reports env_file, which tug deploy no longer reads, and names the imp
       'compose.yaml',
       'services:\n  web:\n    image: nginx\n    env_file: app.env\n  db:\n    image: mariadb\n',
     );
-    const result = await lintComposeFile(file);
+    const result = await lintComposeFile(file, process.cwd());
     assert.equal(result.errors.length, 1, 'only the service that uses env_file is reported');
     assert.match(
       result.errors[0],

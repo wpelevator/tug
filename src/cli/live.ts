@@ -1,4 +1,4 @@
-import { EventEmitter } from 'node:events';
+import type { EventEmitter } from 'node:events';
 import type { Readable, Writable } from 'node:stream';
 
 import { LIVE_WINDOW_BYTES, liveOutputCost } from '../protocol.ts';
@@ -99,9 +99,10 @@ export type CliLiveStdin = Readable & {
 };
 export type CliLiveStdout = Writable & { isTTY?: boolean; columns?: number; rows?: number };
 export interface CliLiveIO {
-  stdin?: CliLiveStdin;
-  stdout?: CliLiveStdout;
-  stderr?: Writable;
+  stdin: CliLiveStdin;
+  stdout: CliLiveStdout;
+  stderr: Writable;
+  /** Where SIGINT is heard; the CLI passes its runtime's signals. */
   signals?: EventEmitter;
   signal?: AbortSignal;
   /** Renders a `ps` or `inspect` result; defaults to indented JSON. */
@@ -129,12 +130,9 @@ const STDIN_LOW_WATER_BYTES = 64 * 1024;
 export async function runCliLive(
   request: LiveRequest,
   transport: CliLiveTransport,
-  io: CliLiveIO = {},
+  io: CliLiveIO,
 ): Promise<number> {
-  const stdin = io.stdin ?? process.stdin;
-  const stdout = io.stdout ?? process.stdout;
-  const stderr = io.stderr ?? process.stderr;
-  const signals = io.signals ?? process;
+  const { stdin, stdout, stderr, signals } = io;
   const controller = new AbortController();
   let session: CliLiveSession | undefined;
   let complete = false;
@@ -255,7 +253,7 @@ export async function runCliLive(
     }
     throw new CliLiveError('live session disconnected before exit');
   };
-  signals.on('SIGINT', cancel);
+  signals?.on('SIGINT', cancel);
   io.signal?.addEventListener('abort', cancel, { once: true });
   stdout.on('error', onStreamError);
   stderr.on('error', onStreamError);
@@ -318,7 +316,7 @@ export async function runCliLive(
     return code;
   } finally {
     complete = true;
-    signals.off('SIGINT', cancel);
+    signals?.off('SIGINT', cancel);
     io.signal?.removeEventListener('abort', cancel);
     stdout.off('resize', resize);
     if (inputAttached) {

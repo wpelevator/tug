@@ -82,6 +82,8 @@ export interface BuildImageOptions {
   service: string;
   buildSpec: string | BuildSpec;
   imageRef: string;
+  /** The environment `docker build` runs in; default this process's. */
+  env?: NodeJS.ProcessEnv;
 }
 
 export async function buildImage({
@@ -89,6 +91,7 @@ export async function buildImage({
   service,
   buildSpec,
   imageRef,
+  env,
 }: BuildImageOptions): Promise<void> {
   const buildPath = typeof buildSpec === 'string' ? buildSpec : buildSpec?.context || '.';
   const dockerfilePath =
@@ -106,5 +109,5 @@ export async function buildImage({
     throw new Error(`build context escapes uploaded root for ${service}`);
   if (!(await exists(fullContext)))
     throw new Error(`build context not found for ${service}: ${buildPath}`);
-  await run('docker', ['build', ...dockerfile, '-t', imageRef, fullContext]);
+  await run('docker', ['build', ...dockerfile, '-t', imageRef, fullContext], { env });
 }

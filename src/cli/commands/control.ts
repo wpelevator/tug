@@ -1,5 +1,4 @@
 import fsp from 'node:fs/promises';
-import path from 'node:path';
 import { withProgress } from '../progress.ts';
 import { formatBytes } from './backup.ts';
 import { runProcess, runStep, SshHostKeyError, sshHostKeyHint, STAGE_MARKER } from '../process.ts';
@@ -23,7 +22,7 @@ import {
   stopControlScript,
 } from '../upgrade.ts';
 import type { ControlInstall } from '../upgrade.ts';
-import { assertImagePublished, defaultImage, resolveImage } from '../../images/image.ts';
+import { defaultImage, resolveImage } from '../../images/image.ts';
 import { decodeCredential, fingerprintPem, writeFileDurable } from '../../pki.ts';
 import { loadTemplate } from '../load-template.ts';
 import { errMessage } from '../../errors.ts';
@@ -40,7 +39,13 @@ import {
   upload,
 } from './context.ts';
 import type { InstallOpts } from './context.ts';
-import { bootstrapDocker, hostHasDocker, preflightRemote, transferTugImage } from './host.ts';
+import {
+  assertPublished,
+  bootstrapDocker,
+  hostHasDocker,
+  preflightRemote,
+  transferTugImage,
+} from './host.ts';
 import { importCredential } from './init.ts';
 import {
   CONTROL_LEFTOVERS,
@@ -49,6 +54,8 @@ import {
   controlGuardScript,
   controlMigrateScript,
 } from '../migrate.ts';
+import { out, err, resolvePath } from '../runtime.ts';
+import type { CliRuntime } from '../runtime.ts';
 
 const PREVIEW_NOTE =
   'This only checked the backup and changed nothing; add --confirm to restore it.';
@@ -84,6 +91,7 @@ interface SetupOpts extends InstallOpts {
 
 /** Replaces the control container with one running `image` on the same volume; the data is never touched. */
 async function installControlContainer(
+  rt: CliRuntime,
   sshTarget: string,
   plan: Omit<ControlInstall, 'imageId'>,
   progress: StepProgress,
@@ -101,18 +109,19 @@ async function installControlContainer(
     MARKER: STAGE_MARKER,
     CONTAINER_SH: sh(CONTROL_CONTAINER),
   });
-  await runStep('ssh', ['--', sshTarget, remote], { progress });
+  await runStep(rt, 'ssh', ['--', sshTarget, remote], { progress });
 }
 
 /** Running `control setup` over an existing control rebuilds it from this run's flags alone; say what that changes. */
 async function warnWhenSetupChangesInstall(
+  rt: CliRuntime,
   sshTarget: string,
   plan: { controlUrl: string; port: number; extraSans: string[] },
 ): Promise<void> {
   let existing: ControlInstall;
   try {
     existing = parseControlInspect(
-      await runCapture('ssh', ['--', sshTarget, inspectControlScript]),
+      await runCapture(rt, 'ssh', ['--', sshTarget, inspectControlScript]),
     );
   } catch {
     return; // nothing installed yet (or not by setup): there is nothing to compare
@@ -129,7 +138,8 @@ async function warnWhenSetupChangesInstall(
       : []),
   ];
   if (changes.length)
-    console.error(
+    err(
+      rt,
       `note: control is already installed on ${sshTarget} and this run changes its settings (${changes.join('; ')}); to move to a new release and keep them, use \`tug control upgrade\``,
     );
 }
@@ -144,11 +154,11 @@ interface UpgradeOpts {
 }
 
 /** The control's own version, retried while the container finishes starting; undefined without a credential or an answer. */
-async function waitForControlVersion(): Promise<string | undefined> {
-  if (!(await loadCfg()).credential) return undefined;
+async function waitForControlVersion(rt: CliRuntime): Promise<string | undefined> {
+  if (!loadCfg(rt).credential) return undefined;
   for (let i = 0; i < 15; i++) {
     try {
-      return (await request<{ v: string }>('GET', '/api/v1/version')).v;
+      return (await request<{ v: string }>(rt, 'GET', '/api/v1/version')).v;
     } catch {
       await new Promise((r) => setTimeout(r, 1000));
     }
@@ -163,10 +173,11 @@ async function waitForControlVersion(): Promise<string | undefined> {
  * the CA is compared before and after.
  */
 export async function runControlUpgrade(
+  rt: CliRuntime,
   sshTargetArg: string | undefined,
   o: UpgradeOpts,
 ): Promise<boolean> {
-  const cfg = await loadCfg();
+  const cfg = loadCfg(rt);
   const sshTarget = sshTargetArg ?? cfg.controlSsh;
   if (!sshTarget)
     throw new Error(
@@ -180,11 +191,15 @@ export async function runControlUpgrade(
     );
   const image = o.rollback
     ? ROLLBACK_TAG
-    : resolveImage(o.image ?? (o.to ? defaultImage(o.to) : undefined), o.buildLocalImage);
-  if (!o.rollback) assertImagePublished(image);
-  return withProgress(`Upgrading control on ${sshTarget}`, async (progress) => {
+    : resolveImage(
+        o.image ?? (o.to ? defaultImage(o.to) : undefined),
+        o.buildLocalImage,
+        rt.version,
+      );
+  if (!o.rollback) assertPublished(rt, image);
+  return withProgress(rt, `Upgrading control on ${sshTarget}`, async (progress) => {
     progress.stage(`Reading the control installation on ${sshTarget}`);
-    const inspection = await runCapture('ssh', ['--', sshTarget, inspectControlScript]).catch(
+    const inspection = await runCapture(rt, 'ssh', ['--', sshTarget, inspectControlScript]).catch(
       (e: unknown) => {
         if (e instanceof SshHostKeyError) throw e;
         throw new Error(
@@ -194,16 +209,20 @@ export async function runControlUpgrade(
       },
     );
     const current = parseControlInspect(inspection);
-    if (o.rollback) await runCapture('ssh', ['--', sshTarget, rollbackImageScript]);
-    const targetId = parseImageId(await runCapture('ssh', ['--', sshTarget, imageIdScript(image)]));
+    if (o.rollback) await runCapture(rt, 'ssh', ['--', sshTarget, rollbackImageScript]);
+    const targetId = parseImageId(
+      await runCapture(rt, 'ssh', ['--', sshTarget, imageIdScript(image)]),
+    );
     if (alreadyRunning(current.imageId, targetId, o.force) && !o.buildLocalImage) {
-      console.error(
+      err(
+        rt,
         `control on ${sshTarget} already runs ${image}; nothing to do (--force recreates it)`,
       );
-      print({ ok: true, sshTarget, image, upgraded: false });
+      print(rt, { ok: true, sshTarget, image, upgraded: false });
       return true;
     }
-    console.error(
+    err(
+      rt,
       [
         o.rollback ? 'Control rollback plan' : 'Control upgrade plan',
         `  host:        ${sshTarget}`,
@@ -222,51 +241,55 @@ export async function runControlUpgrade(
       ].join('\n'),
     );
     if (
-      canPrompt() &&
+      canPrompt(rt) &&
       !o.yes &&
-      !(await confirm(`${o.rollback ? 'Roll back' : 'Upgrade'} control?`))
+      !(await confirm(rt, `${o.rollback ? 'Roll back' : 'Upgrade'} control?`))
     )
       throw new Error('cancelled; nothing was changed');
     progress.stage(`Checking control host ${sshTarget}`);
-    await preflightRemote(sshTarget, {
+    await preflightRemote(rt, sshTarget, {
       ports: [...new Set(current.bindings.map(({ port }) => port))],
       minDiskMb: 2048,
       progress,
     });
-    const runImage = o.buildLocalImage ? await transferTugImage(sshTarget, image, progress) : image;
+    const runImage = o.buildLocalImage
+      ? await transferTugImage(rt, sshTarget, image, progress)
+      : image;
     progress.stage(`Checking control data on ${sshTarget}`);
     // The guard runs first: on a legacy host it refuses with the migrate hint before anything creates the volume.
-    await runStep('ssh', ['--', sshTarget, controlGuardScript(runImage)], { progress });
+    await runStep(rt, 'ssh', ['--', sshTarget, controlGuardScript(runImage)], { progress });
     // Read by image ID: the running container's tag may since name another image, and the ID is always on the host.
     const before = fingerprintPem(
-      await runCapture('ssh', ['--', sshTarget, readControlCaScript(current.imageId)]),
+      await runCapture(rt, 'ssh', ['--', sshTarget, readControlCaScript(current.imageId)]),
     );
     const runImageId = parseImageId(
-      await runCapture('ssh', ['--', sshTarget, imageIdScript(runImage)]),
+      await runCapture(rt, 'ssh', ['--', sshTarget, imageIdScript(runImage)]),
     );
     if (!o.rollback && rollbackTagNeeded(current.imageId, runImageId)) {
       progress.stage(`Keeping ${current.image} as ${ROLLBACK_TAG}`);
-      await runStep('ssh', ['--', sshTarget, rollbackTagScript(current.imageId)], { progress });
+      await runStep(rt, 'ssh', ['--', sshTarget, rollbackTagScript(current.imageId)], { progress });
     }
     progress.stage(`Replacing control on ${sshTarget}`);
-    await installControlContainer(sshTarget, { ...current, image: runImage }, progress);
+    await installControlContainer(rt, sshTarget, { ...current, image: runImage }, progress);
     const after = fingerprintPem(
-      await runCapture('ssh', ['--', sshTarget, readControlCaScript(runImage)]),
+      await runCapture(rt, 'ssh', ['--', sshTarget, readControlCaScript(runImage)]),
     );
     if (after !== before)
       throw new Error(
         `control's CA changed from ${before} to ${after} during the upgrade; inspect /data/pki on ${sshTarget} before using it`,
       );
     progress.stage('Waiting for control to answer');
-    const version = await waitForControlVersion();
+    const version = await waitForControlVersion(rt);
     if (!version)
-      console.error(
+      err(
+        rt,
         `control restarted but did not answer yet (or no credential is configured); check \`tug doctor\` and \`docker logs ${CONTROL_CONTAINER}\` on ${sshTarget}`,
       );
-    console.error(
+    err(
+      rt,
       `control now runs ${runImage}${version ? ` (version ${version})` : ''}; match the agents next with \`tug node upgrade --all\``,
     );
-    print({
+    print(rt, {
       ok: true,
       sshTarget,
       image: runImage,
@@ -278,7 +301,7 @@ export async function runControlUpgrade(
 }
 
 /** `control setup`, also registered as the top-level shortcut `setup`. */
-function addSetup(parent: Command, description: string): void {
+function addSetup(rt: CliRuntime, parent: Command, description: string): void {
   parent
     .command('setup <sshTarget>')
     .description(description)
@@ -315,26 +338,29 @@ function addSetup(parent: Command, description: string): void {
     )
     .option('-y, --yes', 'do not ask for confirmation in a terminal')
     .action(async (sshTarget: string, o: SetupOpts, command: Command) => {
-      const cfg = await loadCfg();
+      const cfg = loadCfg(rt);
       if (!o.import && !o.credentialOut)
         throw new Error('--no-import needs --credential-out, or the root credential would be lost');
       // The control URL clients use: --control-url, TUG_CONTROL_URL or the config's controlUrl, else the SSH target's host
       // and the published port. Clients verify a name generated from the CA, so this is only an address.
       const controlUrl = cfg.requestedControlUrl ?? defaultControlUrl(sshTarget, o.port);
-      console.error(
+      err(
+        rt,
         `control URL: ${controlUrl} (${cfg.requestedControlUrl ? 'from --control-url, TUG_CONTROL_URL or the config file' : 'from the SSH target and --port'}); clients connect there by default`,
       );
-      const interactive = canPrompt();
+      const interactive = canPrompt(rt);
       let missingDocker = false;
-      if (!o.installDocker && interactive && !hostHasDocker(sshTarget)) {
+      if (!o.installDocker && interactive && !hostHasDocker(rt, sshTarget)) {
         missingDocker = true;
         o.installDocker = await confirm(
+          rt,
           `Docker is not installed on ${sshTarget}. Install it now (needs root)?`,
         );
       }
-      const image = resolveImage(o.image, o.buildLocalImage);
-      assertImagePublished(image);
-      console.error(
+      const image = resolveImage(o.image, o.buildLocalImage, rt.version);
+      assertPublished(rt, image);
+      err(
+        rt,
         [
           'Control plan',
           `  host:        ${sshTarget}`,
@@ -345,33 +371,34 @@ function addSetup(parent: Command, description: string): void {
           `  credential:  ${[o.import ? 'imported into the local config' : '', o.credentialOut ? `written to ${o.credentialOut}` : ''].filter(Boolean).join(' and ')}`,
         ].join('\n'),
       );
-      if (interactive && !o.yes && !(await confirm('Install the control plane?')))
+      if (interactive && !o.yes && !(await confirm(rt, 'Install the control plane?')))
         throw new Error('cancelled; nothing was changed');
-      return withProgress(`Preparing control on ${sshTarget}`, async (progress) => {
+      return withProgress(rt, `Preparing control on ${sshTarget}`, async (progress) => {
         if (o.installDocker) {
           progress.stage(`Installing Docker on ${sshTarget}`);
-          await bootstrapDocker(sshTarget, progress);
+          await bootstrapDocker(rt, sshTarget, progress);
         }
         progress.stage(`Checking control host ${sshTarget}`);
-        await preflightRemote(sshTarget, {
+        await preflightRemote(rt, sshTarget, {
           ports: [Number(o.port)],
           minDiskMb: 2048,
           progress,
         });
-        await warnWhenSetupChangesInstall(sshTarget, {
+        await warnWhenSetupChangesInstall(rt, sshTarget, {
           controlUrl,
           port: Number(o.port),
           extraSans: o.extraSan,
         });
         const runImage = o.buildLocalImage
-          ? await transferTugImage(sshTarget, image, progress)
+          ? await transferTugImage(rt, sshTarget, image, progress)
           : image;
         // Before anything is written: a control host that still keeps its data in the old directory must migrate first,
         // or a fresh control would create a second CA on an empty volume (--recover-root included).
         progress.stage(`Checking control data on ${sshTarget}`);
-        await runStep('ssh', ['--', sshTarget, controlGuardScript(runImage)], { progress });
+        await runStep(rt, 'ssh', ['--', sshTarget, controlGuardScript(runImage)], { progress });
         progress.stage(`Installing control on ${sshTarget}`);
         await installControlContainer(
+          rt,
           sshTarget,
           {
             image: runImage,
@@ -384,10 +411,11 @@ function addSetup(parent: Command, description: string): void {
         // Upgrades never reissue root: fresh installs create it, `--recover-root` replaces its key. Output goes straight to files.
         const issue = `docker exec ${sh(CONTROL_CONTAINER)} node dist/main.js control issue-credential --name root --role admin${o.recoverRoot ? ' --replace' : ''}`;
         progress.stage(`Issuing root credential on ${sshTarget}`);
-        const out = await runProcess('ssh', ['--', sshTarget, issue], { capture: true });
+        const out = await runProcess(rt, 'ssh', ['--', sshTarget, issue], { capture: true });
         if (out.status !== 0) {
           if (!o.recoverRoot && /already used/.test(String(out.stderr)))
-            console.error(
+            err(
+              rt,
               'control already has a root credential; upgrade complete (pass --recover-root to replace it)',
             );
           else
@@ -405,6 +433,7 @@ function addSetup(parent: Command, description: string): void {
           // Fail closed before any local write: a credential for a CA the control did not persist is the
           // control-rewrote-credentials incident exactly, and importing it silently breaks every later CLI call.
           const persisted = await runProcess(
+            rt,
             'ssh',
             ['--', sshTarget, `docker exec ${sh(CONTROL_CONTAINER)} cat /data/pki/ca.crt`],
             { capture: true },
@@ -429,7 +458,8 @@ function addSetup(parent: Command, description: string): void {
             onDiskError = errMessage(e);
           }
           if (!onDiskFp)
-            console.error(
+            err(
+              rt,
               `note: skipped the CA-consistency check — could not read the control's persisted CA (${onDiskError})`,
             );
           else if (issuedFp !== onDiskFp)
@@ -437,18 +467,18 @@ function addSetup(parent: Command, description: string): void {
               `the issued root credential is signed by CA ${issuedFp}, but the control persisted CA ${onDiskFp}; refusing to write local state — inspect /data/pki on ${sshTarget}`,
             );
           if (o.credentialOut) {
-            await writeFileDurable(o.credentialOut, text, 0o600);
-            console.error(`root credential written to ${o.credentialOut}`);
+            await writeFileDurable(resolvePath(rt, o.credentialOut), text, 0o600);
+            err(rt, `root credential written to ${o.credentialOut}`);
           }
           if (o.import) {
             const { controlUrl: connectUrl, project } = command.optsWithGlobals<{
               controlUrl?: string;
               project?: string;
             }>();
-            await importCredential(cfg, text, { controlUrl: connectUrl, project });
+            await importCredential(rt, cfg, text, { controlUrl: connectUrl, project });
           }
         }
-        print({ ok: true, sshTarget, url: controlUrl });
+        print(rt, { ok: true, sshTarget, url: controlUrl });
       });
     });
 }
@@ -463,17 +493,19 @@ interface ContainerOpts {
  * back the state on disk (after `control restore`, the restored one).
  */
 export async function runControlContainer(
+  rt: CliRuntime,
   action: 'stop' | 'restart',
   sshTargetArg: string | undefined,
   o: ContainerOpts,
 ): Promise<void> {
-  const cfg = await loadCfg();
+  const cfg = loadCfg(rt);
   const sshTarget = sshTargetArg ?? cfg.controlSsh;
   if (!sshTarget)
     throw new Error(
       `control ${action} needs the control host: pass <ssh-target> or set controlSsh in ${cfg.file}`,
     );
-  console.error(
+  err(
+    rt,
     [
       action === 'stop' ? 'Control stop plan' : 'Control restart plan',
       `  host:      ${sshTarget}`,
@@ -487,30 +519,33 @@ export async function runControlContainer(
     ].join('\n'),
   );
   if (
-    canPrompt() &&
+    canPrompt(rt) &&
     !o.yes &&
-    !(await confirm(`${action === 'stop' ? 'Stop' : 'Restart'} control?`))
+    !(await confirm(rt, `${action === 'stop' ? 'Stop' : 'Restart'} control?`))
   )
     throw new Error('cancelled; nothing was changed');
   await withProgress(
+    rt,
     `${action === 'stop' ? 'Stopping' : 'Restarting'} control on ${sshTarget}`,
     async (progress) => {
       await runStep(
+        rt,
         'ssh',
         ['--', sshTarget, action === 'stop' ? stopControlScript : restartControlScript],
         { progress },
       );
       if (action === 'stop') {
-        print({ ok: true, sshTarget, container: CONTROL_CONTAINER, stopped: true });
+        print(rt, { ok: true, sshTarget, container: CONTROL_CONTAINER, stopped: true });
         return;
       }
       progress.stage('Waiting for control to answer');
-      const version = await waitForControlVersion();
+      const version = await waitForControlVersion(rt);
       if (!version)
-        console.error(
+        err(
+          rt,
           `control restarted but did not answer yet (or no credential is configured); check \`tug doctor\` and \`docker logs ${CONTROL_CONTAINER}\` on ${sshTarget}`,
         );
-      print({
+      print(rt, {
         ok: true,
         sshTarget,
         container: CONTROL_CONTAINER,
@@ -525,18 +560,17 @@ const RESTART_NOTE =
   'control must restart to use the restored state: run `tug control restart [<ssh-target>]` (the SSH target defaults to controlSsh) with your original operator credential';
 
 /** A restore that wants a restart names the command that does it. */
-function noteRestart(result: unknown): void {
-  if ((result as { restartRequired?: boolean } | null)?.restartRequired)
-    console.error(RESTART_NOTE);
+function noteRestart(rt: CliRuntime, result: unknown): void {
+  if ((result as { restartRequired?: boolean } | null)?.restartRequired) err(rt, RESTART_NOTE);
 }
 
-export function registerControl(program: Command): void {
+export function registerControl(rt: CliRuntime, program: Command): void {
   const description =
     'install the control plane on a Docker-capable host over SSH and import the root credential into the local config; it listens for mTLS only, so front it with TCP passthrough rather than a terminating proxy';
   const control = program
     .command('control')
     .description('install, back up and restore the control plane');
-  addSetup(control, description);
+  addSetup(rt, control, description);
   control
     .command('upgrade [sshTarget]')
     .description(
@@ -555,7 +589,7 @@ export function registerControl(program: Command): void {
     .option('--force', 'recreate the container even when it already runs the target image')
     .option('-y, --yes', 'do not ask for confirmation in a terminal')
     .action(async (sshTarget: string | undefined, o: UpgradeOpts) => {
-      if (!(await runControlUpgrade(sshTarget, o))) process.exitCode = 1;
+      if (!(await runControlUpgrade(rt, sshTarget, o))) rt.exitCode = 1;
     });
   control
     .command('stop [sshTarget]')
@@ -564,7 +598,7 @@ export function registerControl(program: Command): void {
     )
     .option('-y, --yes', 'do not ask for confirmation in a terminal')
     .action(async (sshTarget: string | undefined, o: ContainerOpts) =>
-      runControlContainer('stop', sshTarget, o),
+      runControlContainer(rt, 'stop', sshTarget, o),
     );
   control
     .command('restart [sshTarget]')
@@ -573,7 +607,7 @@ export function registerControl(program: Command): void {
     )
     .option('-y, --yes', 'do not ask for confirmation in a terminal')
     .action(async (sshTarget: string | undefined, o: ContainerOpts) =>
-      runControlContainer('restart', sshTarget, o),
+      runControlContainer(rt, 'restart', sshTarget, o),
     );
   control
     .command('migrate <sshTarget>')
@@ -581,15 +615,18 @@ export function registerControl(program: Command): void {
       `move the control data of a control plane installed before it lived in a Docker volume from ${LEGACY_CONTROL_DIR} into the ${CONTROL_VOLUME} volume and restart control on it, keeping its image, URL and port. Run it before the next control setup on such a host, which refuses until then`,
     )
     .action(async (sshTarget: string) =>
-      withProgress(`Migrating control data on ${sshTarget}`, async (progress) => {
-        await runStep('ssh', ['--', sshTarget, controlMigrateScript(STAGE_MARKER)], { progress });
-        console.error(
+      withProgress(rt, `Migrating control data on ${sshTarget}`, async (progress) => {
+        await runStep(rt, 'ssh', ['--', sshTarget, controlMigrateScript(STAGE_MARKER)], {
+          progress,
+        });
+        err(
+          rt,
           `${LEGACY_CONTROL_DIR} is no longer used; remove it on ${sshTarget} once control is confirmed healthy (it holds a copy of the master key and the CA)`,
         );
-        print({ ok: true, sshTarget, volume: CONTROL_VOLUME, leftover: CONTROL_LEFTOVERS });
+        print(rt, { ok: true, sshTarget, volume: CONTROL_VOLUME, leftover: CONTROL_LEFTOVERS });
       }),
     );
-  addSetup(program, 'shortcut for `tug control setup`');
+  addSetup(rt, program, 'shortcut for `tug control setup`');
   const backup = control
     .command('backup')
     .description(
@@ -617,31 +654,39 @@ export function registerControl(program: Command): void {
         if (!archive) {
           // Only an archive has build images, so --no-images must not quietly turn this into one.
           if (!o.images) throw new Error('--no-images applies to an archive; add --local or -o');
-          return withProgress('Storing control-plane backup in the backup destination', async () =>
-            print(await request('POST', '/api/v1/control/backups/run', { toDestination: true })),
+          return withProgress(
+            rt,
+            'Storing control-plane backup in the backup destination',
+            async () =>
+              print(
+                rt,
+                await request(rt, 'POST', '/api/v1/control/backups/run', { toDestination: true }),
+              ),
           );
         }
-        return withProgress('Creating control-plane backup', async (progress) => {
+        return withProgress(rt, 'Creating control-plane backup', async (progress) => {
           // Refuse before the backup exists on control when the chosen file is already there.
-          if (o.output && (await fsp.stat(o.output).catch(() => null)))
+          if (o.output && (await fsp.stat(resolvePath(rt, o.output)).catch(() => null)))
             throw new Error(`${o.output} already exists; choose another file with -o`);
           const result = await request<{
             backupId: string;
             artifactRef: string;
             state: string;
             images: boolean;
-          }>('POST', '/api/v1/control/backups/run', { images: o.images });
-          if (!o.download && !o.output) return print(result);
-          const file = path.resolve(o.output ?? `tug-control-backup-${result.backupId}.tar.gz`);
+          }>(rt, 'POST', '/api/v1/control/backups/run', { images: o.images });
+          if (!o.download && !o.output) return print(rt, result);
+          const file = resolvePath(rt, o.output ?? `tug-control-backup-${result.backupId}.tar.gz`);
           progress.stage(`Downloading the archive to ${file}`);
           await download(
+            rt,
             `/api/v1/control/backups/${encodeURIComponent(result.backupId)}/download`,
             file,
           );
-          console.error(
+          err(
+            rt,
             `Saved ${file}: ${result.images ? 'with' : 'without'} build images, no workload volumes. It contains the master key and the CA private key, so store it encrypted. A copy also stays on control at ${result.artifactRef}; delete it there when you no longer need it.`,
           );
-          print({ ...result, downloadedTo: file, serverCopy: result.artifactRef });
+          print(rt, { ...result, downloadedTo: file, serverCopy: result.artifactRef });
         });
       },
     );
@@ -652,29 +697,30 @@ export function registerControl(program: Command): void {
     )
     .option('--json', 'print the full result as JSON')
     .action(async (o: { json?: boolean }) => {
-      const listing = await request<ControlBackupListing>('GET', '/api/v1/control/backups');
-      if (o.json) return print(listing);
-      console.log(
-        `repository: ${listing.repository ?? 'none (no backup destination is configured)'}`,
-      );
-      console.log(listing.local.length ? 'on the control host:' : 'on the control host: none');
+      const listing = await request<ControlBackupListing>(rt, 'GET', '/api/v1/control/backups');
+      if (o.json) return print(rt, listing);
+      out(rt, `repository: ${listing.repository ?? 'none (no backup destination is configured)'}`);
+      out(rt, listing.local.length ? 'on the control host:' : 'on the control host: none');
       for (const copy of listing.local)
-        console.log(
+        out(
+          rt,
           `  ${copy.id}\t${copy.createdAt}\t${copy.onDisk ? formatBytes(copy.sizeBytes) : 'gone from disk'}\t${copy.images === false ? 'no images' : copy.images ? 'with images' : '-'}\t${copy.path ?? '-'}`,
         );
       if (!listing.remote) return;
       if (listing.remote.state === 'error') {
-        console.log(`in the destination: unreadable: ${listing.remote.error}`);
-        process.exitCode = 1;
+        out(rt, `in the destination: unreadable: ${listing.remote.error}`);
+        rt.exitCode = 1;
         return;
       }
-      console.log(
+      out(
+        rt,
         listing.remote.snapshots.length
           ? 'in the destination (newest first; each holds the database, CA and master key, never workload volumes):'
           : 'in the destination: none yet',
       );
       for (const snapshot of listing.remote.snapshots)
-        console.log(
+        out(
+          rt,
           `  ${snapshot.shortId}\t${snapshot.time}\t${formatBytes(snapshot.sizeBytes ?? null)}\t${snapshot.tags.includes('images:none') ? 'no images' : 'images not recorded'}\t${snapshot.tags.filter((tag) => tag !== 'control' && tag !== 'images:none').join(' ')}`,
         );
     });
@@ -725,18 +771,20 @@ export function registerControl(program: Command): void {
             throw new Error(
               '--from-file takes no archive path, --from-destination, --snapshot or --env',
             );
-          if (!(await fsp.stat(o.fromFile).catch(() => null)))
+          if (!(await fsp.stat(resolvePath(rt, o.fromFile)).catch(() => null)))
             throw new Error(`${o.fromFile} does not exist`);
           return withProgress(
+            rt,
             verify ? 'Verifying control-plane backup' : 'Restoring control-plane backup',
             async () => {
               const result = await upload(
+                rt,
                 `/api/v1/control/restore?${verify ? 'verify=1' : 'confirm=1'}`,
                 o.fromFile!,
               );
-              if (verify) console.error(PREVIEW_NOTE);
-              noteRestart(result);
-              print(result);
+              if (verify) err(rt, PREVIEW_NOTE);
+              noteRestart(rt, result);
+              print(rt, result);
             },
           );
         }
@@ -751,19 +799,19 @@ export function registerControl(program: Command): void {
         // missing value is still read from stdin after the credential values, as `backup destination set` reads them.
         let values: Record<string, string> | undefined;
         if (o.fromDestination && o.passwordStdin) {
-          const missing = o.env.filter((name) => process.env[name] === undefined);
+          const missing = o.env.filter((name) => rt.env[name] === undefined);
           if (missing.length)
             throw new Error(
               `with --password-stdin, set ${missing.join(', ')} in the environment: stdin carries only the password`,
             );
-          const password = (await readStdin()).split(/\r?\n/).find((line) => line.length > 0);
+          const password = (await readStdin(rt)).split(/\r?\n/).find((line) => line.length > 0);
           if (!password) throw new Error('expected the control password on stdin');
           values = {
-            ...Object.fromEntries(o.env.map((name) => [name, process.env[name]!])),
+            ...Object.fromEntries(o.env.map((name) => [name, rt.env[name]!])),
             [CONTROL_PASSWORD_VARIABLE]: password,
           };
         } else if (o.fromDestination) {
-          values = await readEnvValues([...o.env, CONTROL_PASSWORD_VARIABLE]);
+          values = await readEnvValues(rt, [...o.env, CONTROL_PASSWORD_VARIABLE]);
         }
         const fromDestination =
           o.fromDestination && values
@@ -775,17 +823,18 @@ export function registerControl(program: Command): void {
               }
             : undefined;
         return withProgress(
+          rt,
           verify ? 'Verifying control-plane backup' : 'Restoring control-plane backup',
           async () => {
-            const result = await request('POST', '/api/v1/control/restore', {
+            const result = await request(rt, 'POST', '/api/v1/control/restore', {
               artifactRef,
               fromDestination,
               confirm: Boolean(o.confirm),
               verify,
             });
-            if (verify) console.error(PREVIEW_NOTE);
-            noteRestart(result);
-            print(result);
+            if (verify) err(rt, PREVIEW_NOTE);
+            noteRestart(rt, result);
+            print(rt, result);
           },
         );
       },

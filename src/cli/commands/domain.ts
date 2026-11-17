@@ -1,8 +1,9 @@
 import type { Command } from 'commander';
 import { print, projectOf, request } from './context.ts';
 import type { CommonOpts } from './context.ts';
+import type { CliRuntime } from '../runtime.ts';
 
-export function registerDomain(program: Command): void {
+export function registerDomain(rt: CliRuntime, program: Command): void {
   const domain = program
     .command('domain')
     .description(
@@ -16,8 +17,9 @@ export function registerDomain(program: Command): void {
     .requiredOption('--service <service>', 'the service whose ingress route serves the hostname')
     .action(async (host: string, o: CommonOpts & { service: string }) =>
       print(
-        await request('POST', '/api/v1/domains', {
-          project: await projectOf(o),
+        rt,
+        await request(rt, 'POST', '/api/v1/domains', {
+          project: projectOf(rt, o),
           service: o.service,
           host,
         }),
@@ -29,7 +31,8 @@ export function registerDomain(program: Command): void {
     .description('list the mapped domains of the project')
     .action(async (o: CommonOpts) =>
       print(
-        await request('GET', `/api/v1/domains?project=${encodeURIComponent(await projectOf(o))}`),
+        rt,
+        await request(rt, 'GET', `/api/v1/domains?project=${encodeURIComponent(projectOf(rt, o))}`),
       ),
     );
   domain
@@ -37,9 +40,11 @@ export function registerDomain(program: Command): void {
     .description('stop serving a mapped domain')
     .action(async (host: string, o: CommonOpts) =>
       print(
+        rt,
         await request(
+          rt,
           'DELETE',
-          `/api/v1/domains/${encodeURIComponent(host)}?project=${encodeURIComponent(await projectOf(o))}`,
+          `/api/v1/domains/${encodeURIComponent(host)}?project=${encodeURIComponent(projectOf(rt, o))}`,
         ),
       ),
     );

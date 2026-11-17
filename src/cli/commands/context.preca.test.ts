@@ -7,7 +7,8 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { Pki, identityUri, serverNames } from '../../pki.ts';
 import { serverTlsOptions } from '../../control/tls-server.ts';
-import { resetVersionChecks, request, setResolvedConfig } from './context.ts';
+import { request } from './context.ts';
+import { testRuntime } from '../../../tests/cli-runtime.ts';
 import type { ResolvedCliConfig } from '../config.ts';
 
 /**
@@ -38,7 +39,8 @@ test('a credential from a different CA fails the preflight with the both-fingerp
   const url = `https://127.0.0.1:${(https.address() as { port: number }).port}`;
   const realpathed = path.join(dir, 'credential.json');
   await fs.writeFile(realpathed, JSON.stringify(credential), { mode: 0o600 });
-  setResolvedConfig({
+  const { rt } = testRuntime();
+  rt.state.config = {
     file: path.join(dir, 'cfg.yml'),
     localFile: path.join(dir, 'cfg.local.yml'),
     fileExists: false,
@@ -49,22 +51,20 @@ test('a credential from a different CA fails the preflight with the both-fingerp
     nodeDefaults: {},
     nodes: {},
     project: 'site',
-  } as unknown as ResolvedCliConfig);
-  resetVersionChecks();
+  } as unknown as ResolvedCliConfig;
   try {
     await assert.rejects(
-      request('GET', '/api/v1/services?project=site'),
+      request(rt, 'GET', '/api/v1/services?project=site'),
       /did not present a certificate signed by this credential's CA/,
       'the CA mismatch must surface as the actionable message from the first TLS connection (the preflight)',
     );
     await assert.rejects(
-      request('GET', '/api/v1/services?project=site'),
+      request(rt, 'GET', '/api/v1/services?project=site'),
       /this credential trusts [A-F0-9]/,
       'the message also names the trusted CA fingerprint',
     );
   } finally {
     https.closeAllConnections();
     await new Promise<void>((resolve) => https.close(() => resolve()));
-    resetVersionChecks();
   }
 });

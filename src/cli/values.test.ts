@@ -17,6 +17,7 @@ import {
   referencedVariables,
   requiredVariables,
 } from './values.ts';
+import { testRuntime } from '../../tests/cli-runtime.ts';
 
 async function withDir<T>(run: (dir: string) => Promise<T>): Promise<T> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-values-'));
@@ -62,13 +63,13 @@ test('findMissingValues counts only what control or --var supplies, never .env o
     process.env.TUG_TEST_SHELL_VALUE = 'set';
     try {
       assert.deepEqual(
-        await findMissingValues(file, new Set(['A'])),
+        await findMissingValues(process.cwd(), file, new Set(['A'])),
         ['B', 'C', 'D'],
         'a name in .env is still missing unless control holds it',
       );
       await fs.writeFile(file, 'x: ${A} ${TUG_TEST_SHELL_VALUE}\n');
       assert.deepEqual(
-        await findMissingValues(file, new Set(['A'])),
+        await findMissingValues(process.cwd(), file, new Set(['A'])),
         ['TUG_TEST_SHELL_VALUE'],
         'an exported shell variable is still missing unless control holds it',
       );
@@ -76,7 +77,7 @@ test('findMissingValues counts only what control or --var supplies, never .env o
       delete process.env.TUG_TEST_SHELL_VALUE;
     }
     assert.deepEqual(
-      await findMissingValues(path.join(dir, 'absent.yml'), new Set()),
+      await findMissingValues(dir, path.join(dir, 'absent.yml'), new Set()),
       [],
       'an unreadable file is left to the Compose reader to report',
     );
@@ -87,7 +88,7 @@ test('describeValues says where each name came from, in file order, and shows no
   await withDir(async (dir) => {
     const file = path.join(dir, 'compose.yaml');
     await fs.writeFile(file, 'x: ${DB_PASSWORD} ${TAG} ${HOST} ${REGION:-eu} ${HOST}\n');
-    const values = await describeValues(file, {
+    const values = await describeValues(process.cwd(), file, {
       secrets: new Set(['DB_PASSWORD']),
       vars: new Map([['HOST', { version: 3, value: 'db.internal' }]]),
       flags: { TAG: 'abc123' },
@@ -110,12 +111,12 @@ test('ignoredSourceNotes names what Tug ignored: .env entries control lacks, and
     const file = path.join(dir, 'compose.yaml');
     await fs.writeFile(file, 'services: {}\n');
     assert.deepEqual(
-      await ignoredSourceNotes(file, new Set(), {}),
+      await ignoredSourceNotes(dir, file, new Set(), {}),
       [],
       'no .env and no profiles means nothing to say',
     );
     await fs.writeFile(path.join(dir, '.env'), 'DB_PASSWORD=x\nexport MAIL_HOST=y\nKNOWN=z\n');
-    const [note] = await ignoredSourceNotes(file, new Set(['KNOWN']), {});
+    const [note] = await ignoredSourceNotes(dir, file, new Set(['KNOWN']), {});
     assert.match(note, /Ignored \.env/, 'the note says .env was ignored');
     assert.match(
       note,
@@ -124,7 +125,7 @@ test('ignoredSourceNotes names what Tug ignored: .env entries control lacks, and
     );
     assert.match(note, /tug secret import \.env/, 'it points at the import command');
     assert.ok(!note.includes('=x'), 'a value from .env is never echoed');
-    const notes = await ignoredSourceNotes(file, new Set(), { COMPOSE_PROFILES: 'debug' });
+    const notes = await ignoredSourceNotes(dir, file, new Set(), { COMPOSE_PROFILES: 'debug' });
     assert.match(
       notes.join('\n'),
       /COMPOSE_PROFILES=debug.*--profile/,
@@ -184,6 +185,7 @@ test('generateSecret is long, URL-safe and unique', () => {
 test('promptForValues generates by default and accepts an entered secret or variable', async () => {
   const answers = ['', 'e', 'hunter2', 'v', 'eu-west-1'];
   const values = await promptForValues(
+    testRuntime().rt,
     ['ONE', 'TWO', 'THREE'],
     async () => answers.shift() as string,
   );

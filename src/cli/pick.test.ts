@@ -212,13 +212,15 @@ test('a resize redraws the menu and finishing removes every process hook', async
 
 test('a terminated process shows the cursor again and still dies of the signal', async () => {
   const picker = pathToFileURL(path.resolve('src/cli/pick.ts')).href;
+  const runtime = pathToFileURL(path.resolve('src/cli/runtime.ts')).href;
   const child = spawn(
     process.execPath,
     [
       '--input-type=module',
       '-e',
-      `import { createPicker } from ${JSON.stringify(picker)};
-      createPicker({ input: process.stdin, output: process.stderr }).one('Target', ['a', 'b']);`,
+      `import { terminalPicker } from ${JSON.stringify(picker)};
+      import { processRuntime } from ${JSON.stringify(runtime)};
+      terminalPicker(processRuntime('0.0.0')).one('Target', ['a', 'b']);`,
     ],
     { stdio: ['pipe', 'pipe', 'pipe'] },
   );

@@ -1,3 +1,4 @@
+import type { EventEmitter } from 'node:events';
 import readline from 'node:readline';
 import type { Readable, Writable } from 'node:stream';
 import { errMessage } from '../../errors.ts';
@@ -19,7 +20,9 @@ import type { Snapshot, Tone, ViewRef } from './types.ts';
 export interface TuiIO {
   stdin: Readable & CliLiveStdin;
   stdout: Writable & CliLiveStdout;
-  stderr?: Writable;
+  stderr: Writable;
+  /** Where SIGTERM, SIGHUP and exit are heard, so the terminal is restored when the process ends; without it none are. */
+  signals?: EventEmitter;
 }
 export interface TuiOptions {
   api: Api;
@@ -33,7 +36,7 @@ export interface TuiOptions {
   /** Short name of the control plane for the header. */
   controlLabel: string;
   cliVersion: string;
-  env?: NodeJS.ProcessEnv;
+  env: NodeJS.ProcessEnv;
   intervals?: Intervals;
   /** Opens the push channel from control; the screen works without it, polling faster. */
   watch?: (handlers: {
@@ -81,7 +84,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
     );
 
   const snapshot: Snapshot = emptySnapshot();
-  const style = createStyle(wantsColor(stdout.isTTY, options.env ?? process.env));
+  const style = createStyle(wantsColor(stdout.isTTY, options.env));
   let state: UiState = initialState({
     columns: stdout.columns || 80,
     rows: stdout.rows || 24,
@@ -307,7 +310,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
           tty: true,
         }),
         options.transport,
-        { stdin, stdout, stderr: io.stderr },
+        { stdin, stdout, stderr: io.stderr, signals: io.signals },
       );
       if (code !== 0) message = { text: `shell exited with code ${code}`, tone: 'warn' };
     } catch (error) {
@@ -343,8 +346,8 @@ export async function runTui(options: TuiOptions): Promise<number> {
   const onSignal = (): void => finished(0);
   const abort = (): void => finished(0);
   options.signal?.addEventListener('abort', abort, { once: true });
-  process.once('SIGTERM', onSignal);
-  process.once('SIGHUP', onSignal);
+  io.signals?.once('SIGTERM', onSignal);
+  io.signals?.once('SIGHUP', onSignal);
   const restore = (): void => {
     try {
       stdout.write(LEAVE);
@@ -352,7 +355,7 @@ export async function runTui(options: TuiOptions): Promise<number> {
       // The terminal is already gone; nothing to restore.
     }
   };
-  process.once('exit', restore);
+  io.signals?.once('exit', restore);
   try {
     stdout.write(ENTER);
     stdin.setRawMode(true);
@@ -371,9 +374,9 @@ export async function runTui(options: TuiOptions): Promise<number> {
     poller.stop();
     live?.abort();
     options.signal?.removeEventListener('abort', abort);
-    process.off('SIGTERM', onSignal);
-    process.off('SIGHUP', onSignal);
-    process.off('exit', restore);
+    io.signals?.off('SIGTERM', onSignal);
+    io.signals?.off('SIGHUP', onSignal);
+    io.signals?.off('exit', restore);
     stdout.off('resize', onResize);
     stdin.off('keypress', onKeypress);
     restore();

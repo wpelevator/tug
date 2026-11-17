@@ -2,6 +2,7 @@ import type { Command } from 'commander';
 import { loadCfg } from './context.ts';
 import { runControlUpgrade } from './control.ts';
 import { runNodeUpgrade } from './node.ts';
+import type { CliRuntime } from '../runtime.ts';
 
 interface UpgradeAllOpts {
   to?: string;
@@ -14,7 +15,7 @@ interface UpgradeAllOpts {
  * `tug upgrade`: control first, then every configured node, because control refuses agents that run ahead of it. It stops
  * when control fails, so no agent is touched against a control that did not upgrade.
  */
-export function registerUpgrade(program: Command): void {
+export function registerUpgrade(rt: CliRuntime, program: Command): void {
   program
     .command('upgrade')
     .description(
@@ -31,20 +32,21 @@ export function registerUpgrade(program: Command): void {
     )
     .option('-y, --yes', 'do not ask for confirmation in a terminal')
     .action(async (o: UpgradeAllOpts, command: Command) => {
-      const cfg = await loadCfg();
+      const cfg = loadCfg(rt);
       if (!cfg.controlSsh)
         throw new Error(
           `upgrade needs controlSsh in ${cfg.file}: the SSH target of the control host`,
         );
-      if (!(await runControlUpgrade(undefined, o))) {
-        process.exitCode = 1;
+      if (!(await runControlUpgrade(rt, undefined, o))) {
+        rt.exitCode = 1;
         return;
       }
       const ok = await runNodeUpgrade(
+        rt,
         {},
         { all: true, wait: true, to: o.to, buildLocalImage: o.buildLocalImage, force: o.force },
         command,
       );
-      if (!ok) process.exitCode = 1;
+      if (!ok) rt.exitCode = 1;
     });
 }

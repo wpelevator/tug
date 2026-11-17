@@ -6,9 +6,9 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { startMtlsControl } from '../../tests/helpers.ts';
+import { cliEntry } from '../../tests/cli-process.ts';
 
 const exec = promisify(execFile);
-const entry = path.resolve('src/cli.ts');
 
 async function withControl<T>(
   run: (
@@ -29,7 +29,7 @@ async function withControl<T>(
   }
 }
 const tug = (args: string[], env: NodeJS.ProcessEnv, cwd: string) =>
-  exec(process.execPath, [entry, ...args], { cwd, env }).then(
+  exec(process.execPath, [cliEntry, ...args], { cwd, env }).then(
     (r) => ({ code: 0, stdout: r.stdout, stderr: r.stderr }),
     (e: { code: number; stdout: string; stderr: string }) => ({
       code: e.code,

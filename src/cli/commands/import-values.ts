@@ -1,9 +1,11 @@
 import fs from 'node:fs/promises';
-import { ask, canPrompt } from '../prompt.ts';
+import { canPrompt, prompter } from '../prompt.ts';
 import { classifyEnvFile } from '../values.ts';
 import type { ImportEntry } from '../values.ts';
 import { projectOf, request } from './context.ts';
-import type { CommonOpts } from './context.ts';
+import type { CommonOpts, ControlGet } from './context.ts';
+import { out, err, resolvePath } from '../runtime.ts';
+import type { CliRuntime } from '../runtime.ts';
 
 const word = (kind: 'secret' | 'var'): string => (kind === 'var' ? 'variable' : 'secret');
 
@@ -12,7 +14,7 @@ const word = (kind: 'secret' | 'var'): string => (kind === 'var' ? 'variable' : 
  * CLI process made control reset the second connection (ECONNRESET).
  */
 export async function loadExistingNames(
-  get: typeof request,
+  get: ControlGet,
   project: string,
 ): Promise<{ secrets: { name: string }[]; vars: { name: string }[] }> {
   const query = `?project=${encodeURIComponent(project)}`;
@@ -37,25 +39,29 @@ export interface ImportOpts extends CommonOpts {
  * `--overwrite`.
  */
 export async function importValues(
+  rt: CliRuntime,
   file: string | undefined,
   o: ImportOpts,
   mode: 'secret' | 'var',
 ): Promise<void> {
-  const project = await projectOf(o);
+  const project = projectOf(rt, o);
   const path = file ?? '.env';
   let text: string;
   try {
-    text = await fs.readFile(path, 'utf8');
+    text = await fs.readFile(resolvePath(rt, path), 'utf8');
   } catch (error) {
     throw new Error(`could not read ${path}: ${(error as Error).message}`, { cause: error });
   }
-  const interactive = canPrompt();
+  const interactive = canPrompt(rt);
   const { entries, skipped } = classifyEnvFile(text, {
     vars: o.vars,
     secrets: o.secrets,
     fallback: mode,
   });
-  const { secrets, vars } = await loadExistingNames(request, project);
+  const { secrets, vars } = await loadExistingNames(
+    (method, route) => request(rt, method, route),
+    project,
+  );
   const existing = new Map<string, 'secret' | 'var'>([
     ...secrets.map((row) => [row.name, 'secret'] as const),
     ...vars.map((row) => [row.name, 'var'] as const),
@@ -77,8 +83,8 @@ export async function importValues(
     todo.push(entry);
   }
   if (!todo.length) {
-    for (const note of notes) console.error(note);
-    console.log(`nothing to import from ${path}`);
+    for (const note of notes) err(rt, note);
+    out(rt, `nothing to import from ${path}`);
     return;
   }
   if (interactive && !o.yes) {
@@ -86,7 +92,7 @@ export async function importValues(
       const chosen: ImportEntry[] = [];
       for (const entry of todo) {
         const answer = (
-          await ask(
+          await prompter(rt)(
             `${entry.name} → ${word(entry.kind)}. [s]ecret, [v]ariable, e[x]clude, or Enter to keep ${word(entry.kind)}? `,
           )
         )
@@ -100,27 +106,29 @@ export async function importValues(
       }
       todo = chosen;
     } else {
-      console.error(`From ${path} into project ${project}:`);
-      for (const entry of todo) console.error(`  ${entry.name.padEnd(32)} ${word(entry.kind)}`);
+      err(rt, `From ${path} into project ${project}:`);
+      for (const entry of todo) err(rt, `  ${entry.name.padEnd(32)} ${word(entry.kind)}`);
       if (todo.some((entry) => entry.kind === 'var'))
-        console.error(
-          'Variables are visible to anyone with a deploy credential; secrets never are.',
-        );
-      const answer = (await ask(`Store these ${todo.length}? [Y/n] `)).trim().toLowerCase();
+        err(rt, 'Variables are visible to anyone with a deploy credential; secrets never are.');
+      const answer = (await prompter(rt)(`Store these ${todo.length}? [Y/n] `))
+        .trim()
+        .toLowerCase();
       if (answer === 'n' || answer === 'no') {
-        console.error('nothing stored');
+        err(rt, 'nothing stored');
         return;
       }
     }
   }
-  for (const note of notes) console.error(note);
+  for (const note of notes) err(rt, note);
   for (const entry of todo) {
     const result = await request<{ version: number }>(
+      rt,
       'POST',
       entry.kind === 'secret' ? '/api/v1/secrets' : '/api/v1/vars',
       { project, name: entry.name, value: entry.value },
     );
-    console.log(
+    out(
+      rt,
       `${entry.name.padEnd(32)} ${word(entry.kind).padEnd(8)} stored (version ${result.version})`,
     );
   }

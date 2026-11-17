@@ -5,12 +5,12 @@ import { createServer } from 'node:https';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import { after, test } from 'node:test';
+import { test } from 'node:test';
 import { Pki, serverNames, identityUri } from '../../pki.ts';
 import type { Credential } from '../../pki.ts';
 import { serverTlsOptions } from '../../control/tls-server.ts';
-import { pinPackageVersion } from '../../images/image.ts';
-import { resetVersionChecks, request, setResolvedConfig } from './context.ts';
+import { request } from './context.ts';
+import { testRuntime } from '../../../tests/cli-runtime.ts';
 import type { ResolvedCliConfig } from '../config.ts';
 
 /**
@@ -90,8 +90,10 @@ async function startFixture(scenario: Scenario): Promise<Fixture> {
   };
 }
 
-async function configure(f: Fixture): Promise<void> {
-  setResolvedConfig({
+/** A runtime that reports `CLI_VERSION` and talks to the fixture; it remembers nothing of any other run. */
+function configure(f: Fixture) {
+  const run = testRuntime({ version: CLI_VERSION });
+  run.rt.state.config = {
     file: '/dev/null',
     localFile: '/dev/null',
     fileExists: false,
@@ -102,35 +104,21 @@ async function configure(f: Fixture): Promise<void> {
     nodeDefaults: {},
     nodes: {},
     project: 'site',
-  } as unknown as ResolvedCliConfig);
-  resetVersionChecks();
+  } as unknown as ResolvedCliConfig;
+  return run;
 }
 
-const warnings: string[] = [];
-const unmutatedWarning = console.error;
-const speak = (): void => {
-  console.error = unmutatedWarning;
-};
 // Fixed versions, independent of the package's real one: the verdicts depend only on how these relate under the
 // skew rule (a different major is breaking from 1.0; an older minor or patch of the same major is compatible).
 const CLI_VERSION = '1.4.2';
 const OLDER_MAJOR = '0.9.0';
 const NEWER_PATCH = '1.4.3';
-pinPackageVersion(CLI_VERSION);
-after(() => pinPackageVersion(undefined));
-
-const quiet = (): void => {
-  console.error = (message?: unknown) => {
-    warnings.push(String(message));
-  };
-};
 
 test('a read-first command gets its skew judged off the response stamp, with no extra probe', async () => {
   const f = await startFixture({ stamp: CLI_VERSION });
-  await configure(f);
-  quiet();
+  const h = configure(f);
   try {
-    await request('GET', '/api/v1/status');
+    await request(h.rt, 'GET', '/api/v1/status');
     assert.deepEqual(
       f.hits.map((h) => h.route),
       ['/api/v1/status'],
@@ -141,18 +129,16 @@ test('a read-first command gets its skew judged off the response stamp, with no 
       [CLI_VERSION],
       'every request declares the calling CLI version for the control-side guard',
     );
-    assert.deepEqual(warnings, [], 'matching versions stay silent');
+    assert.equal(h.stderr(), '', 'matching versions stay silent');
     // The agreement is remembered for the process; a later mutation pays no probe either.
-    await request('POST', '/api/v1/deployments', { project: 'site' });
+    await request(h.rt, 'POST', '/api/v1/deployments', { project: 'site' });
     assert.deepEqual(
       f.hits.map((h) => h.route),
       ['/api/v1/status', '/api/v1/deployments'],
       'a mutation that follows a judged read skips the probe',
     );
   } finally {
-    speak();
     await f.close();
-    resetVersionChecks();
   }
 });
 
@@ -160,10 +146,10 @@ test('a stale stamp or stampless control refuses the read-first command with the
   for (const stamp of [undefined, OLDER_MAJOR]) {
     const label = stamp === undefined ? 'a stampless control' : `a stale stamp (${stamp})`;
     const f = await startFixture({ stamp });
-    await configure(f);
+    const h = configure(f);
     try {
       await assert.rejects(
-        request('GET', '/api/v1/status'),
+        request(h.rt, 'GET', '/api/v1/status'),
         /tug control upgrade <control host> --yes/,
         `${label} is refused, from the response the read already paid for`,
       );
@@ -174,23 +160,19 @@ test('a stale stamp or stampless control refuses the read-first command with the
       );
     } finally {
       await f.close();
-      resetVersionChecks();
     }
   }
 });
 
 test('a control on a newer patch is compatible and stays silent', async () => {
   const f = await startFixture({ stamp: NEWER_PATCH });
-  await configure(f);
-  quiet();
+  const h = configure(f);
   try {
-    await request('GET', '/api/v1/status');
-    await request('GET', '/api/v1/status');
-    assert.deepEqual(warnings, [], 'a patch never changes the wire, so no pin warning is printed');
+    await request(h.rt, 'GET', '/api/v1/status');
+    await request(h.rt, 'GET', '/api/v1/status');
+    assert.equal(h.stderr(), '', 'a patch never changes the wire, so no pin warning is printed');
   } finally {
-    speak();
     await f.close();
-    resetVersionChecks();
   }
 });
 
@@ -202,16 +184,16 @@ test('a mutating first request is probed against the version route before it is 
     { stamp: undefined, noDeploymentRoute: true, expected: ['/api/v1/version'] },
   ]) {
     const f = await startFixture(scenario);
-    await configure(f);
+    const h = configure(f);
     try {
       if (scenario.expected.length === 2)
         await assert.doesNotReject(
-          request('POST', '/api/v1/deployments', { project: 'site' }),
+          request(h.rt, 'POST', '/api/v1/deployments', { project: 'site' }),
           'a compatible control receives the mutation',
         );
       else
         await assert.rejects(
-          request('POST', '/api/v1/deployments', { project: 'site' }),
+          request(h.rt, 'POST', '/api/v1/deployments', { project: 'site' }),
           /tug control upgrade <control host> --yes/,
           'an older control is refused before it received the mutation',
         );
@@ -222,7 +204,6 @@ test('a mutating first request is probed against the version route before it is 
       );
     } finally {
       await f.close();
-      resetVersionChecks();
     }
   }
 });
@@ -233,28 +214,26 @@ test("the control's own skew refusal is surfaced verbatim, on read and mutation 
   const controlError = 'this client (test) is newer than the control running own: fix it now';
   const refusal = await (async () => {
     const f = await startFixture({ stamp: CLI_VERSION, refuseAll: controlError });
-    await configure(f);
+    const h = configure(f);
     try {
-      return await request('GET', '/api/v1/status').then(
+      return await request(h.rt, 'GET', '/api/v1/status').then(
         () => null,
         (e) => String((e as Error).message),
       );
     } finally {
       await f.close();
-      resetVersionChecks();
     }
   })();
   const mutationRefusal = await (async () => {
     const f = await startFixture({ stamp: CLI_VERSION, refuseAll: controlError });
-    await configure(f);
+    const h = configure(f);
     try {
-      return await request('POST', '/api/v1/deployments', { project: 'site' }).then(
+      return await request(h.rt, 'POST', '/api/v1/deployments', { project: 'site' }).then(
         () => null,
         (e) => String((e as Error).message),
       );
     } finally {
       await f.close();
-      resetVersionChecks();
     }
   })();
   assert.equal(
@@ -271,16 +250,15 @@ test("the control's own skew refusal is surfaced verbatim, on read and mutation 
 
 test('a refused control is judged again on the next request, never waved through', async () => {
   const f = await startFixture({ stamp: OLDER_MAJOR });
-  await configure(f);
+  const h = configure(f);
   try {
     for (const attempt of [1, 2])
       await assert.rejects(
-        request('GET', '/api/v1/status'),
+        request(h.rt, 'GET', '/api/v1/status'),
         /tug control upgrade <control host> --yes/,
         `attempt ${attempt} against a stale control is refused: a refusal must not be remembered as agreement`,
       );
   } finally {
     await f.close();
-    resetVersionChecks();
   }
 });

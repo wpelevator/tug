@@ -6,18 +6,18 @@ import path from 'node:path';
 import { Pki, fingerprintPem, type Credential } from '../../pki.ts';
 import type { ResolvedCliConfig } from '../config.ts';
 import { importCredential } from './init.ts';
+import { testRuntime } from '../../../tests/cli-runtime.ts';
 
 const LIFETIME_MS = 24 * 60 * 60 * 1000;
 
-interface Harness {
-  cfg: ResolvedCliConfig;
-}
-
-async function harness(): Promise<Harness> {
+/** A runtime whose credentials directory is private to the test, plus the config an import starts from. */
+async function harness() {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-init-import-'));
-  // Keep imports out of the real user config directory; importCredential reads this on every call.
-  process.env.TUG_CREDENTIALS_DIR = path.join(dir, 'credentials');
+  const credentials = path.join(dir, 'credentials');
+  const run = testRuntime({ env: { ...process.env, TUG_CREDENTIALS_DIR: credentials } });
   return {
+    ...run,
+    credentials,
     cfg: {
       file: path.join(dir, 'cfg.yml'),
       fileExists: false,
@@ -42,19 +42,15 @@ async function credential(
   return issued.credential;
 }
 
+const ca12 = (cred: Credential) =>
+  fingerprintPem(cred.ca).replace(/:/g, '').toLowerCase().slice(0, 12);
+
 test('importCredential records the first credential without a CA-change notice', async () => {
   const h = await harness();
   const pki = await Pki.load(await fs.mkdtemp(path.join(os.tmpdir(), 'tug-pki-a-')), true);
-  const errors: string[] = [];
-  const original = console.error;
-  console.error = (...args: unknown[]) => errors.push(args.join(' '));
-  try {
-    await importCredential(h.cfg, JSON.stringify(await credential(pki, 'first')), {});
-  } finally {
-    console.error = original;
-  }
+  await importCredential(h.rt, h.cfg, JSON.stringify(await credential(pki, 'first')), {});
   assert.ok(
-    !errors.some((line) => line.includes('signed by CA')),
+    !h.stderr().includes('signed by CA'),
     'the first import cannot be a CA change and must not warn',
   );
 });
@@ -63,21 +59,13 @@ test('the imported file name embeds the credential CA fingerprint', async () => 
   const h = await harness();
   const pki = await Pki.load(await fs.mkdtemp(path.join(os.tmpdir(), 'tug-pki-a-')), true);
   const cred = await credential(pki, 'named');
-  const printed: string[] = [];
-  const original = console.log;
-  console.log = (...args: unknown[]) => printed.push(args.join(' '));
-  try {
-    await importCredential(h.cfg, JSON.stringify(cred), {});
-  } finally {
-    console.log = original;
-  }
-  const ca12 = fingerprintPem(cred.ca).replace(/:/g, '').toLowerCase().slice(0, 12);
+  await importCredential(h.rt, h.cfg, JSON.stringify(cred), {});
   assert.match(
-    printed.join('\n'),
-    new RegExp(`control\\.test_8443\\.${ca12}\\.json`),
+    h.stdout(),
+    new RegExp(`control\\.test_8443\\.${ca12(cred)}\\.json`),
     'the imported file name carries the CA fingerprint prefix',
   );
-  await fs.access(path.join(process.env.TUG_CREDENTIALS_DIR!, `control.test_8443.${ca12}.json`));
+  await fs.access(path.join(h.credentials, `control.test_8443.${ca12(cred)}.json`));
 });
 
 test('importing a credential from a different CA never overwrites the previously imported file', async () => {
@@ -93,29 +81,14 @@ test('importing a credential from a different CA never overwrites the previously
   );
 
   h.cfg.credential = oldCred;
-  const errors: string[] = [];
-  const original = console.error;
-  const originalLog = console.log;
-  console.error = (...args: unknown[]) => errors.push(args.join(' '));
-  console.log = () => {};
-  try {
-    await importCredential(h.cfg, JSON.stringify(oldCred), {});
-    // The resolved config still points at the previous credential when the replacement is imported;
-    // `writeInitConfig` flips the pointer only after the import decision.
-    h.cfg.credentialFile = path.join(
-      process.env.TUG_CREDENTIALS_DIR!,
-      `control.test_8443.${fingerprintPem(oldCred.ca).replace(/:/g, '').toLowerCase().slice(0, 12)}.json`,
-    );
-    await importCredential(h.cfg, JSON.stringify(newCred), {});
-  } finally {
-    console.error = original;
-    console.log = originalLog;
-  }
+  await importCredential(h.rt, h.cfg, JSON.stringify(oldCred), {});
+  // The resolved config still points at the previous credential when the replacement is imported;
+  // `writeInitConfig` flips the pointer only after the import decision.
+  h.cfg.credentialFile = path.join(h.credentials, `control.test_8443.${ca12(oldCred)}.json`);
+  await importCredential(h.rt, h.cfg, JSON.stringify(newCred), {});
 
-  const caOld = fingerprintPem(oldCred.ca).replace(/:/g, '').toLowerCase().slice(0, 12);
-  const caNew = fingerprintPem(newCred.ca).replace(/:/g, '').toLowerCase().slice(0, 12);
-  const oldPath = path.join(process.env.TUG_CREDENTIALS_DIR!, `control.test_8443.${caOld}.json`);
-  const newPath = path.join(process.env.TUG_CREDENTIALS_DIR!, `control.test_8443.${caNew}.json`);
+  const oldPath = path.join(h.credentials, `control.test_8443.${ca12(oldCred)}.json`);
+  const newPath = path.join(h.credentials, `control.test_8443.${ca12(newCred)}.json`);
   const oldFile = JSON.parse(await fs.readFile(oldPath, 'utf8'));
   const newFile = JSON.parse(await fs.readFile(newPath, 'utf8'));
   assert.equal(
@@ -129,11 +102,11 @@ test('importing a credential from a different CA never overwrites the previously
     'the different-CA credential is written to its own fingerprint-named file',
   );
   assert.ok(
-    errors.join('\n').includes(fingerprintPem(newCred.ca)),
+    h.stderr().includes(fingerprintPem(newCred.ca)),
     'the warning names the incoming credential CA fingerprint',
   );
   assert.match(
-    errors.join('\n'),
+    h.stderr(),
     /previous file stays/,
     'the warning points at the preserved previous file',
   );
@@ -143,19 +116,12 @@ test('re-importing the same CA credential reuses one file (idempotent, no name c
   const h = await harness();
   const pki = await Pki.load(await fs.mkdtemp(path.join(os.tmpdir(), 'tug-pki-a-')), true);
   const cred = await credential(pki, 'stable');
-  const originalLog = console.log;
-  console.log = () => {};
-  try {
-    await importCredential(h.cfg, JSON.stringify(cred), {});
-    await importCredential(h.cfg, JSON.stringify(cred), {});
-  } finally {
-    console.log = originalLog;
-  }
-  const dir = process.env.TUG_CREDENTIALS_DIR!;
-  const files = (await fs.readdir(dir)).filter((name) => name.endsWith('.json'));
+  await importCredential(h.rt, h.cfg, JSON.stringify(cred), {});
+  await importCredential(h.rt, h.cfg, JSON.stringify(cred), {});
+  const files = (await fs.readdir(h.credentials)).filter((name) => name.endsWith('.json'));
   assert.equal(files.length, 1, 'two imports of one credential produce one file');
   assert.equal(
-    JSON.parse(await fs.readFile(files[0] && path.join(dir, files[0]), 'utf8')).ca,
+    JSON.parse(await fs.readFile(files[0] && path.join(h.credentials, files[0]), 'utf8')).ca,
     cred.ca,
   );
 });
@@ -165,16 +131,9 @@ test('replacing a credential whose CA is unreadable still imports and skips the 
   const pki = await Pki.load(await fs.mkdtemp(path.join(os.tmpdir(), 'tug-pki-bad-')), true);
   const good = await credential(pki, 'repair');
   h.cfg = { ...h.cfg, credential: { ...good, ca: 'not a certificate' } } as ResolvedCliConfig;
-  const errors: string[] = [];
-  const original = console.error;
-  console.error = (...args: unknown[]) => errors.push(args.join(' '));
-  try {
-    await importCredential(h.cfg, JSON.stringify(good), {});
-  } finally {
-    console.error = original;
-  }
+  await importCredential(h.rt, h.cfg, JSON.stringify(good), {});
   assert.ok(
-    !errors.some((line) => line.includes('signed by CA')),
+    !h.stderr().includes('signed by CA'),
     'a corrupt previous credential is exactly what a re-import repairs; it must not block or confuse the import',
   );
 });

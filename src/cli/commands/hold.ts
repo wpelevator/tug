@@ -2,8 +2,9 @@ import { selectHolds } from './selection.ts';
 import type { Command } from 'commander';
 import { print, projectOf, request } from './context.ts';
 import type { CommonOpts } from './context.ts';
+import type { CliRuntime } from '../runtime.ts';
 
-export function registerHold(program: Command): void {
+export function registerHold(rt: CliRuntime, program: Command): void {
   const hold = program
     .command('hold')
     .description('services a deploy stopped because their data moved to another node');
@@ -16,10 +17,11 @@ export function registerHold(program: Command): void {
     .action(async (services: string[], o: CommonOpts & { select?: boolean }) => {
       if (o.select && services.length)
         throw new Error('--select cannot be combined with explicit services');
-      if (o.select) services = await selectHolds();
+      if (o.select) services = await selectHolds(rt);
       return print(
-        await request('POST', '/api/v1/holds/release', {
-          project: await projectOf(o),
+        rt,
+        await request(rt, 'POST', '/api/v1/holds/release', {
+          project: projectOf(rt, o),
           services,
         }),
       );

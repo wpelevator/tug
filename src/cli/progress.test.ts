@@ -1,11 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createProgress, suspendProgress } from './progress.ts';
+import { testRuntime } from '../../tests/cli-runtime.ts';
 
 test('progress reports stages immediately and elapsed time while work is pending', (t) => {
+  const { rt } = testRuntime();
   t.mock.timers.enable({ apis: ['Date', 'setInterval'], now: 0 });
   const lines: string[] = [];
-  const progress = createProgress({ write: (line) => lines.push(line) });
+  const progress = createProgress(rt, { write: (line) => lines.push(line) });
   try {
     progress.stage('Building images');
     assert.deepEqual(lines, ['[0s] Building images'], 'a stage must be visible before work starts');
@@ -33,15 +35,17 @@ test('progress reports stages immediately and elapsed time while work is pending
 });
 
 test('scoped progress stops heartbeats on success, early return and rejection', async (t) => {
+  const run = testRuntime();
   const { withProgress } = await import('./progress.ts');
   t.mock.timers.enable({ apis: ['Date', 'setInterval'], now: 0 });
-  const lines: string[] = [];
-  t.mock.method(process.stderr, 'write', (line: string) => {
-    lines.push(line);
-    return true;
-  });
+  // Progress writes one line per report to the runtime's stderr.
+  const lines = {
+    get length() {
+      return run.stderr().split('\n').length - 1;
+    },
+  };
   for (const fails of [false, true]) {
-    const operation = withProgress('Waiting', async () => {
+    const operation = withProgress(run.rt, 'Waiting', async () => {
       t.mock.timers.tick(10_000);
       if (fails) throw new Error('operation failed');
       return 42;
@@ -64,9 +68,10 @@ test('scoped progress stops heartbeats on success, early return and rejection', 
 });
 
 test('a terminal gets one live line and finished stages stay as lines', (t) => {
+  const { rt } = testRuntime();
   t.mock.timers.enable({ apis: ['Date', 'setInterval'], now: 0 });
   let screen = '';
-  const progress = createProgress({
+  const progress = createProgress(rt, {
     live: { write: (text) => (screen += text), columns: () => 60 },
   });
   progress.stage('Pulling image');
@@ -97,9 +102,10 @@ test('a terminal gets one live line and finished stages stay as lines', (t) => {
 });
 
 test('printing above the live line clears it first and draws it again', (t) => {
+  const { rt } = testRuntime();
   t.mock.timers.enable({ apis: ['Date', 'setInterval'], now: 0 });
   let screen = '';
-  const progress = createProgress({
+  const progress = createProgress(rt, {
     live: { write: (text) => (screen += text), columns: () => 80 },
   });
   progress.stage('Installing');
@@ -114,10 +120,11 @@ test('printing above the live line clears it first and draws it again', (t) => {
 });
 
 test('other output is kept off the live line, and an unfinished line keeps the status hidden', (t) => {
+  const { rt } = testRuntime();
   t.mock.timers.enable({ apis: ['Date', 'setInterval'], now: 0 });
   let screen = '';
   let hook: { before(): void; after(endedLine: boolean): void } | undefined;
-  const progress = createProgress({
+  const progress = createProgress(rt, {
     live: {
       write: (text) => (screen += text),
       columns: () => 80,
@@ -148,9 +155,10 @@ test('other output is kept off the live line, and an unfinished line keeps the s
 });
 
 test('remote output is shown as data and a started progress can be suspended by prompts and menus', (t) => {
+  const { rt } = testRuntime();
   t.mock.timers.enable({ apis: ['Date', 'setInterval'], now: 0 });
   let screen = '';
-  const progress = createProgress({
+  const progress = createProgress(rt, {
     live: { write: (text) => (screen += text), columns: () => 80 },
   });
   progress.stage('Installing');
@@ -160,7 +168,7 @@ test('remote output is shown as data and a started progress can be suspended by 
     !/[\x07\t]|\x1b\]/.test(screen.split('\r\x1b[K').pop()!),
     'control characters from a remote host must not reach the terminal',
   );
-  const resume = suspendProgress();
+  const resume = suspendProgress(rt);
   screen = '';
   t.mock.timers.tick(3_000);
   assert.equal(

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { loadDeployValues } from './deploy.ts';
-import type { request } from './context.ts';
+import type { ControlGet } from './context.ts';
 
 test('deploy reads secrets and variables one request after the other, never both in flight', async () => {
   const events: string[] = [];
@@ -16,7 +16,7 @@ test('deploy reads secrets and variables one request after the other, never both
     inFlight--;
     if (route.startsWith('/api/v1/secrets')) return { secrets: [{ name: 'API_KEY' }] };
     return { vars: [{ name: 'GREETING', version: 1, value: 'hi' }] };
-  }) as unknown as typeof request;
+  }) as unknown as ControlGet;
 
   const values = await loadDeployValues(get, 'site');
 
