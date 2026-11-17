@@ -5,7 +5,14 @@ import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import * as tar from 'tar';
-import { bootstrapCommand, dockerBootstrap, immutableLocalTag, transferTugImage } from './host.ts';
+import {
+  assertPublished,
+  bootstrapCommand,
+  dockerBootstrap,
+  immutableLocalTag,
+  transferTugImage,
+} from './host.ts';
+import { defaultImage } from '../../images/image.ts';
 import { STAGE_MARKER } from '../process.ts';
 import { testRuntime } from '../../../tests/cli-runtime.ts';
 
@@ -129,5 +136,21 @@ test("the Docker bootstrap command hands the script this run's stage marker", as
     await dockerBootstrap(),
     /echo "\$\{TUG_MARKER:-\}Installing Docker packages/,
     'the script names its stage with the marker the command provides, and works without one (cloud-init)',
+  );
+});
+
+test('the registry lookup of a test runtime says published, and an unpublished answer stops the command', () => {
+  const image = defaultImage('999.0.0');
+  assert.doesNotThrow(
+    () => assertPublished(testRuntime().rt, image),
+    'a test runtime must never reach the registry, so an unreleased version reads as published',
+  );
+  const unpublished = testRuntime({
+    inspectImage: () => ({ status: 1, stderr: 'no such manifest' }),
+  }).rt;
+  assert.throws(
+    () => assertPublished(unpublished, image),
+    /999\.0\.0 is not published yet/,
+    'the runtime lookup should be the one consulted, and a missing manifest should name the image',
   );
 });

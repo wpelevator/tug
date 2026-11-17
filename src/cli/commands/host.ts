@@ -152,15 +152,19 @@ function probe(rt: CliRuntime, target: string, command: string) {
  * manifest is looked up with this run's environment, so a Docker on its PATH is the one that answers.
  */
 export function assertPublished(rt: CliRuntime, image: string): void {
-  assertImagePublished(image, (ref) => {
-    const result = spawnSync('docker', ['manifest', 'inspect', ref], {
-      encoding: 'utf8',
-      timeout: 20_000,
-      env: rt.env,
-      cwd: rt.cwd,
-    });
-    return { status: result.status, stderr: String(result.stderr ?? '') };
-  });
+  assertImagePublished(
+    image,
+    rt.inspectImage ??
+      ((ref) => {
+        const result = spawnSync('docker', ['manifest', 'inspect', ref], {
+          encoding: 'utf8',
+          timeout: 20_000,
+          env: rt.env,
+          cwd: rt.cwd,
+        });
+        return { status: result.status, stderr: String(result.stderr ?? '') };
+      }),
+  );
 }
 
 /** Whether the host already has a working Docker Engine. */
