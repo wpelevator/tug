@@ -1,5 +1,27 @@
 # @wpelevator/tug
 
+## 3.1.0
+
+### Minor Changes
+
+- d4b995d: Add authenticated control readiness and project-scoped Prometheus metrics, configurable bounded writer admission with retry hints, and structured control/agent logs with safe default failure classifications and opt-in sanitized debug causes.
+- ca456aa: Add `tug control stop` and `tug control restart`, which stop or restart the control container over SSH without touching its volume, image or published ports, and make `tug control restore` name `tug control restart` as the next step. Every command that runs SSH now explains `Host key verification failed` and prints the `ssh-keygen -R <host>` remedy instead of reporting a connection failure, and never edits `known_hosts`.
+- ca456aa: Catch deploy problems earlier and report them more clearly. Control refuses a deploy before the build when another project's current deployment publishes the same host port on the same node address, naming the project, node, address and port, and `tug deploy --dry-run` runs the same check through a new route, `POST /api/v1/deployments/check` (a newer CLI against an older control reports the missing route). A missing value that sits in an `x-tug.backup` field now says it may be a container variable that needs `$$` and shows the corrected line. A failed http health check names the full URL the agent requested, with the container address, path and query, and the last status or connection error. The deploy summary and `tug status` show the deployment id when two deployments carry the same version label, which the default `git-<Compose hash>` label does for a changed build context, secret or variable.
+- ca456aa: `tug doctor` now checks that ingress nodes answer on ports 80 and 443 (control opens a TCP connection to each node's address) and fails with the closed port, the likely firewall cause and the fix; tug still never changes a firewall. It prints the local Docker daemon as `skip` with `needed only for --build-local` instead of `FAIL` when none is reachable, and no longer counts it as a problem. Node and control diagnostics report load average, available memory, free disk under Docker's data root and the CPU and memory of the agent, Caddy and control containers. `tug node ingress` reminds the operator to open the ports. Additive: the new checks and fields appear in `doctor --json`, and an agent that predates the resources check simply omits it.
+- d4b995d: Add signed best-effort webhook notifications with bounded retries, startup grace and delivery metrics. Optional notification configuration errors keep control available. Add an external HTTP probe with bounded same-host redirects.
+- 3fc8375: Add `tug ingress logs [node]` (and the `tug logs --ingress` shorthand) to read an ingress node's Caddy container, and `tug ingress tls [node]` to show per host whether the edge serves a valid certificate and why not. Ingress agents now probe their own Caddy with a TLS handshake per named host and report `issued`, `pending` or `failed` in the ingress status. The state also appears in `tug domain list`, as a count in `tug status`, and in `tug doctor`, which now fails the `ingress` check for a host without a certificate for more than ten minutes. Both commands need an unscoped `admin` credential. The status field is additive, and an agent that predates it reads `unknown`.
+- 75d8a35: Add `x-tug.ingress.nodes`, the ingress nodes that serve a route. Without it every ingress node serves every route and requests a certificate for every host, so a host that resolves to one node showed as failed on the others. Named routes render only on those nodes, and a deployment waits only for them.
+
+### Patch Changes
+
+- ca456aa: Fix the MariaDB restore example in the Compose reference, which failed `tug deploy` because of an unescaped `$`, and add a test that checks every Compose snippet in the README and docs against the deploy value rules. Add scripts under `tools/scripts` to measure ingress overhead, container CPU and memory, and downtime during a redeploy.
+- f89e0cb: Record local QEMU enrollment and recovery checks, including content verification and remaining coverage limits.
+- d4b995d: Document operational reliability and recovery responsibilities, and cover interrupted activation, ENOSPC, damaged-repository recovery, rollout behavior and integration convergence with regression tests.
+- 7bb7841: Fix the MariaDB and PostgreSQL restore recipes in the backup docs, which failed `tug deploy` because of an unescaped `$`. Document host firewalls and the Let's Encrypt retry delay for ingress, the control restart after a restore, and add the 3.0.0 real-host results.
+- 75d8a35: Add the real-host results for the merged papercut fixes to the evaluation: port probe, ingress certificate state, control stop and restart, host key hint, duplicate port refusal, cross-node names and reboot survival.
+- 06e68cc: Start faster: the CLI loads only the command it runs. The CLI now takes its environment, working directory, streams and signals from one runtime object instead of the process, which lets the test suite run commands in-process and finish in less than half the time.
+- faf4a3f: Clarify that managed HTTP ingress already balances requests with round robin, distinguish cross-node service-name recovery from seamless failover, and separate future internal balancing from existing ingress in the roadmap.
+
 ## 3.0.0
 
 ### Major Changes
