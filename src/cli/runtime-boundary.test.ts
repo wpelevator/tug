@@ -58,3 +58,15 @@ test('code that takes everything from the runtime is accepted', async () => {
   ].join('\n');
   assert.deepEqual(await errors(code, 'src/cli/example.ts'), [], 'the runtime forms are the way');
 });
+
+test('only the process and host modules may start child processes, so every ssh gets the host key remedy', async () => {
+  const code = "import { spawnSync } from 'node:child_process';\nexport const a = spawnSync;";
+  for (const spelling of [code, code.replace('node:child_process', 'child_process')])
+    assert.ok(
+      (await errors(spelling, 'src/cli/commands/node.ts')).length > 0,
+      'a command importing child_process would run ssh without the host key remedy',
+    );
+  for (const file of ['src/cli/process.ts', 'src/cli/commands/host.ts', 'src/cli/config.ts'])
+    assert.deepEqual(await errors(code, file), [], `${file} is allowed to start child processes`);
+  assert.deepEqual(await errors(code, 'src/control/example.ts'), [], 'other roles are not covered');
+});

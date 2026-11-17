@@ -96,6 +96,29 @@ export default [
     },
   },
   {
+    // Every ssh the CLI runs goes through runStep, runCapture or runLocal (src/cli/process.ts) or the host probes
+    // (src/cli/commands/host.ts), which turn a host key refusal into the ssh-keygen -R remedy and leave known_hosts
+    // alone. A command that spawned ssh itself would skip that, so child processes are started only in those modules
+    // (and by config.ts, which runs git).
+    files: ['src/cli/**/*.ts'],
+    ignores: [
+      'src/cli/**/*.test.ts',
+      'src/cli/process.ts',
+      'src/cli/commands/host.ts',
+      'src/cli/config.ts',
+    ],
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        {
+          selector: 'ImportDeclaration[source.value=/^(node:)?child_process$/]',
+          message:
+            'Run ssh through runStep, runCapture or runLocal (src/cli/process.ts) so a host key refusal prints the ssh-keygen -R remedy; do not start child processes here.',
+        },
+      ],
+    },
+  },
+  {
     files: ['tests/**/*.ts', 'src/**/*.test.ts'],
     languageOptions: {
       globals: {
