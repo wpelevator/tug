@@ -6,6 +6,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
 import { startMtlsControl } from '../../tests/helpers.ts';
+import { cliEntry, mainEntry } from '../../tests/cli-process.ts';
 
 const exec = promisify(execFile);
 
@@ -23,7 +24,7 @@ test('whole-document stdin commands and HTTP commands exit after completing thei
     AWS_SECRET_ACCESS_KEY: undefined,
   };
   const run = (entry: string, args: string[], input?: string) => {
-    const running = exec(process.execPath, [path.resolve(entry), ...args], {
+    const running = exec(process.execPath, [entry, ...args], {
       cwd: dir,
       env,
       timeout: 60_000,
@@ -32,7 +33,7 @@ test('whole-document stdin commands and HTTP commands exit after completing thei
     if (input !== undefined) running.child.stdin!.end(input);
     return running;
   };
-  const cli = (args: string[], input?: string) => run('src/cli.ts', args, input);
+  const cli = (args: string[], input?: string) => run(cliEntry, args, input);
   try {
     const imported = await cli(['init', '-'], JSON.stringify(control.root));
     assert.match(
@@ -41,7 +42,7 @@ test('whole-document stdin commands and HTTP commands exit after completing thei
       'init should import stdin and exit after EOF',
     );
 
-    const identity = await run('src/main.ts', ['agent', 'identity']);
+    const identity = await run(mainEntry, ['agent', 'identity']);
     assert.match(
       identity.stdout,
       /BEGIN CERTIFICATE REQUEST/,
@@ -53,7 +54,7 @@ test('whole-document stdin commands and HTTP commands exit after completing thei
       'app1',
       'node register should read the complete CSR and exit after the API response',
     );
-    const installed = await run('src/main.ts', ['agent', 'install-cert'], registered.stdout);
+    const installed = await run(mainEntry, ['agent', 'install-cert'], registered.stdout);
     assert.match(
       installed.stdout,
       /installed identity for node app1/,

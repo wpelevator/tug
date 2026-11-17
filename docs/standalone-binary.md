@@ -110,7 +110,7 @@ Review the remaining runtime behavior under Bun: asynchronous child processes fo
 
 - Add `tools/scripts/build-binary.js` (Node, per project convention) that runs `bun build --compile tools/binary/entry.ts` for each target, writes `dist-bin/tug-<os>-<arch>`, and packs each into a `.tar.gz` with a `.sha256` file.
 - Add an `npm run build:binary` script that calls it. Bun is a build-time dependency only, installed in CI with `oven-sh/setup-bun` and not added to `package.json`.
-- Extend the smoke test (`test:smoke:dist` already runs `src/cli/templates.test.ts` against `CLI_ENTRY`) so `CLI_ENTRY` can point at the native binary and assert `tug --version`, that every template renders, and that an mTLS request through a local test control succeeds with the pinned CA and connect-target override (the checks of `verify-mtls-runtime.js`).
+- Extend the smoke test (`test:smoke:dist` already runs `src/cli/templates.process.test.ts` against `CLI_ENTRY`) so `CLI_ENTRY` can point at the native binary and assert `tug --version`, that every template renders, and that an mTLS request through a local test control succeeds with the pinned CA and connect-target override (the checks of `verify-mtls-runtime.js`).
 - CI runs the smoke test on the host-native binary for linux x64 and macOS arm64. The other targets are cross-compiled only.
 
 ## Release and Homebrew

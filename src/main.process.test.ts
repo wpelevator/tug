@@ -9,13 +9,13 @@ import { promisify } from 'node:util';
 import { agentIdentityCsr, installIdentity } from './agent/credential.ts';
 import { NODE_LIFETIME_MS, Pki, identityUri } from './pki.ts';
 import type { IdentityResponse } from './protocol.ts';
+import { mainEntry } from '../tests/cli-process.ts';
 
 const exec = promisify(execFile);
-const entry = path.resolve('src/main.ts');
 
 test('--help prints usage for the runtime instead of starting a service', async () => {
   for (const args of [['control', '--help'], ['agent', '--help'], ['--help']]) {
-    const { stdout } = await exec(process.execPath, [entry, ...args], { timeout: 60_000 });
+    const { stdout } = await exec(process.execPath, [mainEntry, ...args], { timeout: 60_000 });
     assert.match(stdout, /Usage: tug-runtime/, `${args.join(' ')} should print usage and exit`);
   }
 });
@@ -33,7 +33,7 @@ test('agent identity --current refuses an agent enrolled as another node with a 
   });
   const env = { ...process.env, TUG_STATE_DIR: dir };
   const run = (...args: string[]) =>
-    exec(process.execPath, [entry, 'agent', 'identity', ...args], { env, timeout: 60_000 });
+    exec(process.execPath, [mainEntry, 'agent', 'identity', ...args], { env, timeout: 60_000 });
   await assert.rejects(
     run('--current', 'app9'),
     (error: { code: number; stderr: string }) => {
@@ -68,7 +68,7 @@ test('the control refuses a database from a newer Tug with one plain line and a 
   db.exec('PRAGMA user_version = 99');
   db.close();
   await assert.rejects(
-    exec(process.execPath, [entry, 'control'], {
+    exec(process.execPath, [mainEntry, 'control'], {
       env: { ...process.env, TUG_DATA_DIR: dir, TUG_CONTROL_URL: 'https://control.test:8443' },
       timeout: 60_000,
     }),

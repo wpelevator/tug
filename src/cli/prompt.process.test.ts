@@ -6,6 +6,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
 import { pathToFileURL } from 'node:url';
+import { cliEntry } from '../../tests/cli-process.ts';
 
 const exec = promisify(execFile);
 
@@ -85,11 +86,11 @@ test('CLI exits after a prompted command fails while stdin stays open', async ()
     'process.stdin.isTTY = true; process.stdout.isTTY = true;',
   )}`;
   try {
-    const running = exec(
-      process.execPath,
-      ['--import', terminal, path.resolve('src/cli.ts'), 'node', 'add'],
-      { cwd: dir, env: { ...process.env, TUG_CONFIG: '', CI: '' }, timeout: 60_000 },
-    );
+    const running = exec(process.execPath, ['--import', terminal, cliEntry, 'node', 'add'], {
+      cwd: dir,
+      env: { ...process.env, TUG_CONFIG: '', CI: '' },
+      timeout: 60_000,
+    });
     let answered = false;
     running.child.stderr!.on('data', (data) => {
       if (!answered && String(data).includes('Node name')) {

@@ -16,6 +16,7 @@ import { serverTlsOptions } from '../control/tls-server.ts';
 import { createCliLiveTransport } from './live-transport.ts';
 import { parseLiveRequest, runCliLive } from './live.ts';
 import { until } from '../../tests/wait.ts';
+import { cliEntry } from '../../tests/cli-process.ts';
 
 const execFileAsync = promisify(execFile);
 async function serverFixture() {
@@ -348,7 +349,7 @@ test('CLI commands route through resolved configuration and preserve exec argv i
   };
   delete env.TUG_CONFIG;
   const cli = (...args: string[]) =>
-    execFileAsync(process.execPath, [path.resolve('src/cli.ts'), ...args], {
+    execFileAsync(process.execPath, [cliEntry, ...args], {
       env,
       cwd: '/tmp',
       timeout: 60_000,
@@ -449,7 +450,7 @@ test('interactive CLI exits on completion, failure, disconnect and cancellation 
     for (outcome of ['success', 'nonzero', 'error', 'disconnect', 'cancel']) {
       const running = execFileAsync(
         process.execPath,
-        [path.resolve('src/cli.ts'), 'exec', 'web', '-i', '--', 'cat'],
+        [cliEntry, 'exec', 'web', '-i', '--', 'cat'],
         {
           cwd: os.tmpdir(),
           env: {

@@ -12,6 +12,7 @@ import { Pki, identityUri, serverNames } from '../pki.ts';
 import { packageVersion } from '../images/image.ts';
 import { serverTlsOptions } from '../control/tls-server.ts';
 import { keysFor, menuCount } from './test-keys.ts';
+import { cliEntry } from '../../tests/cli-process.ts';
 
 const exec = promisify(execFile);
 test('live command selection sends exact services, eligible nodes and remote arguments without contaminating stdout', async () => {
@@ -76,25 +77,21 @@ test('live command selection sends exact services, eligible nodes and remote arg
   const url = `https://127.0.0.1:${(https.address() as { port: number }).port}`;
   const fakeTerminal = `data:text/javascript,${encodeURIComponent('process.stdin.isTTY=true; process.stdout.isTTY=true;')}`;
   const run = (args: string[], answers: string[] = [], env: Record<string, string> = {}) => {
-    const running = exec(
-      process.execPath,
-      ['--import', fakeTerminal, path.resolve('src/cli.ts'), ...args],
-      {
-        cwd: dir,
-        env: {
-          ...process.env,
-          TUG_CONFIG: '',
-          TUG_PROJECT: 'site',
-          TUG_CREDENTIAL: '',
-          TUG_CREDENTIAL_FILE: credentialFile,
-          TUG_CONTROL_URL: url,
-          CI: '',
-          TERM: 'xterm-256color',
-          ...env,
-        },
-        timeout: 60_000,
+    const running = exec(process.execPath, ['--import', fakeTerminal, cliEntry, ...args], {
+      cwd: dir,
+      env: {
+        ...process.env,
+        TUG_CONFIG: '',
+        TUG_PROJECT: 'site',
+        TUG_CREDENTIAL: '',
+        TUG_CREDENTIAL_FILE: credentialFile,
+        TUG_CONTROL_URL: url,
+        CI: '',
+        TERM: 'xterm-256color',
+        ...env,
       },
-    );
+      timeout: 60_000,
+    });
     let text = '';
     let answered = 0;
     running.child.stderr!.on('data', (data) => {
