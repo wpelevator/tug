@@ -1,16 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { Command } from 'commander';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { startMtlsControl } from '../../tests/helpers.ts';
 import { addJsonOption } from './json-option.ts';
-
-const exec = promisify(execFile);
-const cliEntry = new URL('../cli.ts', import.meta.url).pathname;
+import { execCli } from '../../tests/cli-inprocess.ts';
 
 test('addJsonOption gives every result command a --json option and leaves the rest alone', () => {
   const program = new Command('tug');
@@ -51,7 +47,7 @@ test('addJsonOption gives every result command a --json option and leaves the re
 
 /** Every leaf command path of the real CLI, found by following `Commands:` in each --help. */
 async function leafCommands(prefix: string[] = []): Promise<{ path: string[]; help: string }[]> {
-  const { stdout } = await exec('node', ['src/cli.ts', ...prefix, '--help']);
+  const { stdout } = await execCli([...prefix, '--help']);
   const section = /\nCommands:\n([\s\S]*?)(?:\n\n|\n*$)/.exec(stdout)?.[1];
   const children = (section ?? '')
     .split('\n')
@@ -99,8 +95,7 @@ test(
       TUG_CREDENTIALS_DIR: path.join(dir, 'credentials'),
     };
     await fsp.writeFile(env.TUG_CONFIG as string, '{}');
-    const cli = async (...args: string[]) =>
-      (await exec(process.execPath, [cliEntry, ...args], { env, cwd: dir })).stdout;
+    const cli = async (...args: string[]) => (await execCli([...args], { env, cwd: dir })).stdout;
     try {
       const secrets = JSON.parse(await cli('secret', 'list', '--json'));
       assert.ok(Array.isArray(secrets.secrets), 'secret list --json prints the secrets document');
@@ -116,14 +111,10 @@ test(
         'backup list --json prints the catalog with its targets and runs',
       );
       for (const extra of [[], ['--allow-empty']]) {
-        const check = await exec(
-          process.execPath,
-          [cliEntry, 'backup', 'list', '--check', ...extra],
-          {
-            env,
-            cwd: dir,
-          },
-        ).then(
+        const check = await execCli(['backup', 'list', '--check', ...extra], {
+          env,
+          cwd: dir,
+        }).then(
           () => ({ code: 0, stderr: '' }),
           (error: { code: number; stderr: string }) => error,
         );

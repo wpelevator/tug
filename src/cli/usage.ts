@@ -1,5 +1,10 @@
 let started = false;
 
+/** Starts a run with no work done yet, so one process can run several commands (the tests do). */
+export function resetUsage(): void {
+  started = false;
+}
+
 /** A command calls this when it starts real work (a control request, a remote step): an error after that is not a usage mistake. */
 export function markWorkStarted(): void {
   started = true;

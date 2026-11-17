@@ -1,23 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { promisify } from 'node:util';
 import { startMtlsControl } from '../../../tests/helpers.ts';
-
-const exec = promisify(execFile);
-const entry = path.resolve('src/cli.ts');
+import { execCli } from '../../../tests/cli-inprocess.ts';
 
 test('domain commands reach the control over mTLS and report its answers', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-domain-cli-'));
   const control = await startMtlsControl(dir);
   const run = (...args: string[]) =>
-    exec(process.execPath, [entry, 'domain', ...args], {
+    execCli(['domain', ...args], {
       cwd: dir,
       env: { ...process.env, ...control.env, TUG_CREDENTIAL: '', TUG_PROJECT: 'site' },
-      timeout: 60_000,
     });
   try {
     assert.deepEqual(

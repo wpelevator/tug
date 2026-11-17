@@ -151,6 +151,9 @@ export async function startMtlsControl(
   options: { eventPruneIntervalMs?: number } = {},
 ) {
   process.env.TUG_DATA_DIR = dir;
+  // Control shares this process with the in-process CLI (tests/cli-inprocess.ts), so its info logs would land in the
+  // CLI's captured stdout. Set before control loads: the logger reads the level once.
+  process.env.TUG_LOG_LEVEL ??= 'error';
   const { createApp, listen } = await import('../src/control/control.ts');
   const { issueHostCredential } = await import('../src/control/credential-issue.ts');
   const { createTransport } = await import('../src/transport.ts');

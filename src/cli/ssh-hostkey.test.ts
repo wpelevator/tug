@@ -1,16 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { promisify } from 'node:util';
 import { startMtlsControl } from '../../tests/helpers.ts';
 import { discoverAddresses, hostHasDocker, remoteHostname } from './commands/host.ts';
 import { runCapture, runLocal, runStep, SshHostKeyError, sshHostKeyHint } from './process.ts';
+import { execCli } from '../../tests/cli-inprocess.ts';
 
-const execFileAsync = promisify(execFile);
-const cliEntry = path.resolve('src/cli.ts');
 const REFUSAL = 'Host key verification failed.';
 
 test('sshHostKeyHint names the host and the ssh-keygen -R remedy only for a host key refusal', () => {
@@ -146,8 +143,7 @@ test('every command that runs ssh prints the ssh-keygen -R remedy and never touc
   const target = 'root@203.0.113.9';
   // Registered by an earlier add, as for any host that is already a node.
   await control.registerNode('n1');
-  const cli = (...args: string[]) =>
-    execFileAsync(process.execPath, [cliEntry, ...args], { env, cwd: dir });
+  const cli = (...args: string[]) => execCli([...args], { env, cwd: dir });
   try {
     for (const args of [
       ['node', 'add', target, '--name', 'n1', '--no-wait'],

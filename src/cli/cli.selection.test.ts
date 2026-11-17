@@ -9,6 +9,7 @@ import { createTransport } from '../transport.ts';
 import { openDb } from '../db/db.ts';
 import { startMtlsControl } from '../../tests/helpers.ts';
 import { keysFor, menuCount } from './test-keys.ts';
+import { execCli } from '../../tests/cli-inprocess.ts';
 
 const exec = promisify(execFile);
 const terminal = `data:text/javascript,${encodeURIComponent('process.stdin.isTTY = true; process.stdout.isTTY = true;')}`;
@@ -76,7 +77,11 @@ test('CLI selections mutate only chosen resources, preserve output and abort wit
       ],
     ] as [string[], RegExp][])
       await assert.rejects(
-        run(args),
+        // Rejected before any prompt, so it needs no terminal and runs in-process.
+        execCli(args, {
+          cwd: dir,
+          env: { ...process.env, ...control.env, TUG_CREDENTIAL: '', TUG_PROJECT: 'site', CI: '' },
+        }),
         pattern,
         'conflicting selection flags must fail before prompting or mutation',
       );

@@ -1,14 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { promisify } from 'node:util';
 import { startMtlsControl } from '../../../tests/helpers.ts';
-
-const exec = promisify(execFile);
-const entry = path.resolve('src/cli.ts');
+import { execCli } from '../../../tests/cli-inprocess.ts';
 
 async function withControl(
   run: (ctx: {
@@ -21,7 +17,7 @@ async function withControl(
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-vars-cli-'));
   const control = await startMtlsControl(dir);
   const tug = (args: string[], stdin?: string) => {
-    const child = exec(process.execPath, [entry, ...args], {
+    return execCli(args, {
       cwd: dir,
       env: {
         ...process.env,
@@ -33,10 +29,8 @@ async function withControl(
         TUG_TEST_SHELL: 'from-shell',
         COMPOSE_PROFILES: 'debug',
       },
-      timeout: 60_000,
+      input: stdin,
     });
-    if (stdin !== undefined) child.child.stdin!.end(stdin);
-    return child;
   };
   try {
     await run({

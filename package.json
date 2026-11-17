@@ -28,7 +28,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "schema": "node tools/scripts/write-x-tug-schema.js",
     "prepack": "npm run build",
-    "test": "node --test 'src/**/*.test.ts' tools/scripts/check-reachability.test.mjs",
+    "test": "node tools/scripts/test.mjs 'src/**/*.test.ts' tools/scripts/check-reachability.test.mjs",
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write . && eslint . --fix",
     "test:integration": "bash tools/scripts/integration-test.sh",

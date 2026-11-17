@@ -1,21 +1,16 @@
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { promisify } from 'node:util';
 import { findConfigInParents } from './config.ts';
-
-const exec = promisify(execFile);
-const entry = path.resolve(import.meta.dirname, '../cli.ts');
+import { execCli } from '../../tests/cli-inprocess.ts';
 
 async function failure(args: string[], cwd: string): Promise<string> {
   try {
-    await exec(process.execPath, [entry, ...args], {
+    await execCli([...args], {
       cwd,
       env: { ...process.env, TUG_CONFIG: '', TUG_CREDENTIAL: '', TUG_CREDENTIAL_FILE: '', CI: '' },
-      timeout: 60_000,
     });
   } catch (error) {
     return (error as { stderr: string }).stderr;

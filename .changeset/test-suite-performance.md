@@ -2,4 +2,4 @@
 '@wpelevator/tug': patch
 ---
 
-Document where the `npm test` time goes and propose a faster test suite.
+Start faster: the CLI loads only the command it runs, and run the CLI tests in-process so the test suite takes about half as long.

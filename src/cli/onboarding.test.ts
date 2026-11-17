@@ -1,7 +1,5 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -17,9 +15,7 @@ import {
 import { confirm, type Prompter } from './prompt.ts';
 import { commandPath } from './config.ts';
 import { formatNodes } from './status.ts';
-
-const exec = promisify(execFile);
-const entry = path.resolve(import.meta.dirname, '../cli.ts');
+import { execCli } from '../../tests/cli-inprocess.ts';
 
 const answers =
   (...given: string[]): Prompter =>
@@ -122,7 +118,7 @@ test('the CLI is grouped: setup mirrors control setup, node add needs a name for
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-groups-'));
   const env = { ...process.env, TUG_CONFIG: path.join(dir, 'cfg.json'), CI: '1' };
   await fs.writeFile(env.TUG_CONFIG, '{}');
-  const run = (...args: string[]) => exec(process.execPath, [entry, ...args], { env, cwd: dir });
+  const run = (...args: string[]) => execCli([...args], { env, cwd: dir });
   try {
     const flags = (help: string) => [...help.matchAll(/^\s+(--[a-z-]+)/gm)].map((m) => m[1]).sort();
     assert.deepEqual(

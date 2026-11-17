@@ -1,14 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { promisify } from 'node:util';
 import { lintComposeFile } from './lint.ts';
-
-const exec = promisify(execFile);
-const entry = path.resolve('src/cli.ts');
+import { execCli } from '../../../tests/cli-inprocess.ts';
 
 const writeFile = async (dir: string, name: string, text: string): Promise<string> => {
   const file = path.join(dir, name);
@@ -125,7 +121,7 @@ test('tug lint exits nonzero with findings on stderr and prints ok on a passing 
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-lint-'));
   try {
     await writeFile(dir, 'compose.yml', GOOD);
-    const okRun = await exec(process.execPath, [entry, 'lint'], {
+    const okRun = await execCli(['lint'], {
       cwd: dir,
       env: { ...process.env },
     });
@@ -136,7 +132,7 @@ test('tug lint exits nonzero with findings on stderr and prints ok on a passing 
       'bad.yml',
       'services:\n  web:\n    image: nginx\n    x-tug:\n      replicas: 0\n',
     );
-    const error = (await exec(process.execPath, [entry, 'lint', '-f', 'bad.yml'], {
+    const error = (await execCli(['lint', '-f', 'bad.yml'], {
       cwd: dir,
       env: { ...process.env },
     }).catch((e: Error & { stdout?: string; stderr?: string }) => e)) as Error & {
@@ -164,14 +160,10 @@ test('tug lint --json prints a machine-readable result and no human summary', as
       'bad.yml',
       'services:\n  web:\n    image: nginx\n    x-tug:\n      health:\n        type: htp\n',
     );
-    const { stdout } = await exec(
-      process.execPath,
-      [entry, 'lint', '--file', 'bad.yml', '--json'],
-      {
-        cwd: dir,
-        env: { ...process.env },
-      },
-    ).catch((e: Error & { stdout?: string }) => e as never);
+    const { stdout } = await execCli(['lint', '--file', 'bad.yml', '--json'], {
+      cwd: dir,
+      env: { ...process.env },
+    }).catch((e: Error & { stdout?: string }) => e as never);
     const result = JSON.parse(String(stdout));
     assert.deepEqual(
       { ok: result.ok, file: path.basename(result.file), errors: result.errors },
@@ -185,7 +177,7 @@ test('tug lint --json prints a machine-readable result and no human summary', as
     const good = await writeFile(dir, 'compose.yml', GOOD);
     const ok = JSON.parse(
       (
-        await exec(process.execPath, [entry, 'lint', '--json'], {
+        await execCli(['lint', '--json'], {
           cwd: dir,
           env: { ...process.env },
         }).catch((e: Error & { stdout?: string }) => e as never)
@@ -212,7 +204,7 @@ test('the tug.yml file setting defaults the file lint looks at', async () => {
     await writeFile(dir, 'compose.yml', 'services:\n  web:\n    x-tug: 5\n');
     const alt = await writeFile(dir, 'compose.alt.yml', GOOD);
     await writeFile(dir, 'tug.yml', 'file: compose.alt.yml\n');
-    const { stdout } = await exec(process.execPath, [entry, 'lint', '--json'], {
+    const { stdout } = await execCli(['lint', '--json'], {
       cwd: dir,
       env: { ...process.env },
     });

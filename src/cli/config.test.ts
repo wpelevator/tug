@@ -3,10 +3,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { execFile, spawnSync } from 'node:child_process';
-import { promisify } from 'node:util';
+import { spawnSync } from 'node:child_process';
 import { Command } from 'commander';
 import { writeCredentialFile } from '../../tests/helpers.ts';
+import { execCli } from '../../tests/cli-inprocess.ts';
 import {
   CONFIG_NAMES,
   COMMAND_SETTINGS,
@@ -17,9 +17,6 @@ import {
   resolveCliConfig,
   writeInitConfig,
 } from './config.ts';
-
-const exec = promisify(execFile);
-const entry = path.resolve('src/cli.ts');
 
 async function withDir(run: (dir: string) => Promise<void>): Promise<void> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-config-file-'));
@@ -398,7 +395,7 @@ test('every config key is the camelCase of the flag it defaults, and every liste
   const helps = new Map<string, string>();
   const help = async (command: string): Promise<string> => {
     if (!helps.has(command)) {
-      const { stdout } = await exec(process.execPath, [entry, ...command.split(' '), '--help']);
+      const { stdout } = await execCli([...command.split(' '), '--help']);
       helps.set(command, stdout);
     }
     return helps.get(command)!;
@@ -493,7 +490,7 @@ test('node add reads the ssh target from the config and reports a missing one by
       'controlUrl: https://control.test\nnodes:\n  app1:\n    ssh: root@203.0.113.7\n  app2:\n    address: x.test\n',
     );
     const run = (...args: string[]) =>
-      exec(process.execPath, [entry, ...args], { cwd: dir }).then(
+      execCli([...args], { cwd: dir }).then(
         () => ({ code: 0, stderr: '' }),
         (error: { code: number; stderr: string }) => ({ code: error.code, stderr: error.stderr }),
       );
@@ -532,7 +529,7 @@ test('node add reads the ssh target from the config and reports a missing one by
 
 test('every config key applies to every command that has its option, and to no other', async () => {
   const run = (...args: string[]) =>
-    exec(process.execPath, [entry, ...args], { env: { ...process.env, TUG_CONFIG: '' } }).then(
+    execCli([...args], { env: { ...process.env, TUG_CONFIG: '' } }).then(
       (r) => r.stdout,
       (e: { stdout?: string }) => e.stdout ?? '',
     );

@@ -1,8 +1,8 @@
 # Test suite performance
 
-Status: Record with a proposal. Measured on 17 November 2026 on a 4-core Linux container with Node.js 22.23.4. The proposal is not built yet.
+Status: Record. The first proposal is built; measured on 17 November 2026 on a 4-core Linux container with Node.js 22.23.4.
 
-`npm test` takes about 2 minutes 49 seconds there, and about 8.5 minutes of CPU. This page records where that time goes and what to change. The numbers are from runs on that machine, so treat them as ratios, not as promises for other hardware. I did not measure earlier releases, so this page cannot say which change made the suite slow.
+`npm test` took 2 minutes 49 seconds there and about 8.5 minutes of CPU before the change described under [Result](#result), and takes 1 minute 17 seconds after it. This page records where the time went and what changed. The numbers are from runs on that machine, so treat them as ratios, not as promises for other hardware. I did not measure earlier releases, so this page cannot say which change made the suite slow.
 
 ## What the run is made of
 
@@ -51,19 +51,26 @@ The build takes 5.7 s. Building and caching alone roughly halves the start cost 
 
 `src/cli.ts` calls `program.parseAsync()` at the top level, so there is no function a test can call without starting a process.
 
-## Proposal
+## Result
 
-Ordered by effect. Do the first two together.
+Built, in this order:
 
-1. **Expose the CLI as a function and run argument-level tests in-process.** Move the program construction into `src/cli/main.ts` as `run(argv, { env, cwd, stdout, stderr })` returning an exit code, and keep `src/cli.ts` as the three-line entry that calls it. Move the matrix tests that only check parsing, help text, `--json` shape, config-key mapping and "rejected before contacting control" onto `run`. Keep about 10 real subprocess tests as smoke tests: exit codes, stdin and stdout streams, signals, and the `dist` entry. This removes most of the 467 spawns.
-2. **Parse before loading.** Register commands lazily: `src/cli.ts` looks at the first argument and imports only that command's module. `tug credential list` then no longer loads the deploy and TUI graphs. This helps operators on every invocation, not just the suite, and cuts the remaining spawns.
-3. **Run subprocess tests against the built CLI.** Add a `pretest` step that runs `npm run build` once (5.7 s) and set `NODE_COMPILE_CACHE` to a directory under `os.tmpdir()` for the remaining spawns. `npm run test:smoke:dist` already builds, so the build path is exercised.
-4. **Split the scripts.** `npm test` runs the fast suite (in-process and unit tests). `npm run test:cli` runs the subprocess smoke tests. CI runs both, and a contributor runs `npm test` while iterating.
+1. `src/cli/program.ts` exports `runCli(argv)`, which builds the program per call and returns the exit code. `src/cli.ts` is a three-line entry. Commander throws instead of calling `process.exit`, and `resetUsage` plus `setVerbose` reset the module state between runs.
+2. The program loads only the module of the command named on the command line (`COMMAND_MODULES`), and everything for `--help`, `--version` and unknown names. `tug credential list` starts in about 0.34 s instead of 0.45 s. `src/cli/program.test.ts` checks that the table matches `tug --help`.
+3. `tests/cli-inprocess.ts` provides `execCli`, and 17 test files moved from `exec(process.execPath, [entry, …])` to it. The matrix tests (`credentials`, `json-option`, `config`, `var`, the argument cases of `cli.selection`) now take about a second each, down from 18 to 46 seconds.
+4. `npm test` runs through `tools/scripts/test.mjs`, which sets `NODE_COMPILE_CACHE` for the processes that remain.
 
-A projection, not a measurement: if 400 of the 467 spawns move in-process, the suite loses up to roughly 300 s of CPU and should finish in about 1 minute on this machine. Re-measure after step 1 before committing to steps 3 and 4.
+| Measure | Before | After |
+| --- | --- | --- |
+| Wall time, `npm test` | 2 min 49 s | 1 min 17 s |
+| CPU time (user) | 8 min 35 s | 3 min 22 s |
+| CLI processes started | 467 | 106 |
+| Test cases | 1,175 | 1,180 (four new, for `runCli` and `execCli`) |
 
-## Acceptance
+The 106 that remain need a real process: the interactive selection and prompt tests (a fake terminal and keystrokes), whole-document stdin and `secret set` (exit while stdin stays open), the 100 MB streaming tests, `wait-progress`, and the `dist` and templates smoke tests.
 
-- `npm test` finishes in under 90 s on 4 cores, and the CLI spawn count is under 70 when measured with the preload described above.
-- No test is deleted: every moved case asserts the same behavior, including its assertion message.
-- The `--json` and config-key matrix tests still cover every registered command, so adding a command without covering it fails.
+I did not build the `pretest` build step or the `npm test` / `npm run test:cli` split. After the move, the processes that remain are mostly terminal and stream tests that run against `src`, so a built entry would save about 0.15 s on about a hundred starts, and the suite is already under the 90 second target. Revisit when it grows past that.
+
+## Next candidates
+
+The slowest files now are `src/control/live-flow.test.ts`, `src/cli/cli.selection.test.ts`, `src/cli/templates.test.ts` and `src/cli/wait-progress.test.ts`. Each is dominated by a few real-process or large-transfer cases. Cutting further means shrinking the 100 MB transfers or sharing one control between cases, not removing spawns.
