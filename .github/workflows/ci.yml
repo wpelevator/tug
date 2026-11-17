@@ -31,7 +31,10 @@ jobs:
         run: npm run typecheck
       - if: matrix.node == 24
         run: npm run lint
+      # Tests start tug processes that compile the same TypeScript graph each time; a compile cache shares that work.
       - run: npm test
+        env:
+          NODE_COMPILE_CACHE: ${{ runner.temp }}/node-compile-cache
       - run: npm run test:smoke:dist
 
   integration:

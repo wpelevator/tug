@@ -3,7 +3,6 @@ import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { testFiles, tierOf } from '../tools/scripts/test-tiers.mjs';
 
 // Keeps the test tiers honest (docs/testing.md#test-tiers). A node process costs about half a second to start, so the
 // suite stays fast only while tests that start real tug processes are few, named and easy to find. These checks make
@@ -12,7 +11,16 @@ import { testFiles, tierOf } from '../tools/scripts/test-tiers.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SELF = 'src/test-layout.test.ts';
-const files = testFiles(root).map((file) => file.split(path.sep).join('/'));
+const tierOf = (file: string) => (/\.process\.test\.[mc]?[jt]s$/.test(file) ? 'process' : 'fast');
+
+function walk(dir: string): string[] {
+  return fs.readdirSync(path.join(root, dir), { withFileTypes: true }).flatMap((entry) => {
+    const rel = `${dir}/${entry.name}`;
+    if (entry.isDirectory()) return walk(rel);
+    return /\.test\.[mc]?[jt]s$/.test(entry.name) ? [rel] : [];
+  });
+}
+const files = [...walk('src'), ...walk('tools/scripts')].sort();
 const read = (file: string) => fs.readFileSync(path.join(root, file), 'utf8');
 const startsRealProcess = (text: string) =>
   /tests\/cli-process\.ts|process\.execPath|\bspawn\(|\bexecFile\(/.test(text);
