@@ -57,6 +57,11 @@ export interface CliRuntime {
   signals: EventEmitter;
   /** Sends the signal to this process, for a handler that restored the terminal and now lets the signal act. */
   raise(signal: NodeJS.Signals): void;
+  /**
+   * Answers whether a registry image exists, as `docker manifest inspect` would. Unset runs that command with this
+   * run's environment; a test runtime sets it so no test depends on the registry or on which release is published.
+   */
+  inspectImage?: (image: string) => { status: number | null; stderr: string };
   /** The exit code a command asked for; the entry point applies it. Unset means success. */
   exitCode?: number;
   state: CliState;

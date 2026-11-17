@@ -13,6 +13,11 @@ export interface TestRuntimeOptions {
   input?: string;
   /** The version the CLI reports; defaults to this package's. */
   version?: string;
+  /**
+   * Answers the registry lookup of the install commands; defaults to "published". The real lookup is false on the
+   * commit that cuts a release, whose image builds minutes later, so a test must never reach it unless it says so.
+   */
+  inspectImage?: CliRuntime['inspectImage'];
   /** Present stdin and stdout as terminals. */
   tty?: boolean;
   columns?: number;
@@ -51,6 +56,7 @@ export function testRuntime(options: TestRuntimeOptions = {}) {
     stderr: sink(err, false, 100),
     inheritStdio: false,
     version: options.version ?? packageVersion(),
+    inspectImage: options.inspectImage ?? (() => ({ status: 0, stderr: '' })),
     signals: new EventEmitter(),
     raise: () => {},
     state: freshState(env),

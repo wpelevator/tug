@@ -123,7 +123,7 @@ test('host probes stop on a host key refusal instead of reading it as no Docker 
   });
 });
 
-test('every command that runs ssh prints the ssh-keygen -R remedy and never touches known_hosts', async () => {
+test('the commands that catch an ssh failure still print the ssh-keygen -R remedy and never touch known_hosts', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-hostkey-cli-'));
   const control = await startMtlsControl(path.join(dir, 'data'));
   const bin = path.join(dir, 'bin');
@@ -147,12 +147,13 @@ test('every command that runs ssh prints the ssh-keygen -R remedy and never touc
   const cli = (...args: string[]) => execCli([...args], { env, cwd: dir });
   try {
     for (const args of [
+      // One command that runs ssh directly; the rest reach it through the wrappers, which src/cli's lint rule enforces
+      // (runtime-boundary.test.ts) and the tests above cover.
       ['node', 'add', target, '--name', 'n1', '--no-wait'],
-      ['node', 'replace', 'n1', target, '--no-wait'],
-      ['node', 'repair', 'n1', target, '--no-wait'],
+      // The commands that catch an ssh failure: each must let the host key refusal through instead of rewording it.
       ['node', 'upgrade', 'n1', target, '--no-wait'],
-      ['node', 'migrate', 'n1', target, '--no-wait'],
-      ['node', 'remove', 'n1', target, '--teardown', '-y'],
+      ['control', 'upgrade', target, '-y'],
+      // Reads the installation first and treats any failure there as "nothing installed yet".
       [
         'control',
         'setup',
@@ -163,10 +164,6 @@ test('every command that runs ssh prints the ssh-keygen -R remedy and never touc
         '--credential-out',
         path.join(dir, 'c'),
       ],
-      ['control', 'upgrade', target, '-y'],
-      ['control', 'migrate', target],
-      ['control', 'stop', target, '-y'],
-      ['control', 'restart', target, '-y'],
     ]) {
       const label = `tug ${args.slice(0, 2).join(' ')}`;
       const failure = await cli(...args).then(
