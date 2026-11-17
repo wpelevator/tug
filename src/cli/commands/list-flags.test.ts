@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { Command } from 'commander';
 import type { Option } from 'commander';
 import { collectList } from './context.ts';
+import { testRuntime } from '../../../tests/cli-runtime.ts';
 import { registerBackup } from './backup.ts';
 import { registerControl } from './control.ts';
 import { registerCredential } from './credential.ts';
@@ -45,6 +46,7 @@ function everyOption(command: Command): { path: string; option: Option }[] {
 }
 
 test('every flag that takes several values accepts a comma-separated list', () => {
+  const { rt } = testRuntime();
   const program = new Command();
   for (const register of [
     registerBackup,
@@ -63,7 +65,7 @@ test('every flag that takes several values accepts a comma-separated list', () =
     registerVar,
     registerVolume,
   ])
-    register(program);
+    register(rt, program);
   const multi = everyOption(program).filter(({ option }) => Array.isArray(option.defaultValue));
   assert.deepEqual(
     [...new Set(multi.map(({ option }) => option.long))].sort(),

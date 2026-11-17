@@ -429,7 +429,7 @@ test('init creates the tracked file once, keeps an existing one untouched, and g
       dir,
       true,
     );
-    const written = await writeInitConfig(resolved, path.join(dir, 'cred1.json'), {});
+    const written = await writeInitConfig(resolved, path.join(dir, 'cred1.json'), {}, process.env);
     assert.deepEqual(
       written.map((file) => path.basename(file)),
       ['tug.yml', 'tug.local.yml'],
@@ -456,9 +456,12 @@ test('init creates the tracked file once, keeps an existing one untouched, and g
     const edited = `# my comment\n${tracked}nodes:\n  app1:\n    ssh: root@h\n`;
     await fs.writeFile(path.join(dir, 'tug.yml'), edited);
     const again = await resolveCliConfig({ controlUrl: 'https://other.test' }, {}, dir, true);
-    await writeInitConfig(again, path.join(dir, 'cred2.json'), {
-      controlUrl: 'https://other.test',
-    });
+    await writeInitConfig(
+      again,
+      path.join(dir, 'cred2.json'),
+      { controlUrl: 'https://other.test' },
+      process.env,
+    );
     assert.equal(
       await fs.readFile(path.join(dir, 'tug.yml'), 'utf8'),
       edited,
@@ -567,7 +570,13 @@ test('every config key applies to every command that has its option, and to no o
 test('init writes the credential URL into a new tracked file when no URL was given', async () => {
   await withDir(async (dir) => {
     const resolved = await resolveCliConfig({}, {}, dir, true);
-    await writeInitConfig(resolved, path.join(dir, 'cred.json'), {}, 'https://control.test:8443');
+    await writeInitConfig(
+      resolved,
+      path.join(dir, 'cred.json'),
+      {},
+      process.env,
+      'https://control.test:8443',
+    );
     assert.match(
       await fs.readFile(path.join(dir, 'tug.yml'), 'utf8'),
       /controlUrl: https:\/\/control\.test:8443/,

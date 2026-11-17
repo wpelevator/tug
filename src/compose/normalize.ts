@@ -89,14 +89,14 @@ const PASSTHROUGH = /^(PATH|HOME|USER|USERPROFILE|SYSTEMROOT|TMPDIR|TEMP|TMP|DOC
  */
 async function composeCliEnv(
   file: string,
+  hostEnv: NodeJS.ProcessEnv,
   values: NodeJS.ProcessEnv,
   profiles: readonly string[],
 ): Promise<{ env: NodeJS.ProcessEnv; emptyEnvFile: string; cleanup: () => Promise<void> }> {
   const text = await fs.readFile(file, 'utf8').catch(() => '');
   if (/^[^#\n]*\benv_file\s*:/m.test(text)) throw new Error(ENV_FILE_MESSAGE(file));
   const env: NodeJS.ProcessEnv = {};
-  for (const [key, value] of Object.entries(process.env))
-    if (PASSTHROUGH.test(key)) env[key] = value;
+  for (const [key, value] of Object.entries(hostEnv)) if (PASSTHROUGH.test(key)) env[key] = value;
   Object.assign(env, values);
   if (profiles.length) env.COMPOSE_PROFILES = profiles.join(',');
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-compose-env-'));
@@ -121,13 +121,16 @@ export async function normalizeCompose(
     vars?: Readonly<Record<string, string>>;
     /** Active profiles, in place of `COMPOSE_PROFILES`. */
     profiles?: readonly string[];
+    /** The environment of the machine running the CLI, of which only what Docker needs reaches `docker compose`; default `process.env`. */
+    hostEnv?: NodeJS.ProcessEnv;
   } = {},
 ): Promise<ComposeFile> {
   // Nothing here comes from the deploy machine: not its shell, not `.env`, not `env_file`. The names control holds
   // are the whole environment, so two machines that run the same deploy read the same values.
   const env: NodeJS.ProcessEnv = { ...options.vars };
   for (const name of secretNames) env[name] = secretSentinel(name);
-  if (!(options.composeCli ?? process.env.TUG_COMPOSE_CLI === '1'))
+  const hostEnv = options.hostEnv ?? process.env;
+  if (!(options.composeCli ?? hostEnv.TUG_COMPOSE_CLI === '1'))
     return loadCompose(file, {
       project: options.project,
       env,
@@ -136,7 +139,7 @@ export async function normalizeCompose(
     });
   const runner = options.runner ?? ((cmd, args, opts) => run(cmd, args, opts));
   let result: RunResult;
-  const cliEnv = await composeCliEnv(file, env, options.profiles ?? []);
+  const cliEnv = await composeCliEnv(file, hostEnv, env, options.profiles ?? []);
   try {
     result = await runner('docker', composeConfigArgs(file, options.project, cliEnv.emptyEnvFile), {
       env: cliEnv.env,

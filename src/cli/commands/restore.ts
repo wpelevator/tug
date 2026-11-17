@@ -1,8 +1,10 @@
-import { selectMany } from '../selection.ts';
+import { selectMany, terminalSelection } from '../selection.ts';
 import { selectBackup, selectRestore, selectSnapshot, serviceChoices } from './selection.ts';
 import { withProgress } from '../progress.ts';
 import type { Command } from 'commander';
 import { collectList, loadCfg, print, request } from './context.ts';
+import { out, err } from '../runtime.ts';
+import type { CliRuntime } from '../runtime.ts';
 
 interface RestorePlanView {
   target: string;
@@ -25,7 +27,7 @@ interface RestoreRecord {
   started_at: string | null;
 }
 
-export function registerRestore(program: Command): void {
+export function registerRestore(rt: CliRuntime, program: Command): void {
   const restore = program
     .command('restore')
     .description('restore services and volumes from backups');
@@ -76,18 +78,22 @@ export function registerRestore(program: Command): void {
           throw new Error('--select-writers cannot be combined with --writers or --no-writers');
         if (o.scratch && o.selectWriters)
           throw new Error('--select-writers does not apply to scratch restores');
-        target = await selectBackup(target);
-        if (o.selectSnapshot) o.from = await selectSnapshot(target);
+        target = await selectBackup(rt, target);
+        if (o.selectSnapshot) o.from = await selectSnapshot(rt, target);
         if (o.selectWriters)
-          o.writers = await selectMany('Select services to stop for the restore', serviceChoices);
-        return withProgress(`Preparing restore for ${target}`, async (progress) => {
-          const project = (await loadCfg()).project || 'site';
+          o.writers = await selectMany(
+            'Select services to stop for the restore',
+            () => serviceChoices(rt),
+            terminalSelection(rt),
+          );
+        return withProgress(rt, `Preparing restore for ${target}`, async (progress) => {
+          const project = loadCfg(rt).project || 'site';
           const explicit = Array.isArray(o.writers) && o.writers.length > 0 ? o.writers : undefined;
           const result = await request<{
             confirmed: boolean;
             plan: RestorePlanView;
             restoreId?: string;
-          }>('POST', '/api/v1/restores', {
+          }>(rt, 'POST', '/api/v1/restores', {
             project,
             target,
             from: o.from,
@@ -100,10 +106,10 @@ export function registerRestore(program: Command): void {
           const plan = result.plan;
           /** With --json the plan and the outcome are one document, printed when the command ends. */
           const finish = (outcome: object = {}): void => {
-            if (o.json) print({ ...result, ...outcome });
+            if (o.json) print(rt, { ...result, ...outcome });
           };
           const say = (line: string): void => {
-            if (!o.json) console.log(line);
+            if (!o.json) out(rt, line);
           };
           say(`target:   ${plan.target} on ${plan.node}`);
           say(`snapshot: ${plan.snapshotId}${plan.snapshotTime ? ` (${plan.snapshotTime})` : ''}`);
@@ -126,13 +132,14 @@ export function registerRestore(program: Command): void {
           for (;;) {
             await new Promise((resolve) => setTimeout(resolve, 2000));
             const { restores } = await request<{ restores: RestoreRecord[] }>(
+              rt,
               'GET',
               `/api/v1/restores?project=${encodeURIComponent(project)}`,
             );
             const record = restores.find((item) => item.id === result.restoreId);
             if (record) progress.stage(`Restore ${record.id}: ${record.state}`);
             if (record?.state === 'succeeded') {
-              if (record.error) console.error(`warning: ${record.error}`);
+              if (record.error) err(rt, `warning: ${record.error}`);
               say(
                 `restore ${record.id} completed${record.scratch_volume ? `; files are in volume ${record.scratch_volume}` : ''}`,
               );
@@ -140,21 +147,23 @@ export function registerRestore(program: Command): void {
               return;
             }
             if (record && ['failed', 'interrupted', 'released'].includes(record.state)) {
-              console.error(`restore ${record.id} ${record.state}: ${record.error ?? ''}`);
+              err(rt, `restore ${record.id} ${record.state}: ${record.error ?? ''}`);
               if (record.state === 'interrupted')
-                console.error(
+                err(
+                  rt,
                   `the services stay stopped; run tug restore resume ${record.id} to try again or tug restore release ${record.id} to start them (data may be partly restored)`,
                 );
               finish({ restore: record });
-              process.exitCode = 1;
+              rt.exitCode = 1;
               return;
             }
             if (Date.now() > deadline) {
-              console.error(
+              err(
+                rt,
                 `timed out waiting; restore ${result.restoreId} continues on control (tug restore list)`,
               );
               finish({ timedOut: true });
-              process.exitCode = 1;
+              rt.exitCode = 1;
               return;
             }
           }
@@ -165,15 +174,17 @@ export function registerRestore(program: Command): void {
     .command('list')
     .description('show recent restores and their state')
     .action(async (o: { json?: boolean }) => {
-      const project = (await loadCfg()).project || 'site';
+      const project = loadCfg(rt).project || 'site';
       const { restores } = await request<{ restores: RestoreRecord[] }>(
+        rt,
         'GET',
         `/api/v1/restores?project=${encodeURIComponent(project)}`,
       );
-      if (o.json) return print({ restores });
-      if (!restores.length) console.log('no restores');
+      if (o.json) return print(rt, { restores });
+      if (!restores.length) out(rt, 'no restores');
       for (const r of restores)
-        console.log(
+        out(
+          rt,
           `${r.started_at}\t${r.id}\t${r.target}\t${r.mode}\t${r.state}\t${r.snapshot_id.slice(0, 8)}${r.error ? `\t${r.error}` : ''}`,
         );
     });
@@ -181,11 +192,13 @@ export function registerRestore(program: Command): void {
     .command('resume [id]')
     .description('run an interrupted restore again; the stopped services stay stopped meanwhile')
     .action(async (id: string) =>
-      console.log(
+      out(
+        rt,
         JSON.stringify(
           await request(
+            rt,
             'POST',
-            `/api/v1/restores/${encodeURIComponent(await selectRestore(id))}/resume`,
+            `/api/v1/restores/${encodeURIComponent(await selectRestore(rt, id))}/resume`,
           ),
         ),
       ),
@@ -196,11 +209,13 @@ export function registerRestore(program: Command): void {
       'start the services an interrupted restore stopped and unlock the project; the data may be partly restored',
     )
     .action(async (id: string) =>
-      console.log(
+      out(
+        rt,
         JSON.stringify(
           await request(
+            rt,
             'POST',
-            `/api/v1/restores/${encodeURIComponent(await selectRestore(id))}/release`,
+            `/api/v1/restores/${encodeURIComponent(await selectRestore(rt, id))}/release`,
           ),
         ),
       ),
@@ -211,6 +226,6 @@ export function registerRestore(program: Command): void {
       'stop a restore that is waiting on its safety backup (nothing has changed) or restoring (it is interrupted, its services stay stopped until resume or release)',
     )
     .action(async (id: string) =>
-      print(await request('POST', `/api/v1/restores/${encodeURIComponent(id)}/cancel`)),
+      print(rt, await request(rt, 'POST', `/api/v1/restores/${encodeURIComponent(id)}/cancel`)),
     );
 }

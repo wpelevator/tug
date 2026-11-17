@@ -23,7 +23,7 @@ At 0.8 s of CPU each, those starts account for up to about 370 s of the 515 s of
 
 | Case | Seconds | File |
 | --- | --- | --- |
-| CLI selections mutate only chosen resources | 36.9 | `src/cli/cli.selection.test.ts` |
+| CLI selections mutate only chosen resources | 36.9 | `src/cli/cli.selection.process.test.ts` |
 | Token commands reject malformed invocations | 28.9 | `src/cli/credentials.test.ts` |
 | Credential create, list and revoke | 25.5 | `src/cli/credentials.test.ts` |
 | Deploy refuses a `--var` that is a secret | 23.9 | `src/cli/commands/var.test.ts` |
@@ -55,9 +55,9 @@ The build takes 5.7 s. Building and caching alone roughly halves the start cost 
 
 Built, in this order:
 
-1. `src/cli/program.ts` exports `runCli(argv)`, which builds the program per call and returns the exit code. `src/cli.ts` is a three-line entry. Commander throws instead of calling `process.exit`, and `resetUsage` plus `setVerbose` reset the module state between runs.
-2. The program loads only the module of the command named on the command line (`COMMAND_MODULES`), and everything for `--help`, `--version` and unknown names. `tug credential list` starts in about 0.34 s instead of 0.45 s. `src/cli/program.test.ts` checks that the table matches `tug --help`.
-3. `tests/cli-inprocess.ts` provides `execCli`, and 17 test files moved from `exec(process.execPath, [entry, …])` to it. The matrix tests (`credentials`, `json-option`, `config`, `var`, the argument cases of `cli.selection`) now take about a second each, down from 18 to 46 seconds.
+1. The CLI reaches its process only through a `CliRuntime` (env, cwd, streams, signals, exit code and per-run state; see [the CLI runtime](architecture.md#the-cli-runtime)), and `runCli(argv, rt)` in `src/cli/program.ts` builds the command tree for one run and returns the exit code. `src/cli.ts` is a three-line entry. ESLint rejects `process`, `console` and `os.homedir` in `src/cli/` outside `runtime.ts`.
+2. The program loads only the module of the command named on the command line (`REGISTRARS`), and everything for `--help`, `--version` and unknown names; the root options that decide where the command name is come from the program itself. `tug credential list` starts in about 0.34 s instead of 0.45 s. `src/cli/program.test.ts` checks that the table matches `tug --help`.
+3. `tests/cli-inprocess.ts` provides `execCli`, which builds a `testRuntime` (`tests/cli-runtime.ts`) for each call, so nothing global is patched and calls overlap safely, and 17 test files moved from `exec(process.execPath, [entry, …])` to it. The matrix tests (`credentials`, `json-option`, `config`, `var`, the argument cases of `cli.selection`) now take about a second each, down from 18 to 46 seconds.
 4. CI sets `NODE_COMPILE_CACHE` on the test step, so the processes that remain compile the module graph once. Locally, export it to get the same (for example `NODE_COMPILE_CACHE="$TMPDIR/tug-compile-cache" npm test`).
 5. Test files that start real tug processes are named `*.process.test.ts`, import their entry points from `tests/cli-process.ts`, and are guarded by `src/test-layout.test.ts` (see [fast and process test files](testing.md#fast-and-process-test-files)).
 
@@ -66,7 +66,7 @@ Built, in this order:
 | Wall time, `npm test` | 2 min 49 s | 1 min 10 s to 1 min 27 s, depending on `--test-concurrency` |
 | CPU time (user) | 8 min 35 s | 3 min 22 s |
 | CLI processes started | 467 | 106 |
-| Test cases | 1,175 | 1,184 (nine new, for `runCli`, `execCli` and the layout guard) |
+| Test cases | 1,175 | 1,188 (new ones for `runCli`, the runtime, `execCli` and the layout guard) |
 
 The 106 that remain need a real process: the interactive selection and prompt tests (a fake terminal and keystrokes), whole-document stdin and `secret set` (exit while stdin stays open), the 100 MB streaming tests, `wait-progress`, and the `dist` and templates smoke tests.
 
@@ -100,9 +100,9 @@ Matching the concurrency to the core count is worth about 20 % on this machine, 
 
 The cause of the slow suite was a habit, not a defect: the cheapest way to write a CLI test was to copy a neighbour and spawn the process. Three things keep it from coming back:
 
-- The cheap way is the default. `execCli` (`tests/cli-inprocess.ts`) is what a test reaches for, and `startMtlsControl` gives it a real control in the same process.
+- The cheap way is the default. `execCli` (`tests/cli-inprocess.ts`) is what a test reaches for, and `startMtlsControl` gives it a real control in the same process. The runtime boundary is what makes that safe: the CLI cannot read a global, so a test never has to patch one.
 - The expensive way is named and fenced. A test that needs a terminal, piped stdin, signals or the built entry goes in a `*.process.test.ts` file and imports `cliEntry` or `mainEntry` from `tests/cli-process.ts`. `src/test-layout.test.ts` fails when a fast file imports that helper or names the entry path, and when a process file starts no process.
-- The numbers are in the log. A reader can compare against the table above: the suite at 1,184 test cases takes about 70 s on 4 cores, with 106 CLI starts in the whole run.
+- The numbers are in the log. A reader can compare against the table above: the suite at 1,188 test cases takes about 70 s on 4 cores, with 106 CLI starts in the whole run.
 
 ## Next candidates
 

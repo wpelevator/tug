@@ -1,7 +1,8 @@
 import type { Command } from 'commander';
 import { print, request } from './context.ts';
+import type { CliRuntime } from '../runtime.ts';
 
-export function registerImage(program: Command): void {
+export function registerImage(rt: CliRuntime, program: Command): void {
   const image = program.command('image').description('manage the build archives kept on control');
   image
     .command('prune')
@@ -12,7 +13,8 @@ export function registerImage(program: Command): void {
     .option('--dry-run', 'list what would be deleted without deleting it')
     .action(async (o: { keep: string; dryRun?: boolean }) =>
       print(
-        await request('POST', '/api/v1/images/prune', {
+        rt,
+        await request(rt, 'POST', '/api/v1/images/prune', {
           keep: Number(o.keep),
           dryRun: Boolean(o.dryRun),
         }),

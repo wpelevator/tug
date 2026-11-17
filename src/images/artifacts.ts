@@ -51,8 +51,13 @@ export async function hashArchive(file: string): Promise<{ sha256: string; sizeB
   }
   return { sha256: hash.digest('hex'), sizeBytes };
 }
-export async function saveImageArchive(imageRef: string, file: string): Promise<ArchiveInfo> {
-  const child = spawn('docker', ['save', imageRef], { stdio: ['ignore', 'pipe', 'pipe'] });
+/** `env` is the environment `docker save` runs in; default this process's. */
+export async function saveImageArchive(
+  imageRef: string,
+  file: string,
+  env?: NodeJS.ProcessEnv,
+): Promise<ArchiveInfo> {
+  const child = spawn('docker', ['save', imageRef], { env, stdio: ['ignore', 'pipe', 'pipe'] });
   let error = '';
   child.stderr.on('data', (chunk) => {
     error = (error + chunk).slice(-4000);

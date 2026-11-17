@@ -1,4 +1,7 @@
-import { Readable } from 'node:stream';
+import { runCli } from '../src/cli/program.ts';
+import { testRuntime } from './cli-runtime.ts';
+import type { TestRuntimeOptions } from './cli-runtime.ts';
+
 /** What `promisify(execFile)` resolves with, so tests written against a child process keep their assertions. */
 export interface CliResult {
   stdout: string;
@@ -7,92 +10,51 @@ export interface CliResult {
 export interface CliFailure extends Error, CliResult {
   code: number;
 }
-export interface CliOptions {
-  env?: NodeJS.ProcessEnv;
-  cwd?: string;
-  /** Piped to the command's stdin (not a terminal). Without it stdin is empty, as with `< /dev/null`. */
-  input?: string;
+export interface CliOptions extends TestRuntimeOptions {
+  /** Milliseconds before the call is abandoned as hung; a leaked handle or a command waiting for input fails here. */
+  timeout?: number;
 }
 
-let queue: Promise<unknown> = Promise.resolve();
+/** Rejects with `Error(message)` when `work` has not settled within `ms`. */
+export async function withDeadline<T>(work: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const hung = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), ms);
+  });
+  try {
+    return await Promise.race([work, hung]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /**
  * Runs `tug <args>` inside this test process instead of starting node for it, which costs about half a second per
- * call. It swaps process.env, the working directory and stdout and stderr for the duration of the run, so calls are
- * serialized. Resolves like a promisified `execFile` and rejects with `code`, `stdout` and `stderr` on a non-zero
- * exit. Use a real child process (see tests/cli-process.ts) only for what in-process cannot show: signals, a
- * terminal, piped stdin, process exit and the built `dist` entry.
+ * call. The command gets a runtime of its own (tests/cli-runtime.ts): its environment, working directory, streams and
+ * signals are plain objects, so nothing global is touched and calls may overlap. Resolves like a promisified
+ * `execFile` and rejects with `code`, `stdout` and `stderr` on a non-zero exit. Use a real child process (see
+ * tests/cli-process.ts) only for what in-process cannot show: signals, a terminal, a command that must exit while its
+ * stdin stays open, and the built `dist` entry.
  */
-export function execCli(args: readonly string[], options: CliOptions = {}): Promise<CliResult> {
-  const run = queue.then(() => runOnce(args, options));
-  queue = run.catch(() => undefined);
-  return run;
-}
-
-async function runOnce(args: readonly string[], options: CliOptions): Promise<CliResult> {
-  const { runCli } = await import('../src/cli/program.ts');
-  const savedEnv = { ...process.env };
-  const savedCwd = process.cwd();
-  const savedExitCode = process.exitCode;
-  const out: string[] = [];
-  const err: string[] = [];
-  const capture =
-    (chunks: string[]) =>
-    (chunk: string | Uint8Array, ...rest: unknown[]) => {
-      chunks.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString());
-      const callback = rest.find((value) => typeof value === 'function') as
-        (() => void) | undefined;
-      callback?.();
-      return true;
-    };
-  const realExit = process.exit;
-  const stdinDescriptor = Object.getOwnPropertyDescriptor(process, 'stdin');
-  Object.defineProperty(process, 'stdin', {
-    value: Readable.from(options.input === undefined ? [] : [options.input]),
-    configurable: true,
-  });
-  const { write: outWrite } = process.stdout;
-  const { write: errWrite } = process.stderr;
-  for (const key of Object.keys(process.env)) delete process.env[key];
-  Object.assign(process.env, options.env ?? savedEnv);
-  if (options.cwd) process.chdir(options.cwd);
-  process.stdout.write = capture(out) as typeof process.stdout.write;
-  process.stderr.write = capture(err) as typeof process.stderr.write;
-  // A command that calls process.exit must end this call, not the test runner.
-  class Exit extends Error {
-    status: number;
-    constructor(status: number) {
-      super(`process.exit(${status})`);
-      this.status = status;
-    }
-  }
-  process.exit = ((status?: number) => {
-    throw new Exit(status ?? Number(process.exitCode ?? 0));
-  }) as typeof process.exit;
-  let code: number;
-  try {
-    code = await runCli(args).catch((e: unknown) => {
-      if (e instanceof Exit) return e.status;
-      throw e;
-    });
-  } finally {
-    process.exit = realExit;
-    if (stdinDescriptor) Object.defineProperty(process, 'stdin', stdinDescriptor);
-    process.stdout.write = outWrite;
-    process.stderr.write = errWrite;
-    process.chdir(savedCwd);
-    for (const key of Object.keys(process.env)) delete process.env[key];
-    Object.assign(process.env, savedEnv);
-    process.exitCode = savedExitCode;
-  }
-  const result = { stdout: out.join(''), stderr: err.join('') };
+export async function execCli(
+  args: readonly string[],
+  options: CliOptions = {},
+): Promise<CliResult> {
+  const { rt, stdout, stderr } = testRuntime(options);
+  const limit = options.timeout ?? 60_000;
+  const code = await withDeadline(
+    runCli(args, rt),
+    limit,
+    `tug ${args.join(' ')} did not finish within ${limit / 1000} s`,
+  );
+  const result = { stdout: stdout(), stderr: stderr() };
   if (code === 0) return result;
   throw Object.assign(new Error(`tug ${args.join(' ')} exited ${code}\n${result.stderr}`), result, {
     code,
   });
 }
 
-/** A command line for the failing-argument tests: the exit code and both streams, whether or not it succeeded. */
+/** The exit code and both streams of a command, whether or not it succeeded, for tests of failing invocations. */
 export async function cliOutcome(
   args: readonly string[],
   options: CliOptions = {},
@@ -101,6 +63,7 @@ export async function cliOutcome(
     return { ...(await execCli(args, options)), code: 0 };
   } catch (e) {
     const failure = e as CliFailure;
+    if (typeof failure.code !== 'number') throw e;
     return { stdout: failure.stdout, stderr: failure.stderr, code: failure.code };
   }
 }

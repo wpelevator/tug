@@ -1,10 +1,13 @@
 import fs from 'node:fs/promises';
+import path from 'node:path';
 import type { Command } from 'commander';
 import * as yaml from 'js-yaml';
 import { composeErrors } from '../../compose/compose.ts';
 import { errMessage } from '../../errors.ts';
 import type { ComposeFile } from '../../protocol.ts';
 import { defaultComposeFile } from './deploy.ts';
+import { out, err } from '../runtime.ts';
+import type { CliRuntime } from '../runtime.ts';
 
 /** What `tug lint` found in one file: deploy's rejection reasons, or an empty list. */
 export interface LintResult {
@@ -21,10 +24,10 @@ const finding = (file: string, error: string) => `${file}: ${error}`;
  * Docker, a control connection or a credential. The file is linted as written: deploy expands short
  * syntax when it reads the file, so short-form volumes are not reported here.
  */
-export async function lintComposeFile(file: string): Promise<LintResult> {
+export async function lintComposeFile(file: string, cwd: string): Promise<LintResult> {
   let text: string;
   try {
-    text = await fs.readFile(file, 'utf8');
+    text = await fs.readFile(path.resolve(cwd, file), 'utf8');
   } catch (error) {
     return { file, errors: [`could not be read: ${errMessage(error)}`] };
   }
@@ -50,27 +53,27 @@ export async function lintComposeFile(file: string): Promise<LintResult> {
   return { file, errors: [...envFiles, ...others] };
 }
 
-export function registerLint(program: Command): void {
+export function registerLint(rt: CliRuntime, program: Command): void {
   program
     .command('lint')
     .description(
       'check a Compose file against the x-tug schema without deploying or talking to control',
     )
-    .option('-f, --file <file>', 'compose file', defaultComposeFile())
+    .option('-f, --file <file>', 'compose file', defaultComposeFile(rt))
     .option('--json', 'print the findings as JSON for scripts and editors')
     .action(async (o: { file: string; json?: boolean }) => {
-      const result = await lintComposeFile(o.file);
+      const result = await lintComposeFile(o.file, rt.cwd);
       if (o.json) {
-        console.log(JSON.stringify({ ok: !result.errors.length, ...result }, null, 2));
+        out(rt, JSON.stringify({ ok: !result.errors.length, ...result }, null, 2));
       } else {
         // One finding per line on stderr, keeping any piped stdout clean for editors and scripts;
         // findings already name their service or volume, so the prefix only adds the file.
-        for (const error of result.errors) console.error(finding(result.file, error));
+        for (const error of result.errors) err(rt, finding(result.file, error));
       }
       if (result.errors.length) {
-        process.exitCode = 1;
+        rt.exitCode = 1;
         return;
       }
-      if (!o.json) console.log(`${result.file}: ok`);
+      if (!o.json) out(rt, `${result.file}: ok`);
     });
 }

@@ -3,6 +3,8 @@ import { withProgress } from '../progress.ts';
 import type { Command } from 'commander';
 import { backupCheckProblems } from '../../backup/check.ts';
 import { collectList, loadCfg, print, readEnvValues, request } from './context.ts';
+import { out, err } from '../runtime.ts';
+import type { CliRuntime } from '../runtime.ts';
 
 interface BackupRunRecord {
   id: string;
@@ -57,7 +59,7 @@ const runState = (run: BackupRunRecord): string =>
       : run.state;
 const BACKUP_TERMINAL = ['succeeded', 'failed', 'missed', 'cancelled'];
 
-export function registerBackup(program: Command): void {
+export function registerBackup(rt: CliRuntime, program: Command): void {
   const backup = program
     .command('backup')
     .description('run and inspect workload backups and set where they go');
@@ -76,19 +78,19 @@ export function registerBackup(program: Command): void {
       ) => {
         if (o.select && targets.length)
           throw new Error('--select cannot be combined with explicit targets');
-        if (o.select) targets = await selectBackups();
-        return withProgress('Queueing backups', async (progress) => {
-          const project = (await loadCfg()).project || 'site';
+        if (o.select) targets = await selectBackups(rt);
+        return withProgress(rt, 'Queueing backups', async (progress) => {
+          const project = loadCfg(rt).project || 'site';
           const queued = await request<{
             runs: { runId: string; target: string }[];
             errors: string[];
-          }>('POST', '/api/v1/backups/run', {
+          }>(rt, 'POST', '/api/v1/backups/run', {
             project,
             targets: targets.length ? targets : undefined,
           });
-          for (const message of queued.errors) console.error(message);
+          for (const message of queued.errors) err(rt, message);
           if (!o.json)
-            for (const run of queued.runs) console.log(`queued ${run.target} as ${run.runId}`);
+            for (const run of queued.runs) out(rt, `queued ${run.target} as ${run.runId}`);
           let failed = queued.errors.length > 0;
           // With --json the outcome of each run is printed once, at the end.
           const finished: BackupListing['runs'] = [];
@@ -103,6 +105,7 @@ export function registerBackup(program: Command): void {
             while (pending.size && Date.now() < deadline) {
               await new Promise((resolve) => setTimeout(resolve, 2000));
               const listing = await request<BackupListing>(
+                rt,
                 'GET',
                 `/api/v1/backups?project=${encodeURIComponent(project)}&limit=200`,
               );
@@ -114,7 +117,8 @@ export function registerBackup(program: Command): void {
                   const ok = run.state === 'succeeded';
                   failed ||= !ok;
                   if (!o.json)
-                    console.log(
+                    out(
+                      rt,
                       ok
                         ? `${run.target}: snapshot ${run.snapshot_id?.slice(0, 8)}, ${formatBytes(run.added_bytes)} added`
                         : `${run.target}: ${run.state}${run.error ? ` (${run.error})` : ''}`,
@@ -127,20 +131,21 @@ export function registerBackup(program: Command): void {
                 );
             }
             if (pending.size) {
-              console.error(
+              err(
+                rt,
                 `timed out waiting for ${pending.size} backup(s); they keep running on the node`,
               );
               failed = true;
             }
           }
           if (o.json)
-            print({
+            print(rt, {
               ok: !failed,
               queued: queued.runs,
               errors: queued.errors,
               ...(o.wait ? { finished } : {}),
             });
-          if (failed) process.exitCode = 1;
+          if (failed) rt.exitCode = 1;
         });
       },
     );
@@ -157,28 +162,32 @@ export function registerBackup(program: Command): void {
       'with --check, accept a project that has no enabled backup target (a destination is still required)',
     )
     .action(async (o: { limit: string; check?: boolean; allowEmpty?: boolean; json?: boolean }) => {
-      const project = (await loadCfg()).project || 'site';
+      const project = loadCfg(rt).project || 'site';
       const listing = await request<BackupListing>(
+        rt,
         'GET',
         `/api/v1/backups?project=${encodeURIComponent(project)}&limit=${encodeURIComponent(o.limit)}`,
       );
       if (!listing.destinationConfigured)
-        console.error('no backup destination is configured; run tug backup destination set');
-      if (o.json) print(listing);
+        err(rt, 'no backup destination is configured; run tug backup destination set');
+      if (o.json) print(rt, listing);
       else if (!listing.targets.length)
-        console.log('no backup targets; add x-tug.backup to a database service or volume');
+        out(rt, 'no backup targets; add x-tug.backup to a database service or volume');
       if (!o.json && listing.control)
-        console.log(
+        out(
+          rt,
           `control\t-\tnightly\tlast success ${listing.control.lastSuccessAt ?? 'never'}${listing.control.scope === 'local' ? '\tlocal path only: not off-host' : ''}${listing.control.problem ? `\t${listing.control.problem}` : ''}`,
         );
       if (!o.json)
         for (const t of listing.targets)
-          console.log(
+          out(
+            rt,
             `${t.target}\t${t.node ?? '-'}\t${t.schedule}\tlast success ${t.lastSuccessAt ?? 'never'}\tnext ${t.enabled ? t.nextRunAt : 'disabled'}`,
           );
       if (!o.json)
         for (const r of listing.runs)
-          console.log(
+          out(
+            rt,
             `${r.finished_at ?? r.queued_at}\t${r.target}\t${r.trigger}\t${runState(r)}\t${r.snapshot_id?.slice(0, 8) ?? '-'}\t${formatBytes(r.size_bytes)}\t${r.id}${r.error ? `\t${r.error}` : ''}`,
           );
       if (o.check) {
@@ -186,8 +195,8 @@ export function registerBackup(program: Command): void {
           requireProtection: true,
           allowEmpty: o.allowEmpty,
         });
-        for (const problem of problems) console.error(`PROBLEM ${problem}`);
-        if (problems.length) process.exitCode = 1;
+        for (const problem of problems) err(rt, `PROBLEM ${problem}`);
+        if (problems.length) rt.exitCode = 1;
       }
     });
   backup
@@ -196,9 +205,10 @@ export function registerBackup(program: Command): void {
       'stop a queued or running backup (the run id is the last column of `tug backup list`); it is reported as cancelled and not retried',
     )
     .action(async (run: string) => {
-      const project = (await loadCfg()).project || 'site';
+      const project = loadCfg(rt).project || 'site';
       print(
-        await request('POST', `/api/v1/backups/${encodeURIComponent(run)}/cancel`, { project }),
+        rt,
+        await request(rt, 'POST', `/api/v1/backups/${encodeURIComponent(run)}/cancel`, { project }),
       );
     });
   backup
@@ -212,10 +222,12 @@ export function registerBackup(program: Command): void {
     )
     .action(async (o: { control?: boolean }) => {
       if (o.control)
-        return print(await request('GET', '/api/v1/backup/repository-password?control=1'));
-      const project = (await loadCfg()).project || 'site';
+        return print(rt, await request(rt, 'GET', '/api/v1/backup/repository-password?control=1'));
+      const project = loadCfg(rt).project || 'site';
       print(
+        rt,
         await request(
+          rt,
           'GET',
           `/api/v1/backup/repository-password?project=${encodeURIComponent(project)}`,
         ),
@@ -237,11 +249,13 @@ export function registerBackup(program: Command): void {
       [],
     )
     .action(async (url: string, o: { env: string[] }) => {
-      const env = await readEnvValues(o.env);
-      console.log(
-        JSON.stringify(await request('POST', '/api/v1/backup/destination', { url, env })),
+      const env = await readEnvValues(rt, o.env);
+      out(
+        rt,
+        JSON.stringify(await request(rt, 'POST', '/api/v1/backup/destination', { url, env })),
       );
-      console.error(
+      err(
+        rt,
         'Control now backs itself up here every night. Keep its password with these credentials: tug backup password --control',
       );
     });
@@ -250,13 +264,13 @@ export function registerBackup(program: Command): void {
     .description(
       'show the backup destination and the names of its credential variables, never values',
     )
-    .action(async () => print(await request('GET', '/api/v1/backup/destination')));
+    .action(async () => print(rt, await request(rt, 'GET', '/api/v1/backup/destination')));
   destination
     .command('remove')
     .description(
       'remove the backup destination and its stored credentials; existing backups stay in the repository',
     )
     .action(async () =>
-      console.log(JSON.stringify(await request('DELETE', '/api/v1/backup/destination'))),
+      out(rt, JSON.stringify(await request(rt, 'DELETE', '/api/v1/backup/destination'))),
     );
 }

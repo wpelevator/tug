@@ -7,10 +7,11 @@ import { createHash } from 'node:crypto';
 import * as tar from 'tar';
 import { bootstrapCommand, dockerBootstrap, immutableLocalTag, transferTugImage } from './host.ts';
 import { STAGE_MARKER } from '../process.ts';
+import { testRuntime } from '../../../tests/cli-runtime.ts';
 
 test('runtime image transfer reports build, export, copy and load in order and cleans temporary archives', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-transfer-progress-'));
-  const previousPath = process.env.PATH;
+  const previousPath = process.env.PATH ?? '';
   const stages: string[] = [];
   const commandsFile = path.join(dir, 'commands.jsonl');
   try {
@@ -39,8 +40,13 @@ if (cmd === 'docker' && args[0] === 'save') process.stdout.write(fs.readFileSync
 `;
     for (const cmd of ['ssh', 'docker', 'scp'])
       await fs.writeFile(path.join(dir, cmd), stub, { mode: 0o755 });
-    process.env.PATH = dir + path.delimiter + previousPath;
-    const runTag = await transferTugImage('root@host', 'tug:local', (label) => stages.push(label));
+    // The stubs are found through this run's PATH; this process's own is never touched.
+    const { rt } = testRuntime({
+      env: { ...process.env, PATH: dir + path.delimiter + previousPath },
+    });
+    const runTag = await transferTugImage(rt, 'root@host', 'tug:local', (label) =>
+      stages.push(label),
+    );
     assert.equal(
       runTag,
       'tug:local-0123456789ab',
@@ -82,7 +88,7 @@ if (cmd === 'docker' && args[0] === 'save') process.stdout.write(fs.readFileSync
     });
     stages.length = 0;
     await assert.rejects(
-      transferTugImage('root@host', 'tug:local', (label) => stages.push(label)),
+      transferTugImage(rt, 'root@host', 'tug:local', (label) => stages.push(label)),
       /exit 9/,
       'failed builds must preserve the child exit error',
     );
@@ -92,8 +98,6 @@ if (cmd === 'docker' && args[0] === 'save') process.stdout.write(fs.readFileSync
       'failed builds must not claim to export or transfer an image',
     );
   } finally {
-    if (previousPath === undefined) delete process.env.PATH;
-    else process.env.PATH = previousPath;
     await fs.rm(dir, { recursive: true, force: true });
   }
 });

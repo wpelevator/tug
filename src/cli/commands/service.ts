@@ -6,8 +6,9 @@ import { ingressLogs } from './ingress.ts';
 import type { Command } from 'commander';
 import { projectOf, request, runLive, waitForCommand } from './context.ts';
 import type { CommonOpts } from './context.ts';
+import type { CliRuntime } from '../runtime.ts';
 
-export function registerService(program: Command): void {
+export function registerService(rt: CliRuntime, program: Command): void {
   program
     .command('exec [service] [command...]')
     .description('execute a command on a service container (default: sh)')
@@ -22,8 +23,8 @@ export function registerService(program: Command): void {
         o: { interactive?: boolean; tty?: boolean; node?: string; select?: boolean },
       ) => {
         if (o.select && service) command.unshift(service);
-        service = await selectService(o.select ? undefined : service);
-        await runLive('exec', { service, command, ...o });
+        service = await selectService(rt, o.select ? undefined : service);
+        await runLive(rt, 'exec', { service, command, ...o });
       },
     );
   program
@@ -37,8 +38,8 @@ export function registerService(program: Command): void {
       if (o.select && service) command.unshift(service);
       if (!command.length)
         throw new Error('run needs a command, such as: tug run web -- wp core update-db');
-      service = await selectService(o.select ? undefined : service);
-      await runLive('exec', { service, command, node: o.node, oneOff: true });
+      service = await selectService(rt, o.select ? undefined : service);
+      await runLive(rt, 'exec', { service, command, node: o.node, oneOff: true });
     });
   program
     .command('ps')
@@ -47,6 +48,7 @@ export function registerService(program: Command): void {
     .option('--json', "print Docker's container list as JSON for scripts")
     .action(async (o: { node?: string; json?: boolean }) => {
       await runLive(
+        rt,
         'ps',
         { node: o.node },
         o.json
@@ -62,8 +64,8 @@ export function registerService(program: Command): void {
     .description('print container details as JSON')
     .option('--node <name>', 'select one node')
     .action(async (service: string, o: { node?: string }) => {
-      service = await selectService(service);
-      await runLive('inspect', { service, ...o });
+      service = await selectService(rt, service);
+      await runLive(rt, 'inspect', { service, ...o });
     });
   program
     .command('logs [service]')
@@ -80,24 +82,24 @@ export function registerService(program: Command): void {
         if (o.ingress) {
           if (svc || o.project)
             throw new Error('--ingress reads the edge, which belongs to no project or service');
-          await ingressLogs(o.node, o);
+          await ingressLogs(rt, o.node, o);
           return;
         }
         if (o.node && !o.follow) throw new Error('--node requires --follow for logs');
-        svc = await selectService(svc);
+        svc = await selectService(rt, svc);
         if (o.follow) {
-          await runLive('logs', { service: svc, node: o.node, tail: o.tail });
+          await runLive(rt, 'logs', { service: svc, node: o.node, tail: o.tail });
           return;
         }
-        const created = await request('POST', '/api/v1/logs', {
-          project: await projectOf(o),
+        const created = await request(rt, 'POST', '/api/v1/logs', {
+          project: projectOf(rt, o),
           service: svc,
           tail: Number(o.tail),
         });
-        const cmd = await waitForCommand(created.commandId, 60);
+        const cmd = await waitForCommand(rt, created.commandId, 60);
         const result = JSON.parse(cmd.result_json || '{}');
-        if (result.stdout) process.stdout.write(result.stdout);
-        if (result.stderr) process.stderr.write(result.stderr);
+        if (result.stdout) rt.stdout.write(result.stdout);
+        if (result.stderr) rt.stderr.write(result.stderr);
         if (result.error) throw new Error(result.error);
       },
     );

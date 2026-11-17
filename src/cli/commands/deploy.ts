@@ -4,7 +4,12 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import type { Command } from 'commander';
-import { createLocalBuildSnapshot, createSourceArchive, prepareLocalImages } from '../build.ts';
+import {
+  createLocalBuildSnapshot,
+  createSourceArchive,
+  localBuildDependencies,
+  prepareLocalImages,
+} from '../build.ts';
 import { deploymentsSharingLabel } from '../status.ts';
 import { createProgress, withProgress } from '../progress.ts';
 import { canPrompt } from '../prompt.ts';
@@ -30,14 +35,16 @@ import {
   waitForCommand,
   waitForDeployment,
 } from './context.ts';
-import type { CommonOpts, DeployResponse, WaitOpts } from './context.ts';
+import type { CommonOpts, ControlGet, DeployResponse, WaitOpts } from './context.ts';
+import { out, err, resolvePath } from '../runtime.ts';
+import type { CliRuntime } from '../runtime.ts';
 
 /**
  * The project's secrets and variable values, read one request after the other. Two requests in flight from one CLI
  * process made control reset the second TLS connection (`ECONNRESET`), so these are sequential on purpose.
  */
 export async function loadDeployValues(
-  get: typeof request,
+  get: ControlGet,
   project: string,
 ): Promise<{
   secrets: { name: string }[];
@@ -54,11 +61,11 @@ export async function loadDeployValues(
   return { secrets, vars };
 }
 
-async function makeContext(): Promise<string> {
-  const cfg = await loadCfg();
+async function makeContext(rt: CliRuntime): Promise<string> {
+  const cfg = loadCfg(rt);
   const tmp = path.join(os.tmpdir(), `tug-${Date.now()}.tgz`);
   try {
-    await createSourceArchive(process.cwd(), tmp, [
+    await createSourceArchive(rt.cwd, tmp, [
       cfg.file,
       cfg.localFile,
       ...(cfg.credentialFile ? [cfg.credentialFile] : []),
@@ -71,7 +78,7 @@ async function makeContext(): Promise<string> {
 }
 
 /** The first conventional Compose file name in the working directory; `docker-compose.yml` when none exists. */
-export function defaultComposeFile(cwd = process.cwd()): string {
+export function defaultComposeFile(rt: CliRuntime, cwd = rt.cwd): string {
   const names = ['compose.yaml', 'compose.yml', 'docker-compose.yaml', 'docker-compose.yml'];
   return names.find((name) => existsSync(path.join(cwd, name))) ?? 'docker-compose.yml';
 }
@@ -86,12 +93,12 @@ export async function composeName(file: string): Promise<string | undefined> {
  * Ids of earlier deployments of the project that carry the same version label as this one, found from control's recent
  * deployments. A failed lookup is no hint: the summary still shows the deployment id.
  */
-async function sharedLabel(response: DeployResponse): Promise<string[]> {
+async function sharedLabel(rt: CliRuntime, response: DeployResponse): Promise<string[]> {
   try {
     const state = response.desiredState as { project?: string; version?: string } | undefined;
     const { deployments } = await request<{
       deployments: { id: string; version: string; project_id?: string }[];
-    }>('GET', '/api/v1/status');
+    }>(rt, 'GET', '/api/v1/status');
     return deploymentsSharingLabel(
       deployments,
       response.deployment.id,
@@ -103,11 +110,11 @@ async function sharedLabel(response: DeployResponse): Promise<string[]> {
   }
 }
 
-export function registerDeploy(program: Command): void {
+export function registerDeploy(rt: CliRuntime, program: Command): void {
   const deploy = program
     .command('deploy')
     .description('deploy the Compose project, or cancel a deployment with `deploy cancel <id>`')
-    .option('-f, --file <file>', 'compose file', defaultComposeFile())
+    .option('-f, --file <file>', 'compose file', defaultComposeFile(rt))
     .option('--version <version>', 'display version (default: git-<Compose hash>)')
     .option('--build-local', 'build application images locally and upload them without source')
     .option(
@@ -154,15 +161,18 @@ export function registerDeploy(program: Command): void {
             dryRun?: boolean;
           },
       ) => {
-        const progress = createProgress();
+        const progress = createProgress(rt);
         try {
           progress.stage('Preparing deployment');
-          const cfg = await loadCfg();
+          const cfg = loadCfg(rt);
           const project = o.project || cfg.project || 'site';
           // Every ${NAME} comes from control (secrets as sentinels the agent fills in, variables as their values), from
           // --var, or from the default written in the file. The shell and .env of this machine are never read.
           const flags = parseVarFlags(o.var ?? []);
-          const { secrets, vars } = await loadDeployValues(request, project);
+          const { secrets, vars } = await loadDeployValues(
+            (method, route) => request(rt, method, route),
+            project,
+          );
           const secretNames = secrets.map((secret) => secret.name);
           const variables = new Map(
             vars.map((row) => [row.name, { version: row.version, value: row.value }]),
@@ -174,32 +184,32 @@ export function registerDeploy(program: Command): void {
               );
           }
           for (const note of await ignoredSourceNotes(
+            rt.cwd,
             o.file,
             new Set([...secretNames, ...variables.keys()]),
+            rt.env,
           ))
-            console.error(note);
+            err(rt, note);
           const known = () => new Set([...secretNames, ...variables.keys(), ...Object.keys(flags)]);
-          const missing = await findMissingValues(o.file, known());
+          const missing = await findMissingValues(rt.cwd, o.file, known());
           if (missing.length) {
-            if (o.dryRun || !canPrompt())
+            if (o.dryRun || !canPrompt(rt))
               throw new Error(
                 missingValuesMessage(
                   o.file,
-                  await fs.readFile(o.file, 'utf8').catch(() => ''),
+                  await fs.readFile(resolvePath(rt, o.file), 'utf8').catch(() => ''),
                   missing,
                   Boolean(o.dryRun),
                 ),
               );
-            console.error(
-              `Values not set on control for project ${project}: ${missing.join(', ')}`,
-            );
+            err(rt, `Values not set on control for project ${project}: ${missing.join(', ')}`);
             // Only names that do not exist yet are stored, so an existing value is never overwritten.
-            for (const [name, entry] of Object.entries(await promptForValues(missing))) {
+            for (const [name, entry] of Object.entries(await promptForValues(rt, missing))) {
               if (entry.kind === 'secret') {
-                await request('POST', '/api/v1/secrets', { project, name, value: entry.value });
+                await request(rt, 'POST', '/api/v1/secrets', { project, name, value: entry.value });
                 secretNames.push(name);
               } else {
-                const stored = await request<{ version: number }>('POST', '/api/v1/vars', {
+                const stored = await request<{ version: number }>(rt, 'POST', '/api/v1/vars', {
                   project,
                   name,
                   value: entry.value,
@@ -208,7 +218,7 @@ export function registerDeploy(program: Command): void {
               }
             }
           }
-          const values = await describeValues(o.file, {
+          const values = await describeValues(rt.cwd, o.file, {
             secrets: new Set(secretNames),
             vars: variables,
             flags,
@@ -216,29 +226,31 @@ export function registerDeploy(program: Command): void {
           const referenced = new Set(values.map((value) => value.name));
           for (const name of Object.keys(flags))
             if (!referenced.has(name))
-              console.error(`warning: --var ${name} is not referenced in ${o.file}; it is ignored`);
-          console.error(`Values: ${summarizeValues(values)}`);
+              err(rt, `warning: --var ${name} is not referenced in ${o.file}; it is ignored`);
+          err(rt, `Values: ${summarizeValues(values)}`);
           const movePayload = o.move.length ? { moves: o.move } : {};
-          const declared = await composeName(o.file);
+          const declared = await composeName(resolvePath(rt, o.file));
           if (declared && declared !== project)
-            console.error(
+            err(
+              rt,
               `warning: ${o.file} is named ${declared} but the Tug project is ${project}; secrets, backups and restores are scoped to the Tug project (set project: ${declared} in tug.yml, or pass --project)`,
             );
-          const compose = await normalizeCompose(o.file, secretNames, {
+          const compose = await normalizeCompose(resolvePath(rt, o.file), secretNames, {
             project,
             composeCli: o.composeCli,
+            hostEnv: rt.env,
             vars: { ...Object.fromEntries([...variables].map(([n, v]) => [n, v.value])), ...flags },
             profiles: o.profile,
           });
           if (o.dryRun) {
             // Reading the file is part of the dry run: an env_file or an unsupported construct fails here too.
-            console.log(formatValuesTable(values));
+            out(rt, formatValuesTable(values));
             // The checks a deploy makes against other projects (a host port another project already publishes on a node).
-            await request('POST', '/api/v1/deployments/check', { project, compose });
-            console.error('No host-port clash with another project on any node.');
+            await request(rt, 'POST', '/api/v1/deployments/check', { project, compose });
+            err(rt, 'No host-port clash with another project on any node.');
             return;
           }
-          for (const warning of bindMountWarnings(compose)) console.error(warning);
+          for (const warning of bindMountWarnings(compose)) err(rt, warning);
           const version = o.version || `git-${composeHash(compose)}`;
           let response: DeployResponse;
           if (o.buildLocal) {
@@ -247,17 +259,17 @@ export function registerDeploy(program: Command): void {
               const form = new FormData();
               progress.stage('Preparing local build snapshot');
               const source = Object.values(compose.services).some((service) => service.build)
-                ? await createLocalBuildSnapshot(process.cwd(), directory, [
+                ? await createLocalBuildSnapshot(rt.cwd, directory, [
                     cfg.file,
                     cfg.localFile,
                     ...(cfg.credentialFile ? [cfg.credentialFile] : []),
                   ])
-                : process.cwd();
+                : rt.cwd;
               const localImages = await prepareLocalImages(
                 compose,
                 source,
                 directory,
-                undefined,
+                localBuildDependencies(rt, (message) => err(rt, message)),
                 progress.stage,
               );
               for (const { field } of localImages)
@@ -271,13 +283,19 @@ export function registerDeploy(program: Command): void {
                 JSON.stringify({ project, version, compose, values, localImages, ...movePayload }),
               );
               progress.stage('Uploading images and preparing deployment on control');
-              response = await request<DeployResponse>('POST', '/api/v1/deployments', form, true);
+              response = await request<DeployResponse>(
+                rt,
+                'POST',
+                '/api/v1/deployments',
+                form,
+                true,
+              );
             } finally {
               await fs.rm(directory, { recursive: true, force: true });
             }
           } else if (Object.values(compose.services).some((service) => service.build)) {
             progress.stage('Archiving source for remote build');
-            const tarball = await makeContext();
+            const tarball = await makeContext(rt);
             try {
               const form = new FormData();
               form.append(
@@ -286,13 +304,19 @@ export function registerDeploy(program: Command): void {
               );
               form.append('context', await openAsBlob(tarball), 'context.tgz');
               progress.stage('Uploading source and building images on control');
-              response = await request<DeployResponse>('POST', '/api/v1/deployments', form, true);
+              response = await request<DeployResponse>(
+                rt,
+                'POST',
+                '/api/v1/deployments',
+                form,
+                true,
+              );
             } finally {
               await fs.rm(tarball, { force: true });
             }
           } else {
             progress.stage('Resolving images and preparing deployment on control');
-            response = await request<DeployResponse>('POST', '/api/v1/deployments', {
+            response = await request<DeployResponse>(rt, 'POST', '/api/v1/deployments', {
               project,
               version,
               compose,
@@ -303,13 +327,14 @@ export function registerDeploy(program: Command): void {
           if (o.wait) {
             progress.stage(`Deployment ${response.deployment.id}: ${response.deployment.state}`);
             response.deployment = await waitForDeployment(
+              rt,
               response.deployment.id,
               Number(o.timeout),
               (deployment) => progress.stage(`Deployment ${deployment.id}: ${deployment.state}`),
             );
           }
-          const sharedWith = o.json ? [] : await sharedLabel(response);
-          printResult(o.json, response, (value) => formatDeployment(value, sharedWith));
+          const sharedWith = o.json ? [] : await sharedLabel(rt, response);
+          printResult(rt, o.json, response, (value) => formatDeployment(value, sharedWith));
         } finally {
           progress.stop();
         }
@@ -320,9 +345,11 @@ export function registerDeploy(program: Command): void {
     .description('cancel a deployment that has not finished')
     .action(async (id: string) =>
       print(
+        rt,
         await request(
+          rt,
           'POST',
-          `/api/v1/deployments/${encodeURIComponent(await selectDeployment(id))}/cancel`,
+          `/api/v1/deployments/${encodeURIComponent(await selectDeployment(rt, id))}/cancel`,
           {},
         ),
       ),
@@ -336,21 +363,22 @@ export function registerDeploy(program: Command): void {
     .option('--timeout <seconds>', 'wait timeout', '300')
     .option('--json', 'print the full result, including the desired state, as JSON')
     .action(async (o: CommonOpts & WaitOpts & { force?: boolean; json?: boolean }) => {
-      return withProgress('Preparing rollback on control', async (progress) => {
-        const response = await request<DeployResponse>('POST', '/api/v1/rollback', {
-          project: await projectOf(o),
+      return withProgress(rt, 'Preparing rollback on control', async (progress) => {
+        const response = await request<DeployResponse>(rt, 'POST', '/api/v1/rollback', {
+          project: projectOf(rt, o),
           force: Boolean(o.force),
         });
         if (o.wait) {
           progress.stage(`Deployment ${response.deployment.id}: ${response.deployment.state}`);
           response.deployment = await waitForDeployment(
+            rt,
             response.deployment.id,
             Number(o.timeout),
             (deployment) => progress.stage(`Deployment ${deployment.id}: ${deployment.state}`),
           );
         }
-        const sharedWith = o.json ? [] : await sharedLabel(response);
-        printResult(o.json, response, (value) => formatDeployment(value, sharedWith));
+        const sharedWith = o.json ? [] : await sharedLabel(rt, response);
+        printResult(rt, o.json, response, (value) => formatDeployment(value, sharedWith));
       });
     });
 
@@ -368,15 +396,17 @@ export function registerDeploy(program: Command): void {
         if (o.replicas && replicas)
           throw new Error('pass replicas positionally or with --replicas, not both');
         replicas = replicas || o.replicas || '';
-        const project = await projectOf(o);
+        const project = projectOf(rt, o);
         if (!/^[1-9]\d*$/.test(replicas)) throw new Error('replicas must be a positive integer');
-        service = await selectService(service);
+        service = await selectService(rt, service);
         const result = await request<{ service: string; replicas: number; nodes: string[] }>(
+          rt,
           'POST',
           '/api/v1/scale',
           { project, service, replicas: Number(replicas) },
         );
         printResult(
+          rt,
           o.json,
           result,
           (r) =>
@@ -390,12 +420,12 @@ export function registerDeploy(program: Command): void {
     .description('restart a service on every node that runs it')
     .option('--timeout <seconds>', 'wait timeout', '60')
     .action(async (svc: string, o: CommonOpts & { timeout: string }) => {
-      const project = await projectOf(o);
-      svc = await selectService(svc);
-      const created = await request('POST', '/api/v1/restart', { project, service: svc });
-      const cmd = await waitForCommand(created.commandId, Number(o.timeout));
+      const project = projectOf(rt, o);
+      svc = await selectService(rt, svc);
+      const created = await request(rt, 'POST', '/api/v1/restart', { project, service: svc });
+      const cmd = await waitForCommand(rt, created.commandId, Number(o.timeout));
       if (cmd.state === 'failed')
         throw new Error(JSON.parse(cmd.result_json || '{}').error || 'restart failed');
-      print(cmd);
+      print(rt, cmd);
     });
 }

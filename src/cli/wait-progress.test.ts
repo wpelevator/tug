@@ -3,14 +3,15 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import https from 'node:https';
 import os from 'node:os';
-import { Readable } from 'node:stream';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { Command } from 'commander';
 import { writeStubDocker } from '../../tests/helpers.ts';
 import { Pki, identityUri, serverNames } from '../pki.ts';
 import { serverTlsOptions } from '../control/tls-server.ts';
-import { resetVersionChecks, setResolvedConfig, waitForCommand } from './commands/context.ts';
+import { waitForCommand } from './commands/context.ts';
+import { testRuntime } from '../../tests/cli-runtime.ts';
+import type { ResolvedCliConfig } from './config.ts';
 import { packageVersion } from '../images/image.ts';
 import { registerBackup } from './commands/backup.ts';
 import { registerRestore } from './commands/restore.ts';
@@ -62,7 +63,7 @@ test('long-wait commands report progress on stderr and retain their results and 
     });
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  setResolvedConfig({
+  const config = {
     file: path.join(dir, 'tug.yml'),
     localFile: path.join(dir, 'tug.local.yml'),
     fileExists: false,
@@ -72,31 +73,37 @@ test('long-wait commands report progress on stderr and retain their results and 
     commandDefaults: {},
     nodeDefaults: {},
     nodes: {},
-  });
+  } as unknown as ResolvedCliConfig;
+  // What a run sees of its process: change these between runs instead of patching this process.
+  const session = { env: { ...process.env } as NodeJS.ProcessEnv, cwd: process.cwd(), input: '' };
+  const newRun = () => {
+    const made = testRuntime({ env: session.env, cwd: session.cwd, input: session.input });
+    made.rt.state.config = config;
+    return made;
+  };
+  let last = newRun();
   const out: string[] = [];
   const err: string[] = [];
-  t.mock.method(console, 'log', (line: string) => out.push(line));
-  t.mock.method(console, 'error', (line: string) => err.push(line));
-  t.mock.method(process.stderr, 'write', (line: string) => {
-    err.push(line);
-    return true;
-  });
   const run = async (...args: string[]) => {
     out.length = 0;
     err.length = 0;
     requested.length = 0;
     urls.length = 0;
-    // One CLI process is one new module state: forget the remembered version agreement between runs.
-    resetVersionChecks();
+    // One CLI process is one new runtime: it remembers nothing of the previous run.
+    last = newRun();
     const program = new Command();
-    registerBackup(program);
-    registerRestore(program);
-    registerDeploy(program);
-    registerControl(program);
-    registerNode(program);
-    await program.parseAsync(args, { from: 'user' });
+    registerBackup(last.rt, program);
+    registerRestore(last.rt, program);
+    registerDeploy(last.rt, program);
+    registerControl(last.rt, program);
+    registerNode(last.rt, program);
+    try {
+      await program.parseAsync(args, { from: 'user' });
+    } finally {
+      if (last.stdout()) out.push(last.stdout());
+      if (last.stderr()) err.push(last.stderr());
+    }
   };
-  const originalExitCode = process.exitCode;
   try {
     await t.test('target selection validation completes before progress starts', async () => {
       await assert.rejects(
@@ -189,13 +196,12 @@ test('long-wait commands report progress on stderr and retain their results and 
     });
     await t.test('backup timeout preserves nonzero exit and running-work explanation', async () => {
       await run('backup', 'run', '--timeout', '0');
-      assert.equal(process.exitCode, 1, 'backup timeouts must exit nonzero');
+      assert.equal(last.rt.exitCode, 1, 'backup timeouts must exit nonzero');
       assert.match(
         err.join(''),
         /keep running on the node/,
         'backup timeout must explain that remote work continues',
       );
-      process.exitCode = originalExitCode;
     });
     await t.test(
       'restore reports queued and terminal state, and preview does not wait',
@@ -259,8 +265,7 @@ test('long-wait commands report progress on stderr and retain their results and 
           /Backups: service:db: running/,
           'backup progress must report the observed state of pending targets',
         );
-        assert.equal(process.exitCode, 1, 'failed backups must still exit nonzero');
-        process.exitCode = originalExitCode;
+        assert.equal(last.rt.exitCode, 1, 'failed backups must still exit nonzero');
         polls = 0;
         routes = {
           'POST /api/v1/restores': {
@@ -296,8 +301,7 @@ test('long-wait commands report progress on stderr and retain their results and 
           /services stay stopped/,
           'restore interruptions must retain the recovery instructions',
         );
-        assert.equal(process.exitCode, 1, 'interrupted restores must still exit nonzero');
-        process.exitCode = originalExitCode;
+        assert.equal(last.rt.exitCode, 1, 'interrupted restores must still exit nonzero');
       },
     );
     await t.test('queued command waits report states and preserve failure results', async () => {
@@ -305,7 +309,9 @@ test('long-wait commands report progress on stderr and retain their results and 
       routes = {
         'GET /api/v1/commands/c1': { state: 'failed', result_json: '{"error":"offline"}' },
       };
-      const result = await waitForCommand('c1');
+      const direct = newRun();
+      const result = await waitForCommand(direct.rt, 'c1');
+      err.push(direct.stderr());
       assert.equal(
         result.state,
         'failed',
@@ -318,7 +324,7 @@ test('long-wait commands report progress on stderr and retain their results and 
       );
     });
     await t.test('node installs report stages and only wait when requested', async () => {
-      const previousPath = process.env.PATH;
+      const previousEnv = session.env;
       const bin = path.join(dir, 'bin');
       await fs.mkdir(bin);
       await writeStubDocker(bin);
@@ -329,7 +335,7 @@ test('long-wait commands report progress on stderr and retain their results and 
           '\nif (process.argv.at(-1).includes("agent identity")) process.stdout.write("csr");\n',
         { mode: 0o755 },
       );
-      process.env.PATH = bin + path.delimiter + previousPath;
+      session.env = { ...session.env, PATH: bin + path.delimiter + session.env.PATH };
       routes = {
         'POST /api/v1/nodes/n1/identity': { node: { id: 'n1', name: 'n1' } },
         'GET /api/v1/nodes': { nodes: [{ name: 'n1', last_seen_at: '2099-01-01T00:00:00.000Z' }] },
@@ -357,8 +363,7 @@ test('long-wait commands report progress on stderr and retain their results and 
           'node installs must report preparation, identity, installation and reporting stages',
         );
       } finally {
-        if (previousPath === undefined) delete process.env.PATH;
-        else process.env.PATH = previousPath;
+        session.env = previousEnv;
       }
     });
     await t.test('control backup and restore keep JSON results on stdout', async () => {
@@ -447,12 +452,12 @@ test('long-wait commands report progress on stderr and retain their results and 
           [],
           'a taken output name is refused before a backup is created on control',
         );
-        const previous = process.cwd();
-        process.chdir(dir);
+        const previousCwd = session.cwd;
+        session.cwd = dir;
         try {
           await run('control', 'backup', '--download');
         } finally {
-          process.chdir(previous);
+          session.cwd = previousCwd;
         }
         assert.ok(
           await fs.stat(path.join(dir, 'tug-control-backup-cbak_x.tar.gz')),
@@ -484,10 +489,14 @@ test('long-wait commands report progress on stderr and retain their results and 
           /--env goes with --from-destination/,
           'credential variables only make sense for a destination',
         );
-        process.env.TUG_TEST_KEY = 'AKIA1';
-        process.env.TUG_TEST_SECRET = 'secret1';
-        process.env.TUG_CONTROL_BACKUP_PASSWORD =
-          'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+        const savedEnv = session.env;
+        session.env = {
+          ...session.env,
+          TUG_TEST_KEY: 'AKIA1',
+          TUG_TEST_SECRET: 'secret1',
+          TUG_CONTROL_BACKUP_PASSWORD:
+            'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        };
         try {
           await run(
             'control',
@@ -499,9 +508,7 @@ test('long-wait commands report progress on stderr and retain their results and 
             '--confirm',
           );
         } finally {
-          delete process.env.TUG_TEST_KEY;
-          delete process.env.TUG_TEST_SECRET;
-          delete process.env.TUG_CONTROL_BACKUP_PASSWORD;
+          session.env = savedEnv;
         }
         assert.deepEqual(
           bodies['POST /api/v1/control/restore'],
@@ -711,14 +718,11 @@ test('long-wait commands report progress on stderr and retain their results and 
       'control restore --password-stdin reads only the password from stdin and the credentials from the environment',
       async () => {
         routes = { 'POST /api/v1/control/restore': { restartRequired: true } };
-        const original = Object.getOwnPropertyDescriptor(process, 'stdin')!;
-        const feed = (text: string) =>
-          Object.defineProperty(process, 'stdin', {
-            value: Readable.from([text]),
-            configurable: true,
-          });
-        process.env.TUG_TEST_KEY = 'AKIA2';
-        process.env.TUG_TEST_SECRET = 'secret2';
+        const savedEnv = session.env;
+        const feed = (text: string) => {
+          session.input = text;
+        };
+        session.env = { ...session.env, TUG_TEST_KEY: 'AKIA2', TUG_TEST_SECRET: 'secret2' };
         try {
           feed('\n' + 'b'.repeat(64) + '\nignored\n');
           await run(
@@ -744,7 +748,7 @@ test('long-wait commands report progress on stderr and retain their results and 
             },
             'the first non-empty stdin line is the password and the credentials come from the environment',
           );
-          delete process.env.TUG_TEST_SECRET;
+          delete session.env.TUG_TEST_SECRET;
           feed('b'.repeat(64) + '\n');
           await assert.rejects(
             run(
@@ -779,14 +783,12 @@ test('long-wait commands report progress on stderr and retain their results and 
             'the flag only means something for a destination',
           );
         } finally {
-          Object.defineProperty(process, 'stdin', original);
-          delete process.env.TUG_TEST_KEY;
-          delete process.env.TUG_TEST_SECRET;
+          session.env = savedEnv;
+          session.input = '';
         }
       },
     );
   } finally {
-    process.exitCode = originalExitCode;
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await fs.rm(dir, { recursive: true, force: true });
   }

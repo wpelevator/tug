@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { loadExistingNames } from './import-values.ts';
-import type { request } from './context.ts';
+import type { ControlGet } from './context.ts';
 
 test('import reads secret and variable names one request after the other, never both in flight', async () => {
   const routes: string[] = [];
@@ -15,7 +15,7 @@ test('import reads secret and variable names one request after the other, never 
     inFlight--;
     if (route.startsWith('/api/v1/secrets')) return { secrets: [{ name: 'API_KEY' }] };
     return { vars: [{ name: 'GREETING' }] };
-  }) as unknown as typeof request;
+  }) as unknown as ControlGet;
 
   const names = await loadExistingNames(get, 'site');
 

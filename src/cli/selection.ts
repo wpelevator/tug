@@ -1,6 +1,7 @@
 import { canPrompt } from './prompt.ts';
 import { terminalPicker } from './pick.ts';
 import type { Picker } from './pick.ts';
+import type { CliRuntime } from './runtime.ts';
 
 export interface Choice {
   value: string;
@@ -9,18 +10,18 @@ export interface Choice {
 export interface SelectionIO extends Picker {
   interactive: boolean;
 }
-const terminal = (): SelectionIO => ({
-  interactive: canPrompt(),
-  one: (...args) => terminalPicker.one(...args),
-  many: (...args) => terminalPicker.many(...args),
-});
+/** Selection on this run's terminal. */
+export const terminalSelection = (rt: CliRuntime): SelectionIO => {
+  const picker = terminalPicker(rt);
+  return { interactive: canPrompt(rt), one: picker.one, many: picker.many };
+};
 
 /** Resolve lazily so explicit arguments never need a discovery request. */
 export async function selectOne(
   value: string | undefined,
   question: string,
   load: () => Promise<Choice[]>,
-  io = terminal(),
+  io: SelectionIO,
 ): Promise<string> {
   if (value) return value;
   const selected = await selectChoices(question, load, false, io);
@@ -29,7 +30,7 @@ export async function selectOne(
 export async function selectMany(
   question: string,
   load: () => Promise<Choice[]>,
-  io = terminal(),
+  io: SelectionIO,
 ): Promise<string[]> {
   return selectChoices(question, load, true, io);
 }

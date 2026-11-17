@@ -1,11 +1,12 @@
 import fs from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 import type { Command } from 'commander';
 import { writeInitConfig } from '../config.ts';
 import type { ResolvedCliConfig } from '../config.ts';
 import { decodeCredential, fingerprintPem, writeFileDurable } from '../../pki.ts';
 import { loadCfg, print, readStdin } from './context.ts';
+import { out, err, homeDir, resolvePath } from '../runtime.ts';
+import type { CliRuntime } from '../runtime.ts';
 
 /**
  * Store a credential document in a 0600 file under the user's config directory and point the git-ignored overlay
@@ -13,6 +14,7 @@ import { loadCfg, print, readStdin } from './context.ts';
  * `quiet`, and returns the files either way.
  */
 export async function importCredential(
+  rt: CliRuntime,
   cfg: ResolvedCliConfig,
   text: string,
   connection: { controlUrl?: string; project?: string; quiet?: boolean },
@@ -39,7 +41,8 @@ export async function importCredential(
     }
   })();
   if (previousFingerprint && previousFingerprint !== caFingerprint)
-    console.error(
+    err(
+      rt,
       `note: this credential is signed by CA ${caFingerprint}, replacing one signed by ${previousFingerprint}; the CLI now trusts a different control` +
         (cfg.credentialFile
           ? `, and the previous file stays at ${cfg.credentialFile} until you switch back`
@@ -47,12 +50,8 @@ export async function importCredential(
     );
   // TUG_CREDENTIALS_DIR keeps scripts and tests out of the real home directory.
   const dir =
-    process.env.TUG_CREDENTIALS_DIR ||
-    path.join(
-      process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'),
-      'tug',
-      'credentials',
-    );
+    rt.env.TUG_CREDENTIALS_DIR ||
+    path.join(rt.env.XDG_CONFIG_HOME || path.join(homeDir(rt), '.config'), 'tug', 'credentials');
   // The credential file name carries the CA's fingerprint, so importing a credential from a different control CA is
   // additive by construction: it writes a new file and never overwrites the credential the CLI was working with.
   // Same-CA reissues (a deliberate root recovery or re-issue) keep the same file, because the old credential is dead.
@@ -66,32 +65,33 @@ export async function importCredential(
     cfg,
     source,
     { controlUrl: connection.controlUrl, project: connection.project },
+    rt.env,
     credential.url,
   );
   if (connection.quiet) return { files, credentialFile: source };
-  for (const file of files) console.log(`wrote ${file}`);
-  console.log(`imported credential to ${source}`);
+  for (const file of files) out(rt, `wrote ${file}`);
+  out(rt, `imported credential to ${source}`);
   return { files, credentialFile: source };
 }
 
-export function registerInit(program: Command): void {
+export function registerInit(rt: CliRuntime, program: Command): void {
   program
     .command('init [credentialFile]')
     .description(
       'create the config file if missing and import a credential (a file, or - for stdin) into a 0600 user-config file that the git-ignored .local overlay points at',
     )
     .action(async (credentialFile: string | undefined, o: { json?: boolean }, command: Command) => {
-      const cfg = await loadCfg();
+      const cfg = loadCfg(rt);
       const { controlUrl, project } = command.optsWithGlobals<{
         controlUrl?: string;
         project?: string;
       }>();
       let text: string | undefined;
-      if (credentialFile === '-') text = await readStdin();
-      else if (credentialFile) text = await fs.readFile(credentialFile, 'utf8');
+      if (credentialFile === '-') text = await readStdin(rt);
+      else if (credentialFile) text = await fs.readFile(resolvePath(rt, credentialFile), 'utf8');
       else if (cfg.credential) text = JSON.stringify(cfg.credential);
       if (!text) throw new Error('tug init needs a credential file (or - for stdin)');
-      const result = await importCredential(cfg, text, { controlUrl, project, quiet: o.json });
-      if (o.json) print({ ok: true, ...result });
+      const result = await importCredential(rt, cfg, text, { controlUrl, project, quiet: o.json });
+      if (o.json) print(rt, { ok: true, ...result });
     });
 }

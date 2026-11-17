@@ -18,6 +18,7 @@ test('it refuses to run without a terminal and points at --once', async () => {
       project: 'site',
       controlLabel: 'x',
       cliVersion: '1.2.0',
+      env: {},
     }),
     /needs a terminal.*--once/,
     'a script gets told how to get a summary instead of a broken screen',

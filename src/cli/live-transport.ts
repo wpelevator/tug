@@ -27,6 +27,7 @@ const MAX_EVENTS = 2 * Math.ceil(LIVE_WINDOW_BYTES / LIVE_FRAME_COST);
 export function createCliLiveTransport(
   credential: Credential | undefined,
   controlUrl: string,
+  clientVersion: string = packageVersion(),
 ): CliLiveTransport {
   if (!credential) throw new CliLiveError('no credential: run `tug init <credential-file>`');
   const url = new URL(controlUrl);
@@ -41,7 +42,7 @@ export function createCliLiveTransport(
       ...(clientTlsOptions(credential) as object),
       // The control only parses this header on its HTTP routes (express middleware does not run on upgrades);
       // `runLive` runs the explicit version preflight for live commands instead.
-      headers: { [CLIENT_VERSION_HEADER]: packageVersion() },
+      headers: { [CLIENT_VERSION_HEADER]: clientVersion },
     },
     (error) =>
       // A bare openssl string teaches nothing; a CA mismatch names both fixes at once.

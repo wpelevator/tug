@@ -326,6 +326,7 @@ test('local application builds skip published images and produce unique file-bac
     '/source',
     '/temp',
     {
+      cleanupWarning: () => {},
       nonce: () => 'unique-build',
       build: async (options) => {
         assert.equal(

@@ -12,8 +12,10 @@ export interface WatchClientOptions {
   onFrame(frame: WatchFrame): void;
   /** True once control has said `watch.ready`, false when the socket is gone. */
   onState(connected: boolean): void;
+  /** The version declared to control on the upgrade; the CLI passes its runtime's, the default is this package's. */
+  clientVersion?: string;
   /** Substitutes the socket in tests. */
-  createSocket?: (url: string, credential: Credential) => WebSocket;
+  createSocket?: (url: string, credential: Credential, clientVersion: string) => WebSocket;
   initialBackoffMs?: number;
   maxBackoffMs?: number;
 }
@@ -103,6 +105,7 @@ export class WatchClient {
       socket = (this.options.createSocket ?? defaultSocket)(
         url.toString(),
         this.options.credential,
+        this.options.clientVersion ?? packageVersion(),
       );
     } catch {
       this.retry();
@@ -145,10 +148,10 @@ export class WatchClient {
   }
 }
 
-function defaultSocket(url: string, credential: Credential): WebSocket {
+function defaultSocket(url: string, credential: Credential, clientVersion: string): WebSocket {
   return new WebSocket(url, {
     ...(clientTlsOptions(credential) as object),
-    headers: { [CLIENT_VERSION_HEADER]: packageVersion() },
+    headers: { [CLIENT_VERSION_HEADER]: clientVersion },
     followRedirects: false,
     maxPayload: LIVE_MAX_FRAME_BYTES,
     handshakeTimeout: LIVE_START_TIMEOUT_MS,

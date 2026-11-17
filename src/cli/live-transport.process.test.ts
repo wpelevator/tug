@@ -417,7 +417,12 @@ test('transport maps remote adapter errors into CLI failures', async () => {
   });
   try {
     await assert.rejects(
-      runCliLive(request, createCliLiveTransport(f.credential, f.url)),
+      runCliLive(request, createCliLiveTransport(f.credential, f.url), {
+        stdin: process.stdin,
+        stdout: process.stdout,
+        stderr: process.stderr,
+        signals: process,
+      }),
       /TTY adapter is unavailable/,
       'agent capability errors must surface without claiming remote TTY success',
     );

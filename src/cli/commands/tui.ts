@@ -1,5 +1,4 @@
 import type { Command } from 'commander';
-import { packageVersion } from '../../images/image.ts';
 import { createCliLiveTransport } from '../live-transport.ts';
 import { WatchClient } from '../watch-client.ts';
 import { emptySnapshot } from '../tui/types.ts';
@@ -9,6 +8,8 @@ import { formatOnce, onceReport } from '../tui/once.ts';
 import { Poller } from '../tui/poller.ts';
 import { COMMANDS, resolveCommand } from '../tui/state.ts';
 import { loadCfg, print, request, transportFor } from './context.ts';
+import { out } from '../runtime.ts';
+import type { CliRuntime } from '../runtime.ts';
 
 const VIEWS = COMMANDS.filter((name) => name !== 'help' && name !== 'quit');
 
@@ -21,7 +22,7 @@ function controlLabel(url: string | undefined): string {
   }
 }
 
-export function registerTui(program: Command): void {
+export function registerTui(rt: CliRuntime, program: Command): void {
   program
     .command('tui [view]')
     .description(
@@ -38,25 +39,30 @@ export function registerTui(program: Command): void {
         view: string | undefined,
         o: { once?: boolean; readonly?: boolean; json?: boolean },
       ) => {
-        const cfg = await loadCfg();
+        const cfg = loadCfg(rt);
         const project = cfg.project || 'site';
         const name = view === undefined ? undefined : resolveCommand(view);
         if (view !== undefined && (!name || !(VIEWS as readonly string[]).includes(name)))
           throw new Error(`unknown view "${view}"; choose one of: ${VIEWS.join(', ')}`);
         const api = {
-          request,
+          request: <T = unknown>(
+            method: string,
+            route: string,
+            body?: unknown,
+            multipart?: boolean,
+          ) => request<T>(rt, method, route, body, multipart),
           sleep: (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
         };
         if (o.once || o.json) {
           const snapshot = emptySnapshot();
           await new Poller(api, snapshot, () => {}).pollOnce();
-          const report = onceReport(snapshot, Date.now(), packageVersion());
-          if (o.json) print(report);
-          else console.log(formatOnce(report, Date.now()));
-          if (!report.ok) process.exitCode = 1;
+          const report = onceReport(snapshot, Date.now(), rt.version);
+          if (o.json) print(rt, report);
+          else out(rt, formatOnce(report, Date.now()));
+          if (!report.ok) rt.exitCode = 1;
           return;
         }
-        await transportFor(cfg, 'probe').then((transport) => transport.close());
+        await transportFor(rt, cfg, 'probe').then((transport) => transport.close());
         const ref: ViewRef | undefined =
           name && name !== 'overview'
             ? {
@@ -64,21 +70,23 @@ export function registerTui(program: Command): void {
                 ...(['domains', 'volumes', 'secrets'].includes(name) ? { project } : {}),
               }
             : undefined;
-        process.exitCode = await runTui({
+        rt.exitCode = await runTui({
           api,
-          transport: createCliLiveTransport(cfg.credential, cfg.controlUrl),
+          transport: createCliLiveTransport(cfg.credential, cfg.controlUrl, rt.version),
           watch: (handlers) =>
             new WatchClient({
               credential: cfg.credential!,
               controlUrl: cfg.controlUrl,
+              clientVersion: rt.version,
               ...handlers,
             }),
-          io: { stdin: process.stdin, stdout: process.stdout, stderr: process.stderr },
+          io: { stdin: rt.stdin, stdout: rt.stdout, stderr: rt.stderr, signals: rt.signals },
+          env: rt.env,
           readonly: Boolean(o.readonly),
           project,
           view: ref,
           controlLabel: controlLabel(cfg.credential?.url),
-          cliVersion: packageVersion(),
+          cliVersion: rt.version,
         });
       },
     );

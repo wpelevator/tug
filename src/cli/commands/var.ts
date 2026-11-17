@@ -6,8 +6,10 @@ import type { ImportOpts } from './import-values.ts';
 import { selectResource } from './selection.ts';
 import { readValue } from './value-input.ts';
 import type { ValueInputOpts } from './value-input.ts';
+import { err } from '../runtime.ts';
+import type { CliRuntime } from '../runtime.ts';
 
-export function registerVar(program: Command): void {
+export function registerVar(rt: CliRuntime, program: Command): void {
   const vars = program
     .command('var')
     .description(
@@ -21,15 +23,16 @@ export function registerVar(program: Command): void {
     .option('--value <value>')
     .option('--from-file <path>', 'read the exact contents of a file, newlines included')
     .action(async (name: string, o: CommonOpts & ValueInputOpts) => {
-      const value = await readValue(name, o);
-      const result = await request<{ version: number }>('POST', '/api/v1/vars', {
-        project: await projectOf(o),
+      const value = await readValue(rt, name, o);
+      const result = await request<{ version: number }>(rt, 'POST', '/api/v1/vars', {
+        project: projectOf(rt, o),
         name,
         value,
       });
-      print(result);
+      print(rt, result);
       // On stderr, so a script reading the JSON result is unaffected.
-      console.error(
+      err(
+        rt,
         `variable ${name} stored (version ${result.version}); it takes effect on the next tug deploy. Variables are visible to anyone with a deploy credential: use tug secret set for private values`,
       );
     });
@@ -39,9 +42,11 @@ export function registerVar(program: Command): void {
     .option('--values', 'show values (needs a deploy credential)')
     .action(async (o: CommonOpts & { values?: boolean }) =>
       print(
+        rt,
         await request(
+          rt,
           'GET',
-          `/api/v1/vars${o.values ? '/values' : ''}?project=${encodeURIComponent(await projectOf(o))}`,
+          `/api/v1/vars${o.values ? '/values' : ''}?project=${encodeURIComponent(projectOf(rt, o))}`,
         ),
       ),
     );
@@ -52,9 +57,11 @@ export function registerVar(program: Command): void {
     )
     .action(async (name: string, o: CommonOpts) =>
       print(
+        rt,
         await request(
+          rt,
           'DELETE',
-          `/api/v1/vars/${encodeURIComponent(await selectResource(name, 'vars'))}?project=${encodeURIComponent(await projectOf(o))}`,
+          `/api/v1/vars/${encodeURIComponent(await selectResource(rt, name, 'vars'))}?project=${encodeURIComponent(projectOf(rt, o))}`,
         ),
       ),
     );
@@ -68,6 +75,6 @@ export function registerVar(program: Command): void {
     .option('--overwrite', 'replace a name that already exists as the same kind')
     .option('-y, --yes', 'skip the confirmation in a terminal')
     .action(async (file: string | undefined, o: Omit<ImportOpts, 'vars'>) =>
-      importValues(file, { ...o, vars: [] }, 'var'),
+      importValues(rt, file, { ...o, vars: [] }, 'var'),
     );
 }

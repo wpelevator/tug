@@ -1,7 +1,8 @@
 import readline from 'node:readline';
 import type { Readable, Writable } from 'node:stream';
-import { ask } from './prompt.ts';
+import { prompter } from './prompt.ts';
 import { suspendProgress } from './progress.ts';
+import type { CliRuntime } from './runtime.ts';
 import { clipToColumns, columnWidth, plainText as plain } from './width.ts';
 
 export interface PickIO {
@@ -11,6 +12,10 @@ export interface PickIO {
     unref?: () => unknown;
   };
   output: Writable & { columns?: number; rows?: number };
+  /** Process signals and exit, so a menu can restore the terminal first; without it none are handled. */
+  signals?: CliRuntime['signals'];
+  /** Re-raises a signal after the terminal is restored, so the process still dies of it. */
+  raise?: CliRuntime['raise'];
 }
 
 /**
@@ -106,10 +111,14 @@ function pick(
     const onExit = () => restoreTerminal();
     // A signal that ends the process must not leave the cursor hidden or the terminal raw: restore, then die of it.
     const signals = ['SIGTERM', 'SIGHUP'] as const;
+    const unsubscribe = () => {
+      io.signals?.off('exit', onExit);
+      for (const name of signals) io.signals?.off(name, onSignal);
+    };
     const onSignal = (signal: NodeJS.Signals) => {
       restoreTerminal();
-      for (const name of signals) process.off(name, onSignal);
-      process.kill(process.pid, signal);
+      unsubscribe();
+      io.raise?.(signal);
     };
     const finish = (error: Error | undefined, indexes: number[] = []) => {
       if (settled) return;
@@ -118,8 +127,7 @@ function pick(
       input.off('end', onEnd);
       input.off('error', onError);
       output.off('resize', redraw);
-      process.off('exit', onExit);
-      for (const name of signals) process.off(name, onSignal);
+      unsubscribe();
       input.setRawMode?.(false);
       input.pause();
       // A paused stdin can keep its handle reading after a later consumer resumed it; never let a finished menu hold the process open.
@@ -186,8 +194,8 @@ function pick(
     input.once('end', onEnd);
     input.once('error', onError);
     output.on('resize', redraw);
-    process.once('exit', onExit);
-    for (const name of signals) process.once(name, onSignal);
+    io.signals?.once('exit', onExit);
+    for (const name of signals) io.signals?.once(name, onSignal);
     output.write(HIDE_CURSOR);
     render();
     input.resume();
@@ -254,18 +262,21 @@ export function createNumberedPicker(
   };
 }
 
-const terminalIO = (): PickIO => ({
-  input: process.stdin as PickIO['input'],
-  output: process.stderr,
+const terminalIO = (rt: CliRuntime): PickIO => ({
+  input: rt.stdin,
+  output: rt.stderr,
+  signals: rt.signals,
+  raise: rt.raise,
 });
-const numbered = createNumberedPicker(ask, (line) => console.error(line));
 /** A terminal that announces itself as dumb gets numbered menus; everything else gets the keyboard menu. */
-const choosePicker = (): Picker =>
-  process.env.TERM === 'dumb' ? numbered : createPicker(terminalIO());
+const choosePicker = (rt: CliRuntime): Picker =>
+  rt.env.TERM === 'dumb'
+    ? createNumberedPicker(prompter(rt), (line) => void rt.stderr.write(`${line}\n`))
+    : createPicker(terminalIO(rt));
 
 /** A menu owns the terminal while it is open, so a live progress line is lifted off the screen for the duration. */
-async function whileMenuOpen<T>(run: () => Promise<T>): Promise<T> {
-  const resume = suspendProgress();
+async function whileMenuOpen<T>(rt: CliRuntime, run: () => Promise<T>): Promise<T> {
+  const resume = suspendProgress(rt);
   try {
     return await run();
   } finally {
@@ -273,9 +284,9 @@ async function whileMenuOpen<T>(run: () => Promise<T>): Promise<T> {
   }
 }
 
-/** Resolved on use so importing this module never touches stdin. */
-export const terminalPicker: Picker = {
+/** The menus of this run's terminal, chosen when one opens. */
+export const terminalPicker = (rt: CliRuntime): Picker => ({
   one: (question, labels, initial) =>
-    whileMenuOpen(() => choosePicker().one(question, labels, initial)),
-  many: (question, labels) => whileMenuOpen(() => choosePicker().many(question, labels)),
-};
+    whileMenuOpen(rt, () => choosePicker(rt).one(question, labels, initial)),
+  many: (question, labels) => whileMenuOpen(rt, () => choosePicker(rt).many(question, labels)),
+});

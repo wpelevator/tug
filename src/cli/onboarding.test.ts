@@ -16,6 +16,7 @@ import { confirm, type Prompter } from './prompt.ts';
 import { commandPath } from './config.ts';
 import { formatNodes } from './status.ts';
 import { execCli } from '../../tests/cli-inprocess.ts';
+import { testRuntime } from '../../tests/cli-runtime.ts';
 
 const answers =
   (...given: string[]): Prompter =>
@@ -66,10 +67,15 @@ test('parseAddressCandidates reads ip output and sortCandidates puts private add
 });
 
 test('confirm takes the default on an empty answer and retries on nonsense', async () => {
-  assert.equal(await confirm('ok?', true, answers('')), true, 'empty takes the yes default');
-  assert.equal(await confirm('ok?', false, answers('')), false, 'empty takes the no default');
-  assert.equal(await confirm('ok?', false, answers('maybe', 'YES')), true, 'invalid input re-asks');
-  assert.equal(await confirm('ok?', true, answers('n')), false, 'n declines');
+  const { rt } = testRuntime();
+  assert.equal(await confirm(rt, 'ok?', true, answers('')), true, 'empty takes the yes default');
+  assert.equal(await confirm(rt, 'ok?', false, answers('')), false, 'empty takes the no default');
+  assert.equal(
+    await confirm(rt, 'ok?', false, answers('maybe', 'YES')),
+    true,
+    'invalid input re-asks',
+  );
+  assert.equal(await confirm(rt, 'ok?', true, answers('n')), false, 'n declines');
 });
 
 test('commandPath joins group names and resolves the setup shortcut', () => {

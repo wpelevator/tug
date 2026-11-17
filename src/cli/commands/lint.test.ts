@@ -39,7 +39,7 @@ test('lintComposeFile passes a well-written file and reports its path', async ()
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-lint-'));
   try {
     const file = await writeFile(dir, 'compose.yml', GOOD);
-    const result = await lintComposeFile(file);
+    const result = await lintComposeFile(file, process.cwd());
     assert.deepEqual(
       [result.file, result.errors],
       [file, []],
@@ -47,6 +47,7 @@ test('lintComposeFile passes a well-written file and reports its path', async ()
     );
     const normalized = await lintComposeFile(
       await writeFile(dir, 'short.yml', GOOD.replace('      - "8080:80"\n', '      - "8080:80"\n')),
+      process.cwd(),
     );
     assert.deepEqual(normalized.errors, [], 'short syntax is what operators write');
   } finally {
@@ -76,7 +77,7 @@ volumes:
       persistant: true
 `,
     );
-    const result = await lintComposeFile(file);
+    const result = await lintComposeFile(file, process.cwd());
     assert.ok(
       result.errors.some((e) => e === 'web: x-tug.health.type must be docker, tcp or http'),
       'the health type is checked against its enum',
@@ -97,16 +98,19 @@ volumes:
 test('lint reports an unreadable, invalid or empty file instead of throwing', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-lint-'));
   try {
-    const missing = await lintComposeFile(path.join(dir, 'nope.yml'));
+    const missing = await lintComposeFile(path.join(dir, 'nope.yml'), process.cwd());
     assert.equal(missing.errors.length, 1, 'one finding for a missing file');
     assert.match(
       missing.errors[0],
       /could not be read/,
       'the finding says the file could not be read',
     );
-    const broken = await lintComposeFile(await writeFile(dir, 'broken.yml', 'services: [unclosed'));
+    const broken = await lintComposeFile(
+      await writeFile(dir, 'broken.yml', 'services: [unclosed'),
+      process.cwd(),
+    );
     assert.match(broken.errors[0], /is not valid YAML/, 'a YAML syntax error is a lint finding');
-    const empty = await lintComposeFile(await writeFile(dir, 'empty.yml', ''));
+    const empty = await lintComposeFile(await writeFile(dir, 'empty.yml', ''), process.cwd());
     assert.deepEqual(
       empty.errors,
       ['compose file must define services'],
@@ -228,7 +232,7 @@ test('lint reports env_file, which tug deploy no longer reads, and names the imp
       'compose.yaml',
       'services:\n  web:\n    image: nginx\n    env_file: app.env\n  db:\n    image: mariadb\n',
     );
-    const result = await lintComposeFile(file);
+    const result = await lintComposeFile(file, process.cwd());
     assert.equal(result.errors.length, 1, 'only the service that uses env_file is reported');
     assert.match(
       result.errors[0],

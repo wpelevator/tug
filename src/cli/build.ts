@@ -6,14 +6,30 @@ import { buildImage, run, unpackContext } from '../images/build.ts';
 import { saveImageArchive } from '../images/artifacts.ts';
 import type { ComposeFile, LocalImageUpload } from '../protocol.ts';
 import { CONFIG_NAMES } from './config.ts';
+import type { CliRuntime } from './runtime.ts';
 
 export interface LocalBuildDependencies {
   build: typeof buildImage;
   save: typeof saveImageArchive;
   nonce: () => string;
   remove: (imageRef: string) => Promise<void>;
-  cleanupWarning?: (message: string) => void;
+  /** Reports a temporary image that could not be removed; the build itself succeeded. */
+  cleanupWarning: (message: string) => void;
 }
+
+/** The real Docker build, export and removal, reporting cleanup problems through `cleanupWarning`. */
+export const localBuildDependencies = (
+  rt: CliRuntime,
+  cleanupWarning: (message: string) => void,
+): LocalBuildDependencies => ({
+  build: (options) => buildImage({ ...options, env: rt.env }),
+  save: (imageRef, file) => saveImageArchive(imageRef, file, rt.env),
+  nonce: randomUUID,
+  remove: async (imageRef) => {
+    await run('docker', ['image', 'rm', imageRef], { env: rt.env, cwd: rt.cwd });
+  },
+  cleanupWarning,
+});
 
 /** At any depth: the git directory and every file that can hold a token (the untracked config overlays). */
 const ALWAYS_EXCLUDED = [
@@ -164,14 +180,7 @@ export async function prepareLocalImages(
   compose: ComposeFile,
   contextDir: string,
   directory: string,
-  dependencies: LocalBuildDependencies = {
-    build: buildImage,
-    save: saveImageArchive,
-    nonce: randomUUID,
-    remove: async (imageRef) => {
-      await run('docker', ['image', 'rm', imageRef]);
-    },
-  },
+  dependencies: LocalBuildDependencies,
   onProgress?: (message: string) => void,
 ): Promise<LocalImageUpload[]> {
   const images: LocalImageUpload[] = [];
@@ -196,7 +205,7 @@ export async function prepareLocalImages(
       try {
         await dependencies.remove(imageRef);
       } catch (error) {
-        (dependencies.cleanupWarning || console.warn)(
+        dependencies.cleanupWarning(
           `Could not remove temporary application image ${imageRef}: ${(error as Error).message}`,
         );
       }

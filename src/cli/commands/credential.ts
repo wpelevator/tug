@@ -1,11 +1,13 @@
-import { selectMany } from '../selection.ts';
+import { selectMany, terminalSelection } from '../selection.ts';
 import { selectResource } from './selection.ts';
 import type { Command } from 'commander';
 import { Option } from 'commander';
 import { ROLES } from '../../roles.ts';
 import { collectList, print, request } from './context.ts';
+import { err } from '../runtime.ts';
+import type { CliRuntime } from '../runtime.ts';
 
-export function registerCredential(program: Command): void {
+export function registerCredential(rt: CliRuntime, program: Command): void {
   const credential = program
     .command('credential')
     .description('create, list and revoke operator credentials');
@@ -47,6 +49,7 @@ export function registerCredential(program: Command): void {
             'Select projects (choose all projects alone for unrestricted access)',
             async () => {
               const { projects } = await request<{ projects: { name: string }[] }>(
+                rt,
                 'GET',
                 '/api/v1/projects',
               );
@@ -55,22 +58,24 @@ export function registerCredential(program: Command): void {
                 ...projects.map((project) => ({ value: project.name, label: project.name })),
               ];
             },
+            terminalSelection(rt),
           );
           if (o.project.includes('*')) {
             if (o.project.length !== 1) throw new Error('all projects must be selected alone');
             o.project = [];
           }
         }
-        const created = await request('POST', '/api/v1/credentials', {
+        const created = await request(rt, 'POST', '/api/v1/credentials', {
           name,
           role: o.role,
           projects: o.project.length ? o.project : undefined,
           expiresInSeconds: o.expiresInDays ? Number(o.expiresInDays) * 86400 : undefined,
         });
-        console.error(
+        err(
+          rt,
           'Store this credential now (for example as the TUG_CREDENTIAL secret in CI); it is not shown again. Replace one by creating a new name, verifying it, then revoking the old name.',
         );
-        print(created);
+        print(rt, created);
       },
     );
   credential
@@ -78,7 +83,7 @@ export function registerCredential(program: Command): void {
     .description(
       'list operator credentials with role, projects, expiry and last use; secrets are never shown',
     )
-    .action(async () => print(await request('GET', '/api/v1/credentials')));
+    .action(async () => print(rt, await request(rt, 'GET', '/api/v1/credentials')));
   credential
     .command('revoke [name]')
     .description(
@@ -86,9 +91,11 @@ export function registerCredential(program: Command): void {
     )
     .action(async (name: string) =>
       print(
+        rt,
         await request(
+          rt,
           'DELETE',
-          `/api/v1/credentials/${encodeURIComponent(await selectResource(name, 'credentials'))}`,
+          `/api/v1/credentials/${encodeURIComponent(await selectResource(rt, name, 'credentials'))}`,
         ),
       ),
     );

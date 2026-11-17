@@ -9,7 +9,8 @@ import * as yaml from 'js-yaml';
 import { parseDotenv } from '../compose/load.ts';
 import { MAX_VAR_BYTES, RESERVED_VALUE_NAMES, VALUE_NAME, VALUE_NAME_MESSAGE } from '../values.ts';
 import type { DeploymentValue } from '../values.ts';
-import { ask } from './prompt.ts';
+import { prompter } from './prompt.ts';
+import type { CliRuntime } from './runtime.ts';
 import type { Prompter } from './prompt.ts';
 
 /** `$$` is an escaped dollar; `${NAME}` is required only when it has no `:-`, `-`, `:+`, `+`, `:?` or `?` modifier. */
@@ -61,11 +62,12 @@ export function parseVarFlags(entries: readonly string[]): Record<string, string
 
 /** Variables a Compose file requires that control, `--var` and nothing else supplies. */
 export async function findMissingValues(
+  cwd: string,
   file: string,
   known: ReadonlySet<string>,
 ): Promise<string[]> {
   // An unreadable file is reported by the Compose reader with its own message.
-  const source = await fs.readFile(file, 'utf8').catch(() => '');
+  const source = await fs.readFile(path.resolve(cwd, file), 'utf8').catch(() => '');
   return requiredVariables(source).filter((name) => !known.has(name));
 }
 
@@ -139,6 +141,7 @@ export function missingValuesMessage(
  * nothing (the default written in the file). Order follows the file.
  */
 export async function describeValues(
+  cwd: string,
   file: string,
   sources: {
     secrets: ReadonlySet<string>;
@@ -146,7 +149,7 @@ export async function describeValues(
     flags: Readonly<Record<string, string>>;
   },
 ): Promise<DeploymentValue[]> {
-  const source = await fs.readFile(file, 'utf8').catch(() => '');
+  const source = await fs.readFile(path.resolve(cwd, file), 'utf8').catch(() => '');
   return referencedVariables(source).map((name): DeploymentValue => {
     if (name in sources.flags) return { name, source: '--var', value: sources.flags[name] };
     if (sources.secrets.has(name)) return { name, source: 'secret' };
@@ -178,12 +181,13 @@ async function dotEnvNames(dir: string): Promise<string[]> {
  * file (with the names control does not hold) and `COMPOSE_PROFILES` in the shell.
  */
 export async function ignoredSourceNotes(
+  cwd: string,
   file: string,
   controlNames: ReadonlySet<string>,
-  env: NodeJS.ProcessEnv = process.env,
+  env: NodeJS.ProcessEnv,
 ): Promise<string[]> {
   const notes: string[] = [];
-  const names = await dotEnvNames(path.dirname(path.resolve(file)));
+  const names = await dotEnvNames(path.dirname(path.resolve(cwd, file)));
   if (names.length) {
     const unset = names.filter((name) => !controlNames.has(name));
     notes.push(
@@ -214,8 +218,9 @@ export interface NewValue {
 
 /** Resolve each missing name interactively; returns what to store, and as which kind. */
 export async function promptForValues(
+  rt: CliRuntime,
   names: readonly string[],
-  prompt: Prompter = ask,
+  prompt: Prompter = prompter(rt),
 ): Promise<Record<string, NewValue>> {
   const values: Record<string, NewValue> = {};
   for (const name of names) {
