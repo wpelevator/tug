@@ -2,7 +2,7 @@
 
 Status: Record. The first proposal is built; measured on 17 November 2026 on a 4-core Linux container with Node.js 22.23.4.
 
-`npm test` took 2 minutes 49 seconds there and about 8.5 minutes of CPU before the change described under [Result](#result), and takes about 70 seconds after it with the concurrency set to the core count. This page records where the time went and what changed. The numbers are from runs on that machine, so treat them as ratios, not as promises for other hardware. I did not measure earlier releases, so this page cannot say which change made the suite slow.
+`npm test` took 2 minutes 49 seconds there and about 8.5 minutes of CPU before the change described under [Result](#result), and takes about 77 seconds after it (70 seconds with `--test-concurrency` set to the core count). This page records where the time went and what changed. The numbers are from runs on that machine, so treat them as ratios, not as promises for other hardware. I did not measure earlier releases, so this page cannot say which change made the suite slow.
 
 ## What the run is made of
 
@@ -63,24 +63,24 @@ Built, in this order:
 
 | Measure | Before | After |
 | --- | --- | --- |
-| Wall time, `npm test` | 2 min 49 s | 1 min 10 s to 1 min 27 s, depending on `--test-concurrency` |
+| Wall time, `npm test` | 2 min 49 s | about 77 s (70 s with `--test-concurrency=4`) |
 | CPU time (user) | 8 min 35 s | 3 min 22 s |
 | CLI processes started | 467 | 106 |
-| Test cases | 1,175 | 1,188 (new ones for `runCli`, the runtime, `execCli` and the layout guard) |
+| Test cases | 1,175 | 1,192 (new ones for `runCli`, the runtime, `execCli`, the ESLint boundary and the layout guard) |
 
-The 106 that remain need a real process: the interactive selection and prompt tests (a fake terminal and keystrokes), whole-document stdin and `secret set` (exit while stdin stays open), the 100 MB streaming tests, `wait-progress`, and the `dist` and templates smoke tests.
+The 106 that remain need a real process: the interactive selection and prompt tests (a fake terminal and keystrokes), whole-document stdin and `secret set` (exit while stdin stays open), the 100 MB streaming tests, and the `dist` and templates smoke tests. `wait-progress` is not among them: it runs in-process and takes about 14 s because it waits on real timers.
 
-I did not build the `pretest` build step or the `npm test` / `npm run test:cli` split. After the move, the processes that remain are mostly terminal and stream tests that run against `src`, so a built entry would save about 0.15 s on about a hundred starts, and the suite is already under the 90 second target. Revisit when it grows past that.
+A `pretest` build step and an `npm test` / `npm run test:cli` split were not built. After the move, the processes that remain are mostly terminal and stream tests that run against `src`, so a built entry would save about 0.15 s on about a hundred starts, and the suite is already under the 90 second target. Revisit when it grows past that.
 
 ## Fast and process files
 
 `node:test` has no tags. It can run files in parallel (`--test-concurrency`), split a run across machines (`--test-shard`) and filter by test name (`--test-name-pattern`, `--test-skip-pattern`), and it runs the tests inside one file one after another. Parallelism is therefore per file, and the wall time is bounded by the larger of the longest file and the total CPU time divided by the cores.
 
-Measured serially and uncontended on the 4-core container, the 153 files add up to 224 s, so 4 cores cannot go below about 56 s. The longest file alone is 21.5 s (`src/control/live-flow.test.ts`), then `cli.selection` (18.3 s), `templates` (14.7 s) and `wait-progress` (13.6 s, in-process but waiting on real timers).
+Measured serially and uncontended on the 4-core container, the 153 test files that existed then add up to 224 s, so 4 cores cannot go below about 56 s. The longest file alone is 21.5 s (`src/control/live-flow.test.ts`), then `cli.selection` (18.3 s), `templates` (14.7 s) and `wait-progress` (13.6 s, in-process but waiting on real timers).
 
 | Kind | Files | Serial time | How it is selected |
 | --- | --- | --- | --- |
-| Fast: unit and in-process service tests | 144 | 167 s | `*.test.ts` |
+| Fast: unit and in-process service tests | 144 (145 now) | 167 s | `*.test.ts` |
 | Process: starts real tug processes | 9 | 57 s | `*.process.test.ts`, `npm run test:process` |
 
 `npm test` runs both. With plain `node --test` the process files alone take 28 s wall, and node cannot exclude a glob, so there is no fast-only script: the kind is a file name that tools and a reader can use (`ls src/**/*.process.test.ts`).
@@ -102,7 +102,7 @@ The cause of the slow suite was a habit, not a defect: the cheapest way to write
 
 - The cheap way is the default. `execCli` (`tests/cli-inprocess.ts`) is what a test reaches for, and `startMtlsControl` gives it a real control in the same process. The runtime boundary is what makes that safe: the CLI cannot read a global, so a test never has to patch one.
 - The expensive way is named and fenced. A test that needs a terminal, piped stdin, signals or the built entry goes in a `*.process.test.ts` file and imports `cliEntry` or `mainEntry` from `tests/cli-process.ts`. `src/test-layout.test.ts` fails when a fast file imports that helper or names the entry path, and when a process file starts no process.
-- The numbers are in the log. A reader can compare against the table above: the suite at 1,188 test cases takes about 70 s on 4 cores, with 106 CLI starts in the whole run.
+- The numbers are in the log. A reader can compare against the table above: the suite at 1,192 test cases takes about 77 s on 4 cores, with 106 CLI starts in the whole run.
 
 ## Next candidates
 

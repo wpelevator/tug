@@ -29,7 +29,9 @@ export async function lintComposeFile(file: string, cwd: string): Promise<LintRe
   try {
     text = await fs.readFile(path.resolve(cwd, file), 'utf8');
   } catch (error) {
-    return { file, errors: [`could not be read: ${errMessage(error)}`] };
+    // Name the file as it was typed, as the error did when it was opened relative to the process directory.
+    const reason = errMessage(error).split(path.resolve(cwd, file)).join(file);
+    return { file, errors: [`could not be read: ${reason}`] };
   }
   let compose: ComposeFile | undefined;
   try {

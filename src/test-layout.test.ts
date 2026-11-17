@@ -49,6 +49,22 @@ test('no test hard-codes the path of the CLI or runtime entry, so the process fi
   );
 });
 
+test('a fast test file that starts processes does not name the CLI or runtime entry in any spelling', () => {
+  const offenders = files.filter((file) => {
+    if (file === SELF || kindOf(file) !== 'fast') return false;
+    const text = read(file);
+    return (
+      /process\.execPath|\bspawn\(|\bexecFile\(|execFileSync|spawnSync/.test(text) &&
+      /\b(?:cli|main)\.(?:ts|js)\b|CLI_ENTRY/.test(text)
+    );
+  });
+  assert.deepEqual(
+    offenders,
+    [],
+    'a fast file that spawns a process and names cli.ts, main.ts or dist/*.js is starting the real CLI: use execCli, or move those tests to a *.process.test.ts file',
+  );
+});
+
 test('a *.process.test.* file really starts processes, so the process files holds only slow tests', () => {
   const idle = files.filter((file) => kindOf(file) === 'process' && !startsRealProcess(read(file)));
   assert.deepEqual(

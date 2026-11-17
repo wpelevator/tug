@@ -16,5 +16,5 @@ These pages record why tug is built the way it is and what is planned. They are 
 | [Standalone binary](standalone-binary.md) | Prototyped | A compiled client without Node.js |
 | [tug compared with Docker Swarm](swarm-comparison.md) | Record | A dated source assessment of overlap and gaps, with evidence |
 | [Terminal UI design](tui-design.md) | Phases 1 to 3 built | User flows, screen design, architecture and the remaining phases of `tug tui` |
-| [Test suite performance](test-performance.md) | Record | Where the 2 minute 49 second `npm test` run went and what cut it to 1 minute 17 seconds |
+| [Test suite performance](test-performance.md) | Record | Where the 2 minute 49 second `npm test` run went and what cut it to about 77 seconds |
 | [Terminology review](terminology-review.md) | Record | The 1 November 2026 naming review behind the vocabulary |

@@ -55,6 +55,43 @@ export default [
           property: 'homedir',
           message: 'Use homeDir(rt), which honours the runtime environment.',
         },
+        {
+          object: 'globalThis',
+          property: 'process',
+          message: 'Use the CliRuntime instead of reaching the process through globalThis.',
+        },
+        {
+          object: 'globalThis',
+          property: 'console',
+          message:
+            'Write through the CliRuntime: out(rt, ...) for stdout, err(rt, ...) for stderr.',
+        },
+      ],
+      'no-restricted-imports': [
+        'error',
+        {
+          paths: [
+            {
+              name: 'node:process',
+              message: 'Use the CliRuntime instead of importing the process.',
+            },
+            { name: 'process', message: 'Use the CliRuntime instead of importing the process.' },
+            {
+              name: 'node:console',
+              message: 'Write through the CliRuntime: out(rt, ...) and err(rt, ...).',
+            },
+            {
+              name: 'node:os',
+              importNames: ['homedir'],
+              message: 'Use homeDir(rt), which honours the runtime environment.',
+            },
+            {
+              name: 'os',
+              importNames: ['homedir'],
+              message: 'Use homeDir(rt), which honours the runtime environment.',
+            },
+          ],
+        },
       ],
     },
   },

@@ -467,7 +467,7 @@ function addSetup(rt: CliRuntime, parent: Command, description: string): void {
               `the issued root credential is signed by CA ${issuedFp}, but the control persisted CA ${onDiskFp}; refusing to write local state — inspect /data/pki on ${sshTarget}`,
             );
           if (o.credentialOut) {
-            await writeFileDurable(o.credentialOut, text, 0o600);
+            await writeFileDurable(resolvePath(rt, o.credentialOut), text, 0o600);
             err(rt, `root credential written to ${o.credentialOut}`);
           }
           if (o.import) {

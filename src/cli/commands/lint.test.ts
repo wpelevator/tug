@@ -105,6 +105,16 @@ test('lint reports an unreadable, invalid or empty file instead of throwing', as
       /could not be read/,
       'the finding says the file could not be read',
     );
+    const relative = await lintComposeFile('nope.yml', dir);
+    assert.match(
+      relative.errors[0],
+      /open 'nope\.yml'/,
+      'a file named relative to the working directory is reported as it was typed, not as an absolute path',
+    );
+    assert.ok(
+      !relative.errors[0].includes(dir),
+      'the finding must not leak the directory the path was resolved against',
+    );
     const broken = await lintComposeFile(
       await writeFile(dir, 'broken.yml', 'services: [unclosed'),
       process.cwd(),

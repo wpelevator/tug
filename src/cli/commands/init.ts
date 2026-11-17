@@ -50,8 +50,12 @@ export async function importCredential(
     );
   // TUG_CREDENTIALS_DIR keeps scripts and tests out of the real home directory.
   const dir =
-    rt.env.TUG_CREDENTIALS_DIR ||
-    path.join(rt.env.XDG_CONFIG_HOME || path.join(homeDir(rt), '.config'), 'tug', 'credentials');
+    (rt.env.TUG_CREDENTIALS_DIR ? resolvePath(rt, rt.env.TUG_CREDENTIALS_DIR) : undefined) ||
+    path.join(
+      resolvePath(rt, rt.env.XDG_CONFIG_HOME || path.join(homeDir(rt), '.config')),
+      'tug',
+      'credentials',
+    );
   // The credential file name carries the CA's fingerprint, so importing a credential from a different control CA is
   // additive by construction: it writes a new file and never overwrites the credential the CLI was working with.
   // Same-CA reissues (a deliberate root recovery or re-issue) keep the same file, because the old credential is dead.

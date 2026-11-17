@@ -126,11 +126,23 @@ test('a run leaves no trace on the process or on the next run', async () => {
 test('the exit code a command asks for is returned, not set on the process', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-exit-'));
   try {
-    await fs.writeFile(path.join(dir, 'compose.yml'), 'services: {}\n');
-    const { rt } = testRuntime({ cwd: dir });
-    const code = await runCli(['lint', '-f', 'compose.yml'], rt);
-    assert.equal(code, rt.exitCode ?? 0, 'runCli should return what the command asked for');
-    assert.equal(process.exitCode, undefined, 'the test process must not carry it');
+    // A bad x-tug value makes `lint` ask for exit code 1 by setting rt.exitCode, the way commands do.
+    await fs.writeFile(
+      path.join(dir, 'bad.yml'),
+      'services:\n  web:\n    image: nginx\n    x-tug:\n      replicas: many\n',
+    );
+    await fs.writeFile(path.join(dir, 'ok.yml'), 'services: {}\n');
+    const failing = testRuntime({ cwd: dir });
+    assert.equal(
+      await runCli(['lint', '-f', 'bad.yml'], failing.rt),
+      1,
+      'runCli should return the code the command asked for',
+    );
+    assert.equal(failing.rt.exitCode, 1, 'the command should record its code on the runtime');
+    const passing = testRuntime({ cwd: dir });
+    assert.equal(await runCli(['lint', '-f', 'ok.yml'], passing.rt), 0, 'a clean file exits 0');
+    assert.equal(passing.rt.exitCode, undefined, 'a command that succeeds asks for no code');
+    assert.equal(process.exitCode, undefined, 'the test process must not carry either code');
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
