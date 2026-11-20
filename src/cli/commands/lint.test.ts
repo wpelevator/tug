@@ -258,3 +258,44 @@ test('lint reports env_file, which tug deploy no longer reads, and names the imp
     await fs.rm(dir, { recursive: true, force: true });
   }
 });
+
+test('lint checks the default of an ingress host written as ${NAME:-default} and skips one that has none', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-lint-'));
+  const compose = (host: string) => GOOD.replace('host: app.example.com', `host: ${host}`);
+  try {
+    const lint = async (host: string) =>
+      (await lintComposeFile(await writeFile(dir, 'c.yml', compose(host)), process.cwd())).errors;
+    assert.deepEqual(
+      await lint('"${APP_HOST:-app.example.com}"'),
+      [],
+      'a valid default is a valid host',
+    );
+    assert.deepEqual(
+      await lint('"www.${DOMAIN:-example.com}"'),
+      [],
+      'a default inside a longer name is resolved',
+    );
+    assert.deepEqual(
+      await lint('"${APP_HOST}"'),
+      [],
+      'a host that only control can supply is not checked, since lint cannot know it',
+    );
+    assert.deepEqual(
+      await lint('"${APP_HOST:?set APP_HOST}"'),
+      [],
+      'a required reference has no default to check',
+    );
+    assert.match(
+      (await lint('"${APP_HOST:-not a host}"')).join('\n'),
+      /ingress\.host must be a fully qualified hostname/,
+      'a bad default is still reported',
+    );
+    assert.match(
+      (await lint('bad_host')).join('\n'),
+      /ingress\.host must be a fully qualified hostname/,
+      'a literal bad host is still reported',
+    );
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});

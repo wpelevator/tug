@@ -16,6 +16,48 @@ export interface LintResult {
   errors: string[];
 }
 
+/** `${NAME:-default}` and `${NAME-default}`, with no reference nested in the default. */
+const DEFAULTED = /\$\{[A-Za-z_][A-Za-z0-9_]*:?-([^${}]*)\}/g;
+
+/**
+ * An `ingress.host` as deploy would read it with nothing set: each default is taken (nested ones from the inside out),
+ * `$$` is one dollar. Undefined when a reference without a default remains, because its value is only known to control.
+ */
+export function hostWithDefaults(host: string): string | undefined {
+  let text = host.replaceAll('$$', '\0');
+  for (let previous = ''; previous !== text;) {
+    previous = text;
+    text = text.replace(DEFAULTED, '$1');
+  }
+  return /\$[{A-Za-z_]/.test(text) ? undefined : text.replaceAll('\0', '$');
+}
+
+/**
+ * A copy of the file in which every `x-tug.ingress.host` is the name deploy would use: defaults filled in, and a host
+ * that depends on a value without a default swapped for a valid placeholder, so only names that are known are checked.
+ */
+function withResolvedHosts(compose: ComposeFile): ComposeFile {
+  const services: ComposeFile['services'] = {};
+  for (const [name, svc] of Object.entries(compose.services)) {
+    const ingress = svc && typeof svc === 'object' ? svc['x-tug']?.ingress : undefined;
+    if (!ingress || typeof ingress !== 'object' || ingress.host === undefined) {
+      services[name] = svc;
+      continue;
+    }
+    let unknown = 0;
+    const resolve = (host: unknown): unknown => {
+      if (typeof host !== 'string') return host;
+      return hostWithDefaults(host) ?? `value-from-control-${name}-${unknown++}.invalid`;
+    };
+    const host = Array.isArray(ingress.host) ? ingress.host.map(resolve) : resolve(ingress.host);
+    services[name] = {
+      ...svc,
+      'x-tug': { ...svc['x-tug'], ingress: { ...ingress, host } },
+    } as typeof svc;
+  }
+  return { ...compose, services };
+}
+
 /** The prefix `tug lint` prints before every finding, so one line names both looks. */
 const finding = (file: string, error: string) => `${file}: ${error}`;
 
@@ -49,7 +91,7 @@ export async function lintComposeFile(file: string, cwd: string): Promise<LintRe
       ([name]) =>
         `${name}: env_file is not read by tug deploy (values come only from control); store its entries with tug secret import <file> or tug var import <file> and list them under environment`,
     );
-  const others = composeErrors(compose, [], { normalized: false }).filter(
+  const others = composeErrors(withResolvedHosts(compose), [], { normalized: false }).filter(
     (error) => !/: env_file is not supported$/.test(error),
   );
   return { file, errors: [...envFiles, ...others] };
