@@ -384,9 +384,9 @@ function validateHealth(name: string, health: unknown, errors: string[]): void {
     return;
   }
   for (const key of Object.keys(health))
-    if (!['type', 'port', 'path', 'interval', 'timeout', 'retries'].includes(key))
+    if (!['type', 'port', 'path', 'host', 'expect', 'interval', 'timeout', 'retries'].includes(key))
       errors.push(
-        `${name}: x-tug.health.${key} is not supported (supported: type, port, path, interval, timeout, retries)`,
+        `${name}: x-tug.health.${key} is not supported (supported: type, port, path, host, expect, interval, timeout, retries)`,
       );
   const type = typeof health.type === 'string' ? health.type : undefined;
   if (!type) errors.push(`${name}: x-tug.health needs type: docker, tcp or http`);
@@ -407,6 +407,26 @@ function validateHealth(name: string, health: unknown, errors: string[]): void {
     (typeof health.path !== 'string' || !health.path.startsWith('/'))
   )
     errors.push(`${name}: x-tug.health.path must be an absolute path such as / or /healthz`);
+  for (const key of ['host', 'expect'] as const)
+    if (health[key] !== undefined && type !== undefined && type !== 'http')
+      errors.push(`${name}: x-tug.health.${key} applies only to type http`);
+  if (
+    health.host !== undefined &&
+    (typeof health.host !== 'string' ||
+      !/^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:\d{1,5})?$/.test(health.host))
+  )
+    errors.push(
+      `${name}: x-tug.health.host must be a host name such as blog.example.com, optionally with :port`,
+    );
+  if (
+    health.expect !== undefined &&
+    (!Array.isArray(health.expect) ||
+      !health.expect.length ||
+      health.expect.some((status) => !Number.isInteger(status) || status < 100 || status > 599))
+  )
+    errors.push(
+      `${name}: x-tug.health.expect must be a list of HTTP status codes such as [200, 301]`,
+    );
   for (const key of ['interval', 'timeout'] as const)
     if (health[key] !== undefined && !isDuration(health[key]))
       errors.push(

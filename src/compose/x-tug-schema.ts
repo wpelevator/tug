@@ -69,6 +69,19 @@ const health = (): JsonSchema => ({
       pattern: '^/',
       description: 'http only: the request path (default /).',
     },
+    host: {
+      type: 'string',
+      pattern: '^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:\\d{1,5})?$',
+      description:
+        'http only: the Host header to send, for an app that serves several virtual hosts (a WordPress multisite redirects any other name).',
+    },
+    expect: {
+      type: 'array',
+      minItems: 1,
+      items: { type: 'integer', minimum: 100, maximum: 599 },
+      description:
+        'http only: the status codes that pass (default: any 2xx). Redirects are not followed, so list 301 or 302 to accept one.',
+    },
     interval: duration('Time between attempts (default 2s).'),
     timeout: duration('Per-attempt limit (default 2s).'),
     retries: {

@@ -36,7 +36,8 @@ export function createTransport(
     }
     return undiciFetch(url, {
       ...(request as object),
-      redirect: 'error',
+      // A caller that inspects redirects itself (the agent's health probe) asks for 'manual'; everything else fails on one.
+      redirect: init?.redirect ?? 'error',
       dispatcher,
     } as never) as unknown as Promise<Response>;
   };

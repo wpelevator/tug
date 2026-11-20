@@ -617,6 +617,42 @@ describe('x-tug schema checks', () => {
     );
   });
 
+  test('x-tug.health host and expect are for http probes and are checked', () => {
+    assert.equal(
+      service({
+        health: { type: 'http', path: '/', host: 'blog.example.com', expect: [200, 301, 302] },
+      }),
+      '',
+      'a virtual host and the statuses it answers with are valid',
+    );
+    assert.equal(
+      service({ health: { type: 'http', host: 'blog.example.com:8080' } }),
+      '',
+      'a host may carry a port',
+    );
+    assert.match(
+      service({ health: { type: 'tcp', port: 80, host: 'blog.example.com' } }),
+      /x-tug\.health\.host applies only to type http/,
+      'a tcp probe has no Host header',
+    );
+    assert.match(
+      service({ health: { type: 'docker', expect: [200] } }),
+      /x-tug\.health\.expect applies only to type http/,
+      'a docker probe has no status code',
+    );
+    assert.match(
+      service({ health: { type: 'http', host: 'https://blog.example.com/' } }),
+      /x-tug\.health\.host must be a host name/,
+      'a URL is not a Host header',
+    );
+    for (const expect of [[], [99], [200.5], ['200'], 200])
+      assert.match(
+        service({ health: { type: 'http', expect } }),
+        /x-tug\.health\.expect must be a list of HTTP status codes such as \[200, 301\]/,
+        `expect ${JSON.stringify(expect)} is rejected`,
+      );
+  });
+
   test('volume x-tug takes type, driver, persistent, placement and backup', () => {
     assert.equal(
       volume({ type: 'local', persistent: true, placement: { nodes: ['n1'] } }),
