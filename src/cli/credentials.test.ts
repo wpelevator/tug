@@ -241,3 +241,25 @@ test('backup destination commands set, show and remove the destination without e
     await control.close();
   }
 });
+
+test('credential create --raw prints only the token, which works as TUG_CREDENTIAL, and keeps the notice on stderr', async () => {
+  const data = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-cli-raw-'));
+  const control = await startMtlsControl(data);
+  try {
+    const run = (env: Record<string, string>, ...args: string[]) =>
+      execCli([...args], { env: { ...process.env, ...control.env, ...env }, cwd: data });
+    const raw = await run({}, 'credential', 'create', 'ci-raw', '--role', 'read', '--raw');
+    assert.match(
+      raw.stdout,
+      /^[A-Za-z0-9_-]{200,}\n$/,
+      '--raw prints the token and a newline, nothing else',
+    );
+    assert.match(raw.stderr, /not shown again/, 'the one-time notice stays on stderr');
+    await run({ TUG_CREDENTIAL: raw.stdout.trim(), TUG_CREDENTIAL_FILE: '' }, 'status');
+    const json = await run({}, 'credential', 'create', 'ci-json', '--role', 'read');
+    await run({ TUG_CREDENTIAL: json.stdout, TUG_CREDENTIAL_FILE: '' }, 'status');
+  } finally {
+    await control.close();
+    await fs.rm(data, { recursive: true, force: true });
+  }
+});

@@ -60,6 +60,11 @@ export function parseCredential(value: unknown): Credential {
   return credential;
 }
 
+/**
+ * A credential from its file or environment text: the credential document, its base64url form, or the JSON that
+ * `tug credential create` prints, whose `credential` field holds the base64url form (so the whole output can be
+ * pasted as a CI secret).
+ */
 export function decodeCredential(text: string): Credential {
   const trimmed = text.trim();
   let parsed: unknown;
@@ -70,6 +75,9 @@ export function decodeCredential(text: string): Credential {
   } catch (e) {
     throw new Error('credential is not valid JSON or base64url-encoded JSON', { cause: e });
   }
+  const wrapped = (parsed as { credential?: unknown } | null)?.credential;
+  if (typeof wrapped === 'string' && !('cert' in (parsed as object)))
+    return decodeCredential(wrapped);
   return parseCredential(parsed);
 }
 

@@ -357,3 +357,37 @@ test('IP public URLs get IP SANs and verify without SNI', async () => {
     srv.close();
   }
 });
+
+test('the JSON that credential create prints is accepted as a credential, and a bare document still is', async () => {
+  const pki = await Pki.load(await tmp(), true);
+  const { credential } = await pki.issueClient(
+    identityUri('operator', 'o1'),
+    86_400_000,
+    'https://control.example:8443',
+  );
+  const printed = JSON.stringify(
+    {
+      name: 'ci',
+      role: 'deploy',
+      expiresAt: '2027-01-01T00:00:00Z',
+      credential: encodeCredential(credential),
+    },
+    null,
+    2,
+  );
+  assert.deepEqual(
+    decodeCredential(printed),
+    credential,
+    'the whole credential create output works as TUG_CREDENTIAL',
+  );
+  assert.deepEqual(
+    decodeCredential(JSON.stringify(credential)),
+    credential,
+    'a credential document is unchanged',
+  );
+  assert.throws(
+    () => decodeCredential(JSON.stringify({ name: 'ci', credential: 'not-a-credential' })),
+    /credential is not valid JSON or base64url-encoded JSON/,
+    'a wrapper around a bad token still fails with the usual message',
+  );
+});
