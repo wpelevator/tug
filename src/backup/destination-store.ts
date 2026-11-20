@@ -44,6 +44,17 @@ export function backupDestinationQueries(db: Db) {
         );
       });
     },
+    /** Stores a check result, but only while the destination is still the URL that was checked; false when it changed. */
+    recordCheck(url: string, checkedAt: string, result: unknown): boolean {
+      return (
+        db.run(
+          "UPDATE backup_destination SET checked_at=?,check_result_json=? WHERE id='default' AND url=?",
+          checkedAt,
+          JSON.stringify(result),
+          url,
+        ).changes > 0
+      );
+    },
     remove(): boolean {
       return immediateTransaction(db, () => {
         db.run('DELETE FROM secrets WHERE project_id=?', BACKUP_SECRET_PROJECT);

@@ -148,7 +148,10 @@ export async function writeCredentialFile(
  */
 export async function startMtlsControl(
   dir: string,
-  options: { eventPruneIntervalMs?: number } = {},
+  options: {
+    eventPruneIntervalMs?: number;
+    docker?: import('../src/docker-api.ts').DockerApi;
+  } = {},
 ) {
   const { createApp, listen } = await import('../src/control/control.ts');
   const { issueHostCredential } = await import('../src/control/credential-issue.ts');

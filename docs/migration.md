@@ -49,6 +49,29 @@ tug node add root@NEW --name web-2 --address 10.0.0.9 --label web --install-dock
 
 Nodes must carry all of a service's labels, and nodes whose agent has not been seen recently are skipped when labels are resolved. Keep explicit `nodes:` only where a service must stay on one named host, such as a database that owns a local volume. See [Compose extensions](compose.md#service-x-tug-keys) and [Nodes](nodes.md#node-labels). `tug scale` stays within a service's explicit `placement.nodes`, so change the placement and deploy to move a pinned service.
 
+## Coming from an existing restic setup
+
+tug derives each repository password from control's master key and manages `RESTIC_PASSWORD` and `RESTIC_REPOSITORY` itself, so it cannot open a repository that has a password of your choosing. Point tug at a new path beside the old repository, for example `rest:http://backup.internal:8000/tug` next to `rest:http://backup.internal:8000/old`, and let it start fresh:
+
+```sh
+tug backup destination set rest:http://backup.internal:8000/tug --env RESTIC_REST_USERNAME --env RESTIC_REST_PASSWORD
+tug backup password
+```
+
+To bring old snapshots along, copy them in with the passwords of both repositories (`tug backup password` prints the new one):
+
+```sh
+restic -r rest:http://backup.internal:8000/tug/site copy --from-repo rest:http://backup.internal:8000/old
+```
+
+To adopt an existing repository instead, place it at `<destination>/<project>` and add tug's password as an extra key, which leaves the old password working:
+
+```sh
+restic -r <repository> key add --new-password-file <file>
+```
+
+Old snapshots carry other hosts and tags than tug's, so tug's listing, restore and retention ignore them. Keep running `tug backup list --check` while both systems exist, because the old one may be failing without anyone noticing. See [Destinations](backups.md#destinations).
+
 ## Move the web tier
 
 A web tier whose database and uploads live elsewhere is stateless, so it is the cheapest move.

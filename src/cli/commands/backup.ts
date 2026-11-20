@@ -44,6 +44,37 @@ interface BackupListing {
   }[];
   runs: BackupRunRecord[];
 }
+interface DestinationCheck {
+  ok: boolean;
+  checkedAt: string;
+  from: 'control';
+  url: string;
+  repositories: {
+    name: string;
+    repository: string;
+    state: 'ok' | 'initialized' | 'error';
+    error?: string;
+  }[];
+}
+/** Where the check runs, so a pass is not read as proof that every node can reach the destination. */
+const CHECK_SCOPE =
+  'Checked from the control host; each node connects to the destination at its first backup.';
+/** Says why a failed check failed, one repository per line, on stderr. */
+function reportFailedCheck(rt: CliRuntime, check: DestinationCheck, saved: boolean): void {
+  err(
+    rt,
+    saved
+      ? `The destination was saved but is not usable yet: ${check.repositories.filter((r) => r.state === 'error').length} repository check(s) failed.`
+      : `The destination check failed for ${check.repositories.filter((r) => r.state === 'error').length} repository(ies).`,
+  );
+  for (const repository of check.repositories)
+    if (repository.state === 'error')
+      err(rt, `  ${repository.name} (${repository.repository}): ${repository.error ?? 'failed'}`);
+}
+const checkDestination = (rt: CliRuntime): Promise<DestinationCheck> =>
+  withProgress(rt, 'Checking the backup destination', () =>
+    request<DestinationCheck>(rt, 'POST', '/api/v1/backup/destination/check', {}),
+  );
 export const formatBytes = (bytes: number | null): string =>
   bytes === null
     ? '-'
@@ -224,14 +255,17 @@ export function registerBackup(rt: CliRuntime, program: Command): void {
       if (o.control)
         return print(rt, await request(rt, 'GET', '/api/v1/backup/repository-password?control=1'));
       const project = loadCfg(rt).project || 'site';
-      print(
+      const result = await request<{ deployed?: boolean }>(
         rt,
-        await request(
-          rt,
-          'GET',
-          `/api/v1/backup/repository-password?project=${encodeURIComponent(project)}`,
-        ),
+        'GET',
+        `/api/v1/backup/repository-password?project=${encodeURIComponent(project)}`,
       );
+      print(rt, result);
+      if (result.deployed === false)
+        err(
+          rt,
+          `project ${project} has not been deployed yet: check the project name, because the password is derived from it`,
+        );
     });
 
   const destination = backup
@@ -240,7 +274,7 @@ export function registerBackup(rt: CliRuntime, program: Command): void {
   destination
     .command('set <url>')
     .description(
-      'set where backups go, such as s3:https://s3.example.com/bucket/tug-backups; credentials are stored encrypted on control',
+      'set where backups go, such as s3:https://s3.example.com/bucket/tug-backups, rest:http://backup.internal:8000/tug or b2:bucket:tug; credentials are stored encrypted on control. Then checks the destination from the control host (creating missing repositories); nodes connect at their first backup. Exits nonzero when the check fails; --no-check skips it',
     )
     .option(
       '--env <name>',
@@ -248,16 +282,43 @@ export function registerBackup(rt: CliRuntime, program: Command): void {
       collectList,
       [],
     )
-    .action(async (url: string, o: { env: string[] }) => {
+    .option('--no-check', 'save the destination without checking it')
+    .action(async (url: string, o: { env: string[]; check: boolean }) => {
       const env = await readEnvValues(rt, o.env);
-      out(
+      const saved = await request<Record<string, unknown>>(
         rt,
-        JSON.stringify(await request(rt, 'POST', '/api/v1/backup/destination', { url, env })),
+        'POST',
+        '/api/v1/backup/destination',
+        { url, env },
       );
+      const check = o.check ? await checkDestination(rt) : undefined;
+      // One JSON document, so scripts that parse the output of `set` keep working.
+      out(rt, JSON.stringify(check ? { ...saved, check } : saved));
       err(
         rt,
         'Control now backs itself up here every night. Keep its password with these credentials: tug backup password --control',
       );
+      if (check) {
+        err(rt, CHECK_SCOPE);
+        if (!check.ok) {
+          reportFailedCheck(rt, check, true);
+          rt.exitCode = 1;
+        }
+      }
+    });
+  destination
+    .command('check')
+    .description(
+      'check the destination from the control host: open the control repository and the repository of every project with a backup target, and create the ones that do not exist yet (which also proves write access). Exits nonzero when any repository cannot be used. Nodes connect to the destination at their first backup, so this does not prove every node can reach it',
+    )
+    .action(async () => {
+      const check = await checkDestination(rt);
+      print(rt, check);
+      err(rt, CHECK_SCOPE);
+      if (!check.ok) {
+        reportFailedCheck(rt, check, false);
+        rt.exitCode = 1;
+      }
     });
   destination
     .command('show')

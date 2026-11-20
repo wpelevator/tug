@@ -4,6 +4,7 @@ import { rm } from 'node:fs/promises';
 import { pipeline } from 'node:stream/promises';
 import { redactSecrets } from './destination.ts';
 import { collect, ensureImage, parseSummary } from './job.ts';
+import { classifyRepositoryProbe, describeProbeFailure } from './repository-probe.ts';
 import type { Collected } from './job.ts';
 import type { AttachedProcess, DockerApi } from '../docker-api.ts';
 
@@ -33,22 +34,11 @@ const RETENTION = [
   '6',
 ];
 /**
- * restic appends "Is there a repository at the following location?" to every failure to open the config, whatever
- * the cause, so that line says nothing. A repository counts as missing only on positive evidence that the config
- * object itself is absent: S3 `NoSuchKey`, a local `no such file`, an SFTP missing file or a 404 from a REST server.
- * Anything else (a wrong bucket, a refused login, an unreachable store, a wrong password, an answer nobody has seen
- * before) is a backend error, so it is neither initialized over nor reported as "no control backup". The denylist
- * stays as a second guard for messages that mention both.
- */
-const CONFIG_IS_ABSENT =
-  /specified key does not exist|NoSuchKey|no such file or directory|file does not exist|unexpected HTTP response \(404\)|\b404 (page )?not found/i;
-const NOT_A_MISSING_REPOSITORY =
-  /NoSuchBucket|bucket does not exist|AccessDenied|Forbidden|Unauthorized|InvalidAccessKey|SignatureDoesNotMatch|dial tcp|no such host|timeout|timed out|connection refused|connection reset|certificate|wrong password|\(40[13]\)/i;
-/**
  * restic keeps retrying a failing backend and prints one notice per attempt ("Stat(<config/>) returned error,
  * retrying after 8s: ..."), then ends with its final `Fatal:` message. The notices are history: a bucket that
- * did not exist a minute ago and was created since ends in "repository does not exist", and only that final state
- * says what to do. Classification and summaries therefore ignore the notices.
+ * did not exist a minute ago and was created since ends in "repository does not exist". Summaries therefore show the
+ * final message and reduce the notices to a count. Whether a repository is missing is never read from this text: it is
+ * restic's exit code ({@link classifyRepositoryProbe}).
  */
 const RETRY_NOTICE = /returned error, retrying after [^:]*:\s*/i;
 function splitRetries(text: string): { notices: string[]; rest: string[] } {
@@ -58,11 +48,6 @@ function splitRetries(text: string): { notices: string[]; rest: string[] } {
     rest: lines.filter((line) => !RETRY_NOTICE.test(line)),
   };
 }
-export const isMissingRepository = (stderr: string): boolean => {
-  const final = splitRetries(stderr).rest.join('\n');
-  return CONFIG_IS_ABSENT.test(final) && !NOT_A_MISSING_REPOSITORY.test(final);
-};
-
 export interface ControlRepositoryAccess {
   /** The destination URL as stored, such as `s3:https://host/bucket/prefix`. */
   url: string;
@@ -115,10 +100,27 @@ function summarize(text: string): string {
 
 type Exec = (cmd: string[]) => Promise<Collected>;
 
+/** One restic repository to open: the control repository, or a project's when checking a destination. */
+interface ResticAccess {
+  /** The full restic repository, such as `s3:https://host/bucket/prefix/_control`. */
+  repository: string;
+  env: Record<string, string>;
+  password: string;
+  resticImage: string;
+  limitMs?: number;
+  stallMs?: number;
+  signal?: AbortSignal;
+}
+
+const controlAccess = (access: ControlRepositoryAccess): ResticAccess => ({
+  ...access,
+  repository: controlRepository(access.url),
+});
+
 /** Runs `work` against a restic helper container that is always removed afterwards. */
 async function withRestic<T>(
   docker: DockerApi,
-  access: ControlRepositoryAccess,
+  access: ResticAccess,
   work: (
     exec: Exec,
     run: (cmd: string[], file: string, mode: 'read' | 'write') => Promise<Collected>,
@@ -126,7 +128,7 @@ async function withRestic<T>(
 ): Promise<T> {
   const redact = (text: string) =>
     redactSecrets(text, [...Object.values(access.env), access.password]);
-  const repository = controlRepository(access.url);
+  const repository = access.repository;
   const binds = repository.startsWith('/') ? [`${repository}:${repository}`] : [];
   const limit = access.limitMs ?? CONTROL_JOB_LIMIT_MS;
   let container: string | undefined;
@@ -293,14 +295,15 @@ export async function pushControlArchive(
   archivePath: string,
   options: { tags?: string[] } = {},
 ): Promise<ControlPush> {
-  return withRestic(docker, access, async (exec, run) => {
+  return withRestic(docker, controlAccess(access), async (exec, run) => {
     let repository: ControlPush['repository'] = 'ok';
     const probe = await exec(['restic', 'cat', 'config']);
-    if (probe.code !== 0) {
-      // Only a missing repository is created; a wrong password or an unreachable bucket must fail the backup.
-      if (!isMissingRepository(probe.err))
+    const state = classifyRepositoryProbe(probe);
+    if (state !== 'ok') {
+      // Only a missing repository (restic exit code 10) is created; a wrong password or an unreachable bucket must fail the backup.
+      if (state === 'error')
         throw new ControlBackupError(
-          `repository check failed: ${summarize(probe.err || probe.out)}`,
+          `repository check failed: ${describeProbeFailure(probe, summarize(probe.err || probe.out))}`,
         );
       const init = await exec(['restic', 'init']);
       if (init.code !== 0)
@@ -409,14 +412,14 @@ export async function listControlSnapshots(
   docker: DockerApi,
   access: ControlRepositoryAccess,
 ): Promise<{ state: 'ok' | 'missing'; snapshots: ControlSnapshot[] }> {
-  return withRestic(docker, access, async (exec) => {
+  return withRestic(docker, controlAccess(access), async (exec) => {
     const probe = await exec(['restic', 'cat', 'config']);
-    if (probe.code !== 0) {
-      if (isMissingRepository(probe.err)) return { state: 'missing' as const, snapshots: [] };
+    const state = classifyRepositoryProbe(probe);
+    if (state === 'missing') return { state: 'missing' as const, snapshots: [] };
+    if (state === 'error')
       throw new ControlBackupError(
-        `cannot read the control repository (wrong control password or credentials, or an unreachable store): ${summarize(probe.err || probe.out)}`,
+        `cannot read the control repository (wrong control password or credentials, or an unreachable store): ${describeProbeFailure(probe, summarize(probe.err || probe.out))}`,
       );
-    }
     const listed = await exec(['restic', 'snapshots', '--json', ...SNAPSHOT_FILTER]);
     if (listed.code !== 0)
       throw new ControlBackupError(
@@ -437,13 +440,14 @@ export async function fetchControlArchive(
     throw new ControlBackupError(
       'the snapshot must be an id from `tug control backup list` (8 to 64 hex digits)',
     );
-  await withRestic(docker, access, async (exec, run) => {
+  await withRestic(docker, controlAccess(access), async (exec, run) => {
     const probe = await exec(['restic', 'cat', 'config']);
-    if (probe.code !== 0)
+    const state = classifyRepositoryProbe(probe);
+    if (state !== 'ok')
       throw new ControlBackupError(
-        isMissingRepository(probe.err)
+        state === 'missing'
           ? `no control backup was found at ${controlRepository(access.url)}`
-          : `cannot read the control repository (wrong control password or credentials, or an unreachable store): ${summarize(probe.err || probe.out)}`,
+          : `cannot read the control repository (wrong control password or credentials, or an unreachable store): ${describeProbeFailure(probe, summarize(probe.err || probe.out))}`,
       );
     if (snapshot !== 'latest') {
       // Only snapshots control itself stored may be restored into control, whatever else the repository holds.
@@ -465,4 +469,42 @@ export async function fetchControlArchive(
       );
     }
   });
+}
+
+export interface RepositoryCheck {
+  state: 'ok' | 'initialized' | 'error';
+  /** Redacted restic message when `state` is `error`. */
+  error?: string;
+}
+
+/**
+ * Checks one repository the way the first backup would use it: an existing one is `ok`, a missing one (restic exit
+ * code 10) is initialized, which also proves write access, and anything else is an `error` with restic's message.
+ * Never throws for a backend problem; the helper's own failures (timeout, cancel, Docker) come back as `error` too.
+ */
+export async function checkRepository(
+  docker: DockerApi,
+  access: Omit<ResticAccess, 'limitMs'> & { limitMs?: number },
+): Promise<RepositoryCheck> {
+  try {
+    return await withRestic(docker, access, async (exec) => {
+      const probe = await exec(['restic', 'cat', 'config']);
+      const state = classifyRepositoryProbe(probe);
+      if (state === 'ok') return { state: 'ok' as const };
+      if (state === 'error')
+        return {
+          state: 'error' as const,
+          error: describeProbeFailure(probe, summarize(probe.err || probe.out)),
+        };
+      const init = await exec(['restic', 'init']);
+      if (init.code !== 0)
+        return {
+          state: 'error' as const,
+          error: `repository init failed: ${summarize(init.err || init.out)}`,
+        };
+      return { state: 'initialized' as const };
+    });
+  } catch (error) {
+    return { state: 'error', error: error instanceof Error ? error.message : String(error) };
+  }
 }

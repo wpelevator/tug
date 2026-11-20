@@ -1,5 +1,6 @@
 import { Transform } from 'node:stream';
 import { redactSecrets } from './destination.ts';
+import { classifyRepositoryProbe, describeProbeFailure } from './repository-probe.ts';
 import {
   LABEL_JOB,
   LABEL_PROJECT,
@@ -350,20 +351,20 @@ export async function runBackupJob(
     const version = (await exec(['restic', 'version'])).out.match(/restic (\d+\.\d+\.\d+)/)?.[1];
 
     phase('checking');
-    let repository: 'ok' | 'initialized' = 'ok';
+    let repository: 'ok' | 'initialized' | 'missing' = 'ok';
     const probe = await exec(['restic', 'cat', 'config']);
-    if (probe.code !== 0) {
-      // Only a missing repository is initialized; a wrong password or an unreachable bucket must fail the job.
-      if (
-        kind === 'backup.restore' ||
-        !/Is there a repository at the following location|does not exist|no such file/i.test(
-          probe.err,
-        )
-      )
-        throw fail('repository check failed', probe.err || probe.out);
-      const init = await exec(['restic', 'init']);
-      if (init.code !== 0) throw fail('repository init failed', init.err || init.out);
-      repository = 'initialized';
+    const state = classifyRepositoryProbe(probe);
+    if (state === 'error' || (state === 'missing' && kind === 'backup.restore'))
+      // A restore needs an existing repository; a wrong password or an unreachable bucket fails every kind of job.
+      throw fail('repository check failed', describeProbeFailure(probe, probe.err || probe.out));
+    if (state === 'missing') {
+      // `backup.check` only reports; `backup.run` creates the repository, as only restic exit code 10 means it is absent.
+      if (kind === 'backup.check') repository = 'missing';
+      else {
+        const init = await exec(['restic', 'init']);
+        if (init.code !== 0) throw fail('repository init failed', init.err || init.out);
+        repository = 'initialized';
+      }
     }
     if (kind === 'backup.check')
       return {

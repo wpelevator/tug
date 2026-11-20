@@ -6,8 +6,8 @@ import path from 'node:path';
 import {
   controlRepository,
   controlRepositoryPassword,
+  checkRepository,
   fetchControlArchive,
-  isMissingRepository,
   listControlSnapshots,
   pushControlArchive,
 } from './control-backup.ts';
@@ -69,7 +69,7 @@ test('a push creates a missing repository, streams the archive into restic and r
   await fs.writeFile(archive, 'archive-bytes');
   const docker = dockerWith((cmd) => {
     const line = cmd.join(' ');
-    if (line === 'restic cat config') return { code: 1, err: NEVER_CREATED };
+    if (line === 'restic cat config') return { code: 10, err: NEVER_CREATED };
     if (line.startsWith('restic backup'))
       return { code: 0, out: '{"message_type":"summary","snapshot_id":"abc123def456"}\n' };
     return { code: 0 };
@@ -159,7 +159,7 @@ test('a fetch writes the newest control snapshot to a private file and reports a
     );
 
     const empty = dockerWith((cmd) =>
-      cmd[1] === 'cat' ? { code: 1, err: NEVER_CREATED } : { code: 0 },
+      cmd[1] === 'cat' ? { code: 10, err: NEVER_CREATED } : { code: 0 },
     );
     await assert.rejects(
       () => fetchControlArchive(empty, S3, path.join(dir, 'none.tar.gz')),
@@ -237,29 +237,13 @@ test('a hung restic fails at the time limit and its helper is removed', async ()
 
 const BUCKET_MISSING =
   'Fatal: unable to open config file: Stat: The specified bucket does not exist.\nIs there a repository at the following location?';
+/** restic 0.19.1 against an S3 bucket that exists but holds no repository: exit code 10. */
 const NEVER_CREATED =
-  'Fatal: unable to open config file: Stat: The specified key does not exist.\nIs there a repository at the following location?';
-
-test('only a repository that was never created counts as missing', () => {
-  assert.equal(
-    isMissingRepository(NEVER_CREATED),
-    true,
-    'a missing config file is a repository to create',
-  );
-  for (const [what, text] of [
-    ['a wrong bucket', BUCKET_MISSING],
-    [
-      'a refused login',
-      'Stat: AccessDenied: Access Denied.\nIs there a repository at the following location?',
-    ],
-    [
-      'an unreachable store',
-      'dial tcp: lookup s3.example.com: no such host\nIs there a repository at the following location?',
-    ],
-    ['a wrong password', 'wrong password or no key found'],
-  ] as const)
-    assert.equal(isMissingRepository(text), false, `${what} is not a missing repository`);
-});
+  'Fatal: repository does not exist: unable to open config file: Stat: The specified key does not exist.\nIs there a repository at the following location?\ns3:http://s3.example.com/bucket/tug';
+/** restic 0.19.1 against a rest-server without the repository: exit code 10. */
+const REST_MISSING =
+  'Fatal: repository does not exist: unable to open config file: <config/> does not exist\nIs there a repository at the following location?\nrest:http://backup.internal:8030/tug/_control/';
+const WRONG_PASSWORD = 'Fatal: wrong password or no key found';
 
 test('a wrong bucket fails a push and a fetch instead of creating or reporting an empty repository', async () => {
   const dir = await scratch();
@@ -423,7 +407,7 @@ test('listing reads the snapshots from the destination, newest first, flat or gr
 
 test('listing reports an empty destination as missing and an unreadable one as an error', async () => {
   const empty = dockerWith((cmd) =>
-    cmd[1] === 'cat' ? { code: 1, err: NEVER_CREATED } : { code: 0 },
+    cmd[1] === 'cat' ? { code: 10, err: NEVER_CREATED } : { code: 0 },
   );
   assert.deepEqual(
     await listControlSnapshots(empty, S3),
@@ -496,32 +480,8 @@ test('a named snapshot is restored only when control stored it, and the id is va
   }
 });
 
-const REST_404 =
-  'Fatal: unable to open config file: Stat: unexpected HTTP response (404): 404 page not found\nIs there a repository at the following location?';
 const REST_401 =
   'Fatal: unable to open config file: Stat: unexpected HTTP response (401): 401 Unauthorized\nIs there a repository at the following location?';
-const LOCAL_MISSING =
-  'Fatal: unable to open config file: stat /srv/backups/_control/config: no such file or directory\nIs there a repository at the following location?';
-const HINT_ONLY =
-  'Fatal: something nobody has seen\nIs there a repository at the following location?';
-
-test('a repository is missing only on positive evidence that its config is absent', () => {
-  for (const [what, text] of [
-    ['an S3 key that does not exist', NEVER_CREATED],
-    ['a local path that does not exist', LOCAL_MISSING],
-    ['a REST server answering 404', REST_404],
-  ] as const)
-    assert.equal(isMissingRepository(text), true, `${what} is a repository to create`);
-  for (const [what, text] of [
-    ['a REST server refusing the login', REST_401],
-    ['an answer with only the hint', HINT_ONLY],
-  ] as const)
-    assert.equal(
-      isMissingRepository(text),
-      false,
-      `${what} is a backend error, not an empty repository`,
-    );
-});
 
 test('a refused REST login fails the push and the fetch instead of initializing or reporting nothing', async () => {
   const dir = await scratch();
@@ -604,35 +564,12 @@ const BUCKET_APPEARED = [
   's3:http://10.0.2.2:9000/tug-backups/_control',
 ].join('\n');
 
-test('only the final failure decides whether a repository is missing, not the retries before it', () => {
-  assert.equal(
-    isMissingRepository(BUCKET_APPEARED),
-    true,
-    'a bucket that did not exist during earlier attempts and was created since leaves a repository to create',
-  );
-  assert.equal(
-    isMissingRepository(
-      [
-        retryNotice(8, 'The specified key does not exist'),
-        'Fatal: unable to open config file: Stat: The specified bucket does not exist',
-      ].join('\n'),
-    ),
-    false,
-    'a final failure about the bucket is a backend error whatever the retries said',
-  );
-  assert.equal(
-    isMissingRepository(retryNotice(8, 'The specified key does not exist')),
-    false,
-    'retry notices alone are not evidence of anything',
-  );
-});
-
 test('a bucket created while restic was retrying lets the first backup initialize the repository', async () => {
   const dir = await scratch();
   const archive = path.join(dir, 'a.tar.gz');
   await fs.writeFile(archive, 'x');
   const docker = dockerWith((cmd) =>
-    cmd[1] === 'cat' ? { code: 1, err: BUCKET_APPEARED } : { code: 0 },
+    cmd[1] === 'cat' ? { code: 10, err: BUCKET_APPEARED } : { code: 0 },
   );
   try {
     const result = await pushControlArchive(docker, S3, archive);
@@ -756,4 +693,103 @@ test('a slow store that retries and then makes progress is not failed as stalled
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
+});
+
+test('a push initializes a repository that restic reports as missing with exit code 10, whatever the backend says', async () => {
+  for (const [what, err] of [
+    ['a REST server', REST_MISSING],
+    ['an S3 key that does not exist', NEVER_CREATED],
+  ] as const) {
+    const dir = await scratch();
+    const archive = path.join(dir, 'a.tar.gz');
+    await fs.writeFile(archive, 'x');
+    const docker = dockerWith((cmd) => (cmd[1] === 'cat' ? { code: 10, err } : { code: 0 }));
+    try {
+      const result = await pushControlArchive(docker, S3, archive);
+      assert.equal(result.repository, 'initialized', `${what} without a repository is created`);
+      assert.ok(
+        execs(docker).some((line) => line.startsWith('restic init')),
+        `${what}: restic init runs`,
+      );
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test('a wrong password (exit 12) and a missing bucket (exit 1) fail a push without init and explain the cause', async () => {
+  for (const [what, code, err, expected] of [
+    ['a wrong password', 12, WRONG_PASSWORD, /wrong repository password/],
+    ['a missing bucket', 1, BUCKET_MISSING, /bucket does not exist/],
+  ] as const) {
+    const dir = await scratch();
+    const archive = path.join(dir, 'a.tar.gz');
+    await fs.writeFile(archive, 'x');
+    const docker = dockerWith((cmd) => (cmd[1] === 'cat' ? { code, err } : { code: 0 }));
+    try {
+      await assert.rejects(
+        () => pushControlArchive(docker, S3, archive),
+        expected,
+        `${what} fails the backup with its cause`,
+      );
+      assert.ok(
+        !execs(docker).some((line) => line.startsWith('restic init')),
+        `${what} never triggers restic init`,
+      );
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test('an exit code 1 with the repository hint tells the operator that restic must be 0.17 or newer', async () => {
+  const dir = await scratch();
+  const archive = path.join(dir, 'a.tar.gz');
+  await fs.writeFile(archive, 'x');
+  const docker = dockerWith((cmd) =>
+    cmd[1] === 'cat' ? { code: 1, err: NEVER_CREATED } : { code: 0 },
+  );
+  try {
+    await assert.rejects(
+      () => pushControlArchive(docker, S3, archive),
+      /TUG_RESTIC_IMAGE must be 0\.17 or newer/,
+      'an old restic that cannot exit with 10 is named as the cause',
+    );
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('checkRepository reports ok, initialized and error states and never throws for a backend failure', async () => {
+  const access = {
+    repository: 's3:https://s3.example.com/bucket/tug/shop',
+    env: S3.env,
+    password: 'repo-password-1',
+    resticImage: S3.resticImage,
+  };
+  const run = (code: number, err: string, initCode = 0) =>
+    checkRepository(
+      dockerWith((cmd) =>
+        cmd[1] === 'cat'
+          ? { code, err }
+          : cmd[1] === 'init'
+            ? { code: initCode, err: 'init boom' }
+            : { code: 0 },
+      ),
+      access,
+    );
+  assert.deepEqual(await run(0, ''), { state: 'ok' }, 'an existing repository is ok');
+  assert.deepEqual(
+    await run(10, REST_MISSING),
+    { state: 'initialized' },
+    'a missing repository is created',
+  );
+  const bucket = await run(1, BUCKET_MISSING);
+  assert.equal(bucket.state, 'error', 'a missing bucket is an error');
+  assert.match(bucket.error ?? '', /bucket does not exist/, 'the error carries restic message');
+  const wrong = await run(12, WRONG_PASSWORD);
+  assert.match(wrong.error ?? '', /wrong repository password/, 'exit 12 explains the password');
+  const noInit = await run(10, REST_MISSING, 1);
+  assert.equal(noInit.state, 'error', 'a failed init is an error');
+  assert.match(noInit.error ?? '', /repository init failed/, 'the init failure is named');
 });

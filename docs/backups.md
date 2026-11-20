@@ -1,15 +1,16 @@
 # Backups and recovery
 
-Mark a service or a volume with `x-tug.backup`, give control one S3-compatible destination, and agents run [restic](https://restic.net) on the node that holds the data on a schedule. There is no backup container to build or keep alive.
+Mark a service or a volume with `x-tug.backup`, give control one restic repository location (S3-compatible storage, a REST server and other [destinations](#destinations)), and agents run [restic](https://restic.net) on the node that holds the data on a schedule. There is no backup container to build or keep alive.
 
 ## Set up your first backup
 
-You need S3-compatible storage reachable from the workload node, and credentials allowed to use the bucket. Create the bucket first. Mark each target in your Compose file as shown in [Compose extensions](compose.md#backups), and see the [WordPress example](https://github.com/wpelevator/tug/blob/main/examples/wordpress/README.md) for a database and files together. A top-level schedule only supplies defaults and enables nothing.
+You need storage restic can use, reachable from the control host and from the workload node, and credentials allowed to use it. The example uses S3-compatible storage, see [Destinations](#destinations) for the others. Create the bucket first. Mark each target in your Compose file as shown in [Compose extensions](compose.md#backups), and see the [WordPress example](https://github.com/wpelevator/tug/blob/main/examples/wordpress/README.md) for a database and files together. A top-level schedule only supplies defaults and enables nothing.
 
 ```sh
 # Supply the values through your shell or secret manager. Do not commit them.
 export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
 tug backup destination set s3:https://s3.example.com/bucket/tug-backups --env AWS_ACCESS_KEY_ID --env AWS_SECRET_ACCESS_KEY
+tug backup destination check
 tug deploy
 tug backup run
 tug backup list --check
@@ -18,6 +19,8 @@ tug backup password
 
 | Command | What it tells you |
 | --- | --- |
+| `backup destination set` | Saves the destination, then checks it from the control host (`--no-check` skips the check) |
+| `backup destination check` | Opens the control repository and each project's repository, creates missing ones and exits nonzero if any fails |
 | `backup run` | Waits for the configured targets and reports failure |
 | `backup list --check` | Whether each target succeeded, and exits nonzero if not |
 | `backup password` | The repository and its password. Store it, with the storage credentials, off the server |
@@ -26,6 +29,49 @@ tug backup password
 The password is derived from control's master key, so losing both the password and the master key makes the repository unreadable. Credentials are encrypted on control and released only to a node running a backup. Each project has its own repository under `<destination>/<project>`, and commands use the [resolved project](cli.md#arguments-options-and-configuration).
 
 Control also backs itself up to the same destination every night, see [Control plane backup](#control-plane-backup). Configure [signed webhooks](observability.md#alerting) for backup failures, missed protection and recovery notifications. Delivery is best effort; keep an independent scheduled `tug backup list --check`.
+
+## Destinations
+
+A destination is a restic repository location. `tug backup destination set <url>` accepts these forms, and each project and control get their own repository below it. Credentials are never part of the URL: pass them as `--env` variables, which control stores encrypted. `RESTIC_PASSWORD`, `RESTIC_REPOSITORY` and `RESTIC_PASSWORD_FILE` are managed by tug and refused.
+
+| URL form | Credentials (`--env`) | Status |
+| --- | --- | --- |
+| `s3:https://host/bucket[/prefix]` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` (required) | Exercised on real hosts |
+| `rest:http://host:8000/path` | `RESTIC_REST_USERNAME`, `RESTIC_REST_PASSWORD`, or none for a server started with `--no-auth` | Verified against restic's `rest-server` |
+| `b2:bucket:path` | `B2_ACCOUNT_ID`, `B2_ACCOUNT_KEY` | Accepted, not yet exercised in a real-host run |
+| `azure:container:/path` | `AZURE_ACCOUNT_NAME` with `AZURE_ACCOUNT_KEY` or `AZURE_ACCOUNT_SAS` | Accepted, not yet exercised in a real-host run |
+| `gs:bucket:/path` | `GOOGLE_PROJECT_ID` with `GOOGLE_ACCESS_TOKEN`, or `GOOGLE_APPLICATION_CREDENTIALS` | Accepted, not yet exercised in a real-host run. A credentials file path must exist inside the helper container, which tug cannot provide, so prefer `GOOGLE_ACCESS_TOKEN` |
+| `swift:container:/path` | The `OS_*` variables restic documents for your Keystone setup | Accepted, not yet exercised in a real-host run |
+| `/absolute/path` | None | Development only: the path is read on each node and is not shared between nodes |
+
+Each backend's variables are listed in restic's [Preparing a new repository](https://restic.readthedocs.io/en/stable/030_preparing_a_new_repo.html).
+
+### REST server
+
+A [rest-server](https://github.com/restic/rest-server) is the simplest destination you host yourself:
+
+```sh
+export RESTIC_REST_USERNAME RESTIC_REST_PASSWORD
+tug backup destination set rest:http://backup.internal:8000/tug --env RESTIC_REST_USERNAME --env RESTIC_REST_PASSWORD
+```
+
+Plain HTTP is acceptable only on a private network or VPN that the control host and every node share. Use `rest:https://` anywhere else. A server started with `--no-auth` needs no `--env`.
+
+### Not supported
+
+`sftp:` is rejected because tug cannot give the restic helper container SSH keys or a `known_hosts` file. Run a rest-server and reach it over a private network or VPN, or use S3. `rclone:` is rejected because the helper image does not configure rclone.
+
+### Check the destination
+
+```sh
+tug backup destination check
+```
+
+The check runs from the control host in a restic helper container. It opens `_control` and the repository of every project with an enabled backup target. An existing repository is `ok`. A missing one, which restic reports with exit code 10, is created with `restic init` and reported as `initialized`, which also proves the credentials can write. Anything else is `error` with restic's message: a wrong repository password (exit code 12), a bucket that does not exist, a refused login or an unreachable store. A bucket is never created by a check or a backup, so a typo in the bucket name fails instead. The command exits nonzero when any repository fails, and `tug backup destination show` returns the last result as `checkResult`.
+
+`tug backup destination set` runs the same check right after saving and exits nonzero when it fails, with the destination saved but not usable yet. Pass `--no-check` to skip it. Nodes connect to the destination at their first backup, so a passing check proves the control host's access, not that every node can reach the destination.
+
+Repositories are created by the first check or backup only when restic is 0.17 or newer, the first version that reports a missing repository with exit code 10. With an older `TUG_RESTIC_IMAGE` the failure says so.
 
 ## Plan for recovery
 
@@ -107,6 +153,8 @@ backup:
 | `backup.no_destination` | No destination is configured |
 | `backup.cancelled` | Someone ran `tug backup cancel <run>`. A cancelled backup is a warning and is not retried |
 
+Exit status is the signal to wire into monitoring: `tug backup list --check` exits nonzero when a target is stale, failed or missed, or when nothing is protected. Run it from cron or a monitor, and keep running it during a [migration](migration.md#coming-from-an-existing-restic-setup), when the old backup system may be failing without anyone noticing.
+
 While control is down no backup starts, which is the price of one scheduler. Running jobs finish and report when control returns. `tug backup run` takes a backup now, and `tug backup list` shows the catalog, see [CLI](cli.md#backups).
 
 ## Restore
@@ -179,7 +227,7 @@ As soon as a backup destination exists, control backs itself up with nothing mor
 | Who runs it | Control runs the restic helper on its own Docker socket, so the control host needs no node and no cron job |
 | Stalls | restic retries a failing store (a missing bucket, a refused login, an unreachable host) for many minutes. When it prints only retry notices for two minutes (`TUG_CONTROL_BACKUP_STALL_MS`), the backup fails with restic's final message and last cause, which `tug backup list` shows |
 
-Create the bucket first. A repository is initialized only when restic's final answer is that it does not exist, so a bucket created while a backup was retrying is picked up by the next attempt.
+Create the bucket first. A repository is initialized only when restic exits with code 10 (the repository does not exist). A missing bucket makes restic retry and fail, so a bucket created while a backup was retrying is picked up by the next attempt.
 
 `tug backup list` shows a `control` line with the last success in the destination now in use. Switching destination starts a first backup there and reports it as unprotected until that backup completes. A local-path destination (for development) is labelled `local path only: not off-host`. `tug backup list --check` fails when the last control backup failed, when none succeeded for twice the interval (two days by default), or when a destination has had no completed backup an hour after it was set. `tug events --project _control` shows `backup.completed` and `backup.failed`.
 
@@ -224,7 +272,8 @@ A node runs backup and restore jobs in lanes: a restore and its safety backup fi
 | Control down | No backup starts. Running jobs finish and report when control returns, and a long gap yields one missed event and one catch-up run per target |
 | Consistency | Live volumes are crash-consistent, not application-consistent. Use a command backup for anything with its own consistency |
 | One node per volume | A volume is backed up from the node that holds it. A volume mounted from a file server with `driver_opts` is read through that node's mount, so back up the file server's own disk where you can |
-| Not built | Repository maintenance (`restic check`, a read-verify of the data) and SFTP destinations |
+| Not built | Repository maintenance (`restic check`, a read-verify of the data) |
+| Rejected destinations | `sftp:` and `rclone:` URLs, see [Not supported](#not-supported) |
 | Leftovers | A scratch restore leaves its volume (`tug_r<project-length>_<project>_<id>`) behind, and the safety snapshot of every in-place restore is kept for ever. No command lists or removes either. Remove scratch volumes with `docker volume rm` on the node, and safety snapshots with `restic forget` using the repository from `tug backup password` |
 | Helper memory | The restic helper defaults to 512 MB, half of a 1 GB host. Lower it with `memory` under `x-tug.backup`. Larger repositories need more, so test the limit against your data |
 | `tug exec` | Cancelling it does not stop the remote process |

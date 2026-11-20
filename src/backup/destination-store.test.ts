@@ -152,3 +152,32 @@ test('failed destination removal restores its credentials', async (t) => {
     'a failed removal must restore the destination credentials',
   );
 });
+
+test('a check result is stored only while the destination is still the URL that was checked', async (t) => {
+  const db = await openDb(':memory:');
+  t.after(() => db.close());
+  const destination = backupDestinationQueries(db);
+  assert.equal(
+    destination.recordCheck('s3:none', at, { ok: true }),
+    false,
+    'there is nothing to record a check on before a destination exists',
+  );
+  destination.replace('s3:one', [secret('a', 'A')], at);
+  assert.equal(
+    destination.recordCheck('s3:one', at, { ok: true }),
+    true,
+    'the checked URL matches',
+  );
+  assert.deepEqual(
+    [destination.find()?.checked_at, destination.find()?.check_result_json],
+    [at, '{"ok":true}'],
+    'the check time and result are persisted',
+  );
+  destination.replace('s3:two', [secret('b', 'B')], at);
+  assert.equal(
+    destination.recordCheck('s3:one', at, { ok: false }),
+    false,
+    'a result for a destination that was replaced meanwhile is dropped',
+  );
+  assert.equal(destination.find()?.check_result_json, null, 'the new destination stays unchecked');
+});
