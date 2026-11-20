@@ -197,3 +197,16 @@ test('address candidates leave out Docker and CNI bridges, which never reach ano
     'only interfaces that can reach other hosts are offered; an operator bridge such as br-lan stays, container bridges go',
   );
 });
+
+test('formatNodes says busy for a node whose agent is applying, and disabled before busy', () => {
+  const node = { address: null, ingress: 0, labels: [], last_seen_at: 't' };
+  const table = formatNodes([
+    { ...node, name: 'a', status: 'online', applying: true },
+    { ...node, name: 'b', status: 'online', applying: false },
+    { ...node, name: 'c', status: 'disabled', applying: true, disabled_at: 'd' },
+  ]);
+  const status = (name: string) => table.split('\n').find((line) => line.startsWith(name));
+  assert.match(status('a')!, /\bbusy\b/, 'an applying node reads busy, not stale or online');
+  assert.match(status('b')!, /\bonline\b/, 'a node that is not applying keeps its status');
+  assert.match(status('c')!, /\bdisabled\b/, 'a disabled node is never reported busy');
+});

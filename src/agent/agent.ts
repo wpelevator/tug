@@ -1513,8 +1513,38 @@ export async function endpointAddressesForAgent(
   );
 }
 
+/** How often an agent that is still applying work tells control, so a long image pull does not look like a lost node. */
+export const APPLY_HEARTBEAT_MS = Number(process.env.TUG_APPLY_HEARTBEAT_MS || 15_000);
+
+/**
+ * Starts telling control, every `intervalMs`, that this agent is alive and applying. The first beat comes after one
+ * interval, so a poll that finishes quickly sends none. Returns the function that stops it. A beat that fails is
+ * ignored: the next poll reports for real.
+ */
+export function startApplyHeartbeat(
+  ctx: AgentContext,
+  intervalMs = APPLY_HEARTBEAT_MS,
+): () => void {
+  const timer = setInterval(() => {
+    void api(ctx, '/agent/v1/wake?after=0&timeout=0&applying=1').catch(() => undefined);
+  }, intervalMs);
+  timer.unref();
+  return () => clearInterval(timer);
+}
+
 export async function pollOnce(ctx: AgentContext = defaultContext()): Promise<ProjectStatus[]> {
-  const work = await api<WorkResponse & { desiredState?: DesiredState }>(ctx, '/agent/v1/work');
+  const work = await api<PolledWork>(ctx, '/agent/v1/work');
+  const stopHeartbeat = startApplyHeartbeat(ctx);
+  try {
+    return await applyWork(ctx, work);
+  } finally {
+    stopHeartbeat();
+  }
+}
+
+type PolledWork = WorkResponse & { desiredState?: DesiredState };
+
+async function applyWork(ctx: AgentContext, work: PolledWork): Promise<ProjectStatus[]> {
   const projects: ProjectStatus[] = [];
   for (const desired of work.desiredStates || (work.desiredState ? [work.desiredState] : [])) {
     try {

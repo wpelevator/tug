@@ -1824,6 +1824,10 @@ export async function createApp(
       res.json(db.get('SELECT * FROM projects WHERE id=?', String(req.params.project))),
   );
 
+  /** The last applying heartbeat of each node: in memory, because it is a hint that a restart may lose. */
+  const applyingSince = new Map<string, number>();
+  /** True while an agent's heartbeat says it is applying work: three missed beats of 15 s end it. */
+  const isApplying = (nodeId: string) => Date.now() - (applyingSince.get(nodeId) ?? 0) < 45_000;
   /** A node whose agent has been seen before but not within TUG_STALE_SECONDS; never-seen (just registered) nodes stay schedulable. */
   const isStale = (row: { last_seen_at: string | null }) =>
     !!row.last_seen_at &&
@@ -2110,6 +2114,7 @@ export async function createApp(
         return {
           ...rest,
           status: statusOf(row),
+          applying: isApplying(row.id),
           connected: wakeHub.connected(row.id),
           labels: labels_json ? (JSON.parse(labels_json) as string[]) : [],
         };
@@ -5118,10 +5123,14 @@ export async function createApp(
       Math.max(0, Number.parseInt(String(req.query.timeout ?? '25000'), 10) || 0),
     );
     db.run('UPDATE nodes SET last_seen_at=?,status=? WHERE id=?', now(), 'online', req.node!.id);
+    // `applying=1` is the heartbeat of an agent in the middle of a long reconcile; any other call or report ends it.
+    if (String(req.query.applying) === '1') applyingSince.set(req.node!.id, Date.now());
+    else applyingSince.delete(req.node!.id);
     res.json(await wakeHub.wait(req.node!.id, after, timeoutMs));
   });
   get('/agent/v1/work', authAgent, async (req, res) => {
     db.run('UPDATE nodes SET last_seen_at=?,status=? WHERE id=?', now(), 'online', req.node!.id);
+    applyingSince.delete(req.node!.id);
     const node = db.get<NodeRow>('SELECT * FROM nodes WHERE id=?', req.node!.id)!;
     const allStates = currentDesiredStates();
     const desiredStates = allStates.filter((st) =>
@@ -5281,6 +5290,7 @@ export async function createApp(
       );
     }
     db.run('UPDATE nodes SET last_seen_at=?,status=? WHERE id=?', ts, 'online', req.node!.id);
+    applyingSince.delete(req.node!.id);
     if (report.sentAt)
       db.run(
         'UPDATE nodes SET clock_skew_ms=?,clock_observed_at=? WHERE id=?',
