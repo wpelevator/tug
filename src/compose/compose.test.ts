@@ -820,4 +820,19 @@ test('bindMountWarnings names each service and host path that ties a service to 
     [],
     'a definition with only named volumes prints no warning',
   );
+  assert.deepEqual(
+    bindMountWarnings({
+      services: {
+        proxy: {
+          image: 'traefik',
+          volumes: [
+            { type: 'bind', source: '/var/run/docker.sock', target: '/var/run/docker.sock' },
+            { type: 'bind', source: '/run/docker.sock', target: '/run/docker.sock' },
+          ],
+        },
+      },
+    } as unknown as ComposeFile),
+    [],
+    'the Docker socket exists on every node, so mounting it does not tie a service to one host',
+  );
 });

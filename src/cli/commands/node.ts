@@ -256,7 +256,7 @@ export async function planNodeAdd(
   if (interactive && !o.address) {
     const candidates = deps.discover(sshTarget);
     if (candidates.length) {
-      const none = 'none: leave the address unset';
+      const none = 'none: leave the address unset (right for a single node)';
       const options = [
         ...candidates.map(
           (c) => `${c.address} (${c.interface}, ${c.private ? 'private' : 'public'})`,
@@ -265,7 +265,7 @@ export async function planNodeAdd(
       ];
       // A public address would carry cross-node traffic in the clear, so it is never the default.
       const index = await deps.pickOne(
-        `Which address should other nodes use to reach ${name}?`,
+        `Which address should other nodes use to reach ${name}? It carries traffic between nodes; pick none if this is the only node`,
         options,
         candidates[0].private ? 0 : options.length - 1,
       );

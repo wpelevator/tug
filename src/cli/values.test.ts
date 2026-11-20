@@ -118,10 +118,19 @@ test('ignoredSourceNotes names what Tug ignored: .env entries control lacks, and
     await fs.writeFile(path.join(dir, '.env'), 'DB_PASSWORD=x\nexport MAIL_HOST=y\nKNOWN=z\n');
     const [note] = await ignoredSourceNotes(dir, file, new Set(['KNOWN']), {});
     assert.match(note, /Ignored \.env/, 'the note says .env was ignored');
+    assert.match(note, /3 names, 2 not set there/, 'it counts the names control lacks');
+    assert.ok(!note.includes('\n') && note.length < 130, 'the note is one short line');
+    assert.ok(!note.includes('DB_PASSWORD'), 'the note carries a count, not a list of names');
+    const [all] = await ignoredSourceNotes(
+      dir,
+      file,
+      new Set(['DB_PASSWORD', 'MAIL_HOST', 'KNOWN']),
+      {},
+    );
     assert.match(
-      note,
-      /3 names, 2 not set on control \(DB_PASSWORD, MAIL_HOST\)/,
-      'it counts the names control lacks',
+      all,
+      /3 names, all already set there/,
+      'a .env that control already covers says so',
     );
     assert.match(note, /tug secret import \.env/, 'it points at the import command');
     assert.ok(!note.includes('=x'), 'a value from .env is never echoed');

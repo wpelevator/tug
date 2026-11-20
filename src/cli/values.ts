@@ -232,12 +232,11 @@ export async function ignoredSourceNotes(
   const names = await dotEnvNames(path.dirname(path.resolve(cwd, file)));
   if (names.length) {
     const unset = names.filter((name) => !controlNames.has(name));
+    const count = `${names.length} name${names.length === 1 ? '' : 's'}`;
     notes.push(
-      `Ignored .env next to ${file} (Tug reads values only from control): ${names.length} name${names.length === 1 ? '' : 's'}, ${
-        unset.length
-          ? `${unset.length} not set on control (${unset.slice(0, 6).join(', ')}${unset.length > 6 ? ', ...' : ''}); import with tug secret import .env`
-          : 'all already set on control'
-      }`,
+      unset.length
+        ? `Ignored .env (Tug reads values only from control): ${count}, ${unset.length} not set there; tug secret import .env stores them`
+        : `Ignored .env (Tug reads values only from control): ${count}, all already set there`,
     );
   }
   if (env.COMPOSE_PROFILES)

@@ -207,8 +207,8 @@ test('deploy --dry-run says where every value comes from and ignores .env and th
     );
     assert.match(
       dry.stderr,
-      /Ignored \.env.*3 names, 3 not set on control \(TAG, REGION, OTHER\)|Ignored \.env.*not set on control/,
-      'the ignored .env is reported with the names control lacks',
+      /Ignored \.env.*3 names, 2 not set there; tug secret import \.env/,
+      'the ignored .env is reported with a count and the import command',
     );
     assert.match(
       dry.stderr,

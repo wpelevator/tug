@@ -635,6 +635,9 @@ export function selectBuilds(
   return { compose: { ...compose, services }, published };
 }
 
+/** The paths of the Docker socket, present on every node because the agent mounts it. */
+const DOCKER_SOCKETS = new Set(['/var/run/docker.sock', '/run/docker.sock']);
+
 /**
  * Warnings for absolute bind mounts: the path is a directory of one specific host, so the service cannot move to
  * another node or VM without someone recreating and filling that path by hand. Named volumes move with a backup and
@@ -645,6 +648,8 @@ export function bindMountWarnings(compose: ComposeFile): string[] {
   for (const [name, svc] of Object.entries(compose.services || {}))
     for (const mount of svc.volumes || []) {
       if (typeof mount === 'string' || String(mount.type ?? '') !== 'bind') continue;
+      // The agent itself needs the Docker socket, so every node has it: it never ties a service to one host.
+      if (DOCKER_SOCKETS.has(String(mount.source))) continue;
       warnings.push(
         `warning: ${name} bind-mounts ${String(mount.source)}, a path on one host; the service cannot move to another node or VM without recreating that path by hand (a named volume moves with tug backup and restore)`,
       );
