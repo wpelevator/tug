@@ -45,6 +45,7 @@ export const ROUTE_ROLES: Record<string, RouteRole> = {
   'POST /api/v1/projects': 'deploy',
   'POST /api/v1/deployments': 'deploy',
   'POST /api/v1/deployments/check': 'deploy',
+  'POST /api/v1/deployments/retry': 'deploy',
   'POST /api/v1/deployments/:id/cancel': 'deploy',
   'POST /api/v1/rollback': 'deploy',
   'POST /api/v1/scale': 'deploy',

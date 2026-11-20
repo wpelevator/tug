@@ -155,6 +155,10 @@ export function registerDeploy(rt: CliRuntime, program: Command): void {
       'resolve every value and print where each comes from (secrets as •••), then stop without deploying',
     )
     .option(
+      '--retry',
+      'run the failed deployment of the project again (new pulls and health checks, same deployment) after you fixed the cause; reads no Compose file and takes no other deploy option',
+    )
+    .option(
       '--move <service>',
       'acknowledge that a service placed on another node starts empty (its data does not move); the services that write to it are held until you restore it or run `tug hold release` (repeat or comma-separate for several)',
       collectList,
@@ -174,10 +178,46 @@ export function registerDeploy(rt: CliRuntime, program: Command): void {
             var?: string[];
             profile: string[];
             dryRun?: boolean;
+            retry?: boolean;
           },
       ) => {
         const progress = createProgress(rt);
         try {
+          if (o.retry) {
+            // A retry re-runs what control already holds; options that change what is deployed make no sense with it.
+            const conflicting = [
+              ['--build', o.build],
+              ['--build-local', o.buildLocal],
+              ['--dry-run', o.dryRun],
+              ['--version', o.version],
+              ['--var', o.var?.length],
+              ['--move', o.move.length],
+            ]
+              .filter(([, given]) => given)
+              .map(([flag]) => flag);
+            if (conflicting.length)
+              throw new Error(
+                `--retry runs the failed deployment again as it is and cannot be combined with ${conflicting.join(', ')}; deploy without --retry to change what runs`,
+              );
+            progress.stage('Retrying the failed deployment');
+            const response = await request<DeployResponse>(
+              rt,
+              'POST',
+              '/api/v1/deployments/retry',
+              { project: deployProject(rt, o) },
+            );
+            if (o.wait) {
+              progress.stage(`Deployment ${response.deployment.id}: ${response.deployment.state}`);
+              response.deployment = await waitForDeployment(
+                rt,
+                response.deployment.id,
+                Number(o.timeout),
+                (deployment) => progress.stage(`Deployment ${deployment.id}: ${deployment.state}`),
+              );
+            }
+            printResult(rt, o.json, response, (value) => formatDeployment(value));
+            return;
+          }
           progress.stage('Preparing deployment');
           const cfg = loadCfg(rt);
           const project = deployProject(rt, o);

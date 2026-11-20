@@ -786,3 +786,62 @@ test('a deployment with ingress.maintenance succeeds once the edge acknowledges 
     await s.close();
   }
 });
+
+test('deploy --retry reopens the failed deployment under a new revision and ignores the failure reported for the old one', async () => {
+  const s = await server();
+  try {
+    const app = await s.register('app', { address: '192.168.1.5' });
+    const v1 = await s.deploy(stack('web:1'), 'v1');
+    await s.report(app.nodeId, 'app', 'serving', serving(20000));
+    const v2 = await s.deploy(stack('web:2'), 'v2');
+    await s.report(app.nodeId, 'app', 'failed', serving(20000, { rolloutError: 'http 503' }));
+    assert.equal(
+      (await s.deployment(v2.deployment.id)).state,
+      'failed',
+      'the deployment failed its health check',
+    );
+
+    const retried = await s.post('/api/v1/deployments/retry', { project: 'site' });
+    const body = await json(retried);
+    assert.equal(retried.status, 200, JSON.stringify(body));
+    assert.equal(
+      body.deployment.id,
+      v2.deployment.id,
+      'the retry is the same deployment, not a new one',
+    );
+    assert.notEqual(
+      body.desiredState.revision,
+      v2.desiredState.revision,
+      'the desired state is re-sent under a new revision id so agents forget the failure',
+    );
+    const reopened = await s.deployment(v2.deployment.id);
+    assert.equal(reopened.state, 'rolling_out', 'the deployment is rolling out again');
+    assert.equal(reopened.error_message, null, 'the earlier failure message is cleared');
+    const event = (await s.events()).find((e) => e.type === 'deployment.retry');
+    assert.equal(
+      event?.deployment_id,
+      v2.deployment.id,
+      'a retry event is recorded on the same deployment',
+    );
+    assert.equal(event?.actor, 'operator', 'the event names who retried');
+
+    await s.report(app.nodeId, 'app', 'serving', serving(20001));
+    assert.equal(
+      (await s.deployment(v2.deployment.id)).state,
+      'succeeded',
+      'the retried deployment succeeds on the next serving report',
+    );
+    const again = await s.post('/api/v1/deployments/retry', { project: 'site' });
+    assert.equal(again.status, 409, 'a deployment that is not failed cannot be retried');
+    assert.match(
+      (await json(again)).error,
+      new RegExp(
+        `deployment ${v2.deployment.id} is succeeded; only a failed deployment can be retried`,
+      ),
+      'the refusal says why',
+    );
+    void v1;
+  } finally {
+    await s.close();
+  }
+});

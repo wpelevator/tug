@@ -16,6 +16,8 @@ export const deploymentLifecycle = defineLifecycle({
     build_failed: [],
     cancelled: [],
   },
+  // `tug deploy --retry` runs the health checks of a failed deployment again after the cause was fixed.
+  reopens: { failed: ['rolling_out'] },
 });
 export type DeploymentState = keyof typeof deploymentLifecycle.transitions;
 

@@ -210,3 +210,39 @@ test('the database rejects a state the lifecycle does not declare', async () => 
   assert.doesNotThrow(() => insert('c2', 'pending'), 'a declared state is accepted');
   close();
 });
+
+test('a reopen is a legal move out of a terminal state that does not make it active', () => {
+  const lifecycle = defineLifecycle({
+    name: 'job',
+    table: 'jobs',
+    column: 'state',
+    initial: ['run'],
+    transitions: { run: ['done', 'failed'], done: [], failed: [] },
+    reopens: { failed: ['run'] },
+  });
+  assert.equal(canMove(lifecycle, 'failed', 'run'), true, 'a failed job may be reopened');
+  assert.equal(canMove(lifecycle, 'done', 'run'), false, 'a state without a reopen stays closed');
+  assert.deepEqual(
+    activeStates(lifecycle),
+    ['run'],
+    'a reopenable state is still terminal, so waiters and busy checks treat it as finished',
+  );
+  assert.deepEqual(
+    terminalStates(lifecycle),
+    ['done', 'failed'],
+    'both finished states remain terminal',
+  );
+  assert.throws(
+    () =>
+      defineLifecycle({
+        name: 'job',
+        table: 'jobs',
+        column: 'state',
+        initial: ['run'],
+        transitions: { run: ['done'], done: [] },
+        reopens: { run: ['done'] },
+      }),
+    /run is not terminal, so it needs no reopen/,
+    'reopening a state that already has exits is a mistake in the table',
+  );
+});

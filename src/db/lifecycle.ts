@@ -12,6 +12,11 @@ export interface Lifecycle<S extends string> {
   readonly initial: readonly S[];
   /** For every state, the states it may move to. A state with no exits is terminal. */
   readonly transitions: Readonly<Record<S, readonly S[]>>;
+  /**
+   * Moves out of a state that stays terminal: an operator action that re-opens a finished row (a retry). They are legal
+   * for `advance` but do not make the state active, so waiters and busy checks still treat it as finished.
+   */
+  readonly reopens?: Readonly<Partial<Record<S, readonly S[]>>>;
 }
 
 const IDENTIFIER = /^[a-z_][a-z0-9_]*$/;
@@ -24,10 +29,16 @@ export function defineLifecycle<S extends string>(lifecycle: Lifecycle<S>): Life
   for (const state of lifecycle.initial)
     if (!states.includes(state))
       throw new Error(`${lifecycle.name}: initial state ${state} is not declared`);
-  for (const [from, targets] of Object.entries<readonly S[]>(lifecycle.transitions))
-    for (const to of targets)
+  for (const [from, targets] of [
+    ...Object.entries<readonly S[]>(lifecycle.transitions),
+    ...Object.entries<readonly S[] | undefined>(lifecycle.reopens ?? {}),
+  ])
+    for (const to of targets ?? [])
       if (!states.includes(to))
         throw new Error(`${lifecycle.name}: ${from} moves to undeclared state ${to}`);
+  for (const from of Object.keys(lifecycle.reopens ?? {}))
+    if (!isTerminal(lifecycle, from))
+      throw new Error(`${lifecycle.name}: ${from} is not terminal, so it needs no reopen`);
   return lifecycle;
 }
 
@@ -48,7 +59,10 @@ export const canMove = <S extends string>(
   lifecycle: Lifecycle<S>,
   from: string,
   to: string,
-): boolean => lifecycle.transitions[from as S]?.includes(to as S) ?? false;
+): boolean =>
+  (lifecycle.transitions[from as S]?.includes(to as S) ||
+    lifecycle.reopens?.[from as S]?.includes(to as S)) ??
+  false;
 
 /** Quoted list for `state IN (...)`; the names come from the lifecycle, never from input. */
 export const statesSql = <S extends string>(states: readonly S[]): string =>

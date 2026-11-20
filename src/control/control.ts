@@ -3690,6 +3690,53 @@ export async function createApp(
       }
     }),
   );
+  /**
+   * `tug deploy --retry`: runs a failed deployment's rollout again without creating a deployment. The same desired
+   * state is published under a fresh revision id, which is what makes agents forget the per-revision failure of a
+   * rolling service and pull and health-check everything once more; the deployment goes back to `rolling_out` and
+   * succeeds or fails on the new reports (reports of the old revision are ignored).
+   */
+  api('post', '/api/v1/deployments/retry', bodyProject, async (req, res) =>
+    withWriter(async () => {
+      const project = String(req.body?.project || 'site');
+      try {
+        const ds = currentDesired(project);
+        const current = db.get<DeploymentRow>(
+          'SELECT d.* FROM deployments d JOIN projects p ON p.current_deployment_id=d.id WHERE p.id=?',
+          project,
+        );
+        if (!ds || !current) throw httpError(404, missingProject(project));
+        if (current.state !== 'failed')
+          throw httpError(
+            409,
+            `deployment ${current.id} is ${current.state}; only a failed deployment can be retried (deploy again, or roll back with tug rollback)`,
+          );
+        const state: DesiredState = JSON.parse(ds.state_json);
+        state.revision = id('rev');
+        const moved = advance(db, deploymentLifecycle, current.id, 'failed', 'rolling_out', {
+          error_message: null,
+          updated_at: now(),
+        });
+        if (!moved) throw httpError(409, `deployment ${current.id} changed while retrying`);
+        db.run('UPDATE desired_states SET state_json=? WHERE id=?', JSON.stringify(state), ds.id);
+        audit(req.actor!, {
+          type: 'deployment.retry',
+          project,
+          deploymentId: current.id,
+          message: `deployment ${current.id} retried by ${req.actor!.name}`,
+          metadata: { previousError: current.error_message ?? null, revision: state.revision },
+        });
+        wakeAll(project);
+        watch.mark('status', project);
+        res.json({
+          deployment: { ...current, state: 'rolling_out', error_message: null },
+          desiredState: state,
+        });
+      } catch (e) {
+        sendError(res, e);
+      }
+    }),
+  );
   api('get', '/api/v1/volumes', queryProject, async (req, res) => {
     const project = String(req.query.project || 'site');
     const desired = currentDesired(project);

@@ -144,6 +144,7 @@ The project column says how a scoped credential's allowed projects are checked: 
 | `POST /api/v1/projects` | `deploy` | Body `name` |
 | `POST /api/v1/deployments` | `deploy` | Body or upload payload `project` |
 | `POST /api/v1/deployments/check` | `deploy` | Body |
+| `POST /api/v1/deployments/retry` | `deploy` | Body; runs the project's failed deployment again under a new revision |
 | `POST /api/v1/deployments/:id/cancel` | `deploy` | Deployment's project |
 | `POST /api/v1/rollback` | `deploy` | Body |
 | `POST /api/v1/scale` | `deploy` | Body |
