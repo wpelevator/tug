@@ -92,7 +92,7 @@ export function defaultComposeFile(rt: CliRuntime, cwd = rt.cwd): string {
  * The project this deploy targets. A project chosen by `--project`, `TUG_PROJECT` or `tug.yml` stands; one derived
  * from the Compose file is derived again from `-f`, so `tug deploy -f other/compose.yaml` follows that file.
  */
-function deployProject(rt: CliRuntime, o: { project?: string; file: string }): string {
+export function deployProject(rt: CliRuntime, o: { project?: string; file: string }): string {
   const cfg = loadCfg(rt);
   if (o.project) return o.project;
   if (cfg.projectSource !== 'compose-name' && cfg.projectSource !== 'directory') return cfg.project;

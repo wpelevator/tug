@@ -54,6 +54,7 @@ const REGISTRARS: { names: string[]; load: () => Promise<Register> }[] = [
     load: async () => (await import('./commands/registry.ts')).registerRegistry,
   },
   { names: ['secret'], load: async () => (await import('./commands/secret.ts')).registerSecret },
+  { names: ['values'], load: async () => (await import('./commands/values.ts')).registerValues },
   { names: ['var'], load: async () => (await import('./commands/var.ts')).registerVar },
   { names: ['domain'], load: async () => (await import('./commands/domain.ts')).registerDomain },
   { names: ['ingress'], load: async () => (await import('./commands/ingress.ts')).registerIngress },
