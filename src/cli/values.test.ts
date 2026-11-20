@@ -262,3 +262,65 @@ test('backupReferences ignores an escaped $$ and escapeReference doubles both ${
     'single-$ references to the name are doubled and nothing else changes',
   );
 });
+
+test('bare environment keys are required values, and KEY: "" or KEY= is a literal empty value', () => {
+  const source = [
+    'services:',
+    '  web:',
+    '    image: nginx',
+    '    environment:',
+    '      PASSTHROUGH:',
+    '      EXPLICIT: ${EXPLICIT}',
+    '      LITERAL_EMPTY: ""',
+    '      LITERAL_VALUE: x',
+    '  worker:',
+    '    image: nginx',
+    '    environment:',
+    '      - LIST_BARE',
+    '      - LIST_EMPTY=',
+    '      - LIST_VALUE=y',
+  ].join('\n');
+  assert.deepEqual(
+    requiredVariables(source),
+    ['EXPLICIT', 'PASSTHROUGH', 'LIST_BARE'],
+    'a bare key in either syntax is required like ${NAME}; an empty literal is not',
+  );
+  assert.deepEqual(
+    referencedVariables(source),
+    ['EXPLICIT', 'PASSTHROUGH', 'LIST_BARE'],
+    'a bare key is listed among the referenced names, once',
+  );
+});
+
+test('a bare key that control holds is described with its source and one that it lacks is missing', async () => {
+  await withDir(async (dir) => {
+    await fs.writeFile(
+      path.join(dir, 'compose.yaml'),
+      'services:\n  web:\n    image: nginx\n    environment:\n      TOKEN:\n      REGION:\n      EMPTY: ""\n',
+    );
+    assert.deepEqual(
+      await findMissingValues(dir, 'compose.yaml', new Set(['REGION'])),
+      ['TOKEN'],
+      'only the bare key control does not hold is missing',
+    );
+    assert.deepEqual(
+      await describeValues(dir, 'compose.yaml', {
+        secrets: new Set(['TOKEN']),
+        vars: new Map([['REGION', { version: 2, value: 'eu' }]]),
+        flags: {},
+      }),
+      [
+        { name: 'TOKEN', source: 'secret' },
+        { name: 'REGION', source: 'var', version: 2, value: 'eu' },
+      ],
+      'bare keys are recorded with their source, and the literal empty value is not listed',
+    );
+  });
+});
+
+test('the missing-values message explains how to pass an empty string for a bare key', () => {
+  const source = 'services:\n  web:\n    image: nginx\n    environment:\n      - TOKEN\n';
+  const message = missingValuesMessage('compose.yaml', source, ['TOKEN'], false);
+  assert.match(message, /TOKEN is listed under environment without a value/, 'names the bare key');
+  assert.match(message, /NAME: ""/, 'shows the literal empty syntax');
+});

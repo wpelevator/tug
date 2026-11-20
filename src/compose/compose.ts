@@ -347,6 +347,7 @@ export const SERVICE_EXTENSION_KEYS = [
   'ingress',
   'rollout',
   'backup',
+  'build',
 ];
 /** Keys of the top-level-volume `x-tug` block (control records `type` and `driver`). */
 export const VOLUME_EXTENSION_KEYS = ['type', 'driver', 'persistent', 'placement', 'backup'];
@@ -438,6 +439,11 @@ function validateServiceExtension(name: string, svc: ComposeService, errors: str
   const global = ext.global as unknown;
   if (global !== undefined && global !== true && global !== false)
     errors.push(`${name}: x-tug.global must be true or false`);
+  const build = ext.build as unknown;
+  if (build !== undefined && build !== true && build !== false)
+    errors.push(`${name}: x-tug.build must be true or false`);
+  else if (build === true && !svc.build)
+    errors.push(`${name}: x-tug.build: true needs a build: section to build from`);
   if ('placement' in ext) validatePlacement(name, ext.placement, errors);
   if (ext.health !== undefined) validateHealth(name, ext.health, errors);
 }
@@ -536,6 +542,29 @@ function validateTopLevel(compose: ComposeFile, errors: string[]): void {
       if (!SUPPORTED_VOLUME_KEYS.includes(field) && !isExtension(field))
         errors.push(`volumes.${key}: ${field} is not supported`);
   }
+}
+
+/**
+ * Applies the rule that `image:` wins over `build:`: a service that names both is deployed from its published image
+ * and is not built, unless `forceBuild` (`tug deploy --build`) or `x-tug.build: true` asks for the build. A service
+ * with only `build:` always builds. Returns the compose file to deploy (the input is not changed) and the services
+ * whose `build:` was set aside, so the caller can say so.
+ */
+export function selectBuilds(
+  compose: ComposeFile,
+  forceBuild = false,
+): { compose: ComposeFile; published: string[] } {
+  const published: string[] = [];
+  const services: ComposeFile['services'] = {};
+  for (const [name, svc] of Object.entries(compose.services || {})) {
+    if (svc.build && svc.image && !forceBuild && svc['x-tug']?.build !== true) {
+      const { build: _build, ...rest } = svc;
+      void _build;
+      services[name] = rest;
+      published.push(name);
+    } else services[name] = svc;
+  }
+  return { compose: { ...compose, services }, published };
 }
 
 /**

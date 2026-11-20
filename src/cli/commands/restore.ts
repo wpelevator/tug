@@ -87,7 +87,7 @@ export function registerRestore(rt: CliRuntime, program: Command): void {
             terminalSelection(rt),
           );
         return withProgress(rt, `Preparing restore for ${target}`, async (progress) => {
-          const project = loadCfg(rt).project || 'site';
+          const project = loadCfg(rt).project;
           const explicit = Array.isArray(o.writers) && o.writers.length > 0 ? o.writers : undefined;
           const result = await request<{
             confirmed: boolean;
@@ -174,7 +174,7 @@ export function registerRestore(rt: CliRuntime, program: Command): void {
     .command('list')
     .description('show recent restores and their state')
     .action(async (o: { json?: boolean }) => {
-      const project = loadCfg(rt).project || 'site';
+      const project = loadCfg(rt).project;
       const { restores } = await request<{ restores: RestoreRecord[] }>(
         rt,
         'GET',

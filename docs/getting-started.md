@@ -40,7 +40,7 @@ When something is unsupported, each finding names the service and the rule, and 
 
 ```text
 bad.yaml: web: networks other than the default network are not supported
-bad.yaml: web: x-tug.rollback is not supported (supported: placement, replicas, global, health, ingress, rollout, backup)
+bad.yaml: web: x-tug.rollback is not supported (supported: placement, replicas, global, health, ingress, rollout, backup, build)
 ```
 
 [What tug accepts](compose.md#not-supported) lists the unsupported keys. Existing Compose volumes are not reused: tug names its volumes differently, so data moves in explicitly.

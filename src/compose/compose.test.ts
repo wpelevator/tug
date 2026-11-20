@@ -521,7 +521,7 @@ describe('x-tug schema checks', () => {
     assert.equal(service({ placement: { nodes: ['n1'] } }), '', 'a plain placement is valid');
     assert.match(
       service({ ingresss: { host: 'app.example.com', port: 80 } }),
-      /web: x-tug\.ingresss is not supported \(supported: placement, replicas, global, health, ingress, rollout, backup\)/,
+      /web: x-tug\.ingresss is not supported \(supported: placement, replicas, global, health, ingress, rollout, backup, build\)/,
       'an unknown key names its location and the accepted ones',
     );
     assert.match(service('nginx'), /web: x-tug must be an object/, 'a scalar x-tug is rejected');

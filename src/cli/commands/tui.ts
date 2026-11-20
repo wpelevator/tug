@@ -40,7 +40,7 @@ export function registerTui(rt: CliRuntime, program: Command): void {
         o: { once?: boolean; readonly?: boolean; json?: boolean },
       ) => {
         const cfg = loadCfg(rt);
-        const project = cfg.project || 'site';
+        const project = cfg.project;
         const name = view === undefined ? undefined : resolveCommand(view);
         if (view !== undefined && (!name || !(VIEWS as readonly string[]).includes(name)))
           throw new Error(`unknown view "${view}"; choose one of: ${VIEWS.join(', ')}`);

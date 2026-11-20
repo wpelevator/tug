@@ -100,6 +100,8 @@ export interface RolloutSpec {
 
 /** The `x-tug` extension on a Compose service. */
 export interface ServiceExtension {
+  /** `true` builds the service on every deploy even when it also names an `image:` (otherwise the image wins). Needs `build:`. */
+  build?: boolean;
   placement?: Placement;
   replicas?: number;
   global?: boolean;

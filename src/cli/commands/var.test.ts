@@ -301,3 +301,26 @@ test('a deployment made with --var records the value record on the deployment', 
     );
   });
 });
+
+test('deploy --dry-run lists bare environment keys with their source and fails when control lacks one', async () => {
+  await withControl(async ({ dir, tug, fails }) => {
+    await fs.writeFile(
+      path.join(dir, 'compose.yaml'),
+      'services:\n  web:\n    image: nginx\n    environment:\n      API_TOKEN:\n      EMPTY: ""\n  worker:\n    image: nginx\n    environment:\n      - REGION\n',
+    );
+    const message = await fails(['deploy', '--dry-run']);
+    assert.match(
+      message,
+      /not set on control: API_TOKEN, REGION/,
+      'bare keys fail the deploy while control does not hold them',
+    );
+    assert.ok(!/EMPTY/.test(message), 'an empty literal is never reported as missing');
+    await tug(['secret', 'set', 'API_TOKEN', '--value', 'hunter2']);
+    await tug(['var', 'set', 'REGION', '--value', 'eu']);
+    const dry = await tug(['deploy', '--dry-run']);
+    assert.match(dry.stdout, /API_TOKEN\s+secret\s+•••/, 'a bare secret key is listed as a secret');
+    assert.match(dry.stdout, /REGION\s+var\s+eu/, 'a bare variable key is listed with its value');
+    assert.ok(!/EMPTY/.test(dry.stdout), 'the literal empty value is not a value from control');
+    assert.match(dry.stderr, /Values: 1 secret, 1 var/, 'the summary counts bare keys');
+  });
+});

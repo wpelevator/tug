@@ -215,6 +215,11 @@ const serviceXtug = (): JsonSchema => ({
     'Tug settings for this service, described in docs/compose.md and checked by `tug lint`.',
   type: 'object',
   properties: {
+    build: {
+      type: 'boolean',
+      description:
+        'Build this service from its build: section on every deploy even when it also names an image: (by default the image wins and nothing is built). Needs build:.',
+    },
     placement: placement(),
     replicas: {
       type: 'integer',
@@ -308,11 +313,13 @@ const projectXtug = (): JsonSchema => ({
 const serviceProperties = (): JsonSchema => ({
   image: {
     type: 'string',
-    description: 'The image reference; control resolves published tags to image@sha256 once.',
+    description:
+      'The image reference; control resolves published tags to image@sha256 once. With build: also set, this image is deployed and nothing is built, unless `tug deploy --build` or x-tug.build: true.',
   },
   build: {
     oneOf: [{ type: 'string' }, { type: 'object' }],
-    description: 'Built by control from uploaded source, or here with `tug deploy --build-local`.',
+    description:
+      'Built by control from uploaded source, or here with `tug deploy --build-local`. With image: also set it builds only for `tug deploy --build` or x-tug.build: true.',
   },
   command: { oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }] },
   entrypoint: { oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }] },

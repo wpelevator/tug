@@ -80,7 +80,7 @@ export function registerBackup(rt: CliRuntime, program: Command): void {
           throw new Error('--select cannot be combined with explicit targets');
         if (o.select) targets = await selectBackups(rt);
         return withProgress(rt, 'Queueing backups', async (progress) => {
-          const project = loadCfg(rt).project || 'site';
+          const project = loadCfg(rt).project;
           const queued = await request<{
             runs: { runId: string; target: string }[];
             errors: string[];
@@ -162,7 +162,7 @@ export function registerBackup(rt: CliRuntime, program: Command): void {
       'with --check, accept a project that has no enabled backup target (a destination is still required)',
     )
     .action(async (o: { limit: string; check?: boolean; allowEmpty?: boolean; json?: boolean }) => {
-      const project = loadCfg(rt).project || 'site';
+      const project = loadCfg(rt).project;
       const listing = await request<BackupListing>(
         rt,
         'GET',
@@ -205,7 +205,7 @@ export function registerBackup(rt: CliRuntime, program: Command): void {
       'stop a queued or running backup (the run id is the last column of `tug backup list`); it is reported as cancelled and not retried',
     )
     .action(async (run: string) => {
-      const project = loadCfg(rt).project || 'site';
+      const project = loadCfg(rt).project;
       print(
         rt,
         await request(rt, 'POST', `/api/v1/backups/${encodeURIComponent(run)}/cancel`, { project }),
@@ -223,7 +223,7 @@ export function registerBackup(rt: CliRuntime, program: Command): void {
     .action(async (o: { control?: boolean }) => {
       if (o.control)
         return print(rt, await request(rt, 'GET', '/api/v1/backup/repository-password?control=1'));
-      const project = loadCfg(rt).project || 'site';
+      const project = loadCfg(rt).project;
       print(
         rt,
         await request(

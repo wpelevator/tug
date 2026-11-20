@@ -14,7 +14,7 @@
           "properties": {
             "image": {
               "type": "string",
-              "description": "The image reference; control resolves published tags to image@sha256 once."
+              "description": "The image reference; control resolves published tags to image@sha256 once. With build: also set, this image is deployed and nothing is built, unless `tug deploy --build` or x-tug.build: true."
             },
             "build": {
               "oneOf": [
@@ -25,7 +25,7 @@
                   "type": "object"
                 }
               ],
-              "description": "Built by control from uploaded source, or here with `tug deploy --build-local`."
+              "description": "Built by control from uploaded source, or here with `tug deploy --build-local`. With image: also set it builds only for `tug deploy --build` or x-tug.build: true."
             },
             "command": {
               "oneOf": [
@@ -314,6 +314,10 @@
               "description": "Tug settings for this service, described in docs/compose.md and checked by `tug lint`.",
               "type": "object",
               "properties": {
+                "build": {
+                  "type": "boolean",
+                  "description": "Build this service from its build: section on every deploy even when it also names an image: (by default the image wins and nothing is built). Needs build:."
+                },
                 "placement": {
                   "description": "Where the service or volume runs. With one registered node it may be omitted; with several, every service chooses nodes or labels (see docs/placement.md).",
                   "type": "object",

@@ -1,6 +1,7 @@
 import { X509Certificate } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
 import type { Db } from '../src/db/db.ts';
+import type { ControlImageOperations } from '../src/control/control.ts';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -148,7 +149,11 @@ export async function writeCredentialFile(
  */
 export async function startMtlsControl(
   dir: string,
-  options: { eventPruneIntervalMs?: number } = {},
+  options: {
+    eventPruneIntervalMs?: number;
+    /** Replaces image operations of control (build, save, inspect, ...); `resolve` defaults to the test resolver. */
+    images?: Partial<ControlImageOperations>;
+  } = {},
 ) {
   const { createApp, listen } = await import('../src/control/control.ts');
   const { issueHostCredential } = await import('../src/control/credential-issue.ts');
@@ -162,7 +167,11 @@ export async function startMtlsControl(
   let server: Awaited<ReturnType<typeof listen>>;
   let root: ReturnType<typeof decodeCredential>;
   try {
-    app = await createApp({ images: { resolve: testImageResolver }, controlUrl, ...options });
+    app = await createApp({
+      controlUrl,
+      ...options,
+      images: { resolve: testImageResolver, ...options.images },
+    });
     server = await listen(app, 0);
     root = decodeCredential(
       await issueHostCredential({ name: 'root', role: 'admin', replace: false, controlUrl }),

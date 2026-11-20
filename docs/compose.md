@@ -44,7 +44,7 @@ A file with problems prints each finding as `$FILE: $RULE` on stderr, so an edit
 
 ```text
 bad.yaml: web: networks other than the default network are not supported
-bad.yaml: web: x-tug.rollback is not supported (supported: placement, replicas, global, health, ingress, rollout, backup)
+bad.yaml: web: x-tug.rollback is not supported (supported: placement, replicas, global, health, ingress, rollout, backup, build)
 ```
 
 `--json` prints `{ ok, file, errors }`.

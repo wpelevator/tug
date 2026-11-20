@@ -30,11 +30,47 @@ function scan(source: string, pattern: RegExp): string[] {
   return [...names];
 }
 
-/** Variable names a Compose file requires, in order of appearance; ones with a default are optional. */
-export const requiredVariables = (source: string): string[] => scan(source, REFERENCE);
+/**
+ * The names a service lists under `environment` without a value, as `- KEY` or `KEY:`. Compose passes the value of
+ * `KEY` through from the shell; Tug reads it from control instead, so such an entry is a reference like `${KEY}`.
+ * `KEY: ""` and `- KEY=` carry a value (the empty string) and are not references.
+ */
+export function bareEnvironmentKeys(source: string): string[] {
+  let doc: unknown;
+  try {
+    doc = yaml.load(source, { schema: yaml.CORE_SCHEMA.withTags([yaml.mergeTag]) });
+  } catch {
+    return [];
+  }
+  const names = new Set<string>();
+  const services = (doc as { services?: unknown } | null)?.services;
+  if (services && typeof services === 'object')
+    for (const service of Object.values(services)) {
+      const environment = (service as { environment?: unknown } | null)?.environment;
+      if (Array.isArray(environment))
+        for (const entry of environment) {
+          if (typeof entry === 'string' && !entry.includes('=') && VALUE_NAME.test(entry.trim()))
+            names.add(entry.trim());
+        }
+      else if (environment && typeof environment === 'object')
+        for (const [key, value] of Object.entries(environment))
+          if ((value === null || value === undefined) && VALUE_NAME.test(key)) names.add(key);
+    }
+  return [...names];
+}
 
-/** Every variable name a Compose file references, defaults included, in order of appearance. */
-export const referencedVariables = (source: string): string[] => scan(source, ANY_REFERENCE);
+const merged = (first: string[], second: string[]): string[] => [...new Set([...first, ...second])];
+
+/**
+ * Variable names a Compose file requires, in order of appearance: `${NAME}` without a default, then bare `environment`
+ * keys. Ones with a default are optional.
+ */
+export const requiredVariables = (source: string): string[] =>
+  merged(scan(source, REFERENCE), bareEnvironmentKeys(source));
+
+/** Every variable name a Compose file references, defaults and bare `environment` keys included, in order of appearance. */
+export const referencedVariables = (source: string): string[] =>
+  merged(scan(source, ANY_REFERENCE), bareEnvironmentKeys(source));
 
 /** What control holds for a project, as the deploy needs it. */
 export interface ProjectValues {
@@ -125,15 +161,21 @@ export function missingValuesMessage(
   dryRun: boolean,
 ): string {
   const inBackup = backupReferences(source, missing);
+  const bare = bareEnvironmentKeys(source).filter((name) => missing.includes(name));
   const base = `${file} needs values that are not set on control: ${missing.join(', ')}. Tug does not read your shell environment or .env; set each with tug secret set <name> (private) or tug var set <name> (visible), pass --var NAME=value for this deploy only, or import a file with tug secret import .env${
     dryRun ? '' : ' (or run tug deploy in a terminal to be prompted)'
   }`;
-  if (!inBackup.size) return base;
+  const bareHint = bare.length
+    ? [
+        `${bare.join(', ')} ${bare.length === 1 ? 'is' : 'are'} listed under environment without a value, which reads it from control like \${NAME}; to pass an empty string write NAME: "" instead`,
+      ]
+    : [];
+  if (!inBackup.size) return [base, ...bareHint].join('\n');
   const hints = [...inBackup].map(
     ([name, text]) =>
       `${name} is used in an x-tug.backup field. If it is a variable of the container and not a value from control, write $$${name} so the container expands it: ${escapeReference(text, name).trim()}`,
   );
-  return `${base}\n${hints.join('\n')}`;
+  return [base, ...bareHint, ...hints].join('\n');
 }
 
 /**

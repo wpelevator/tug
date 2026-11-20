@@ -595,11 +595,12 @@ function activeProfiles(env: NodeJS.ProcessEnv): Set<string> {
 }
 
 /** The project name Compose derives from a directory: lower case, with only letters, digits, `-` and `_`. */
-const directoryProject = (dir: string): string =>
+export const directoryProject = (dir: string): string =>
   path
     .basename(dir)
     .toLowerCase()
-    .replace(/[^a-z0-9_-]/g, '');
+    .replace(/[^a-z0-9_-]/g, '')
+    .replace(/^[_-]+/, '');
 
 /**
  * Reads `file` into the canonical definition. Variables come from `options.env` (default `process.env`), then from

@@ -1,5 +1,5 @@
 import { selectDeployment, selectService } from './selection.ts';
-import { existsSync, openAsBlob } from 'node:fs';
+import { openAsBlob } from 'node:fs';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -13,6 +13,7 @@ import {
 import { deploymentsSharingLabel } from '../status.ts';
 import { createProgress, withProgress } from '../progress.ts';
 import { canPrompt } from '../prompt.ts';
+import { composeNameSync, defaultComposeFileName, resolveProject } from '../project.ts';
 import {
   describeValues,
   findMissingValues,
@@ -22,7 +23,7 @@ import {
   promptForValues,
 } from '../values.ts';
 import { formatValuesTable, summarizeValues } from '../../values.ts';
-import { bindMountWarnings, composeHash } from '../../compose/compose.ts';
+import { bindMountWarnings, composeHash, selectBuilds } from '../../compose/compose.ts';
 import { normalizeCompose } from '../../compose/normalize.ts';
 import {
   loadCfg,
@@ -79,14 +80,18 @@ async function makeContext(rt: CliRuntime): Promise<string> {
 
 /** The first conventional Compose file name in the working directory; `docker-compose.yml` when none exists. */
 export function defaultComposeFile(rt: CliRuntime, cwd = rt.cwd): string {
-  const names = ['compose.yaml', 'compose.yml', 'docker-compose.yaml', 'docker-compose.yml'];
-  return names.find((name) => existsSync(path.join(cwd, name))) ?? 'docker-compose.yml';
+  return defaultComposeFileName(cwd);
 }
 
-/** The top-level `name:` of a Compose file, which Compose would use as the project name. */
-export async function composeName(file: string): Promise<string | undefined> {
-  const text = await fs.readFile(file, 'utf8').catch(() => '');
-  return /^name:\s*["']?([A-Za-z0-9][\w.-]*)["']?\s*(?:#.*)?$/m.exec(text)?.[1];
+/**
+ * The project this deploy targets. A project chosen by `--project`, `TUG_PROJECT` or `tug.yml` stands; one derived
+ * from the Compose file is derived again from `-f`, so `tug deploy -f other/compose.yaml` follows that file.
+ */
+function deployProject(rt: CliRuntime, o: { project?: string; file: string }): string {
+  const cfg = loadCfg(rt);
+  if (o.project) return o.project;
+  if (cfg.projectSource !== 'compose-name' && cfg.projectSource !== 'directory') return cfg.project;
+  return resolveProject({ cwd: rt.cwd, file: o.file }).project;
 }
 
 /**
@@ -116,6 +121,10 @@ export function registerDeploy(rt: CliRuntime, program: Command): void {
     .description('deploy the Compose project, or cancel a deployment with `deploy cancel <id>`')
     .option('-f, --file <file>', 'compose file', defaultComposeFile(rt))
     .option('--version <version>', 'display version (default: git-<Compose hash>)')
+    .option(
+      '--build',
+      'build services that name both build: and image: for this deploy (by default their image is deployed and nothing is built; x-tug.build: true builds one always)',
+    )
     .option('--build-local', 'build application images locally and upload them without source')
     .option(
       '--compose-cli',
@@ -152,6 +161,7 @@ export function registerDeploy(rt: CliRuntime, program: Command): void {
           WaitOpts & {
             file: string;
             version?: string;
+            build?: boolean;
             buildLocal?: boolean;
             composeCli?: boolean;
             json?: boolean;
@@ -165,7 +175,7 @@ export function registerDeploy(rt: CliRuntime, program: Command): void {
         try {
           progress.stage('Preparing deployment');
           const cfg = loadCfg(rt);
-          const project = o.project || cfg.project || 'site';
+          const project = deployProject(rt, o);
           // Every ${NAME} comes from control (secrets as sentinels the agent fills in, variables as their values), from
           // --var, or from the default written in the file. The shell and .env of this machine are never read.
           const flags = parseVarFlags(o.var ?? []);
@@ -229,19 +239,26 @@ export function registerDeploy(rt: CliRuntime, program: Command): void {
               err(rt, `warning: --var ${name} is not referenced in ${o.file}; it is ignored`);
           err(rt, `Values: ${summarizeValues(values)}`);
           const movePayload = o.move.length ? { moves: o.move } : {};
-          const declared = await composeName(resolvePath(rt, o.file));
+          const declared = composeNameSync(resolvePath(rt, o.file));
           if (declared && declared !== project)
             err(
               rt,
               `warning: ${o.file} is named ${declared} but the Tug project is ${project}; secrets, backups and restores are scoped to the Tug project (set project: ${declared} in tug.yml, or pass --project)`,
             );
-          const compose = await normalizeCompose(resolvePath(rt, o.file), secretNames, {
+          const normalized = await normalizeCompose(resolvePath(rt, o.file), secretNames, {
             project,
             composeCli: o.composeCli,
             hostEnv: rt.env,
             vars: { ...Object.fromEntries([...variables].map(([n, v]) => [n, v.value])), ...flags },
             profiles: o.profile,
           });
+          // A service with both build: and image: deploys its image; only --build or x-tug.build: true builds it.
+          const { compose, published } = selectBuilds(normalized, o.build);
+          for (const name of published)
+            err(
+              rt,
+              `note: ${name} has build: and image:, so Tug deploys ${compose.services[name].image} and does not build it (tug deploy --build, or x-tug.build: true on the service, builds it)`,
+            );
           if (o.dryRun) {
             // Reading the file is part of the dry run: an env_file or an unsupported construct fails here too.
             out(rt, formatValuesTable(values));
