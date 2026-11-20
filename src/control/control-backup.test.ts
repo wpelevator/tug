@@ -335,8 +335,8 @@ test('restore from the destination reports an empty destination without touching
   const docker = resticDocker((cmd) =>
     cmd[1] === 'cat'
       ? {
-          code: 1,
-          err: 'Fatal: unable to open config file: Stat: The specified key does not exist.\nIs there a repository at the following location?',
+          code: 10,
+          err: 'Fatal: repository does not exist: unable to open config file: Stat: The specified key does not exist.\nIs there a repository at the following location?',
         }
       : { code: 0 },
   );

@@ -7,6 +7,8 @@ const ENV_NAME_RE = /^[A-Z][A-Z0-9_]{0,63}$/;
 const RESERVED_ENV = ['RESTIC_PASSWORD', 'RESTIC_REPOSITORY', 'RESTIC_PASSWORD_FILE'];
 /** Shorter values would redact ordinary words out of error text. */
 const MIN_REDACTED_LENGTH = 4;
+/** restic's built-in backends Tug accepts; `local` is an absolute path. `sftp:` and `rclone:` are rejected with their own messages. */
+const BACKENDS = ['s3', 'rest', 'b2', 'azure', 'gs', 'swift', 'local'];
 const REQUIRED_ENV: Record<string, string[]> = {
   s3: ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY'],
 };
@@ -30,9 +32,17 @@ export function parseBackupDestination(input: unknown): BackupDestinationInput {
     throw new Error('url is required, such as s3:https://s3.example.com/bucket/tug-backups');
   if (/\s/.test(url)) throw new Error('url must not contain whitespace');
   const scheme = url.startsWith('/') ? 'local' : url.split(':')[0];
-  if (!['s3', 'sftp', 'rest', 'local'].includes(scheme))
+  if (scheme === 'sftp')
     throw new Error(
-      'url must start with s3:, sftp:, rest: or be an absolute path (a path is for development only: it is read on each node, not shared)',
+      'sftp: destinations are not supported because Tug cannot give the restic helper SSH keys or a known_hosts file; run a restic rest-server and reach it over a private network or VPN (rest:http://host:8000/path), or use S3',
+    );
+  if (scheme === 'rclone')
+    throw new Error(
+      'rclone: destinations are not supported because the restic helper image does not configure rclone; use S3, a rest-server (rest:), or another built-in backend',
+    );
+  if (!BACKENDS.includes(scheme))
+    throw new Error(
+      'url must start with s3:, rest:, b2:, azure:, gs: or swift:, or be an absolute path (a path is for development only: it is read on each node, not shared)',
     );
   if (/:\/\/[^/@\s]*:[^/@\s]*@/.test(url))
     throw new Error(

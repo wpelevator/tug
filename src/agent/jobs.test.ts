@@ -71,41 +71,75 @@ test('a check job reports a healthy repository and removes its helper container'
   assert.deepEqual(docker.names(), [], 'the helper container is removed after the job');
 });
 
-test('a missing repository is initialized, but a wrong password is not', async () => {
-  const missing = dockerWith((cmd) => {
-    if (cmd.join(' ') === 'restic cat config')
-      return {
-        code: 10,
-        err: 'Fatal: unable to open config file\nIs there a repository at the following location?',
-      };
-    return { code: 0 };
-  });
-  const first = await runner(missing);
-  await first.jobs.start(command('cmd_1', payload()));
-  await settle(first.jobs, 1);
-  assert.equal(
-    (first.jobs.pending()[0].result as { repository?: string }).repository,
-    'initialized',
-    'a missing repository is created',
-  );
-  assert.ok(
-    missing.execOptions.some((e) => e.cmd.join(' ') === 'restic init'),
-    'restic init ran',
-  );
+const REST_MISSING =
+  'Fatal: repository does not exist: unable to open config file: <config/> does not exist\nIs there a repository at the following location?\nrest:http://backup.internal:8030/tug/site/';
+const S3_NO_KEY =
+  'Fatal: repository does not exist: unable to open config file: Stat: The specified key does not exist.\nIs there a repository at the following location?\ns3:http://s3.example.com/exists/tug';
+const BUCKET_MISSING =
+  'Fatal: unable to open config file: Stat: The specified bucket does not exist.\nIs there a repository at the following location?';
 
-  const wrong = dockerWith((cmd) =>
-    cmd.join(' ') === 'restic cat config'
-      ? { code: 1, err: 'Fatal: wrong password or no key found' }
-      : { code: 0 },
+async function finished(docker: FakeDocker, kind: string) {
+  const { jobs } = await runner(docker);
+  await jobs.start(command('cmd_1', payload(), kind));
+  await settle(jobs, 1);
+  return jobs.pending()[0];
+}
+const ran = (docker: FakeDocker, cmd: string) =>
+  docker.execOptions.some((e) => e.cmd.join(' ') === cmd);
+
+test('a run job initializes a repository restic reports as missing with exit 10, on REST and S3', async () => {
+  for (const [what, err] of [
+    ['a REST server', REST_MISSING],
+    ['an S3 key that does not exist', S3_NO_KEY],
+  ] as const) {
+    const docker = dockerWith((cmd) =>
+      cmd.join(' ') === 'restic cat config' ? { code: 10, err } : { code: 0 },
+    );
+    const result = await finished(docker, 'backup.run');
+    assert.ok(
+      !/repository check failed|repository init failed/.test(JSON.stringify(result.result)),
+      `${what} without a repository must not fail the repository check`,
+    );
+    assert.ok(ran(docker, 'restic init'), `${what}: restic init ran`);
+  }
+});
+
+test('a check job only reports a missing repository and never initializes it', async () => {
+  const docker = dockerWith((cmd) =>
+    cmd.join(' ') === 'restic cat config' ? { code: 10, err: REST_MISSING } : { code: 0 },
   );
-  const second = await runner(wrong);
-  await second.jobs.start(command('cmd_2', payload()));
-  await settle(second.jobs, 1);
-  assert.equal(second.jobs.pending()[0].state, 'failed', 'a wrong password fails the job');
-  assert.ok(
-    !wrong.execOptions.some((e) => e.cmd.join(' ') === 'restic init'),
-    'a wrong password must never initialize a new repository',
+  const result = await finished(docker, 'backup.check');
+  assert.equal(result.state, 'succeeded', 'a missing repository is not a failed check');
+  assert.equal(
+    (result.result as { repository?: string }).repository,
+    'missing',
+    'the check reports the repository as missing',
   );
+  assert.ok(!ran(docker, 'restic init'), 'backup.check is read-only');
+});
+
+test('a missing bucket (exit 1) and a wrong password (exit 12) fail a run job without init', async () => {
+  for (const [what, code, err, expected] of [
+    ['a missing bucket', 1, BUCKET_MISSING, /bucket does not exist/],
+    ['a wrong password', 12, 'Fatal: wrong password or no key found', /wrong repository password/],
+  ] as const) {
+    const docker = dockerWith((cmd) =>
+      cmd.join(' ') === 'restic cat config' ? { code, err } : { code: 0 },
+    );
+    const result = await finished(docker, 'backup.run');
+    assert.equal(result.state, 'failed', `${what} fails the job`);
+    assert.match(JSON.stringify(result.result), expected, `${what} is explained`);
+    assert.ok(!ran(docker, 'restic init'), `${what} must never create a repository or bucket`);
+  }
+});
+
+test('a restore job fails on a missing repository instead of creating one', async () => {
+  const docker = dockerWith((cmd) =>
+    cmd.join(' ') === 'restic cat config' ? { code: 10, err: REST_MISSING } : { code: 0 },
+  );
+  const result = await finished(docker, 'backup.restore');
+  assert.equal(result.state, 'failed', 'there is nothing to restore from');
+  assert.ok(!ran(docker, 'restic init'), 'a restore never initializes');
 });
 
 test('error text never contains credentials', async () => {

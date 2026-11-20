@@ -44,6 +44,21 @@ export function backupDestinationQueries(db: Db) {
         );
       });
     },
+    /**
+     * Stores a check result, but only while the destination is still the one that was checked. `updatedAt` is the
+     * value read before the check began; every replace sets a new one, so a changed URL or changed credentials drop
+     * the stale result. False when it was dropped.
+     */
+    recordCheck(updatedAt: string, checkedAt: string, result: unknown): boolean {
+      return (
+        db.run(
+          "UPDATE backup_destination SET checked_at=?,check_result_json=? WHERE id='default' AND updated_at=?",
+          checkedAt,
+          JSON.stringify(result),
+          updatedAt,
+        ).changes > 0
+      );
+    },
     remove(): boolean {
       return immediateTransaction(db, () => {
         db.run('DELETE FROM secrets WHERE project_id=?', BACKUP_SECRET_PROJECT);

@@ -250,6 +250,8 @@ const SAMPLES: Record<string, { path: string; body?: unknown }> = {
     body: { url: '/srv/restic', env: {} },
   },
   'DELETE /api/v1/backup/destination': { path: '/api/v1/backup/destination' },
+  // Listed after the delete, so no destination exists and an admin gets a fast 409 instead of a check on a real Docker.
+  'POST /api/v1/backup/destination/check': { path: '/api/v1/backup/destination/check', body: {} },
   'GET /api/v1/backup/repository-password': {
     path: '/api/v1/backup/repository-password?project=site',
   },

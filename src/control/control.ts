@@ -137,6 +137,7 @@ import {
   CONTROL_SNAPSHOT_ID,
   controlRepository,
   controlRepositoryPassword,
+  checkRepository,
   fetchControlArchive,
   listControlSnapshots,
   pushControlArchive,
@@ -297,6 +298,10 @@ const liveDimension = (value: unknown) =>
 const liveBase64 = (value: unknown): value is string =>
   typeof value === 'string' &&
   /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value);
+/** One repository of a destination check, including the image pull, may take this long. */
+const DESTINATION_CHECK_REPOSITORY_LIMIT_MS = 2 * 60_000;
+/** The whole destination check (every repository) stops after this long; the rest are reported as errors. */
+const DESTINATION_CHECK_LIMIT_MS = 4 * 60_000;
 /** How long a host may lack a certificate, pending or failing its first attempts, before `tug doctor` fails: DNS and port 80 can lag a new domain. */
 const PENDING_TLS_GRACE_MS = 10 * 60_000;
 /** How long `doctor` waits for a TCP connect to an ingress node's port 80 or 443 before calling it unanswered. */
@@ -2311,7 +2316,9 @@ export async function createApp(
     )
       return res.status(400).json({ error: 'targets must be a list of service or volume names' });
     if (!db.get('SELECT 1 FROM projects WHERE id=?', project))
-      return res.status(404).json({ error: `project ${project} not found` });
+      return res.status(404).json({
+        error: `project ${project} has not been deployed yet; backup targets come from its deployed Compose file, so deploy it first`,
+      });
     const result = backups.runNow(project, targets, req.actor!.name);
     if (!result.runs.length)
       return res.status(result.errors.length ? 409 : 404).json({
@@ -2455,8 +2462,8 @@ export async function createApp(
     const project = String(req.query.project || '');
     if (!PROJECT_NAME_PATTERN.test(project) || isReservedProject(project))
       return res.status(400).json({ error: 'project is required' });
-    if (!db.get('SELECT 1 FROM projects WHERE id=?', project))
-      return res.status(404).json({ error: `project ${project} not found` });
+    // The password is derived from the master key and the name alone, so it exists before the project is deployed.
+    const deployed = Boolean(db.get('SELECT 1 FROM projects WHERE id=?', project));
     const destination = backupDestination();
     audit(req.actor!, {
       type: 'backup.key_read',
@@ -2467,7 +2474,98 @@ export async function createApp(
       project,
       repository: destination ? projectRepository(destination.url, project) : null,
       password: repositoryPassword(masterKey, project),
+      deployed,
     });
+  });
+  /** One check at a time: it holds a helper container per repository and may create repositories. */
+  let destinationCheckRunning = false;
+  api('post', '/api/v1/backup/destination/check', null, async (req, res) => {
+    // The URL and its credentials are read together, before anything awaits.
+    const destination = backupDestination();
+    if (!destination)
+      return res.status(409).json({
+        error: 'no backup destination is configured; set one with tug backup destination set',
+      });
+    if (destinationCheckRunning)
+      return res.status(409).json({ error: 'a destination check is already running' });
+    if (controlPushRunning)
+      return res.status(409).json({
+        error: 'control is backing itself up to the destination right now; try again in a minute',
+      });
+    // Matches the stored check to this exact destination (URL and credentials) if it was replaced meanwhile.
+    const checkedVersion = destination.updated_at;
+    const env = backupEnv();
+    backups.sync();
+    const projects = db
+      .all<{ project_id: string }>(
+        'SELECT DISTINCT project_id FROM backup_schedules WHERE enabled=1 ORDER BY project_id',
+      )
+      .map((row) => row.project_id);
+    destinationCheckRunning = true;
+    try {
+      const overall = AbortSignal.timeout(DESTINATION_CHECK_LIMIT_MS);
+      const repositories: {
+        name: string;
+        repository: string;
+        state: 'ok' | 'initialized' | 'error' | 'skipped';
+        error?: string;
+      }[] = [];
+      const targets = [
+        {
+          name: '_control',
+          repository: controlRepository(destination.url),
+          password: controlRepositoryPassword(masterKey),
+        },
+        ...projects.map((project) => ({
+          name: project,
+          repository: projectRepository(destination.url, project),
+          password: repositoryPassword(masterKey, project),
+        })),
+      ];
+      for (const target of targets) {
+        // Every repository shares the destination, so when control's own fails the others would fail the same way,
+        // each after its own timeout, and the request would outlast the CLI's.
+        const controlFailed = repositories[0]?.state === 'error';
+        const checked = controlFailed
+          ? {
+              state: 'skipped' as const,
+              error: "not checked: control's own repository failed on the same destination",
+            }
+          : overall.aborted
+            ? { state: 'error' as const, error: 'the destination check ran out of time' }
+            : await checkRepository(docker, {
+                repository: target.repository,
+                env,
+                password: target.password,
+                resticImage: resticImage(),
+                limitMs: DESTINATION_CHECK_REPOSITORY_LIMIT_MS,
+                stallMs: controlStallMs(),
+                signal: overall,
+              });
+        repositories.push({ name: target.name, repository: target.repository, ...checked });
+      }
+      const result = {
+        ok: repositories.every((repository) => repository.state !== 'error'),
+        checkedAt: now(),
+        from: 'control' as const,
+        url: destination.url,
+        repositories,
+      };
+      const stored = destinationQueries.recordCheck(checkedVersion, result.checkedAt, result);
+      audit(req.actor!, {
+        type: 'backup.destination_checked',
+        message: `backup destination checked by ${req.actor!.name}: ${result.ok ? 'ok' : 'failed'}`,
+        metadata: {
+          url: destination.url,
+          ok: result.ok,
+          repositories: repositories.map(({ name, state }) => ({ name, state })),
+          stored,
+        },
+      });
+      res.json(result);
+    } finally {
+      destinationCheckRunning = false;
+    }
   });
 
   api('post', '/api/v1/secrets', bodyProject, async (req, res) => {
@@ -4001,7 +4099,8 @@ export async function createApp(
     // The URL and its credentials are read together, before anything awaits: a destination changed meanwhile
     // must not pair the old URL with the new credentials.
     const destination = backupDestination();
-    if (!destination || controlPushRunning) return null;
+    // A destination check is creating or opening the same repositories; the nightly retry follows soon after.
+    if (!destination || controlPushRunning || destinationCheckRunning) return null;
     const env = backupEnv();
     const key = destinationKey(destination.url);
     controlPushRunning = true;
