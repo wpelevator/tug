@@ -6,10 +6,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { startMtlsControl } from '../../../tests/helpers.ts';
 import { execCli } from '../../../tests/cli-inprocess.ts';
-import { selectBuilds, composeErrors } from '../../compose/compose.ts';
+import { composeErrors, ignoredBuildKeys, selectBuilds } from '../../compose/compose.ts';
 import type { ComposeFile } from '../../protocol.ts';
 
 interface BuildCall {
+  secrets?: Record<string, string>;
   imageRef: string;
   service: string;
   buildSpec: unknown;
@@ -39,6 +40,7 @@ async function withControl(
           imageRef: options.imageRef,
           service: options.service,
           buildSpec: options.buildSpec,
+          secrets: options.secrets,
         });
       },
       save: async (_ref, file) => {
@@ -215,5 +217,111 @@ test('a project set in tug.yml or TUG_PROJECT beats the Compose name', async () 
       );
     },
     { TUG_PROJECT: 'fromenv' },
+  );
+});
+
+const WITH_OPTIONS = [
+  'services:',
+  '  web:',
+  '    build:',
+  '      context: .',
+  '      target: production',
+  '      args:',
+  '        NODE_VERSION: "22"',
+  '      secrets:',
+  '        - NPM_TOKEN',
+  '      additional_contexts:',
+  '        base: docker-image://alpine:3.20',
+  '',
+].join('\n');
+
+test('build args, target and secrets reach the build on control, and the secret value is kept out of the deployment', async () => {
+  await withControl(async ({ dir, tug, builds }) => {
+    await fs.writeFile(path.join(dir, 'compose.yaml'), WITH_OPTIONS);
+    await fs.writeFile(path.join(dir, 'Dockerfile'), 'FROM scratch\n');
+    await tug(['secret', 'set', 'NPM_TOKEN', '--value', 'npm-secret-value', '--project', 'shop']);
+    const deployed = await deployJson(tug, ['--project', 'shop']);
+    assert.equal(builds.length, 1, 'the service is built on control');
+    const spec = builds[0].buildSpec as Record<string, unknown>;
+    assert.equal(spec.target, 'production', 'the target stage reaches the build');
+    assert.deepEqual(spec.args, { NODE_VERSION: '22' }, 'the build args reach the build');
+    assert.deepEqual(spec.secrets, ['NPM_TOKEN'], 'the build names the secret it mounts');
+    assert.equal(
+      builds[0].secrets?.NPM_TOKEN,
+      'npm-secret-value',
+      'control decrypts the project secret for the build',
+    );
+    const record = JSON.stringify(deployed);
+    assert.ok(!record.includes('npm-secret-value'), 'the deploy result holds no secret value');
+    const fetched = JSON.stringify(
+      JSON.parse((await tug(['status', '--json', '--project', 'shop'])).stdout),
+    );
+    assert.ok(!fetched.includes('npm-secret-value'), 'the stored deployment holds no secret value');
+  });
+});
+
+test('a build secret that is not a project secret fails the deploy before anything is built', async () => {
+  await withControl(async ({ dir, tug, builds }) => {
+    await fs.writeFile(path.join(dir, 'compose.yaml'), WITH_OPTIONS);
+    await fs.writeFile(path.join(dir, 'Dockerfile'), 'FROM scratch\n');
+    await assert.rejects(
+      tug(['deploy', '--no-wait', '--project', 'shop']),
+      /secrets not found in project shop: NPM_TOKEN/,
+      'the missing secret is named',
+    );
+    assert.deepEqual(builds, [], 'no build ran');
+  });
+});
+
+test('build.secrets cannot be built locally, because only control can read project secrets', async () => {
+  await withControl(async ({ dir, tug }) => {
+    await fs.writeFile(path.join(dir, 'compose.yaml'), WITH_OPTIONS);
+    await fs.writeFile(path.join(dir, 'Dockerfile'), 'FROM scratch\n');
+    await tug(['secret', 'set', 'NPM_TOKEN', '--value', 'x', '--project', 'shop']);
+    await assert.rejects(
+      tug(['deploy', '--build-local', '--no-wait', '--project', 'shop']),
+      /web: build\.secrets are project secrets, which only control can read/,
+      'a local build says why it cannot take build secrets',
+    );
+  });
+});
+
+test('build keys Tug does not pass on are reported, and malformed ones fail validation', () => {
+  const compose = {
+    services: { web: { build: { context: '.', cache_from: ['x'], target: 'a' } } },
+  } as unknown as ComposeFile;
+  assert.deepEqual(
+    ignoredBuildKeys(compose),
+    ['web: build.cache_from'],
+    'only the keys outside the supported set are listed',
+  );
+  const errors = (build: object) =>
+    composeErrors({ services: { web: { build } } } as unknown as ComposeFile, [], {
+      normalized: false,
+    }).join('\n');
+  assert.match(
+    errors({ secrets: 'NPM_TOKEN' }),
+    /build\.secrets must be a list/,
+    'secrets is a list',
+  );
+  assert.match(
+    errors({ secrets: ['bad-name'] }),
+    /build\.secrets entries name a project secret/,
+    'a secret name is a valid value name',
+  );
+  assert.match(
+    errors({ target: 3 }),
+    /build\.target must be the name of a Dockerfile stage/,
+    'target',
+  );
+  assert.match(errors({ args: 'A=1' }), /build\.args must be a mapping or a list/, 'args');
+  assert.equal(
+    errors({
+      args: { A: '1' },
+      secrets: [{ source: 'T', target: 'npm' }],
+      additional_contexts: { a: 'b' },
+    }),
+    '',
+    'the supported shapes pass',
   );
 });

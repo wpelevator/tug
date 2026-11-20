@@ -2,7 +2,7 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import * as tar from 'tar';
-import { buildImage, run, unpackContext } from '../images/build.ts';
+import { buildImage, buildSecretSources, run, unpackContext } from '../images/build.ts';
 import { saveImageArchive } from '../images/artifacts.ts';
 import type { ComposeFile, LocalImageUpload } from '../protocol.ts';
 import { CONFIG_NAMES } from './config.ts';
@@ -187,6 +187,10 @@ export async function prepareLocalImages(
   const nonce = dependencies.nonce();
   for (const [service, spec] of Object.entries(compose.services)) {
     if (!spec.build) continue;
+    if (buildSecretSources(spec.build as Parameters<typeof buildSecretSources>[0]).length)
+      throw new Error(
+        `${service}: build.secrets are project secrets, which only control can read, so this service cannot be built with --build-local; build it on control (leave out --build-local)`,
+      );
     const field = `image-${images.length}`;
     const imageRef = `tug-build/${nonce}/${field}:local`;
     try {

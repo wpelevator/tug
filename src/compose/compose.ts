@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { resolveBackups, validateBackupDefaults } from '../backup/config.ts';
 import { isDuration } from '../duration.ts';
+import { SUPPORTED_BUILD_KEYS } from '../images/build.ts';
 import { sentinelNames } from './normalize.ts';
 import type {
   ComposeFile,
@@ -471,6 +472,52 @@ function validateVolumeExtension(name: string, def: unknown, errors: string[]): 
   if ('placement' in ext) validatePlacement(label, ext.placement, errors);
 }
 
+/** The `build:` keys of every service that will be built and that Tug ignores, as `service: key` strings for a warning. */
+export function ignoredBuildKeys(compose: ComposeFile): string[] {
+  const found: string[] = [];
+  for (const [name, svc] of Object.entries(compose.services || {}))
+    if (isObject(svc.build))
+      for (const key of Object.keys(svc.build))
+        if (!(SUPPORTED_BUILD_KEYS as readonly string[]).includes(key))
+          found.push(`${name}: build.${key}`);
+  return found;
+}
+
+/** The shape of the build keys Tug passes through, so a typo fails the deploy instead of building a different image. */
+function validateBuild(name: string, build: Record<string, unknown>, errors: string[]): void {
+  const mapOrList = (key: string) => {
+    const value = build[key];
+    if (value === undefined || value === null) return;
+    if (!isObject(value) && !(Array.isArray(value) && value.every((v) => typeof v === 'string')))
+      errors.push(`${name}: build.${key} must be a mapping or a list of NAME=value entries`);
+  };
+  mapOrList('args');
+  mapOrList('additional_contexts');
+  if (build.target !== undefined && (typeof build.target !== 'string' || !build.target))
+    errors.push(`${name}: build.target must be the name of a Dockerfile stage`);
+  if (build.secrets === undefined) return;
+  if (!Array.isArray(build.secrets)) {
+    errors.push(`${name}: build.secrets must be a list of project secret names`);
+    return;
+  }
+  for (const secret of build.secrets) {
+    const source =
+      typeof secret === 'string' ? secret : isObject(secret) ? secret.source : undefined;
+    const target = isObject(secret) ? secret.target : undefined;
+    if (typeof source !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(source))
+      errors.push(
+        `${name}: build.secrets entries name a project secret (letters, digits and underscores), got ${JSON.stringify(secret)}`,
+      );
+    else if (
+      target !== undefined &&
+      (typeof target !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(target))
+    )
+      errors.push(
+        `${name}: build.secrets target for ${source} must be a secret id such as npm_token`,
+      );
+  }
+}
+
 function validateSubset(
   name: string,
   svc: ComposeService,
@@ -494,6 +541,7 @@ function validateSubset(
       errors.push(`${name}: networks other than the default network are not supported`);
   }
   if (!svc.image && !svc.build) errors.push(`${name}: image or build is required`);
+  if (isObject(svc.build)) validateBuild(name, svc.build, errors);
   for (const mount of svc.volumes || []) {
     // Short syntax is valid operator input: deploy normalizes it away with `docker compose config`,
     // so only definitions checked in their canonical form have no business still writing it.

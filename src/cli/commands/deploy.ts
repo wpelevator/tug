@@ -23,7 +23,12 @@ import {
   promptForValues,
 } from '../values.ts';
 import { formatValuesTable, summarizeValues } from '../../values.ts';
-import { bindMountWarnings, composeHash, selectBuilds } from '../../compose/compose.ts';
+import {
+  bindMountWarnings,
+  composeHash,
+  ignoredBuildKeys,
+  selectBuilds,
+} from '../../compose/compose.ts';
 import { normalizeCompose } from '../../compose/normalize.ts';
 import {
   loadCfg,
@@ -268,6 +273,11 @@ export function registerDeploy(rt: CliRuntime, program: Command): void {
             return;
           }
           for (const warning of bindMountWarnings(compose)) err(rt, warning);
+          for (const key of ignoredBuildKeys(compose))
+            err(
+              rt,
+              `warning: ${key} is not used by Tug, which passes only context, dockerfile, args, target, secrets and additional_contexts to the build`,
+            );
           const version = o.version || `git-${composeHash(compose)}`;
           let response: DeployResponse;
           if (o.buildLocal) {

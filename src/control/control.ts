@@ -66,7 +66,12 @@ import {
   validateCompose,
 } from '../compose/compose.ts';
 import { findPortClashes, portClashMessage } from '../compose/port-clash.ts';
-import { buildImage, unpackContext, run as runCommand } from '../images/build.ts';
+import {
+  buildImage,
+  buildSecretSources,
+  unpackContext,
+  run as runCommand,
+} from '../images/build.ts';
 import { sentinelNames } from '../compose/normalize.ts';
 import {
   MAX_VAR_BYTES,
@@ -3217,19 +3222,24 @@ export async function createApp(
         );
       // The CLI interpolates control secrets as sentinels; a reference to a secret that is gone would deploy an empty value.
       const referenced = sentinelNames(compose);
-      if (referenced.includes(REGISTRY_AUTH_SECRET))
+      // Secrets a build mounts (`build.secrets`) are read by control while it builds, so they must exist too.
+      const buildSecrets = Object.values(compose.services).flatMap((service) =>
+        buildSecretSources(service.build as Parameters<typeof buildSecretSources>[0]),
+      );
+      if (referenced.includes(REGISTRY_AUTH_SECRET) || buildSecrets.includes(REGISTRY_AUTH_SECRET))
         throw httpError(
           400,
           REGISTRY_AUTH_SECRET +
             ' is reserved for registry authentication and cannot be used in service definitions',
         );
-      if (referenced.length) {
+      const needed = [...new Set([...referenced, ...buildSecrets])];
+      if (needed.length) {
         const known = new Set(
           db
             .all<{ name: string }>('SELECT name FROM secrets WHERE project_id=?', project)
             .map((row) => row.name),
         );
-        const missing = referenced.filter((name) => !known.has(name));
+        const missing = needed.filter((name) => !known.has(name));
         if (missing.length)
           throw httpError(
             400,
@@ -3368,13 +3378,31 @@ export async function createApp(
             if (imported.platform !== info.platform)
               throw httpError(400, 'imported image identity mismatch');
             await images.run('docker', ['tag', item.imageRef, imageRef]);
-          } else
+          } else {
+            const buildSpec = compose.services[service].build!;
+            // Decrypted only here, handed to the build through its environment, and never stored with the deployment.
+            const secrets = Object.fromEntries(
+              buildSecretSources(buildSpec as Parameters<typeof buildSecretSources>[0]).map(
+                (name) => {
+                  const row = db.get<SecretRow>(
+                    'SELECT * FROM secrets WHERE project_id=? AND name=?',
+                    project,
+                    name,
+                  );
+                  if (!row)
+                    throw httpError(400, `secrets not found in project ${project}: ${name}`);
+                  return [name, decrypt(row.encrypted_value, masterKey)];
+                },
+              ),
+            );
             await images.build({
               contextDir: contextDir!,
               service,
-              buildSpec: compose.services[service].build!,
+              buildSpec,
               imageRef,
+              ...(Object.keys(secrets).length ? { secrets } : {}),
             });
+          }
           // An unchanged rebuild produces the image the project already has an archive for: point at that
           // artifact instead of saving, hashing and storing another full copy. Nodes match by image ID, so they
           // download nothing and the running container is kept. The stored `image_id` is the archive's config

@@ -4,6 +4,7 @@ import path from 'node:path';
 import * as tar from 'tar';
 import { scanArchive } from './archive.ts';
 import { ensureDir, exists } from '../files.ts';
+import { errMessage } from '../errors.ts';
 
 export interface RunResult {
   out: string;
@@ -23,9 +24,73 @@ export const RUN_OUTPUT_LIMIT = 1024 * 1024;
 
 const tail = (text: string, chunk: string) =>
   (text + chunk).length > RUN_OUTPUT_LIMIT ? (text + chunk).slice(-RUN_OUTPUT_LIMIT) : text + chunk;
+/** One `build.secrets` entry: the name of a project secret, or `{ source, target }` where `target` is the id the Dockerfile mounts. */
+export type BuildSecret = string | { source?: string; target?: string; [key: string]: unknown };
+
+/** The `build:` keys Tug passes to `docker build`; any other key is ignored. */
+export const SUPPORTED_BUILD_KEYS = [
+  'context',
+  'dockerfile',
+  'args',
+  'target',
+  'secrets',
+  'additional_contexts',
+] as const;
+
 export interface BuildSpec {
   context?: string;
   dockerfile?: string;
+  /** `--build-arg`: visible in the image history, so never a credential (use `secrets`). */
+  args?: Record<string, unknown> | string[];
+  target?: string;
+  /** Project secrets exposed to `RUN --mount=type=secret`; they are never written to a layer. */
+  secrets?: BuildSecret[];
+  /** Named extra contexts for `COPY --from=<name>` and `FROM <name>`; needs `docker buildx`. */
+  additional_contexts?: Record<string, unknown> | string[];
+}
+
+/** The project secret a `build.secrets` entry reads and the id the Dockerfile mounts it as. */
+export function buildSecretNames(secret: BuildSecret): { source: string; id: string } {
+  const source = typeof secret === 'string' ? secret : String(secret.source ?? '');
+  const id = typeof secret === 'string' ? secret : String(secret.target || secret.source || '');
+  return { source, id };
+}
+
+/** The names of the project secrets that the `build:` of a service reads. */
+export function buildSecretSources(build: string | BuildSpec | undefined): string[] {
+  if (!build || typeof build === 'string') return [];
+  return (build.secrets ?? []).map((secret) => buildSecretNames(secret).source);
+}
+
+/** Context values that are not paths in the uploaded source: a URL, a git ref or an image. */
+const REMOTE_CONTEXT = /^(?:https?:\/\/|git:\/\/|git@|ssh:\/\/|docker-image:\/\/|oci-layout:\/\/)/;
+
+/** `additional_contexts` as `[name, value]` pairs, from either the mapping or the `name=value` list. */
+export function additionalContexts(spec: BuildSpec): [string, string][] {
+  const raw = spec.additional_contexts;
+  if (!raw) return [];
+  if (Array.isArray(raw))
+    return raw.map((entry) => {
+      const text = String(entry);
+      const at = text.indexOf('=');
+      return at < 1 ? [text, ''] : [text.slice(0, at), text.slice(at + 1)];
+    });
+  return Object.entries(raw).map(([name, value]) => [name, String(value ?? '')]);
+}
+
+/** `--build-arg` pairs; a name without a value is dropped, because Tug never reads the machine's environment for one. */
+function buildArgPairs(spec: BuildSpec): [string, string][] {
+  const raw = spec.args;
+  if (!raw) return [];
+  if (Array.isArray(raw))
+    return raw.flatMap((entry): [string, string][] => {
+      const text = String(entry);
+      const at = text.indexOf('=');
+      return at < 1 ? [] : [[text.slice(0, at), text.slice(at + 1)]];
+    });
+  return Object.entries(raw).flatMap(([name, value]): [string, string][] =>
+    value === null || value === undefined ? [] : [[name, String(value)]],
+  );
 }
 
 export function run(cmd: string, args: string[], opts: RunOptions = {}): Promise<RunResult> {
@@ -84,6 +149,103 @@ export interface BuildImageOptions {
   imageRef: string;
   /** The environment `docker build` runs in; default this process's. */
   env?: NodeJS.ProcessEnv;
+  /** Values of the project secrets that `build.secrets` names, by secret name. They reach Docker only through its environment. */
+  secrets?: Record<string, string>;
+  /** Whether `docker buildx` is installed; checked with `docker buildx version` when not given. */
+  hasBuildx?: () => Promise<boolean>;
+}
+
+/** The `docker` invocation of one build: its arguments and the environment that carries the secret values. */
+export interface BuildCommand {
+  args: string[];
+  env: NodeJS.ProcessEnv;
+}
+
+const inside = (root: string, target: string) =>
+  target === root || target.startsWith(`${root}${path.sep}`);
+
+/**
+ * The `docker build` (or `docker buildx build` for `additional_contexts`) arguments for a build spec. Secret values go into
+ * environment variables that BuildKit reads with `--secret id=...,env=...`, never into the arguments, so they are not in
+ * the process list, the command text of an error, or an image layer.
+ */
+export function buildCommand(
+  options: Pick<BuildImageOptions, 'contextDir' | 'service' | 'buildSpec' | 'imageRef'> & {
+    env?: NodeJS.ProcessEnv;
+    secrets?: Record<string, string>;
+  },
+): BuildCommand {
+  const { contextDir, service, buildSpec, imageRef } = options;
+  const root = path.resolve(contextDir);
+  const spec: BuildSpec =
+    typeof buildSpec === 'string' ? { context: buildSpec } : (buildSpec ?? {});
+  const buildPath = spec.context || '.';
+  const dockerfilePath = spec.dockerfile
+    ? path.resolve(contextDir, buildPath, spec.dockerfile)
+    : undefined;
+  if (dockerfilePath && !dockerfilePath.startsWith(`${root}${path.sep}`))
+    throw new Error(`Dockerfile escapes uploaded root for ${service}`);
+  const fullContext = path.resolve(contextDir, buildPath);
+  if (!inside(root, fullContext))
+    throw new Error(`build context escapes uploaded root for ${service}`);
+  const args: string[] = [];
+  if (dockerfilePath) args.push('-f', dockerfilePath);
+  if (spec.target) args.push('--target', String(spec.target));
+  for (const [name, value] of buildArgPairs(spec)) args.push('--build-arg', `${name}=${value}`);
+  const env: NodeJS.ProcessEnv = { ...(options.env ?? process.env) };
+  const secrets = spec.secrets ?? [];
+  secrets.forEach((secret, index) => {
+    const { source, id } = buildSecretNames(secret);
+    const value = options.secrets?.[source];
+    if (!source || value === undefined)
+      throw new Error(
+        `build secret ${source || '(unnamed)'} of ${service} is not a project secret`,
+      );
+    const variable = `TUG_BUILD_SECRET_${index}`;
+    env[variable] = value;
+    args.push('--secret', `id=${id},env=${variable}`);
+  });
+  const contexts = additionalContexts(spec);
+  for (const [name, value] of contexts) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(name) || !value)
+      throw new Error(
+        `build.additional_contexts entry ${JSON.stringify(name)} of ${service} needs a name and a value`,
+      );
+    if (/^service:/.test(value))
+      throw new Error(
+        `build.additional_contexts ${name} of ${service} points at another service (${value}), which Tug does not support; build that image in CI and use docker-image://<image> instead`,
+      );
+    if (REMOTE_CONTEXT.test(value)) args.push('--build-context', `${name}=${value}`);
+    else {
+      const local = path.resolve(contextDir, value);
+      if (!inside(root, local))
+        throw new Error(
+          `build.additional_contexts ${name} of ${service} escapes the uploaded root`,
+        );
+      args.push('--build-context', `${name}=${local}`);
+    }
+  }
+  if (secrets.length || contexts.length) env.DOCKER_BUILDKIT = '1';
+  args.push('-t', imageRef, fullContext);
+  return { args, env };
+}
+
+/** True when `docker buildx` answers; `additional_contexts` (`--build-context`) is a buildx feature. */
+export async function dockerHasBuildx(env?: NodeJS.ProcessEnv): Promise<boolean> {
+  try {
+    await run('docker', ['buildx', 'version'], { env, timeoutMs: 30_000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** `text` with every secret value replaced by `***`, for build output that is shown to the operator. */
+function redact(text: string, secrets: Record<string, string> | undefined): string {
+  let result = text;
+  for (const value of Object.values(secrets ?? {}))
+    if (value) result = result.split(value).join('***');
+  return result;
 }
 
 export async function buildImage({
@@ -92,22 +254,31 @@ export async function buildImage({
   buildSpec,
   imageRef,
   env,
+  secrets,
+  hasBuildx,
 }: BuildImageOptions): Promise<void> {
-  const buildPath = typeof buildSpec === 'string' ? buildSpec : buildSpec?.context || '.';
-  const dockerfilePath =
-    typeof buildSpec === 'object' && buildSpec.dockerfile
-      ? path.resolve(contextDir, buildPath, buildSpec.dockerfile)
-      : undefined;
-  if (dockerfilePath && !dockerfilePath.startsWith(`${path.resolve(contextDir)}${path.sep}`))
-    throw new Error(`Dockerfile escapes uploaded root for ${service}`);
-  const dockerfile = dockerfilePath ? ['-f', dockerfilePath] : [];
-  const fullContext = path.resolve(contextDir, buildPath);
-  if (
-    fullContext !== path.resolve(contextDir) &&
-    !fullContext.startsWith(`${path.resolve(contextDir)}${path.sep}`)
-  )
-    throw new Error(`build context escapes uploaded root for ${service}`);
-  if (!(await exists(fullContext)))
-    throw new Error(`build context not found for ${service}: ${buildPath}`);
-  await run('docker', ['build', ...dockerfile, '-t', imageRef, fullContext], { env });
+  const command = buildCommand({ contextDir, service, buildSpec, imageRef, env, secrets });
+  const context = command.args.at(-1)!;
+  if (!(await exists(context)))
+    throw new Error(
+      `build context not found for ${service}: ${path.relative(contextDir, context) || '.'}`,
+    );
+  const buildx = typeof buildSpec === 'object' && additionalContexts(buildSpec).length > 0;
+  if (buildx && !(await (hasBuildx ?? (() => dockerHasBuildx(env)))()))
+    throw new Error(
+      `${service}: build.additional_contexts needs docker buildx, which is not installed where the image is built; install the Docker buildx plugin there, or remove additional_contexts`,
+    );
+  try {
+    await run(
+      'docker',
+      [...(buildx ? ['buildx', 'build', '--load'] : ['build']), ...command.args],
+      {
+        env: command.env,
+      },
+    );
+  } catch (error) {
+    if (!secrets || !Object.keys(secrets).length) throw error;
+    // Build output can echo a secret a Dockerfile printed; never hand that back to the operator.
+    throw new Error(redact(errMessage(error), secrets));
+  }
 }
