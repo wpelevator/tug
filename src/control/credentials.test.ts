@@ -276,6 +276,7 @@ const SAMPLES: Record<string, { path: string; body?: unknown }> = {
   'POST /api/v1/logs': { path: '/api/v1/logs', body: { project: 'site' } },
   'GET /api/v1/commands/:id': { path: '/api/v1/commands/cmd_x' },
   'POST /api/v1/secrets': { path: '/api/v1/secrets', body: { project: 'site' } },
+  'POST /api/v1/registry/login': { path: '/api/v1/registry/login', body: { project: 'site' } },
   'POST /api/v1/vars': { path: '/api/v1/vars', body: { project: 'site' } },
   'POST /api/v1/domains': {
     path: '/api/v1/domains',

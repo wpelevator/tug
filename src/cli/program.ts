@@ -49,6 +49,10 @@ const REGISTRARS: { names: string[]; load: () => Promise<Register> }[] = [
   { names: ['hold'], load: async () => (await import('./commands/hold.ts')).registerHold },
   { names: ['image'], load: async () => (await import('./commands/image.ts')).registerImage },
   { names: ['lint'], load: async () => (await import('./commands/lint.ts')).registerLint },
+  {
+    names: ['registry'],
+    load: async () => (await import('./commands/registry.ts')).registerRegistry,
+  },
   { names: ['secret'], load: async () => (await import('./commands/secret.ts')).registerSecret },
   { names: ['var'], load: async () => (await import('./commands/var.ts')).registerVar },
   { names: ['domain'], load: async () => (await import('./commands/domain.ts')).registerDomain },

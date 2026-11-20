@@ -2519,6 +2519,66 @@ export async function createApp(
       releaseLock(lock);
     }
   });
+  /**
+   * Adds or replaces one registry host in the project's TUG_REGISTRY_AUTH secret, keeping every other host. The stored
+   * JSON is never readable through the API, so the merge happens here rather than in the CLI.
+   */
+  api('post', '/api/v1/registry/login', bodyProject, async (req, res) => {
+    const { project = 'site', host, username, password } = req.body;
+    if (isReservedProject(String(project)))
+      return res.status(400).json({ error: 'project names starting with _ are reserved' });
+    if (typeof host !== 'string' || !/^[a-zA-Z0-9.:[\]-]+$/.test(host))
+      return res.status(400).json({ error: 'host must be a registry host such as ghcr.io' });
+    if (typeof username !== 'string' || !username || typeof password !== 'string' || !password)
+      return res.status(400).json({ error: 'username and password required' });
+    let lock;
+    try {
+      lock = acquireProjectLock(project, 'registry.login');
+      const old = db.get<SecretRow>(
+        'SELECT * FROM secrets WHERE project_id=? AND name=?',
+        project,
+        REGISTRY_AUTH_SECRET,
+      );
+      let credentials;
+      try {
+        credentials = parseRegistryCredentials(
+          old ? decrypt(old.encrypted_value, masterKey) : undefined,
+        );
+      } catch (e) {
+        throw httpError(
+          409,
+          `${errMessage(e)}; replace it with tug secret set ${REGISTRY_AUTH_SECRET}`,
+        );
+      }
+      const replaced = !!credentials[host];
+      credentials[host] = { username, password };
+      const version = (old?.version || 0) + 1;
+      const ts = now();
+      db.run(
+        `INSERT INTO secrets(id,project_id,name,encrypted_value,version,created_at,updated_at) VALUES(?,?,?,?,?,?,?)
+        ON CONFLICT(project_id,name) DO UPDATE SET encrypted_value=excluded.encrypted_value,version=excluded.version,updated_at=excluded.updated_at`,
+        id('sec'),
+        project,
+        REGISTRY_AUTH_SECRET,
+        encrypt(JSON.stringify(credentials), masterKey),
+        version,
+        ts,
+        ts,
+      );
+      wakeAll(project);
+      audit(req.actor!, {
+        type: 'secret.set',
+        project,
+        message: `registry login for ${host} ${replaced ? 'replaced' : 'added'} by ${req.actor!.name}`,
+        metadata: { name: REGISTRY_AUTH_SECRET, version, host },
+      });
+      res.json({ ok: true, host, hosts: Object.keys(credentials).sort(), version });
+    } catch (e) {
+      sendError(res, e);
+    } finally {
+      releaseLock(lock);
+    }
+  });
   api('get', '/api/v1/secrets', queryProject, async (req, res) =>
     isReservedProject(String(req.query.project || 'site'))
       ? res.status(400).json({ error: 'project names starting with _ are reserved' })

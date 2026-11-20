@@ -170,6 +170,7 @@ The project column says how a scoped credential's allowed projects are checked: 
 | `DELETE /api/v1/backup/destination` | `admin` | Control-wide |
 | `GET /api/v1/backup/repository-password` | `admin` | Query `project` prints that project's repository password; `control` prints the control repository password |
 | `POST /api/v1/secrets` | `admin` | Control-wide |
+| `POST /api/v1/registry/login` | `admin` | Body `project`, `host`, `username`, `password`; adds the host to `TUG_REGISTRY_AUTH` and keeps the others |
 | `DELETE /api/v1/secrets/:name` | `admin` | Control-wide |
 | `POST /api/v1/vars` | `deploy` | Body `project`; refuses a name that is a secret |
 | `DELETE /api/v1/vars/:name` | `deploy` | Query `project` |
