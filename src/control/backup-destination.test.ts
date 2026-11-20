@@ -8,6 +8,7 @@ import { FakeDocker } from '../../tests/fake-docker.ts';
 import { controlRepositoryPassword } from '../backup/control-backup.ts';
 import { openDb } from '../db/db.ts';
 import { decrypt } from './secrets.ts';
+import { until } from '../../tests/wait.ts';
 import { json, testImageResolver, testControlUrl, testIdentity } from '../../tests/helpers.ts';
 import { repositoryPassword } from '../backup/destination.ts';
 import type { CreateContainerBody } from '../docker-api.ts';
@@ -317,6 +318,36 @@ const composeWithBackup = {
 const REST_MISSING =
   'Fatal: repository does not exist: unable to open config file: <config/> does not exist\nIs there a repository at the following location?';
 
+async function deployWithBackup(base: string): Promise<void> {
+  const node = await json(await call(base, 'POST', '/api/v1/nodes/register', { name: 'n1' }));
+  await call(base, 'POST', '/api/v1/projects', { name: 'empty' });
+  const deploy = await call(base, 'POST', '/api/v1/deployments', {
+    project: 'site',
+    version: 'v1',
+    compose: composeWithBackup,
+  });
+  assert.equal(deploy.status, 200, await deploy.clone().text());
+  const agent = { 'x-tug-test-node': node.nodeId, 'content-type': 'application/json' };
+  const work = await json(await call(base, 'GET', '/agent/v1/work', undefined, agent));
+  await call(
+    base,
+    'POST',
+    '/agent/v1/status',
+    {
+      projects: [
+        {
+          project: 'site',
+          observedVersion: 'v1',
+          observedRevision: work.desiredStates[0].revision,
+          health: 'serving',
+        },
+      ],
+      commandResults: [],
+    },
+    agent,
+  );
+}
+
 test('a destination check opens the control and project repositories, creates missing ones and stores the result', async () => {
   const docker = new RecordingDocker();
   docker.addImage('restic/restic:0.19.1');
@@ -334,33 +365,7 @@ test('a destination check opens the control and project repositories, creates mi
       409,
       'a check without a destination is refused with a reason',
     );
-    const node = await json(await call(s.base, 'POST', '/api/v1/nodes/register', { name: 'n1' }));
-    await call(s.base, 'POST', '/api/v1/projects', { name: 'empty' });
-    const deploy = await call(s.base, 'POST', '/api/v1/deployments', {
-      project: 'site',
-      version: 'v1',
-      compose: composeWithBackup,
-    });
-    assert.equal(deploy.status, 200, await deploy.clone().text());
-    const agent = { 'x-tug-test-node': node.nodeId, 'content-type': 'application/json' };
-    const work = await json(await call(s.base, 'GET', '/agent/v1/work', undefined, agent));
-    await call(
-      s.base,
-      'POST',
-      '/agent/v1/status',
-      {
-        projects: [
-          {
-            project: 'site',
-            observedVersion: 'v1',
-            observedRevision: work.desiredStates[0].revision,
-            health: 'serving',
-          },
-        ],
-        commandResults: [],
-      },
-      agent,
-    );
+    await deployWithBackup(s.base);
     await call(s.base, 'POST', '/api/v1/backup/destination', {
       url: 'rest:http://backup.internal:8030/tug',
       env: { RESTIC_REST_USERNAME: 'tug', RESTIC_REST_PASSWORD: 'rest-secret-1' },
@@ -445,6 +450,74 @@ test('a manual backup of a project that was never deployed says it has not been 
       'the message says to deploy first',
     );
   } finally {
+    await s.close();
+  }
+});
+
+test('a failing control repository skips the project repositories instead of timing out on each', async () => {
+  const docker = new RecordingDocker();
+  docker.addImage('restic/restic:0.19.1');
+  docker.execResponder = (cmd) =>
+    cmd[1] === 'cat'
+      ? { code: 1, err: 'Fatal: unable to open config file: bucket does not exist' }
+      : { code: 0 };
+  const s = await server(docker);
+  try {
+    await deployWithBackup(s.base);
+    await call(s.base, 'POST', '/api/v1/backup/destination', destination);
+    const result = await json(await call(s.base, 'POST', '/api/v1/backup/destination/check', {}));
+    assert.deepEqual(
+      result.repositories.map((r: { name: string; state: string }) => [r.name, r.state]),
+      [
+        ['_control', 'error'],
+        ['site', 'skipped'],
+      ],
+      'the project repository is skipped once control fails on the same destination',
+    );
+    assert.match(result.repositories[1].error, /not checked: control's own repository failed/);
+    assert.equal(result.ok, false, 'a skipped repository still fails the check');
+    assert.equal(
+      docker.bodies.length,
+      1,
+      'no helper container is started for the skipped repository',
+    );
+  } finally {
+    await s.close();
+  }
+});
+
+test('a second concurrent check is refused and a destination replaced mid-check keeps no stale result', async () => {
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  class GatedDocker extends RecordingDocker {
+    async createContainer(name: string, body: CreateContainerBody): Promise<string> {
+      const id = await super.createContainer(name, body);
+      await gate;
+      return id;
+    }
+  }
+  const docker = new GatedDocker();
+  docker.addImage('restic/restic:0.19.1');
+  docker.execResponder = () => ({ code: 0 });
+  const s = await server(docker);
+  try {
+    await call(s.base, 'POST', '/api/v1/backup/destination', destination);
+    const first = call(s.base, 'POST', '/api/v1/backup/destination/check', {});
+    await until(() => docker.bodies.length === 1, 'the first check to start its helper');
+    const second = await call(s.base, 'POST', '/api/v1/backup/destination/check', {});
+    assert.equal(second.status, 409, 'a check while another runs is refused');
+    assert.match((await json(second)).error, /already running/, 'the reason is given');
+    await call(s.base, 'POST', '/api/v1/backup/destination', {
+      ...destination,
+      env: { ...destination.env, AWS_SECRET_ACCESS_KEY: 'rotated-secret-2' },
+    });
+    release();
+    assert.equal((await first).status, 200, 'the running check still answers');
+    const shown = await json(await call(s.base, 'GET', '/api/v1/backup/destination'));
+    assert.equal(shown.checkResult, null, 'a result for the replaced credentials is not stored');
+    assert.equal(shown.checkedAt, null, 'the replaced destination stays unchecked');
+  } finally {
+    release();
     await s.close();
   }
 });

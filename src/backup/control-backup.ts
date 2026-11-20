@@ -100,6 +100,19 @@ function summarize(text: string): string {
 
 type Exec = (cmd: string[]) => Promise<Collected>;
 
+/**
+ * restic's message for a failed probe, with the hint that fixes it. Only an exit code 1 can mean "restic too old to
+ * say the repository is missing", so only then is the version read.
+ */
+async function explainProbe(exec: Exec, probe: Collected): Promise<string> {
+  const detail = summarize(probe.err || probe.out);
+  if (probe.code !== 1) return describeProbeFailure(probe, detail);
+  const version = (await exec(['restic', 'version']).catch(() => undefined))?.out.match(
+    /restic (\d+\.\d+\.\d+)/,
+  )?.[1];
+  return describeProbeFailure(probe, detail, version);
+}
+
 /** One restic repository to open: the control repository, or a project's when checking a destination. */
 interface ResticAccess {
   /** The full restic repository, such as `s3:https://host/bucket/prefix/_control`. */
@@ -302,9 +315,7 @@ export async function pushControlArchive(
     if (state !== 'ok') {
       // Only a missing repository (restic exit code 10) is created; a wrong password or an unreachable bucket must fail the backup.
       if (state === 'error')
-        throw new ControlBackupError(
-          `repository check failed: ${describeProbeFailure(probe, summarize(probe.err || probe.out))}`,
-        );
+        throw new ControlBackupError(`repository check failed: ${await explainProbe(exec, probe)}`);
       const init = await exec(['restic', 'init']);
       if (init.code !== 0)
         throw new ControlBackupError(`repository init failed: ${summarize(init.err || init.out)}`);
@@ -418,7 +429,7 @@ export async function listControlSnapshots(
     if (state === 'missing') return { state: 'missing' as const, snapshots: [] };
     if (state === 'error')
       throw new ControlBackupError(
-        `cannot read the control repository (wrong control password or credentials, or an unreachable store): ${describeProbeFailure(probe, summarize(probe.err || probe.out))}`,
+        `cannot read the control repository (wrong control password or credentials, or an unreachable store): ${await explainProbe(exec, probe)}`,
       );
     const listed = await exec(['restic', 'snapshots', '--json', ...SNAPSHOT_FILTER]);
     if (listed.code !== 0)
@@ -447,7 +458,7 @@ export async function fetchControlArchive(
       throw new ControlBackupError(
         state === 'missing'
           ? `no control backup was found at ${controlRepository(access.url)}`
-          : `cannot read the control repository (wrong control password or credentials, or an unreachable store): ${describeProbeFailure(probe, summarize(probe.err || probe.out))}`,
+          : `cannot read the control repository (wrong control password or credentials, or an unreachable store): ${await explainProbe(exec, probe)}`,
       );
     if (snapshot !== 'latest') {
       // Only snapshots control itself stored may be restored into control, whatever else the repository holds.
@@ -494,7 +505,7 @@ export async function checkRepository(
       if (state === 'error')
         return {
           state: 'error' as const,
-          error: describeProbeFailure(probe, summarize(probe.err || probe.out)),
+          error: await explainProbe(exec, probe),
         };
       const init = await exec(['restic', 'init']);
       if (init.code !== 0)
@@ -505,6 +516,13 @@ export async function checkRepository(
       return { state: 'initialized' as const };
     });
   } catch (error) {
-    return { state: 'error', error: error instanceof Error ? error.message : String(error) };
+    // withRestic redacts what it throws; this repeats it so nothing stored or returned can carry a credential.
+    return {
+      state: 'error',
+      error: redactSecrets(error instanceof Error ? error.message : String(error), [
+        ...Object.values(access.env),
+        access.password,
+      ]),
+    };
   }
 }

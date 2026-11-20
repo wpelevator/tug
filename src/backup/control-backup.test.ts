@@ -742,22 +742,51 @@ test('a wrong password (exit 12) and a missing bucket (exit 1) fail a push witho
   }
 });
 
-test('an exit code 1 with the repository hint tells the operator that restic must be 0.17 or newer', async () => {
-  const dir = await scratch();
-  const archive = path.join(dir, 'a.tar.gz');
-  await fs.writeFile(archive, 'x');
-  const docker = dockerWith((cmd) =>
-    cmd[1] === 'cat' ? { code: 1, err: NEVER_CREATED } : { code: 0 },
-  );
-  try {
-    await assert.rejects(
-      () => pushControlArchive(docker, S3, archive),
-      /TUG_RESTIC_IMAGE must be 0\.17 or newer/,
-      'an old restic that cannot exit with 10 is named as the cause',
+test('the old-restic hint appears only for a known restic older than 0.17, never for a 0.19 missing bucket', async () => {
+  for (const [version, hinted] of [
+    ['0.19.1', false],
+    ['0.16.4', true],
+  ] as const) {
+    const dir = await scratch();
+    const archive = path.join(dir, 'a.tar.gz');
+    await fs.writeFile(archive, 'x');
+    const docker = dockerWith((cmd) =>
+      cmd[1] === 'cat'
+        ? { code: 1, err: `${BUCKET_MISSING}\ns3:http://s3.example.com/nope/tug` }
+        : cmd[1] === 'version'
+          ? { code: 0, out: `restic ${version} compiled with go1.22\n` }
+          : { code: 0 },
     );
-  } finally {
-    await fs.rm(dir, { recursive: true, force: true });
+    try {
+      await assert.rejects(
+        () => pushControlArchive(docker, S3, archive),
+        (error: Error) =>
+          /bucket does not exist/.test(error.message) &&
+          /TUG_RESTIC_IMAGE must be 0\.17 or newer/.test(error.message) === hinted,
+        `restic ${version}: the hint is ${hinted ? 'present' : 'absent'}`,
+      );
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
   }
+});
+
+test('checkRepository redacts credentials from errors the helper itself throws', async () => {
+  const docker = dockerWith(() => ({ code: 0 }));
+  docker.failCreate = () =>
+    new Error(`docker said no for ${S3.env.AWS_SECRET_ACCESS_KEY} and repo-password-1`);
+  const checked = await checkRepository(docker, {
+    repository: 's3:https://s3.example.com/bucket/tug/shop',
+    env: S3.env,
+    password: 'repo-password-1',
+    resticImage: S3.resticImage,
+  });
+  assert.equal(checked.state, 'error', 'a Docker failure is an error state');
+  assert.ok(
+    !JSON.stringify(checked).includes('sekret-value-1') &&
+      !JSON.stringify(checked).includes('repo-password-1'),
+    'neither the access secret nor the repository password appears in the error',
+  );
 });
 
 test('checkRepository reports ok, initialized and error states and never throws for a backend failure', async () => {

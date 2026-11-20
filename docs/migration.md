@@ -58,10 +58,16 @@ tug backup destination set rest:http://backup.internal:8000/tug --env RESTIC_RES
 tug backup password
 ```
 
-To bring old snapshots along, copy them in with the passwords of both repositories (`tug backup password` prints the new one):
+To bring old snapshots along, copy them in with the passwords of both repositories (`tug backup password` prints the new one). The target repository must exist first. Deploy the project and run `tug backup destination check`, which creates it, or create it yourself with Tug's password so deduplication carries over, before Tug creates it:
 
 ```sh
-restic -r rest:http://backup.internal:8000/tug/site copy --from-repo rest:http://backup.internal:8000/old
+restic -r rest:http://backup.internal:8000/tug/<project> init --copy-chunker-params --from-repo rest:http://backup.internal:8000/old
+```
+
+Then copy:
+
+```sh
+restic -r rest:http://backup.internal:8000/tug/<project> copy --from-repo rest:http://backup.internal:8000/old
 ```
 
 To adopt an existing repository instead, place it at `<destination>/<project>` and add tug's password as an extra key, which leaves the old password working:
@@ -70,7 +76,7 @@ To adopt an existing repository instead, place it at `<destination>/<project>` a
 restic -r <repository> key add --new-password-file <file>
 ```
 
-Old snapshots carry other hosts and tags than tug's, so tug's listing, restore and retention ignore them. Keep running `tug backup list --check` while both systems exist, because the old one may be failing without anyone noticing. See [Destinations](backups.md#destinations).
+Copied and adopted snapshots carry other hosts and tags than tug's, so `tug backup list`, retention and `tug restore` ignore them. Restore those with plain restic. Keep running `tug backup list --check` while both systems exist, because the old one may be failing without anyone noticing. See [Destinations](backups.md#destinations).
 
 ## Move the web tier
 

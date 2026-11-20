@@ -4,6 +4,7 @@ import {
   RESTIC_EXIT_REPOSITORY_MISSING,
   RESTIC_EXIT_WRONG_PASSWORD,
   classifyRepositoryProbe,
+  resticTooOld,
   describeProbeFailure,
 } from './repository-probe.ts';
 
@@ -42,14 +43,26 @@ test('failures get the hint that fixes them', () => {
     /wrong repository password/,
     'exit 12 reads as a wrong password',
   );
-  assert.match(
-    describeProbeFailure(
-      probe(1, 'Is there a repository at the following location?'),
-      'Is there a repository at the following location?',
-    ),
-    /older than 0\.17.*TUG_RESTIC_IMAGE must be 0\.17 or newer/,
-    'exit 1 with the repository hint points at an old restic',
+  const hinted =
+    'Fatal: The specified bucket does not exist\nIs there a repository at the following location?';
+  assert.doesNotMatch(
+    describeProbeFailure(probe(1, hinted), hinted, '0.19.1'),
+    /older than 0\.17/,
+    'restic 0.19 appends the repository hint to ordinary failures, so a mistyped bucket must not blame the version',
   );
+  assert.doesNotMatch(
+    describeProbeFailure(probe(1, hinted), hinted),
+    /older than 0\.17/,
+    'an unknown version gets no hint',
+  );
+  assert.match(
+    describeProbeFailure(probe(1, hinted), hinted, '0.16.4'),
+    /restic 0\.16\.4 is older than 0\.17.*TUG_RESTIC_IMAGE must be 0\.17 or newer/,
+    'a known restic older than 0.17 gets the hint',
+  );
+  assert.equal(resticTooOld('0.17.0'), false, '0.17.0 is new enough');
+  assert.equal(resticTooOld('1.0.0'), false, 'a later major is new enough');
+  assert.equal(resticTooOld('0.9.6'), true, '0.9.6 is too old');
   assert.equal(
     describeProbeFailure(probe(1, 'dial tcp: no such host'), 'dial tcp: no such host'),
     'dial tcp: no such host',

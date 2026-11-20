@@ -44,14 +44,18 @@ export function backupDestinationQueries(db: Db) {
         );
       });
     },
-    /** Stores a check result, but only while the destination is still the URL that was checked; false when it changed. */
-    recordCheck(url: string, checkedAt: string, result: unknown): boolean {
+    /**
+     * Stores a check result, but only while the destination is still the one that was checked. `updatedAt` is the
+     * value read before the check began; every replace sets a new one, so a changed URL or changed credentials drop
+     * the stale result. False when it was dropped.
+     */
+    recordCheck(updatedAt: string, checkedAt: string, result: unknown): boolean {
       return (
         db.run(
-          "UPDATE backup_destination SET checked_at=?,check_result_json=? WHERE id='default' AND url=?",
+          "UPDATE backup_destination SET checked_at=?,check_result_json=? WHERE id='default' AND updated_at=?",
           checkedAt,
           JSON.stringify(result),
-          url,
+          updatedAt,
         ).changes > 0
       );
     },

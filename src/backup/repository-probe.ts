@@ -23,14 +23,36 @@ export function classifyRepositoryProbe(result: ProbeResult): RepositoryProbe {
   return 'error';
 }
 
+/** The first restic that exits with code 10 for a missing repository. */
+export const MIN_RESTIC_VERSION = [0, 17, 0] as const;
+
+/** True when `version` (`0.16.4`) is known and older than {@link MIN_RESTIC_VERSION}. */
+export function resticTooOld(version: string | undefined): boolean {
+  const parts = version
+    ?.match(/^(\d+)\.(\d+)\.(\d+)/)
+    ?.slice(1)
+    .map(Number);
+  if (!parts) return false;
+  for (let i = 0; i < 3; i++) {
+    if (parts[i] !== MIN_RESTIC_VERSION[i]) return parts[i] < MIN_RESTIC_VERSION[i];
+  }
+  return false;
+}
+
 /**
  * Explains a failed probe in words. `detail` is restic's own (already summarized and redacted) message, which this
- * only prefixes: a wrong password and a restic too old to exit with 10 each get the hint that fixes them.
+ * only prefixes or suffixes. A wrong password (exit 12) is named. The old-restic hint needs the restic version: the
+ * message text cannot tell it, because restic 0.19 appends "Is there a repository at the following location?" to
+ * every exit-1 failure too (a mistyped bucket, a refused login).
  */
-export function describeProbeFailure(result: ProbeResult, detail: string): string {
+export function describeProbeFailure(
+  result: ProbeResult,
+  detail: string,
+  resticVersion?: string,
+): string {
   if (result.code === RESTIC_EXIT_WRONG_PASSWORD)
     return `wrong repository password (restic exit code ${RESTIC_EXIT_WRONG_PASSWORD}): ${detail}`;
-  if (result.code === 1 && /Is there a repository at the following location/i.test(result.err))
-    return `${detail} (restic older than 0.17 cannot report a missing repository, so TUG_RESTIC_IMAGE must be 0.17 or newer for repositories to be created automatically)`;
+  if (result.code === 1 && resticTooOld(resticVersion))
+    return `${detail} (restic ${resticVersion} is older than 0.17 and cannot report a missing repository, so TUG_RESTIC_IMAGE must be 0.17 or newer for repositories to be created automatically)`;
   return detail;
 }

@@ -298,11 +298,11 @@ const liveDimension = (value: unknown) =>
 const liveBase64 = (value: unknown): value is string =>
   typeof value === 'string' &&
   /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value);
-/** How long a host may lack a certificate, pending or failing its first attempts, before `tug doctor` fails: DNS and port 80 can lag a new domain. */
 /** One repository of a destination check, including the image pull, may take this long. */
 const DESTINATION_CHECK_REPOSITORY_LIMIT_MS = 2 * 60_000;
 /** The whole destination check (every repository) stops after this long; the rest are reported as errors. */
-const DESTINATION_CHECK_LIMIT_MS = 5 * 60_000;
+const DESTINATION_CHECK_LIMIT_MS = 4 * 60_000;
+/** How long a host may lack a certificate, pending or failing its first attempts, before `tug doctor` fails: DNS and port 80 can lag a new domain. */
 const PENDING_TLS_GRACE_MS = 10 * 60_000;
 /** How long `doctor` waits for a TCP connect to an ingress node's port 80 or 443 before calling it unanswered. */
 const PORT_PROBE_TIMEOUT_MS = 3000;
@@ -2488,6 +2488,12 @@ export async function createApp(
       });
     if (destinationCheckRunning)
       return res.status(409).json({ error: 'a destination check is already running' });
+    if (controlPushRunning)
+      return res.status(409).json({
+        error: 'control is backing itself up to the destination right now; try again in a minute',
+      });
+    // Matches the stored check to this exact destination (URL and credentials) if it was replaced meanwhile.
+    const checkedVersion = destination.updated_at;
     const env = backupEnv();
     backups.sync();
     const projects = db
@@ -2501,7 +2507,7 @@ export async function createApp(
       const repositories: {
         name: string;
         repository: string;
-        state: 'ok' | 'initialized' | 'error';
+        state: 'ok' | 'initialized' | 'error' | 'skipped';
         error?: string;
       }[] = [];
       const targets = [
@@ -2517,17 +2523,25 @@ export async function createApp(
         })),
       ];
       for (const target of targets) {
-        const checked = overall.aborted
-          ? { state: 'error' as const, error: 'the destination check ran out of time' }
-          : await checkRepository(docker, {
-              repository: target.repository,
-              env,
-              password: target.password,
-              resticImage: resticImage(),
-              limitMs: DESTINATION_CHECK_REPOSITORY_LIMIT_MS,
-              stallMs: controlStallMs(),
-              signal: overall,
-            });
+        // Every repository shares the destination, so when control's own fails the others would fail the same way,
+        // each after its own timeout, and the request would outlast the CLI's.
+        const controlFailed = repositories[0]?.state === 'error';
+        const checked = controlFailed
+          ? {
+              state: 'skipped' as const,
+              error: "not checked: control's own repository failed on the same destination",
+            }
+          : overall.aborted
+            ? { state: 'error' as const, error: 'the destination check ran out of time' }
+            : await checkRepository(docker, {
+                repository: target.repository,
+                env,
+                password: target.password,
+                resticImage: resticImage(),
+                limitMs: DESTINATION_CHECK_REPOSITORY_LIMIT_MS,
+                stallMs: controlStallMs(),
+                signal: overall,
+              });
         repositories.push({ name: target.name, repository: target.repository, ...checked });
       }
       const result = {
@@ -2537,7 +2551,7 @@ export async function createApp(
         url: destination.url,
         repositories,
       };
-      const stored = destinationQueries.recordCheck(destination.url, result.checkedAt, result);
+      const stored = destinationQueries.recordCheck(checkedVersion, result.checkedAt, result);
       audit(req.actor!, {
         type: 'backup.destination_checked',
         message: `backup destination checked by ${req.actor!.name}: ${result.ok ? 'ok' : 'failed'}`,
@@ -4085,7 +4099,8 @@ export async function createApp(
     // The URL and its credentials are read together, before anything awaits: a destination changed meanwhile
     // must not pair the old URL with the new credentials.
     const destination = backupDestination();
-    if (!destination || controlPushRunning) return null;
+    // A destination check is creating or opening the same repositories; the nightly retry follows soon after.
+    if (!destination || controlPushRunning || destinationCheckRunning) return null;
     const env = backupEnv();
     const key = destinationKey(destination.url);
     controlPushRunning = true;

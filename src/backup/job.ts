@@ -356,7 +356,10 @@ export async function runBackupJob(
     const state = classifyRepositoryProbe(probe);
     if (state === 'error' || (state === 'missing' && kind === 'backup.restore'))
       // A restore needs an existing repository; a wrong password or an unreachable bucket fails every kind of job.
-      throw fail('repository check failed', describeProbeFailure(probe, probe.err || probe.out));
+      throw fail(
+        'repository check failed',
+        describeProbeFailure(probe, probe.err || probe.out, version),
+      );
     if (state === 'missing') {
       // `backup.check` only reports; `backup.run` creates the repository, as only restic exit code 10 means it is absent.
       if (kind === 'backup.check') repository = 'missing';

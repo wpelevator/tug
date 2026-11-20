@@ -52,25 +52,40 @@ interface DestinationCheck {
   repositories: {
     name: string;
     repository: string;
-    state: 'ok' | 'initialized' | 'error';
+    state: 'ok' | 'initialized' | 'error' | 'skipped';
     error?: string;
   }[];
 }
 /** Where the check runs, so a pass is not read as proof that every node can reach the destination. */
 const CHECK_SCOPE =
   'Checked from the control host; each node connects to the destination at its first backup.';
-/** Says why a failed check failed, one repository per line, on stderr. */
-function reportFailedCheck(rt: CliRuntime, check: DestinationCheck, saved: boolean): void {
-  err(
-    rt,
-    saved
-      ? `The destination was saved but is not usable yet: ${check.repositories.filter((r) => r.state === 'error').length} repository check(s) failed.`
-      : `The destination check failed for ${check.repositories.filter((r) => r.state === 'error').length} repository(ies).`,
-  );
-  for (const repository of check.repositories)
-    if (repository.state === 'error')
-      err(rt, `  ${repository.name} (${repository.repository}): ${repository.error ?? 'failed'}`);
+/** One line per repository on stderr, saying what the state means for the operator. */
+function reportCheck(rt: CliRuntime, check: DestinationCheck): void {
+  for (const r of check.repositories) {
+    if (r.state === 'ok') err(rt, `ok: ${r.name} (${r.repository})`);
+    else if (r.state === 'initialized')
+      err(
+        rt,
+        `created a new, empty repository at ${r.repository} (${r.name}); if backups should already be there, the destination path is wrong`,
+      );
+    else if (r.state === 'skipped') err(rt, `skipped: ${r.name}: ${r.error ?? 'not checked'}`);
+    else {
+      err(rt, `failed: ${r.name} (${r.repository}): ${r.error ?? 'failed'}`);
+      err(
+        rt,
+        r.name === '_control'
+          ? "  control's own nightly backup will fail"
+          : '  failed from the control host; nodes connect to the destination themselves at their first backup, so check that path if control and nodes are on different networks',
+      );
+    }
+  }
+  err(rt, CHECK_SCOPE);
 }
+const failedNames = (check: DestinationCheck): string =>
+  check.repositories
+    .filter((r) => r.state === 'error')
+    .map((r) => r.name)
+    .join(', ');
 const checkDestination = (rt: CliRuntime): Promise<DestinationCheck> =>
   withProgress(rt, 'Checking the backup destination', () =>
     request<DestinationCheck>(rt, 'POST', '/api/v1/backup/destination/check', {}),
@@ -274,7 +289,7 @@ export function registerBackup(rt: CliRuntime, program: Command): void {
   destination
     .command('set <url>')
     .description(
-      'set where backups go, such as s3:https://s3.example.com/bucket/tug-backups, rest:http://backup.internal:8000/tug or b2:bucket:tug; credentials are stored encrypted on control. Then checks the destination from the control host (creating missing repositories); nodes connect at their first backup. Exits nonzero when the check fails; --no-check skips it',
+      'set where backups go, such as s3:https://s3.example.com/bucket/tug-backups, rest:http://backup.internal:8000/tug or b2:bucket:tug; credentials are stored encrypted on control. Then checks the destination from the control host (creating missing repositories); nodes connect at their first backup. A failed check is a warning and the exit code stays 0, since the destination is saved; --no-check skips it',
     )
     .option(
       '--env <name>',
@@ -291,19 +306,35 @@ export function registerBackup(rt: CliRuntime, program: Command): void {
         '/api/v1/backup/destination',
         { url, env },
       );
-      const check = o.check ? await checkDestination(rt) : undefined;
+      // Saving succeeded, so nothing below changes the exit code: a failed or unavailable check is a warning.
+      let check: DestinationCheck | undefined;
+      let unavailable = false;
+      if (o.check)
+        try {
+          check = await checkDestination(rt);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (!/destination\/check: 404/.test(message)) throw error;
+          unavailable = true;
+        }
       // One JSON document, so scripts that parse the output of `set` keep working.
       out(rt, JSON.stringify(check ? { ...saved, check } : saved));
       err(
         rt,
         'Control now backs itself up here every night. Keep its password with these credentials: tug backup password --control',
       );
+      if (unavailable)
+        err(
+          rt,
+          'saved; this control is too old to check destinations (it has no destination check), so nothing was verified. Upgrade control to use tug backup destination check',
+        );
       if (check) {
-        err(rt, CHECK_SCOPE);
-        if (!check.ok) {
-          reportFailedCheck(rt, check, true);
-          rt.exitCode = 1;
-        }
+        reportCheck(rt, check);
+        if (!check.ok)
+          err(
+            rt,
+            `saved; the check failed for ${failedNames(check) || 'some repositories'}: fix it and run tug backup destination check`,
+          );
       }
     });
   destination
@@ -314,11 +345,8 @@ export function registerBackup(rt: CliRuntime, program: Command): void {
     .action(async () => {
       const check = await checkDestination(rt);
       print(rt, check);
-      err(rt, CHECK_SCOPE);
-      if (!check.ok) {
-        reportFailedCheck(rt, check, false);
-        rt.exitCode = 1;
-      }
+      reportCheck(rt, check);
+      if (!check.ok) rt.exitCode = 1;
     });
   destination
     .command('show')

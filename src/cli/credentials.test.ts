@@ -290,20 +290,32 @@ test('backup destination set checks the destination and check exits nonzero whil
     );
     assert.match(created.stderr, /control host/, 'the output says where the check ran');
 
+    assert.match(
+      created.stderr,
+      /created a new, empty repository at .*_control/,
+      'a repository that was just created is not reported as plain success',
+    );
+
     code = 1;
-    await assert.rejects(
-      run(...setArgs),
-      (error: Error & { code?: number; stderr?: string }) => {
-        assert.notEqual(error.code, 0, 'a failed check exits nonzero');
-        assert.match(
-          error.stderr ?? '',
-          /saved but is not usable yet/,
-          'the stderr says it was saved',
-        );
-        assert.match(error.stderr ?? '', /_control/, 'the failing repository is listed');
-        return true;
-      },
-      'set exits nonzero when the check fails',
+    const failed = await run(...setArgs);
+    assert.equal(
+      JSON.parse(failed.stdout).check.ok,
+      false,
+      'a failed check still exits 0 after a successful save and is reported in the JSON',
+    );
+    assert.match(
+      failed.stderr,
+      /saved; the check failed for _control.*tug backup destination check/,
+    );
+    assert.match(
+      failed.stderr,
+      /control's own nightly backup will fail/,
+      'the stderr says what it means',
+    );
+    assert.match(
+      failed.stderr,
+      /Checked from the control host/,
+      'the stderr says where the check ran',
     );
     const shown = JSON.parse((await run('backup', 'destination', 'show')).stdout);
     assert.equal(shown.checkResult.ok, false, 'the failed check is stored with the destination');
