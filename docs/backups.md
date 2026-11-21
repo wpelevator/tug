@@ -84,7 +84,7 @@ Stderr has one line per repository, labelled `from control's host`, and one line
 | `offline` | The node was not online when the check started, so it was not asked |
 | `timeout` | The node did not answer within three minutes (`TUG_DESTINATION_CHECK_NODE_TIMEOUT_MS`) |
 
-Replacing or removing the destination stops a running check, so the check that `destination set` starts afterwards is never refused.
+Replacing or removing the destination stops a running check and any control backup still writing to the old destination, so the check that `destination set` starts afterwards is never refused. A repository whose store only answers with retries, such as an unreachable host, fails the check after 45 seconds with restic's last error (for example `dial tcp …: i/o timeout`).
 
 `initialized` means the check created a new, empty repository. During a [migration](migration.md#coming-from-an-existing-restic-setup) an unexpected `created a new, empty repository` means the destination path is wrong, because the repository you expected would have been found.
 
