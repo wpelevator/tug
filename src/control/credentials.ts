@@ -78,6 +78,7 @@ export const ROUTE_ROLES: Record<string, RouteRole> = {
   'GET /api/v1/backup/destination': 'admin',
   'POST /api/v1/backup/destination': 'admin',
   'DELETE /api/v1/backup/destination': 'admin',
+  'POST /api/v1/backup/destination/check': 'admin',
   'GET /api/v1/backup/repository-password': 'admin',
   'POST /api/v1/control/backups/run': 'admin',
   'GET /api/v1/control/backups': 'admin',

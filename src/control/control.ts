@@ -126,6 +126,7 @@ import {
   compareCompat,
   majorMinor,
 } from '../protocol.ts';
+import type { BackupJobPayload } from '../protocol.ts';
 import {
   isReservedProject,
   parseBackupDestination,
@@ -137,11 +138,14 @@ import {
   CONTROL_SNAPSHOT_ID,
   controlRepository,
   controlRepositoryPassword,
+  checkRepository,
   fetchControlArchive,
   listControlSnapshots,
   pushControlArchive,
 } from '../backup/control-backup.ts';
 import { DEFAULT_RESTIC_IMAGE, createBackupService } from '../backup/scheduler.ts';
+import { CheckCommands, checkPassed, nodeCheckFromResult } from '../backup/destination-check.ts';
+import type { DestinationCheckResult, NodeCheck } from '../backup/destination-check.ts';
 import {
   activateRestore,
   finishActivation,
@@ -297,6 +301,12 @@ const liveDimension = (value: unknown) =>
 const liveBase64 = (value: unknown): value is string =>
   typeof value === 'string' &&
   /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value);
+/** One repository of a destination check, including the image pull, may take this long. */
+const DESTINATION_CHECK_REPOSITORY_LIMIT_MS = 2 * 60_000;
+/** The whole destination check (every repository) stops after this long; the rest are reported as errors. */
+const DESTINATION_CHECK_LIMIT_MS = 4 * 60_000;
+/** A node that has not answered its `backup.check` after this long is reported as `timeout`: it may be finishing a backup first. */
+const DESTINATION_CHECK_NODE_LIMIT_MS = 3 * 60_000;
 /** How long a host may lack a certificate, pending or failing its first attempts, before `tug doctor` fails: DNS and port 80 can lag a new domain. */
 const PENDING_TLS_GRACE_MS = 10 * 60_000;
 /** How long `doctor` waits for a TCP connect to an ingress node's port 80 or 443 before calling it unanswered. */
@@ -2311,7 +2321,9 @@ export async function createApp(
     )
       return res.status(400).json({ error: 'targets must be a list of service or volume names' });
     if (!db.get('SELECT 1 FROM projects WHERE id=?', project))
-      return res.status(404).json({ error: `project ${project} not found` });
+      return res.status(404).json({
+        error: `project ${project} has not been deployed yet; backup targets come from its deployed Compose file, so deploy it first`,
+      });
     const result = backups.runNow(project, targets, req.actor!.name);
     if (!result.runs.length)
       return res.status(result.errors.length ? 409 : 404).json({
@@ -2414,6 +2426,7 @@ export async function createApp(
       return res.status(400).json({ error: errMessage(e) });
     }
     const ts = now();
+    abortRunningCheck();
     destinationQueries.replace(
       parsed.url,
       Object.entries(parsed.env).map(([name, value]) => ({
@@ -2431,6 +2444,7 @@ export async function createApp(
     res.json({ ok: true, url: parsed.url, envNames: Object.keys(parsed.env).sort() });
   });
   api('delete', '/api/v1/backup/destination', null, async (req, res) => {
+    abortRunningCheck();
     const removed = destinationQueries.remove();
     if (removed)
       audit(req.actor!, {
@@ -2455,8 +2469,8 @@ export async function createApp(
     const project = String(req.query.project || '');
     if (!PROJECT_NAME_PATTERN.test(project) || isReservedProject(project))
       return res.status(400).json({ error: 'project is required' });
-    if (!db.get('SELECT 1 FROM projects WHERE id=?', project))
-      return res.status(404).json({ error: `project ${project} not found` });
+    // The password is derived from the master key and the name alone, so it exists before the project is deployed.
+    const deployed = Boolean(db.get('SELECT 1 FROM projects WHERE id=?', project));
     const destination = backupDestination();
     audit(req.actor!, {
       type: 'backup.key_read',
@@ -2467,7 +2481,235 @@ export async function createApp(
       project,
       repository: destination ? projectRepository(destination.url, project) : null,
       password: repositoryPassword(masterKey, project),
+      deployed,
     });
+  });
+  /**
+   * The running check, one at a time: it holds a helper container per repository and may create repositories.
+   * Replacing or removing the destination aborts it and clears this at once, so the check that `destination set`
+   * starts right after is never refused by the previous destination's check.
+   */
+  let runningCheck: { checkId: string; abort: () => void } | undefined;
+  const abortRunningCheck = () => {
+    const stale = runningCheck;
+    runningCheck = undefined;
+    stale?.abort();
+  };
+  /** The `backup.check` commands of the running check, so their results reach it and not the backup runs. */
+  const checkCommands = new CheckCommands();
+  const destinationCheckNodeLimitMs = () =>
+    Number(process.env.TUG_DESTINATION_CHECK_NODE_TIMEOUT_MS) || DESTINATION_CHECK_NODE_LIMIT_MS;
+  try {
+    // A check that was running when control stopped never finishes; do not leave it looking alive.
+    destinationQueries.interruptRunningCheck(now());
+  } catch (e) {
+    log.failure('could not mark an interrupted destination check', e, {}, 'error');
+  }
+  /** Stops a node's check command that nobody answered: dropped if the node never fetched it, else cancelled there. */
+  function cancelCheckCommand(commandId: string, nodeId: string, project: string): void {
+    if (advance(db, commandLifecycle, commandId, 'pending', 'cancelled', { updated_at: now() }))
+      return;
+    const running = db.get("SELECT 1 FROM commands WHERE id=? AND state='running'", commandId);
+    if (running) queueCommand(nodeId, project, 'backup.cancel', { commandId });
+  }
+  api('post', '/api/v1/backup/destination/check', null, async (req, res) => {
+    // The URL and its credentials are read together, before anything awaits.
+    const destination = backupDestination();
+    if (!destination)
+      return res.status(409).json({
+        error: 'no backup destination is configured; set one with tug backup destination set',
+      });
+    if (runningCheck)
+      return res.status(409).json({ error: 'a destination check is already running' });
+    if (controlPushRunning)
+      return res.status(409).json({
+        error: 'control is backing itself up to the destination right now; try again in a minute',
+      });
+    // Matches the stored check to this exact destination (URL and credentials) if it was replaced meanwhile.
+    const checkedVersion = destination.updated_at;
+    const destinationUrl = destination.url;
+    const env = backupEnv();
+    backups.sync();
+    const actor = req.actor!;
+    const checkId = id('chk');
+    const result: DestinationCheckResult = {
+      checkId,
+      state: 'running',
+      startedAt: now(),
+      from: 'control',
+      url: destinationUrl,
+      repositories: [],
+      nodes: [],
+    };
+    // Set before anything can fail, so a second request is refused and `show` already reports this check.
+    const aborted = new AbortController();
+    runningCheck = {
+      checkId,
+      abort: () => {
+        aborted.abort();
+        checkCommands.cancelAll();
+      },
+    };
+    let abandoned = false;
+    const persist = () => {
+      if (abandoned) return false;
+      try {
+        // A false return means the destination was replaced meanwhile: this result belongs to nothing.
+        abandoned = !destinationQueries.recordCheck(
+          checkedVersion,
+          result.state === 'done' ? (result.checkedAt ?? null) : null,
+          result,
+        );
+      } catch (e) {
+        abandoned = true;
+        log.failure('could not store the destination check', e, {}, 'warn');
+      }
+      return !abandoned;
+    };
+    persist();
+    const limitMs = destinationCheckNodeLimitMs();
+    const redact = (text: string) => redactSecrets(text, Object.values(env));
+    const projects = db
+      .all<{ project_id: string }>(
+        'SELECT DISTINCT project_id FROM backup_schedules WHERE enabled=1 ORDER BY project_id',
+      )
+      .map((row) => row.project_id);
+
+    /** Each node that runs a project's backups checks the destination for itself: it may reach it over another network. */
+    function startNodeChecks(): Promise<void>[] {
+      const pairs = db.all<{
+        project_id: string;
+        node_id: string;
+        name: string;
+        status: string;
+        disabled_at: string | null;
+        last_seen_at: string | null;
+      }>(
+        `SELECT DISTINCT s.project_id,s.node_id,n.name,n.status,n.disabled_at,n.last_seen_at FROM backup_schedules s JOIN nodes n ON n.id=s.node_id WHERE s.enabled=1 ORDER BY s.project_id,n.name`,
+      );
+      return pairs.map((pair, index) => {
+        const entry: NodeCheck = { project: pair.project_id, node: pair.name, state: 'pending' };
+        result.nodes.push(entry);
+        const status = statusOf(pair);
+        if (status !== 'online') {
+          Object.assign(entry, { state: 'offline', error: `the node is ${status}` });
+          return Promise.resolve();
+        }
+        const payload: BackupJobPayload = {
+          runId: `${checkId}-${index}`,
+          project: pair.project_id,
+          target: '',
+          type: 'command',
+          repository: projectRepository(destinationUrl, pair.project_id),
+          resticImage: resticImage(),
+          node: pair.name,
+          // Read-only, so it goes ahead of scheduled backups in the node's queue.
+          tags: ['tug', `project:${pair.project_id}`, 'check', 'trigger:manual'],
+          limits: { memory: '512m', timeoutSec: Math.max(1, Math.ceil(limitMs / 1000)) },
+        };
+        const commandId = queueCommand(
+          pair.node_id,
+          pair.project_id,
+          'backup.check',
+          payload as unknown as Record<string, unknown>,
+          new Date(Date.now() + limitMs).toISOString(),
+        );
+        return checkCommands
+          .wait(commandId, limitMs, () =>
+            cancelCheckCommand(commandId, pair.node_id, pair.project_id),
+          )
+          .then((outcome) => {
+            Object.assign(
+              entry,
+              outcome === 'timeout'
+                ? {
+                    state: 'timeout',
+                    error: `did not answer within ${Math.round(limitMs / 1000)} s`,
+                  }
+                : nodeCheckFromResult(entry, outcome.state, outcome.result, redact),
+            );
+            persist();
+          });
+      });
+    }
+
+    async function run(): Promise<void> {
+      const nodeChecks = startNodeChecks();
+      persist();
+      const overall = AbortSignal.any([
+        AbortSignal.timeout(DESTINATION_CHECK_LIMIT_MS),
+        aborted.signal,
+      ]);
+      const targets = [
+        {
+          name: '_control',
+          repository: controlRepository(destinationUrl),
+          password: controlRepositoryPassword(masterKey),
+        },
+        ...projects.map((project) => ({
+          name: project,
+          repository: projectRepository(destinationUrl, project),
+          password: repositoryPassword(masterKey, project),
+        })),
+      ];
+      for (const target of targets) {
+        // Every repository shares the destination, so when control's own fails the others would fail the same way,
+        // each after its own timeout, and the check would run past its limit.
+        const controlFailed = result.repositories[0]?.state === 'error';
+        const checked = controlFailed
+          ? {
+              state: 'skipped' as const,
+              error: "not checked: control's own repository failed on the same destination",
+            }
+          : overall.aborted
+            ? { state: 'error' as const, error: 'the destination check ran out of time' }
+            : await checkRepository(docker, {
+                repository: target.repository,
+                env,
+                password: target.password,
+                resticImage: resticImage(),
+                limitMs: DESTINATION_CHECK_REPOSITORY_LIMIT_MS,
+                stallMs: controlStallMs(),
+                signal: overall,
+              });
+        result.repositories.push({ name: target.name, repository: target.repository, ...checked });
+        persist();
+      }
+      await Promise.all(nodeChecks);
+    }
+
+    void run()
+      .catch((e) => {
+        log.failure('destination check failed', e, {}, 'error');
+        result.error = 'the check stopped unexpectedly';
+      })
+      .then(() => {
+        for (const node of result.nodes)
+          if (node.state === 'pending') Object.assign(node, { state: 'timeout' });
+        result.state = 'done';
+        result.checkedAt = now();
+        result.ok = !result.error && checkPassed(result.repositories, result.nodes);
+        const kept = persist();
+        try {
+          audit(actor, {
+            type: 'backup.destination_checked',
+            message: `backup destination checked by ${actor.name}: ${result.ok ? 'ok' : 'failed'}`,
+            metadata: {
+              url: destinationUrl,
+              ok: result.ok,
+              repositories: result.repositories.map(({ name, state }) => ({ name, state })),
+              nodes: result.nodes.map(({ project, node, state }) => ({ project, node, state })),
+              stored: kept,
+            },
+          });
+        } catch (e) {
+          log.failure('could not audit the destination check', e, {}, 'warn');
+        }
+      })
+      .finally(() => {
+        if (runningCheck?.checkId === checkId) runningCheck = undefined;
+      });
+    res.status(202).json({ checkId, state: 'running' });
   });
 
   api('post', '/api/v1/secrets', bodyProject, async (req, res) => {
@@ -4001,7 +4243,8 @@ export async function createApp(
     // The URL and its credentials are read together, before anything awaits: a destination changed meanwhile
     // must not pair the old URL with the new credentials.
     const destination = backupDestination();
-    if (!destination || controlPushRunning) return null;
+    // A destination check is creating or opening the same repositories; the nightly retry follows soon after.
+    if (!destination || controlPushRunning || runningCheck) return null;
     const env = backupEnv();
     const key = destinationKey(destination.url);
     controlPushRunning = true;
@@ -5107,7 +5350,9 @@ export async function createApp(
     if (jobs.length) backups.onHeartbeat(jobs);
     for (const cr of report.commandResults) {
       if (!runningHere(cr.commandId)) continue;
-      backups.onResult(cr.commandId, cr.state, cr.result);
+      // A destination check's command is not a backup run: its result goes to the check and nothing else.
+      if (!checkCommands.onResult(cr.commandId, cr.state, cr.result))
+        backups.onResult(cr.commandId, cr.state, cr.result);
       advanceWhere(
         db,
         commandLifecycle,

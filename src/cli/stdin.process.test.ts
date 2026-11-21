@@ -67,6 +67,7 @@ test('whole-document stdin commands and HTTP commands exit after completing thei
         'destination',
         'set',
         's3:https://s3.example.com/bucket/tug',
+        '--no-check',
         '--env',
         'AWS_ACCESS_KEY_ID',
         '--env',
