@@ -144,6 +144,7 @@ import {
   listControlSnapshots,
   pushControlArchive,
 } from '../backup/control-backup.ts';
+import { stopResticGracefully } from '../backup/job.ts';
 import { DEFAULT_RESTIC_IMAGE, createBackupService } from '../backup/scheduler.ts';
 import { CheckCommands, checkPassed, nodeCheckFromResult } from '../backup/destination-check.ts';
 import type { DestinationCheckResult, NodeCheck } from '../backup/destination-check.ts';
@@ -4208,8 +4209,11 @@ export async function createApp(
     }
     for (const helper of await docker
       .listContainers({ label: ['tug.job=control-backup'] })
-      .catch(() => []))
+      .catch(() => [])) {
+      // A restic left running by the previous process may hold the repository lock; it is stopped before removal.
+      if (helper.State === 'running') await stopResticGracefully(docker, helper.Id);
       await docker.removeContainer(helper.Id).catch(() => undefined);
+    }
   }
   /** Writes a consistent control archive into the control backup directory; the caller records it and decides how long it stays. */
   async function createControlArchive(

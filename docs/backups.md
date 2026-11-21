@@ -202,7 +202,7 @@ Restores are as generic as backups:
 | 3. Safety backup | Backs up the current data, tagged `trigger:pre-restore`, exempt from retention and not applying retention itself. Skip it with `--no-safety-backup`. If it fails, nothing has changed: the writers start again and the lock drops |
 | 4. Restore | Restores, then starts the writers and unlocks. A volume is first restored into a hidden directory inside itself (`.tug-restore-<id>`) and every file is read and verified. Only then is the live content replaced, so an unreadable repository leaves the volume as it was. This needs free space in the volume for a second copy of the snapshot |
 
-- **Stalls.** A restore whose restic command makes no progress for ten minutes ends as `interrupted` with the reason, and the writers stay stopped.
+- **Stalls.** A restore whose restic command makes no progress for fifteen minutes ends as `interrupted` with the reason, and the writers stay stopped.
 - **Failures.** If the restore fails, the writers stay stopped and the project stays locked, because a half-restored database serving traffic is worse than an outage. `tug restore resume <id>` tries again, and `tug restore release <id>` starts the services anyway.
 - **Same-target snapshots only.** A snapshot can be restored only into the target that produced it (its `project:` and `target:` tags are checked). tug does not restore a snapshot into a different project.
 - **Scheduled backups** of a target are skipped while it is being restored.
@@ -280,8 +280,9 @@ A node runs backup and restore jobs in lanes: a restore and its safety backup fi
 - **One job per project.** A node never runs two jobs of one project at once, because they contend for the project's repository lock.
 - **Concurrency.** It runs two at a time only on a host with 3 GiB or more of memory, since each restic helper reserves 512 MB by default. Set `TUG_BACKUP_CONCURRENCY` on the agent to change that.
 - **Queue.** `tug backup list` shows a job waiting for a slot as `queued behind <run>`, with the run id in its last column.
-- **Stall limit.** Every restic command fails when it makes no progress for ten minutes, so a damaged repository or an unreachable store cannot hold a slot for the whole job limit. A prune that stalls after the snapshot was taken is a warning on the run, not a failed backup.
+- **Stall limit.** Every restic command fails when it makes no progress for fifteen minutes, which is longer than the ten minutes it waits for a repository lock (`--retry-lock`), so waiting for a lock is not reported as a stall, while a damaged repository or an unreachable store still cannot hold a slot for the whole job limit. A prune that stalls after the snapshot was taken is a warning on the run, not a failed backup.
 - **Cancel.** `tug backup cancel <run>` stops a queued or running backup. `tug restore cancel <id>` stops a restore that is waiting on its safety backup (nothing has changed) or restoring (it is interrupted and its services stay stopped until `resume` or `release`). An agent older than control ignores a cancel.
+- **Stopping restic.** When a job is cancelled, times out or stalls, and when an agent or control restarts with a helper left over, tug sends restic SIGINT and gives it 20 seconds to exit before removing the helper container. A restic killed in the middle of a prune would leave its exclusive lock in the repository and block every later backup until the lock went stale.
 
 ## Known limits
 

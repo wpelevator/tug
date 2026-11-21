@@ -3,7 +3,14 @@ import { createReadStream, createWriteStream } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { pipeline } from 'node:stream/promises';
 import { redactSecrets } from './destination.ts';
-import { collect, ensureImage, parseSummary } from './job.ts';
+import {
+  RESTIC_LOCK_WAIT,
+  RESTIC_STOP_GRACE_MS,
+  collect,
+  ensureImage,
+  parseSummary,
+  stopResticGracefully,
+} from './job.ts';
 import { classifyRepositoryProbe, describeProbeFailure } from './repository-probe.ts';
 import type { Collected } from './job.ts';
 import type { AttachedProcess, DockerApi } from '../docker-api.ts';
@@ -60,6 +67,8 @@ export interface ControlRepositoryAccess {
   limitMs?: number;
   /** A restic command that only prints backend retry notices for this long is failed; defaults to {@link CONTROL_STALL_MS}. */
   stallMs?: number;
+  /** How long restic gets to exit after SIGINT before the helper is removed; defaults to `RESTIC_STOP_GRACE_MS`. */
+  stopGraceMs?: number;
   /** Cancels the job (a client that went away); the helper is removed either way. */
   signal?: AbortSignal;
 }
@@ -122,6 +131,7 @@ interface ResticAccess {
   resticImage: string;
   limitMs?: number;
   stallMs?: number;
+  stopGraceMs?: number;
   signal?: AbortSignal;
 }
 
@@ -146,16 +156,26 @@ async function withRestic<T>(
   const limit = access.limitMs ?? CONTROL_JOB_LIMIT_MS;
   let container: string | undefined;
   let finished = false;
+  /** restic processes started and not yet closed: a helper removed while one runs would SIGKILL it with its lock held. */
+  let running = 0;
+  let interrupted = false;
+  const track = (proc: AttachedProcess): AttachedProcess => {
+    running++;
+    proc.once('close', () => running--);
+    return proc;
+  };
   // One limit covers the image pull, the helper and every restic command.
   let timer: NodeJS.Timeout | undefined;
   const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(
-      () =>
-        reject(new ControlBackupError(`restic did not finish within ${Math.round(limit / 1000)}s`)),
-      limit,
-    );
+    timer = setTimeout(() => {
+      interrupted = true;
+      reject(new ControlBackupError(`restic did not finish within ${Math.round(limit / 1000)}s`));
+    }, limit);
     // Not unref'd: while a job is pending its limit is what ends it, and the timer is cleared as soon as it finishes.
-    const cancel = () => reject(new ControlBackupError('the control backup was cancelled'));
+    const cancel = () => {
+      interrupted = true;
+      reject(new ControlBackupError('the control backup was cancelled'));
+    };
     if (access.signal?.aborted) cancel();
     else access.signal?.addEventListener('abort', cancel, { once: true });
   });
@@ -221,6 +241,7 @@ async function withRestic<T>(
         interval = setInterval(
           () => {
             if (!retrying || Date.now() - lastProgress < stallMs) return;
+            interrupted = true;
             reject(
               new ControlBackupError(
                 `restic made no progress for ${Math.round(stallMs / 1000)}s: ${redact(summarize(tail))}`,
@@ -234,7 +255,7 @@ async function withRestic<T>(
       return { stalled, stop: () => clearInterval(interval) };
     };
     const exec: Exec = async (cmd) => {
-      const proc = await Promise.race([docker.execStart(id, { cmd }), timeout]);
+      const proc = track(await Promise.race([docker.execStart(id, { cmd }), timeout]));
       const watch = watchStall(proc);
       try {
         return finish(await Promise.race([collect(proc), timeout, watch.stalled]));
@@ -251,7 +272,7 @@ async function withRestic<T>(
         },
         () => undefined,
       );
-      const proc = await Promise.race([starting, timeout]);
+      const proc = track(await Promise.race([starting, timeout]));
       // A read sends stdout to the file; collect() still keeps a bounded copy, which is ignored.
       const done = collect(proc);
       const moved =
@@ -286,11 +307,20 @@ async function withRestic<T>(
     finished = true;
     clearTimeout(timer);
     // Bounded, so a Docker daemon that hangs here cannot wedge the job (and with it every later control backup).
-    if (container)
+    if (container) {
+      const name = container;
       await Promise.race([
-        docker.removeContainer(container).catch(() => undefined),
-        new Promise((resolve) => setTimeout(resolve, REMOVE_LIMIT_MS).unref()),
+        (async () => {
+          // A restic still running (timeout, cancel, stall) releases its repository lock before the helper is removed.
+          if (running > 0 || interrupted)
+            await stopResticGracefully(docker, name, access.stopGraceMs ?? RESTIC_STOP_GRACE_MS);
+          await docker.removeContainer(name).catch(() => undefined);
+        })(),
+        new Promise((resolve) =>
+          setTimeout(resolve, REMOVE_LIMIT_MS + RESTIC_STOP_GRACE_MS).unref(),
+        ),
       ]);
+    }
   }
 }
 
@@ -335,7 +365,7 @@ export async function pushControlArchive(
         CONTROL_TAG,
         ...(options.tags ?? []).flatMap((tag) => ['--tag', tag]),
         '--retry-lock',
-        '10m',
+        RESTIC_LOCK_WAIT,
       ],
       archivePath,
       'write',
@@ -354,7 +384,7 @@ export async function pushControlArchive(
       ...RETENTION,
       '--prune',
       '--retry-lock',
-      '10m',
+      RESTIC_LOCK_WAIT,
     ]);
     return {
       snapshotId: parseSummary(backup.out).snapshotId,

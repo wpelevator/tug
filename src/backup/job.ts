@@ -8,7 +8,12 @@ import {
   assertVolumeOwnership,
   volumeName,
 } from '../container-spec.ts';
-import type { AttachedProcess, CreateContainerBody, DockerApi } from '../docker-api.ts';
+import type {
+  AttachedProcess,
+  CreateContainerBody,
+  DockerApi,
+  ExecOptions,
+} from '../docker-api.ts';
 import type {
   BackupCredentialsResponse,
   BackupJobPayload,
@@ -31,14 +36,56 @@ export interface JobContext {
   signal?: AbortSignal;
   /** How long a restic command may go without progress before it is failed; defaults to `RESTIC_STALL_MS`. */
   stallMs?: number;
+  /** How long restic gets to exit after SIGINT before the helper is removed; defaults to `RESTIC_STOP_GRACE_MS`. */
+  stopGraceMs?: number;
 }
+
+/** What `--retry-lock` waits for a repository lock, for `backup` and `forget` alike. */
+export const RESTIC_LOCK_WAIT = '10m';
+export const RESTIC_LOCK_WAIT_MS = 10 * 60_000;
 
 /**
  * A restic command that makes no progress for this long is failed instead of waiting out the job limit. restic retries
  * a store that errors on every read for many minutes and says little while it does, so without this a damaged or
  * unreachable repository looks like a job that is still running.
  */
-export const RESTIC_STALL_MS = 10 * 60_000;
+export const RESTIC_STALL_MS = RESTIC_LOCK_WAIT_MS + 5 * 60_000;
+
+/** How long restic gets to release its repository lock after SIGINT before the helper container is removed. */
+export const RESTIC_STOP_GRACE_MS = 20_000;
+
+/**
+ * Stops restic in a helper container so that it releases its lock, then lets the caller remove the container.
+ * Removing a container force-kills every process in it, and a SIGKILLed `forget --prune` leaves an exclusive lock that
+ * blocks every later backup until it goes stale. restic cleans up on SIGINT, so it is sent that, then SIGTERM, and is
+ * given `graceMs` in all to exit; the container is removed afterwards whatever happened, so this never throws.
+ */
+export async function stopResticGracefully(
+  docker: DockerApi,
+  container: string,
+  graceMs = RESTIC_STOP_GRACE_MS,
+): Promise<void> {
+  const seconds = Math.max(1, Math.ceil(graceMs / 1000));
+  const term = Math.max(1, Math.floor(seconds / 4));
+  const script =
+    `pkill -INT -x restic || exit 0; ` +
+    `i=0; while [ $i -lt ${seconds - term} ]; do pgrep -x restic >/dev/null || exit 0; sleep 1; i=$((i+1)); done; ` +
+    `pkill -TERM -x restic; sleep ${term}`;
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      docker.execStart(container, { cmd: ['sh', '-c', script] }).then(collect),
+      new Promise((resolve) => {
+        timer = setTimeout(resolve, graceMs + 5000);
+        timer.unref();
+      }),
+    ]);
+  } catch {
+    /* the container may already be gone or stopped: it is removed next */
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /** restic's backend retry notices: output, but not progress. */
 const RETRY_NOTICE = /returned error, retrying|retrying after|connection refused|i\/o timeout/i;
@@ -84,7 +131,7 @@ export function forgetArgs(payload: BackupJobPayload, retention: BackupRetention
     ...keep,
     '--prune',
     '--retry-lock',
-    '10m',
+    RESTIC_LOCK_WAIT,
   ];
 }
 
@@ -96,7 +143,7 @@ export function backupArgs(payload: BackupJobPayload, stdinName?: string): strin
     payload.node,
     ...tagArgs(payload.tags),
     '--retry-lock',
-    '10m',
+    RESTIC_LOCK_WAIT,
   ];
   if (stdinName) return ['backup', '--stdin', '--stdin-filename', stdinName, ...common];
   const exclude = (payload.volume?.exclude ?? []).flatMap((pattern) => ['--exclude', pattern]);
@@ -205,6 +252,7 @@ export async function runBackupJob(
   const phase = (value: JobPhase, bytes?: number) => ctx.onPhase?.(value, bytes);
   const redact = (text: string) => redactSecrets(text, secretValues(credentials));
   const created: string[] = [];
+  let running = 0;
   const labels = { [LABEL_JOB]: commandId };
   const name = (suffix: string) => `tug-job-${payload.runId}-${suffix}`;
   const fail = (what: string, detail: string): JobError =>
@@ -269,6 +317,13 @@ export async function runBackupJob(
       ],
       HostConfig: { Memory: memoryBytes(payload.limits.memory), Binds: binds },
     });
+    /** Starts a restic process in the helper and counts it until it closes, so the helper is stopped gracefully if it is still running. */
+    const startRestic = async (options: ExecOptions): Promise<AttachedProcess> => {
+      const proc = await docker.execStart(restic, options);
+      running++;
+      proc.once('close', () => running--);
+      return proc;
+    };
     // Cancellation and the job's time limit must reach a restic that never returns; the helpers are removed on the way out.
     const untilAborted = <T>(work: Promise<T>): Promise<T> => {
       const signal = ctx.signal;
@@ -340,8 +395,7 @@ export async function runBackupJob(
       }
     };
     /** A restic command, failed when it stops making progress. */
-    const exec = async (cmd: string[]): Promise<Collected> =>
-      watch(await docker.execStart(restic, { cmd }));
+    const exec = async (cmd: string[]): Promise<Collected> => watch(await startRestic({ cmd }));
     /** Any other command in the helper (find, rm, mv): silent for as long as it takes, but still cancellable. */
     const execPlain = async (cmd: string[]): Promise<Collected> =>
       untilAborted(docker.execStart(restic, { cmd }).then(collect));
@@ -409,7 +463,7 @@ export async function runBackupJob(
           })
         ).find((container) => container.State === 'running');
         if (!running) throw new JobError(`service ${service} is not running on this node`);
-        const dump = await docker.execStart(restic, {
+        const dump = await startRestic({
           cmd: ['restic', 'dump', restore.snapshotId, filename],
         });
         const loader = await docker.execStart(running.Id, { cmd: restoreArgv, stdin: true });
@@ -496,7 +550,7 @@ export async function runBackupJob(
           `service ${service} is not running on this node, so there is nothing to back up`,
         );
       const producer = await docker.execStart(running.Id, { cmd: argv });
-      const proc = await docker.execStart(restic, {
+      const proc = await startRestic({
         cmd: ['restic', ...backupArgs(payload, filename)],
         stdin: true,
       });
@@ -579,13 +633,27 @@ export async function runBackupJob(
       ...(warnings.length ? { warnings } : {}),
     };
   } finally {
-    for (const id of created.reverse()) await docker.removeContainer(id).catch(() => {});
+    // A restic still running here (aborted, timed out or stalled) must release its repository lock before it is removed.
+    for (const id of created.reverse()) {
+      if (running > 0 || ctx.signal?.aborted)
+        await stopResticGracefully(docker, id, ctx.stopGraceMs);
+      await docker.removeContainer(id).catch(() => {});
+    }
   }
 }
 
 /** Removes helper containers left behind by an agent that stopped mid-job. */
-export async function removeStaleJobContainers(docker: DockerApi): Promise<number> {
+export async function removeStaleJobContainers(
+  docker: DockerApi,
+  graceMs = RESTIC_STOP_GRACE_MS,
+): Promise<number> {
   const stale = await docker.listContainers({ label: [LABEL_JOB] }, true);
-  for (const container of stale) await docker.removeContainer(container.Id).catch(() => {});
+  // A restic left running by the previous agent may hold the repository lock; it is stopped, not killed.
+  await Promise.all(
+    stale.map(async (container) => {
+      if (container.State === 'running') await stopResticGracefully(docker, container.Id, graceMs);
+      await docker.removeContainer(container.Id).catch(() => {});
+    }),
+  );
   return stale.length;
 }

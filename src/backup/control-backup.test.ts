@@ -822,3 +822,40 @@ test('checkRepository reports ok, initialized and error states and never throws 
   assert.equal(noInit.state, 'error', 'a failed init is an error');
   assert.match(noInit.error ?? '', /repository init failed/, 'the init failure is named');
 });
+
+test('a cancelled control backup interrupts restic before its helper is removed, and a finished one sends no signal', async () => {
+  const dir = await scratch();
+  const archive = path.join(dir, 'a.tar.gz');
+  await fs.writeFile(archive, 'x');
+  try {
+    const stopsRestic = (call: string) => call.includes('pkill -INT -x restic');
+    const docker = dockerWith((cmd) => (cmd[1] === 'backup' ? undefined : { code: 0 }));
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 50);
+    await assert.rejects(
+      () =>
+        pushControlArchive(
+          docker,
+          { ...S3, signal: controller.signal, stopGraceMs: 1000 },
+          archive,
+        ),
+      /cancelled/,
+      'the cancel ends the backup',
+    );
+    const stop = docker.calls.findIndex(stopsRestic);
+    assert.ok(stop >= 0, 'the running restic gets SIGINT so it releases the repository lock');
+    assert.ok(
+      docker.calls.findIndex((call) => call.startsWith('rm ')) > stop,
+      'the helper is removed only after restic was told to stop',
+    );
+
+    const clean = dockerWith(() => ({ code: 0 }));
+    await pushControlArchive(clean, S3, archive);
+    assert.ok(
+      !clean.calls.some(stopsRestic),
+      'a backup whose restic commands finished sends no signal',
+    );
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});

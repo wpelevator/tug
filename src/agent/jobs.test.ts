@@ -5,7 +5,16 @@ import os from 'node:os';
 import path from 'node:path';
 import type { PassThrough } from 'node:stream';
 import { JobRunner, defaultJobConcurrency, laneOf } from './jobs.ts';
-import { backupArgs, forgetArgs, memoryBytes, parseSummary, runBackupJob } from '../backup/job.ts';
+import {
+  RESTIC_LOCK_WAIT_MS,
+  RESTIC_STALL_MS,
+  backupArgs,
+  forgetArgs,
+  memoryBytes,
+  parseSummary,
+  removeStaleJobContainers,
+  runBackupJob,
+} from '../backup/job.ts';
 import { FakeDocker } from '../../tests/fake-docker.ts';
 import { JOB_CANCELLED } from '../protocol.ts';
 import type { BackupJobPayload, Command } from '../protocol.ts';
@@ -734,4 +743,100 @@ test('a prune that stalls after the snapshot was taken is a warning, not a faile
     /retention failed: restic made no progress/,
     'the stalled prune is a warning',
   );
+});
+
+const stopsRestic = (call: string) =>
+  call.startsWith('exec-start') && call.includes('pkill -INT -x restic');
+const hangingRestore = () =>
+  dockerWith((cmd) => {
+    if (cmd[0] === 'restic' && cmd[1] === 'snapshots') return { code: 0, out: SNAPSHOT_LISTING };
+    if (cmd[0] === 'restic' && cmd[1] === 'restore') return undefined;
+    return { code: 0 };
+  });
+
+test('the stall limit is longer than the repository lock wait, so waiting for a lock is not reported as a stall', () => {
+  assert.ok(
+    RESTIC_STALL_MS > RESTIC_LOCK_WAIT_MS,
+    'a job that waits out --retry-lock must not be failed as stalled first',
+  );
+  const args = [...forgetArgs(payload(), { daily: 7 }), ...backupArgs(payload())];
+  assert.equal(
+    args.filter((arg) => arg === '10m').length,
+    2,
+    'backup and forget wait the lock wait the stall limit was sized against',
+  );
+});
+
+test('an aborted job interrupts restic so it releases its lock before the helper is removed', async () => {
+  const docker = hangingRestore();
+  docker.volumes.set('tug_v4_site_uploads', {
+    Name: 'tug_v4_site_uploads',
+    Labels: { 'tug.project': 'site', 'tug.volume': 'uploads' },
+  });
+  const controller = new AbortController();
+  const running = runBackupJob(
+    volumeRestore('scratch'),
+    'cmd',
+    { docker, credentials, signal: controller.signal, stopGraceMs: 1000 },
+    'backup.restore',
+  );
+  setTimeout(() => controller.abort(new Error('cancelled by test')), 50);
+  await assert.rejects(running, /cancelled by test/, 'the abort ends the job');
+  const stop = docker.calls.findIndex(stopsRestic);
+  const remove = docker.calls.findIndex((call) => call.startsWith('rm tug-job-rst_abc123-restic'));
+  assert.ok(stop >= 0, 'restic is sent SIGINT (pkill -INT) in the helper');
+  assert.ok(remove > stop, 'the helper is removed only after restic was told to stop');
+});
+
+test('a restic that stalls is interrupted before its helper is removed', async () => {
+  const docker = hangingRestore();
+  docker.volumes.set('tug_v4_site_uploads', {
+    Name: 'tug_v4_site_uploads',
+    Labels: { 'tug.project': 'site', 'tug.volume': 'uploads' },
+  });
+  await assert.rejects(
+    runBackupJob(
+      volumeRestore('scratch'),
+      'cmd',
+      { docker, credentials, stallMs: 80, stopGraceMs: 1000 },
+      'backup.restore',
+    ),
+    /made no progress/,
+    'the stall fails the job',
+  );
+  assert.ok(docker.calls.some(stopsRestic), 'the stalled restic gets SIGINT, not a forced removal');
+});
+
+test('a job whose restic commands all finished removes its helper without sending any signal', async () => {
+  const docker = dockerWith(() => ({ code: 0 }));
+  const { jobs } = await runner(docker);
+  await jobs.start(command('cmd_1', payload()));
+  await settle(jobs, 1);
+  assert.ok(!docker.calls.some(stopsRestic), 'no restic is running, so none is interrupted');
+});
+
+test('leftover helpers of a previous agent are stopped gracefully when running and removed either way', async () => {
+  const docker = dockerWith(() => ({ code: 0 }));
+  const live = await docker.createContainer('tug-job-a-restic', {
+    Image: 'restic/restic:0.19.1',
+    Labels: { 'tug.job': 'a' },
+  });
+  await docker.startContainer(live);
+  await docker.createContainer('tug-job-b-restic', {
+    Image: 'restic/restic:0.19.1',
+    Labels: { 'tug.job': 'b' },
+  });
+  docker.calls.length = 0;
+  assert.equal(await removeStaleJobContainers(docker, 1000), 2, 'both leftovers are counted');
+  assert.equal(
+    docker.calls.filter(stopsRestic).length,
+    1,
+    'only the running helper may hold a lock, so only it is signalled',
+  );
+  assert.ok(
+    docker.calls.findIndex(stopsRestic) <
+      docker.calls.findIndex((c) => c === 'rm tug-job-a-restic'),
+    'the running helper is removed after the signal',
+  );
+  assert.deepEqual(docker.names(), [], 'every leftover is removed');
 });
