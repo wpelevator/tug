@@ -6,7 +6,7 @@ import path from 'node:path';
 import { startMtlsControl } from '../../../tests/helpers.ts';
 import { cliOutcome, execCli } from '../../../tests/cli-inprocess.ts';
 
-test('registry login reads the token from stdin, prints no token, and refuses a terminal or empty stdin', async () => {
+test('registry login reads the token from stdin, prints no token, refuses empty stdin, and needs a prompt-capable terminal when not piped', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-registry-cli-'));
   const control = await startMtlsControl(dir);
   try {
@@ -43,8 +43,8 @@ test('registry login reads the token from stdin, prints no token, and refuses a 
     assert.notEqual(empty.code, 0, 'empty stdin fails');
     assert.match(empty.stderr, /stdin was empty/, 'the failure says what to pipe');
     const tty = await login('ghcr.io', undefined, true);
-    assert.notEqual(tty.code, 0, 'a terminal is refused so the token is not typed into history');
-    assert.match(tty.stderr, /pipe the token in/, 'the failure shows the piped form');
+    assert.notEqual(tty.code, 0, 'a terminal that cannot prompt (CI set) is refused');
+    assert.match(tty.stderr, /no terminal to ask in: pipe the token/, 'the failure shows the piped form');
   } finally {
     await control.close();
     await fs.rm(dir, { recursive: true, force: true });

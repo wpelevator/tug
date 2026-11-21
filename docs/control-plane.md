@@ -110,7 +110,7 @@ Private registry credentials live in the encrypted project secret `TUG_REGISTRY_
 printf %s "$GHCR_TOKEN" | tug registry login ghcr.io --username ci-user --project site
 ```
 
-`tug registry login` reads the token on stdin and adds the host to the secret, keeping the hosts already there. GHCR needs a classic personal access token with `read:packages`. To write the whole JSON yourself, give it to `tug secret set TUG_REGISTRY_AUTH --project site` on stdin.
+`tug registry login` reads the token on stdin (or asks for it without echo in a terminal) and adds the host to the secret, keeping the hosts already there. GHCR needs a classic personal access token with `read:packages`. To write the whole JSON yourself, give it to `tug secret set TUG_REGISTRY_AUTH --project site` on stdin.
 
 | Topic | Behavior |
 | --- | --- |
