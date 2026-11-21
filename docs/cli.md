@@ -21,7 +21,7 @@ Commands read `tug <subject> <verb> [params]`, such as `tug node add` and `tug s
 | Read logs, open a shell, run a job | `logs`, `exec`, `run`, `inspect` | [Services and volumes](#services-and-volumes) |
 | Restart, scale, free held services, prune builds | `restart`, `scale`, `hold release`, `image prune` | [Services and volumes](#services-and-volumes) |
 | Manage volumes | `volume list`, `volume remove` | [Services and volumes](#services-and-volumes) |
-| Manage values | `secret`, `var` | [Secrets and variables](#secrets-and-variables) |
+| Manage values, and see which ones a file needs | `secret`, `var`, `values`, `registry login` | [Secrets and variables](#secrets-and-variables) |
 | Map extra hostnames | `domain add`, `list`, `remove` | [Secrets and variables](#secrets-and-variables) |
 | Read the edge's logs, see which hosts have a certificate | `ingress logs`, `ingress tls` | [Ingress](#ingress) |
 | Back up and restore | `backup`, `restore` | [Backups](#backups) |
@@ -36,7 +36,7 @@ A positional argument names the primary target: the SSH host for `node add`, the
 | --- | --- | --- | --- |
 | `--config <file>` | `TUG_CONFIG` | none | `tug.yml`, `tug.yaml`, `tug.json` or `.tug.json` in the current directory |
 | `--control-url <url>` | `TUG_CONTROL_URL` | `controlUrl` | The credential's address. An override is a connect target only |
-| `--project <name>` | `TUG_PROJECT` | `project` | `site` |
+| `--project <name>` | `TUG_PROJECT` | `project` | The Compose file's `name:`, else its directory name, see [Which project](configuration.md#which-project) |
 | `--credential <file>` | `TUG_CREDENTIAL` (inline), `TUG_CREDENTIAL_FILE` | `credential`, only in the untracked overlay | none |
 | `--verbose` | `TUG_VERBOSE=1` | none | off, see [Progress](#progress-and-quiet-steps) |
 
@@ -75,7 +75,7 @@ The CLI reads a YAML or JSON file, `tug.yml` by convention, so a repository can 
 | Lookup | `--config` or `TUG_CONFIG` select a file, which must exist. Otherwise only the working directory is searched, not its parents, for `tug.yml`, `tug.yaml`, `tug.json` and `.tug.json`. More than one is an error and none is fine. When a command needs a credential and finds no config, the error names the nearest parent directory that has one |
 | Format | `.json` is JSON. Anything else is YAML, which also reads JSON |
 | Overlay | `tug.local.yml` next to `tug.yml` (`.tug.local.json` next to `.tug.json`, `<name>.local<ext>` in general) holds what must not be committed. It has the same keys plus `credential` (a path to a credential file), and its values win key by key, including inside `nodeDefaults` and each node. `credential` in the tracked file is an error |
-| `tug init` | Writes the tracked file only when it is missing, so an existing one keeps its comments. It saves the credential with mode `0600` under `~/.config/tug/credentials/`, points the overlay at it and adds the overlay to `.gitignore` in a git checkout |
+| `tug init` | Writes the tracked file only when it is missing, so an existing one keeps its comments (it appends `project:` when the file has none and the project came from the Compose file). The new file always has `project:`. It saves the credential with mode `0600` under `~/.config/tug/credentials/`, points the overlay at it and adds the overlay to `.gitignore` in a git checkout |
 | Strict keys | Unknown keys, wrong types and out-of-range values fail with the file and key. Paths in the file (`file`, `ca`) resolve relative to the file |
 | Not desired state | tug never reconciles against the file. Only the node commands that install or register read `nodes`, as flag defaults. See [Nodes](nodes.md#declaring-nodes-in-the-config-file) |
 
@@ -87,7 +87,7 @@ Each key is the camelCase of the long flag it supplies a default for, with the s
 | `controlSsh` | `<ssh-target>` of the control host | `control upgrade`, `control stop`, `control restart`, `upgrade` |
 | `project` | `--project` | Project-scoped commands |
 | `credential` (overlay only) | `--credential` | All |
-| `file` | `-f, --file` | `deploy`, `lint` |
+| `file` | `-f, --file` | `deploy`, `lint`, `values` |
 | `buildLocal` | `--build-local` | `deploy` |
 | `profile` | `--profile` | `deploy` |
 | `wait` | `--no-wait` | `deploy`, `rollback`, `backup run`, `node add`, `replace`, `repair`, `migrate`, `upgrade` |
@@ -293,7 +293,9 @@ By default it deploys the first of `compose.yaml`, `compose.yml`, `docker-compos
 | --- | --- | --- |
 | `-f, --file <file>` | Compose file | First match above |
 | `--version <version>` | Display version. Image identities stay immutable even when reused. The default label hashes only the Compose file, so a change to a `build:` context, a secret or a variable keeps it; the summary and `tug status` then add the deployment id | `git-<Compose hash>` |
-| `--build-local` | Build on your Docker daemon and upload saved images without source. Single-platform, must match the node architecture | Build on control |
+| `--build` | Build the services that have both `build:` and `image:` for this deploy. By default their `image:` is deployed and nothing is built, see [Build or pull](compose.md#build-or-pull). `--build-local` on its own builds only services with no `image:` | off |
+| `--build-local` | Build on your Docker daemon and upload saved images without source. Single-platform, must match the node architecture. Refused for a service whose `build.secrets` are set | Build on control |
+| `--retry` | Run the project's failed deployment again, with new pulls and health checks, after you fixed the cause (a registry login, a missing image, a port). It reads no Compose file and conflicts with `--build`, `--build-local`, `--dry-run`, `--version`, `--var` and `--move`. It fails when the project's current deployment has not failed | off |
 | `--compose-cli` | Render with `docker compose config` (needs Docker Compose v2 locally), for files that use `include`, `!reset` or `!override` | tug's [native reader](compose.md#native-compose-reader) |
 | `--var <NAME=value>` | Value for this deploy only. Repeatable. A value may contain commas | none |
 | `--profile <name>` | Enable a Compose profile. Repeatable or comma-separated | none |
@@ -306,7 +308,8 @@ By default it deploys the first of `compose.yaml`, `compose.yml`, `docker-compos
 - **Summary.** One line, `site git-ab12: deployment dep_1 succeeded, 3 services`. The default label `git-<Compose hash>` covers the Compose file and not the build context, secrets or variables, so two deployments can carry one label. When control's recent deployments of the project include another with the same label, the line ends with `(same label as dep_0; tell them apart by deployment id)`. A rollback deployment, whose label `rollback-git-ab12-<ms>` embeds the one it replaced, counts as the same label. `tug status` shows `[dep_1]` after the label in the same case. `--json` prints the full result with the desired state and the `values` record of where each `${NAME}` came from.
 - **Moved data.** After `--move`, the services that write to the moved one are held until you run `tug restore run` or `tug hold release`.
 - **Interruption.** If the wait is interrupted (control unreachable, timeout), the error names the deployment and `tug deploy cancel [id]`. A deploy refused because another is still rolling out names that one the same way.
-- **Project name.** `deploy` warns when the file's `name:` differs from the tug project, because secrets, backups and restores are scoped to the project.
+- **Project name.** With no `--project`, `TUG_PROJECT` or `project:` in `tug.yml`, the project is the file's `name:`, or the name of its directory. `deploy` warns when the file's `name:` differs from the project that was chosen another way, because secrets, backups and restores are scoped to the project.
+- **Retry and restart.** `tug restart` restarts a running container and does not clear a failed rollout, so a deployment that failed on a pull stays failed. `tug deploy --retry` gives the same deployment a new revision, which the agents apply again.
 - **Missing values.** It scans the file for `${NAME}` or `$NAME` with no default that control and `--var` do not supply. In a terminal it asks, per variable, whether to generate a random 192-bit secret, enter a secret (hidden) or enter a variable (visible), and stores it before deploying. It never overwrites an existing value and never prints a generated one. Without a terminal, or with `CI` set, it fails naming the variables and the commands that set them.
 
 To deploy CI-built images, push them to a registry and declare `image:`. Control pins tags to digests before publishing. See [Private registries](control-plane.md#published-images-and-private-registries).
@@ -355,6 +358,8 @@ Every `${NAME}` in the Compose file comes from control: a project secret, a proj
 | `tug secret list` | | Names and versions, never values |
 | `tug secret remove [name]` | | Deletes a secret |
 | `tug secret import [file]` | `--vars <names>`, `--secrets <names>`, `--select`, `--overwrite`, `-y` | Stores the entries of a dotenv file (default `./.env`). Every entry is a secret unless `--vars` names it. A terminal lists the result and confirms. `--select` picks secret, variable or exclude per entry. Existing names are skipped unless `--overwrite` (a name of the other kind is always skipped), a bare `KEY` is skipped, and values are never printed |
+| `tug values` | `-f, --file <file>`, `--json` | Lists every `${NAME}` and bare `environment` key the file references with its status: `secret` or `var` (set on control), `default` (the file supplies one) or `missing`. Exits 1 while one is missing. Secret values are never shown |
+| `tug registry login <host>` | `-u, --username <name>` (required) | Adds a registry host to the project secret `TUG_REGISTRY_AUTH` and keeps its other hosts. The token is read from stdin and never printed, and a terminal is refused so it stays out of your shell history: `printf %s "$TOKEN" \| tug registry login ghcr.io --username octo`. Needs admin. GHCR accepts a classic personal access token with `read:packages`, not a fine-grained one |
 | `tug var set <name>` | `--value`, `--from-file` | Sets a project variable: a visible value such as an image tag, host or port |
 | `tug var list` | `--values` | Lists variables. Without `--values` it needs only `read` |
 | `tug var remove [name]` | | Deletes a variable |
@@ -404,7 +409,7 @@ Scoped credentials for CI and teammates. See [Access control](access-control.md)
 
 | Command | Options | What it does |
 | --- | --- | --- |
-| `tug credential create <name>` | `--role read\|deploy\|admin`, `--project <name>` (repeatable), `--select-projects`, `--expires-in-days <n>` (default and maximum `365`) | Creates a credential and prints it once on stdout. Control keeps no copy of its private key. Without `--project` it covers all projects, and admin credentials cannot be limited. Here `--project` is the credential's scope, not the connection project. Names are 1 to 64 letters, numbers, dots, underscores or hyphens and cannot be reused after revocation |
+| `tug credential create <name>` | `--role read\|deploy\|admin`, `--project <name>` (repeatable), `--select-projects`, `--expires-in-days <n>` (default and maximum `365`), `--raw` | Creates a credential and prints it once on stdout. Control keeps no copy of its private key. Without `--project` it covers all projects, and admin credentials cannot be limited. Here `--project` is the credential's scope, not the connection project. Names are 1 to 64 letters, numbers, dots, underscores or hyphens and cannot be reused after revocation. `--raw` prints only the token, for `tug credential create ci --role deploy --raw \| gh secret set TUG_CREDENTIAL`. `TUG_CREDENTIAL` accepts that token or the whole JSON output |
 | `tug credential list` | | Role, projects, creator, last use, expiry and revocation, never secrets |
 | `tug credential revoke [name]` | | Revokes at once and closes live sessions |
 

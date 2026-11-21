@@ -38,6 +38,18 @@ Before 1.0 semver gives no guarantees, so the whole `0.minor` is the compatibili
 
 Control 3.0 reads the database written by 2.x and adds `project_vars` and a value record to deployments. Deployments made before the upgrade have no record.
 
+## Upgrading to 4.0: the image you wrote is the image that runs
+
+Three defaults changed so that a deploy does what the Compose file says. 4.0 is a new major, so the CLI, control and agents move together, as for 3.0: upgrade with `tug upgrade` from a 4.0 CLI ([Upgrade control and nodes](upgrades.md)), then update the CLI in CI and on every other laptop.
+
+| Before 4.0 | From 4.0 | What to do |
+| --- | --- | --- |
+| A service with both `build:` and `image:` was built, and the `image:` name was only a tag | tug deploys `image:` as written, pinned by digest, and builds nothing. `tug deploy --build` builds every such service for that deploy, and `x-tug: { build: true }` on a service always builds it. `build:` alone still builds | If CI built on the node through this pair, add `--build` to that deploy or set `x-tug.build: true`. If CI pushes the image to a registry first, nothing changes and the deploy stops rebuilding it ([Build or pull](compose.md#build-or-pull)) |
+| With no `--project`, `TUG_PROJECT` or `project:` in `tug.yml`, the project was `site` | The project is the Compose file's `name:`, or the name of its directory. The `site` default is gone from the CLI. `tug init` and `tug setup` write `project:` to `tug.yml` | Run `tug status` before the first deploy. A project that lives under `site` needs `project: site` in `tug.yml`, or a deploy creates a second project and finds none of its secrets ([Which project](configuration.md#which-project)) |
+| A bare `environment` key (`DB_PASSWORD` or `DB_PASSWORD:`) passed through whatever the container host had, usually nothing | It is checked like `${DB_PASSWORD}`: the deploy fails naming it when control has no secret or variable of that name. `KEY: ""` is a literal empty value | Run `tug values` (or `tug deploy --dry-run`) in each project and set what it lists as missing, or write `KEY: ""` where an empty value was intended ([Where values come from](compose.md#where-values-come-from)) |
+
+Control 4.0 reads the database written by 3.x and changes no table. A 3.x CLI is refused by a 4.0 control, and a 4.0 CLI refuses a 3.x control, so there is no mixed state to plan for.
+
 ## What 1.0 freezes
 
 From 1.0.0 these are public contracts. Inside one major they change only compatibly, and a breaking change is a new major announced in the changelog:

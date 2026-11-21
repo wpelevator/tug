@@ -77,6 +77,8 @@ After an older restore:
 
 Remote builds save immutable images under `<data dir>/images/<build ID>.tar.gz`. Agents download only the images assigned to them through `GET /agent/v1/images/:buildId`, verify the compressed SHA-256 and byte count, validate the saved image metadata and load the archive, with no registry pull. No registry certificate, daemon trust change or inbound connection to a node is needed, and downloads use the same mTLS connection as every other agent request.
 
+A service with both `build:` and `image:` is not built unless you ask (`tug deploy --build`, or `x-tug.build: true`), see [Build or pull](compose.md#build-or-pull). `build.secrets` reach the build through the control process environment and BuildKit secret mounts. Control decrypts them only for the build, and they appear in no image layer, command argument, error text or deployment record. `build.additional_contexts` need `docker buildx` on control, and the deploy fails saying so when it is missing.
+
 `tug deploy --build-local` builds on your machine and uploads archives instead of source. Control validates and imports them, gives them immutable tags and serves them to assigned agents. Builds are single-platform Linux images (amd64 or arm64), so use a Docker builder matching the target nodes. Agents reject an incompatible platform before starting it. This flag is distinct from the installers' development-only `--build-local-image`, which builds the tug runtime itself.
 
 ### Pruning
@@ -105,10 +107,10 @@ Private registry credentials live in the encrypted project secret `TUG_REGISTRY_
 ```
 
 ```sh
-tug secret set TUG_REGISTRY_AUTH --project site
+printf %s "$GHCR_TOKEN" | tug registry login ghcr.io --username ci-user --project site
 ```
 
-Give the value on stdin.
+`tug registry login` reads the token on stdin and adds the host to the secret, keeping the hosts already there. GHCR needs a classic personal access token with `read:packages`. To write the whole JSON yourself, give it to `tug secret set TUG_REGISTRY_AUTH --project site` on stdin.
 
 | Topic | Behavior |
 | --- | --- |

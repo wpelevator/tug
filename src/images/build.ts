@@ -279,6 +279,8 @@ export async function buildImage({
   } catch (error) {
     if (!secrets || !Object.keys(secrets).length) throw error;
     // Build output can echo a secret a Dockerfile printed; never hand that back to the operator.
+    // No cause: it would carry the unredacted output.
+    // eslint-disable-next-line preserve-caught-error
     throw new Error(redact(errMessage(error), secrets));
   }
 }

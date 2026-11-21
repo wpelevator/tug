@@ -16,9 +16,21 @@ The CLI config is a YAML or JSON file that is safe to commit. It holds the contr
 |---|---|
 | `TUG_CONFIG` | Path to the CLI config file (default: `tug.yml`, `tug.yaml`, `tug.json` or `.tug.json` in the current directory). |
 | `TUG_CONTROL_URL` | Connect target for the control API (an `https://` URL; for example a tunnel). The server is verified by its generated control name regardless; overrides the config file and the credential's default address. |
-| `TUG_PROJECT` | Default project; overrides the config file. |
+| `TUG_PROJECT` | Default project; overrides the config file, see [Which project](#which-project). |
 | `TUG_CREDENTIAL` | Encoded operator credential (for CI). Conflicts with `TUG_CREDENTIAL_FILE`; overrides the overlay. |
 | `TUG_CREDENTIAL_FILE` | Path of a credential file; overrides the `credential` path in the untracked overlay. |
+
+### Which project
+
+A command that works on one project takes it from the first of these that is set:
+
+1. `--project <name>`
+2. `TUG_PROJECT`
+3. `project:` in `tug.yml`
+4. `name:` in the Compose file
+5. The name of the Compose file's directory, lower-cased with characters that Compose rejects removed
+
+With none of them usable (a directory named `---`), the command fails and asks for `--project`. `tug init` and `tug control setup` write `project:` to `tug.yml`, so the project stays the same when the directory is renamed. `tug deploy -f other/compose.yaml` follows the file it is given unless one of the first three names the project. `tug status` before the first deploy shows which projects control holds. A project that was created under the former default `site` needs `project: site`.
 
 ## Control plane
 
