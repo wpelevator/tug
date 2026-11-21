@@ -304,6 +304,8 @@ const liveBase64 = (value: unknown): value is string =>
   /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value);
 /** One repository of a destination check, including the image pull, may take this long. */
 const DESTINATION_CHECK_REPOSITORY_LIMIT_MS = 2 * 60_000;
+/** A repository whose store answers only with retries for this long fails the check with restic's last error. */
+const DESTINATION_CHECK_STALL_MS = 45_000;
 /** The whole destination check (every repository) stops after this long; the rest are reported as errors. */
 const DESTINATION_CHECK_LIMIT_MS = 4 * 60_000;
 /** A node that has not answered its `backup.check` after this long is reported as `timeout`: it may be finishing a backup first. */
@@ -2433,6 +2435,7 @@ export async function createApp(
     }
     const ts = now();
     abortRunningCheck();
+    abortControlPush();
     destinationQueries.replace(
       parsed.url,
       Object.entries(parsed.env).map(([name, value]) => ({
@@ -2451,6 +2454,7 @@ export async function createApp(
   });
   api('delete', '/api/v1/backup/destination', null, async (req, res) => {
     abortRunningCheck();
+    abortControlPush();
     const removed = destinationQueries.remove();
     if (removed)
       audit(req.actor!, {
@@ -2527,7 +2531,7 @@ export async function createApp(
       });
     if (runningCheck)
       return res.status(409).json({ error: 'a destination check is already running' });
-    if (controlPushRunning)
+    if (controlPush)
       return res.status(409).json({
         error: 'control is backing itself up to the destination right now; try again in a minute',
       });
@@ -2675,7 +2679,12 @@ export async function createApp(
                 password: target.password,
                 resticImage: resticImage(),
                 limitMs: DESTINATION_CHECK_REPOSITORY_LIMIT_MS,
-                stallMs: controlStallMs(),
+                // Shorter than the time limit, so an unreachable store fails with restic's own retry error
+                // (`dial tcp …: i/o timeout`) instead of "did not finish within".
+                stallMs: Math.min(
+                  controlStallMs() ?? DESTINATION_CHECK_STALL_MS,
+                  DESTINATION_CHECK_STALL_MS,
+                ),
                 signal: overall,
               });
         result.repositories.push({ name: target.name, repository: target.repository, ...checked });
@@ -4259,7 +4268,7 @@ export async function createApp(
           error:
             'no backup destination is configured; run tug backup destination set <url>, or use tug control backup --local for an archive on the control host, or -o <file> to save one on this machine',
         });
-      if (controlPushRunning)
+      if (controlPush)
         return res.status(409).json({ error: 'a control backup is already running' });
       const result = await runControlDestination('manual');
       if (!result)
@@ -4368,7 +4377,16 @@ export async function createApp(
       repository: controlRepository(destination.url),
     };
   }
-  let controlPushRunning = false;
+  /**
+   * The control backup now running. Replacing or removing the destination cancels it and clears this at once: it is
+   * writing to a destination that is no longer in use, and the check `destination set` starts must not wait for it.
+   */
+  let controlPush: AbortController | undefined;
+  const abortControlPush = () => {
+    const stale = controlPush;
+    controlPush = undefined;
+    stale?.abort();
+  };
   /** Backs control up into the shared destination: a consistent archive without images, streamed into restic. */
   interface ControlDestinationResult {
     ok: boolean;
@@ -4387,17 +4405,18 @@ export async function createApp(
     // must not pair the old URL with the new credentials.
     const destination = backupDestination();
     // A destination check is creating or opening the same repositories; the nightly retry follows soon after.
-    if (!destination || controlPushRunning || runningCheck) return null;
+    if (!destination || controlPush || runningCheck) return null;
     const env = backupEnv();
     const key = destinationKey(destination.url);
-    controlPushRunning = true;
+    const push = new AbortController();
+    controlPush = push;
     const startedAt = now();
     let archive: { backupId: string; artifactRef: string } | undefined;
     try {
       archive = await withWriter(() => createControlArchive(false));
       const size = (await fs.stat(archive.artifactRef)).size;
-      if (restartRequired) return null;
-      const push = await pushControlArchive(
+      if (restartRequired || push.signal.aborted) return null;
+      const pushed = await pushControlArchive(
         docker,
         {
           url: destination.url,
@@ -4406,6 +4425,7 @@ export async function createApp(
           resticImage: resticImage(),
           limitMs: controlJobLimitMs(),
           stallMs: controlStallMs(),
+          signal: push.signal,
         },
         archive.artifactRef,
         // What the snapshot holds, visible when choosing one: no images and, always, no workload data.
@@ -4415,9 +4435,9 @@ export async function createApp(
       const meta = {
         type: 'control',
         destination: key,
-        snapshotId: push.snapshotId,
+        snapshotId: pushed.snapshotId,
         sizeBytes: size,
-        ...push,
+        ...pushed,
       };
       db.run(
         'INSERT INTO backups(id,project_id,target,node_id,state,artifact_ref,metadata_json,created_at,completed_at) VALUES(?,?,?,?,?,?,?,?,?)',
@@ -4426,7 +4446,7 @@ export async function createApp(
         'control-destination',
         null,
         'completed',
-        push.snapshotId ?? null,
+        pushed.snapshotId ?? null,
         JSON.stringify(meta),
         startedAt,
         now(),
@@ -4442,13 +4462,14 @@ export async function createApp(
         stored: 'destination',
         backupId: archive.backupId,
         repository: controlRepository(destination.url),
-        snapshotId: push.snapshotId,
+        snapshotId: pushed.snapshotId,
         sizeBytes: size,
-        ...(push.warning ? { warning: push.warning } : {}),
+        ...(pushed.warning ? { warning: pushed.warning } : {}),
       };
     } catch (e) {
-      // A restore replaced the database while this push ran; there is nothing left to record it in.
-      if (restartRequired) return null;
+      // A restore replaced the database while this push ran; there is nothing left to record it in. A push cancelled
+      // because the destination was replaced or removed is not a failure of any destination in use.
+      if (restartRequired || push.signal.aborted) return null;
       const error = errMessage(e);
       db.run(
         'INSERT INTO backups(id,project_id,target,node_id,state,artifact_ref,metadata_json,created_at,completed_at) VALUES(?,?,?,?,?,?,?,?,?)',
@@ -4466,12 +4487,12 @@ export async function createApp(
       return { ok: false, stored: 'destination', error };
     } finally {
       if (archive) await fs.rm(archive.artifactRef, { force: true });
-      controlPushRunning = false;
+      if (controlPush === push) controlPush = undefined;
     }
   }
   controlDestinationTick = () => {
     const destination = backupDestination();
-    if (controlPushRunning || restartRequired || !destination) return;
+    if (controlPush || restartRequired || !destination) return;
     const key = destinationKey(destination.url);
     const at = Date.now();
     const ok = lastControlDestination(key, true);

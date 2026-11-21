@@ -578,6 +578,50 @@ test('the nightly control backup and a manual one wait while a destination check
   }
 });
 
+test('replacing the destination cancels a control backup still writing to the old one, so the new check is not refused', async () => {
+  const docker = new FakeDocker();
+  docker.addImage('restic/restic:0.17.3');
+  let pushes = 0;
+  docker.execResponder = (cmd) => {
+    if (cmd[1] !== 'backup') return { code: 0 };
+    pushes++;
+    return undefined; // the push to the first destination hangs, as against an unreachable store
+  };
+  const s = await server(docker, {
+    TUG_RESTIC_IMAGE: 'restic/restic:0.17.3',
+    TUG_BACKUP_TICK_MS: '50',
+  });
+  try {
+    await call(s.base, 'POST', '/api/v1/backup/destination', DESTINATION);
+    await until(() => pushes === 1, 'the first control backup to start writing to the destination');
+    const helper = docker.calls
+      .find((c) => c.startsWith('create tug-control-backup-'))!
+      .split(' ')[1];
+    await call(s.base, 'POST', '/api/v1/backup/destination', {
+      ...DESTINATION,
+      url: DESTINATION.url + '-new',
+    });
+    const check = await call(s.base, 'POST', '/api/v1/backup/destination/check', {});
+    assert.equal(
+      check.status,
+      202,
+      'the check that destination set starts right after a replacement is not refused by the old control backup',
+    );
+    await until(
+      () => docker.calls.some((c) => c.startsWith(`rm ${helper}`)),
+      'the helper of the cancelled control backup to be removed',
+    );
+    const { control } = await listing(s.base);
+    assert.notEqual(
+      control?.lastStatus,
+      'failed',
+      'a control backup cancelled by the replacement is not recorded as a failure of the new destination',
+    );
+  } finally {
+    await s.close();
+  }
+});
+
 test('startup removes what a crash left behind and leaves recent files alone', async () => {
   const docker = resticDocker();
   await docker.createContainer('tug-control-backup-dead', {
