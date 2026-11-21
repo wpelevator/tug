@@ -65,4 +65,4 @@ If the new site fails before you retire the old volumes, point DNS back and run 
 
 ## Next steps
 
-Rehearse a restore with [Backups](backups.md), and read the [Production checklist](production-checklist.md) before the cutover. To move between tug servers later, see [Migrating to new servers](migration.md). A fresh tug backup repository sits beside any restic repository you used before. tug does not read the old one.
+Rehearse a restore with [Backups](backups.md), and read the [Production checklist](production-checklist.md) before the cutover. To move between tug servers later, see [Migrating to new servers](migration.md). A fresh tug backup repository sits beside any restic repository you used before, and tug does not read the old one. [Coming from an existing restic setup](migration.md#coming-from-an-existing-restic-setup) shows how to copy old snapshots in.

@@ -176,6 +176,7 @@ The project column says how a scoped credential's allowed projects are checked: 
 | `GET /api/v1/backup/destination` | `admin` | Control-wide; URL and variable names, never values |
 | `POST /api/v1/backup/destination` | `admin` | Control-wide |
 | `DELETE /api/v1/backup/destination` | `admin` | Control-wide |
+| `POST /api/v1/backup/destination/check` | `admin` | Control-wide; starts a background check of the destination from control and from the nodes, and creates missing control-side repositories |
 | `GET /api/v1/backup/repository-password` | `admin` | Query `project` prints that project's repository password; `control` prints the control repository password |
 | `POST /api/v1/secrets` | `admin` | Control-wide |
 | `POST /api/v1/registry/login` | `admin` | Body `project`, `host`, `username`, `password`; adds the host to `TUG_REGISTRY_AUTH` and keeps the others |

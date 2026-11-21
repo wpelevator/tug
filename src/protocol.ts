@@ -285,8 +285,8 @@ export interface BackupJobResult {
   totalBytes?: number;
   durationMs: number;
   resticVersion?: string;
-  /** Repository state for `backup.check`. */
-  repository?: 'ok' | 'initialized';
+  /** Repository state: `missing` only from the read-only `backup.check`; `backup.run` initializes instead. */
+  repository?: 'ok' | 'initialized' | 'missing';
   warnings?: string[];
 }
 

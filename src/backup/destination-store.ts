@@ -10,10 +10,10 @@ interface DestinationSecret {
 
 /** Accepts encrypted values only. Encryption and credential parsing belong to the caller. */
 export function backupDestinationQueries(db: Db) {
+  const find = () =>
+    db.get<BackupDestinationRow>("SELECT * FROM backup_destination WHERE id='default'");
   return {
-    find(): BackupDestinationRow | undefined {
-      return db.get<BackupDestinationRow>("SELECT * FROM backup_destination WHERE id='default'");
-    },
+    find,
     secret(name: string): string | undefined {
       return db.get<{ encrypted_value: string }>(
         'SELECT encrypted_value FROM secrets WHERE project_id=? AND name=?',
@@ -43,6 +43,54 @@ export function backupDestinationQueries(db: Db) {
           at,
         );
       });
+    },
+    /**
+     * Stores a check result, but only while the destination is still the one that was checked. `updatedAt` is the
+     * value read before the check began; every replace sets a new one, so a changed URL or changed credentials drop
+     * the stale result. False when it was dropped. `checkedAt` is null while the check is still running.
+     */
+    recordCheck(updatedAt: string, checkedAt: string | null, result: unknown): boolean {
+      return (
+        db.run(
+          "UPDATE backup_destination SET checked_at=?,check_result_json=? WHERE id='default' AND updated_at=?",
+          checkedAt,
+          JSON.stringify(result),
+          updatedAt,
+        ).changes > 0
+      );
+    },
+    /**
+     * A check that was running when control stopped will never finish: mark it done and failed, so `show` and a CLI
+     * that polls for it do not wait forever. Returns whether a running check was found.
+     */
+    interruptRunningCheck(at: string): boolean {
+      const row = find();
+      if (!row?.check_result_json) return false;
+      let result: { state?: string; error?: string; nodes?: { state: string }[] };
+      try {
+        result = JSON.parse(row.check_result_json);
+      } catch {
+        return false;
+      }
+      if (result.state !== 'running') return false;
+      const interrupted = {
+        ...result,
+        state: 'done',
+        ok: false,
+        checkedAt: at,
+        error: 'control restarted before the check finished',
+        nodes: (result.nodes ?? []).map((node) =>
+          node.state === 'pending'
+            ? { ...node, state: 'timeout', error: 'control restarted' }
+            : node,
+        ),
+      };
+      db.run(
+        "UPDATE backup_destination SET checked_at=?,check_result_json=? WHERE id='default'",
+        at,
+        JSON.stringify(interrupted),
+      );
+      return true;
     },
     remove(): boolean {
       return immediateTransaction(db, () => {

@@ -1,0 +1,5 @@
+---
+'@wpelevator/tug': minor
+---
+
+Add `tug backup destination check`, which checks that backups can reach the destination: control's own repository from the control host, and each project's repository both from the control host and from every node that runs its backups, since a node may reach the destination over another network. Control creates missing repositories; a node only reports one as not created yet. The command exits nonzero when a repository or node fails, is offline or does not answer, and waits for the check up to 10 minutes. `tug backup destination set` runs the check after saving (skip it with `--no-check`) and keeps exit code 0 when the check fails, since the destination is saved. Backup destinations may now use any built-in restic backend: `s3:`, `rest:`, `b2:`, `azure:`, `gs:` and `swift:`. Adds `POST /api/v1/backup/destination/check`, which starts the check and answers `202` with a `checkId`, a `checkResult` with `state` and `nodes` in `GET /api/v1/backup/destination`, and `deployed` in the repository password response.

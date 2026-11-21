@@ -32,6 +32,15 @@ test('invalid destinations are rejected with a message naming the problem', () =
     [{ url: 's3:https://host/b', env: { ...s3Env, RESTIC_PASSWORD: 'x' } }, /managed by Tug/],
     [{ url: 's3:https://host/b', env: { ...s3Env, EXTRA: '' } }, /EXTRA needs a value/],
     [{ url: 's3:https://host/b c', env: s3Env }, /whitespace/],
+    [
+      { url: 'sftp:backup@host:/srv/tug', env: {} },
+      /sftp: destinations are not supported.*SSH keys.*rest-server.*S3/,
+    ],
+    [{ url: 'rclone:remote:path', env: {} }, /rclone: destinations are not supported/],
+    [
+      { url: 'webdav://host/x', env: {} },
+      /url must start with s3:, rest:, b2:, azure:, gs: or swift:/,
+    ],
   ];
   for (const [input, message] of cases)
     assert.throws(
@@ -62,4 +71,24 @@ test('redaction removes secret values and URL credentials but not short ordinary
   assert.ok(!redacted.includes('AKIAEXAMPLE'), 'the access key should be removed');
   assert.ok(!redacted.includes('hunter22'), 'a password in a URL should be removed');
   assert.ok(redacted.endsWith('in db'), 'values under four characters are left alone');
+});
+
+test('every built-in restic backend Tug supports is accepted', () => {
+  for (const url of [
+    'rest:http://backup.internal:8000/tug',
+    'b2:bucket:tug',
+    'azure:container:/tug',
+    'gs:bucket:/tug',
+    'swift:container:/tug',
+    '/srv/restic',
+  ])
+    assert.equal(parseBackupDestination({ url, env: {} }).url, url, `${url} should be accepted`);
+  assert.equal(
+    parseBackupDestination({
+      url: 'rest:http://backup.internal:8000/tug/',
+      env: { RESTIC_REST_USERNAME: 'tug', RESTIC_REST_PASSWORD: 'pw-value' },
+    }).url,
+    'rest:http://backup.internal:8000/tug',
+    'a rest url with credentials in env keeps the url normalized',
+  );
 });

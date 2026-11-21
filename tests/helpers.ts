@@ -153,6 +153,7 @@ export async function startMtlsControl(
     eventPruneIntervalMs?: number;
     /** Replaces image operations of control (build, save, inspect, ...); `resolve` defaults to the test resolver. */
     images?: Partial<ControlImageOperations>;
+    docker?: import('../src/docker-api.ts').DockerApi;
   } = {},
 ) {
   const { createApp, listen } = await import('../src/control/control.ts');
