@@ -12,11 +12,12 @@ import { until } from '../../tests/wait.ts';
 import { json, testImageResolver, testControlUrl, testIdentity } from '../../tests/helpers.ts';
 import { repositoryPassword } from '../backup/destination.ts';
 import type { CreateContainerBody } from '../docker-api.ts';
+import type { BackupJobPayload } from '../protocol.ts';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
-async function server(docker?: FakeDocker) {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-bkdest-'));
+async function server(docker?: FakeDocker, existingDir?: string) {
+  const dir = existingDir ?? (await fs.mkdtemp(path.join(os.tmpdir(), 'tug-bkdest-')));
   process.env.TUG_DATA_DIR = dir;
   const app = await createApp({
     identity: testIdentity,
@@ -29,6 +30,7 @@ async function server(docker?: FakeDocker) {
   });
   return {
     base: `http://127.0.0.1:${(srv.address() as AddressInfo).port}`,
+    dir,
     dbFile: path.join(dir, 'tug.db'),
     keyFile: path.join(dir, 'master.key'),
     close: () => new Promise((resolve) => srv.close(resolve)),
@@ -40,6 +42,27 @@ const headers: Record<string, string> = {
 };
 const call = (base: string, method: string, route: string, body?: unknown, h = headers) =>
   fetch(`${base}${route}`, { method, headers: h, body: body ? JSON.stringify(body) : undefined });
+/** Polls until the stored result is the done check `checkId`. */
+async function runCheckResult(base: string, checkId: string) {
+  let shown = await json(await call(base, 'GET', '/api/v1/backup/destination'));
+  await until(async () => {
+    shown = await json(await call(base, 'GET', '/api/v1/backup/destination'));
+    return shown.checkResult?.checkId === checkId && shown.checkResult.state === 'done';
+  }, 'the check to finish');
+  return shown.checkResult;
+}
+/** Starts a check (202 at once) and polls the stored result until that check is done. */
+async function runCheck(base: string) {
+  const started = await call(base, 'POST', '/api/v1/backup/destination/check', {});
+  assert.equal(started.status, 202, 'a check starts in the background');
+  const { checkId, state } = await json(started);
+  assert.equal(state, 'running', 'the start answers that the check is running');
+  let shown = await json(await call(base, 'GET', '/api/v1/backup/destination'));
+  assert.equal(shown.checkResult.checkId, checkId, 'the running check is already stored');
+  const result = await runCheckResult(base, checkId);
+  shown = await json(await call(base, 'GET', '/api/v1/backup/destination'));
+  return { checkId, result, shown };
+}
 const destination = {
   url: 's3:https://s3.example.com/bucket/tug',
   env: { AWS_ACCESS_KEY_ID: 'AKIAEXAMPLE', AWS_SECRET_ACCESS_KEY: 'sekret-value-1' },
@@ -231,6 +254,7 @@ test('credentials are released only to the owning node for a running backup comm
         'now',
       );
     insert('cmd_run', 'n1', 'backup.run', 'running');
+    insert('cmd_check', 'n1', 'backup.check', 'running');
     insert('cmd_pending', 'n1', 'backup.run', 'pending');
     insert('cmd_other', 'n1', 'service.restart', 'running');
     const fetchCredentials = (nodeId: string, command: string) =>
@@ -254,6 +278,14 @@ test('credentials are released only to the owning node for a running backup comm
       env.RESTIC_PASSWORD,
       repositoryPassword(key, 'site'),
       'the project password is released',
+    );
+
+    const check = await fetchCredentials(n1.nodeId, 'cmd_check');
+    assert.equal(check.status, 200, 'a running backup.check command gets its credentials');
+    assert.equal(
+      (await json(check)).env.RESTIC_PASSWORD,
+      repositoryPassword(key, 'site'),
+      'the check opens the project repository with its password',
     );
 
     assert.equal(
@@ -318,7 +350,7 @@ const composeWithBackup = {
 const REST_MISSING =
   'Fatal: repository does not exist: unable to open config file: <config/> does not exist\nIs there a repository at the following location?';
 
-async function deployWithBackup(base: string): Promise<void> {
+async function deployWithBackup(base: string): Promise<Record<string, string>> {
   const node = await json(await call(base, 'POST', '/api/v1/nodes/register', { name: 'n1' }));
   await call(base, 'POST', '/api/v1/projects', { name: 'empty' });
   const deploy = await call(base, 'POST', '/api/v1/deployments', {
@@ -346,7 +378,60 @@ async function deployWithBackup(base: string): Promise<void> {
     },
     agent,
   );
+  return agent;
 }
+
+/**
+ * Plays the node's agent for a check: fetches work, takes its `backup.check` commands, opens their credentials the way
+ * the agent does and answers with `reply`. Stops with `stop()`.
+ */
+function serveChecks(
+  base: string,
+  agent: Record<string, string>,
+  reply: (payload: BackupJobPayload) => { state: string; result: unknown },
+) {
+  const seen: { commandId: string; payload: BackupJobPayload; credentials: number }[] = [];
+  let stopped = false;
+  const loop = (async () => {
+    while (!stopped) {
+      const work = await json(await call(base, 'GET', '/agent/v1/work', undefined, agent));
+      for (const command of work.commands as { id: string; type: string; payload_json: string }[]) {
+        if (command.type !== 'backup.check') continue;
+        const payload = JSON.parse(command.payload_json) as BackupJobPayload;
+        const credentials = (
+          await call(
+            base,
+            'GET',
+            `/agent/v1/backup/credentials?command=${command.id}`,
+            undefined,
+            agent,
+          )
+        ).status;
+        seen.push({ commandId: command.id, payload, credentials });
+        const { state, result } = reply(payload);
+        await call(
+          base,
+          'POST',
+          '/agent/v1/status',
+          { projects: [], commandResults: [{ commandId: command.id, state, result }] },
+          agent,
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  })();
+  return {
+    seen,
+    stop: async () => {
+      stopped = true;
+      await loop;
+    },
+  };
+}
+const repositoryOk = (payload: BackupJobPayload) => ({
+  state: 'succeeded',
+  result: { runId: payload.runId, durationMs: 1, repository: 'ok' },
+});
 
 test('a destination check opens the control and project repositories, creates missing ones and stores the result', async () => {
   const docker = new RecordingDocker();
@@ -358,6 +443,7 @@ test('a destination check opens the control and project repositories, creates mi
       ? { code: 10, err: REST_MISSING }
       : { code: 0 };
   };
+  const stops: (() => Promise<void>)[] = [];
   const s = await server(docker);
   try {
     assert.equal(
@@ -365,17 +451,23 @@ test('a destination check opens the control and project repositories, creates mi
       409,
       'a check without a destination is refused with a reason',
     );
-    await deployWithBackup(s.base);
+    const agent = await deployWithBackup(s.base);
+    const node = serveChecks(s.base, agent, repositoryOk);
+    stops.push(node.stop);
     await call(s.base, 'POST', '/api/v1/backup/destination', {
       url: 'rest:http://backup.internal:8030/tug',
       env: { RESTIC_REST_USERNAME: 'tug', RESTIC_REST_PASSWORD: 'rest-secret-1' },
     });
     missing.add('rest:http://backup.internal:8030/tug/_control');
-    const res = await call(s.base, 'POST', '/api/v1/backup/destination/check', {});
-    assert.equal(res.status, 200, await res.clone().text());
-    const result = await json(res);
+    const { result, shown } = await runCheck(s.base);
     assert.equal(result.ok, true, 'every repository is usable');
+    assert.equal(result.state, 'done', 'a finished check says so');
     assert.equal(result.from, 'control', 'the result says where it ran');
+    assert.deepEqual(
+      result.nodes,
+      [{ project: 'site', node: 'n1', state: 'ok' }],
+      'the node that runs the project backups answered for its repository',
+    );
     assert.equal(result.url, 'rest:http://backup.internal:8030/tug', 'the checked url is echoed');
     assert.deepEqual(
       result.repositories.map((r: { name: string; state: string }) => [r.name, r.state]),
@@ -392,7 +484,6 @@ test('a destination check opens the control and project repositories, creates mi
       [controlRepositoryPassword(key), repositoryPassword(key, 'site')],
       'each repository is opened with its own derived password',
     );
-    const shown = await json(await call(s.base, 'GET', '/api/v1/backup/destination'));
     assert.equal(shown.checkResult.ok, true, 'the result is stored with the destination');
     assert.equal(shown.checkedAt, result.checkedAt, 'the check time is stored');
     const db = await openDb(s.dbFile);
@@ -403,6 +494,7 @@ test('a destination check opens the control and project repositories, creates mi
     );
     assert.ok(!JSON.stringify(result).includes('rest-secret-1'), 'credentials never appear');
   } finally {
+    await Promise.all(stops.map((stop) => stop()));
     await s.close();
   }
 });
@@ -420,10 +512,8 @@ test('a destination check reports a failing repository with ok false and a redac
   const s = await server(docker);
   try {
     await call(s.base, 'POST', '/api/v1/backup/destination', destination);
-    const res = await call(s.base, 'POST', '/api/v1/backup/destination/check', {});
-    assert.equal(res.status, 200, 'a failing repository is a result, not an HTTP error');
-    const text = await res.text();
-    const result = JSON.parse(text);
+    const { result } = await runCheck(s.base);
+    const text = JSON.stringify(result);
     assert.equal(result.ok, false, 'the check fails');
     assert.equal(result.repositories[0].state, 'error', 'the repository is an error');
     assert.match(result.repositories[0].error, /bucket does not exist/, 'restic message is shown');
@@ -461,11 +551,13 @@ test('a failing control repository skips the project repositories instead of tim
     cmd[1] === 'cat'
       ? { code: 1, err: 'Fatal: unable to open config file: bucket does not exist' }
       : { code: 0 };
+  const stops: (() => Promise<void>)[] = [];
   const s = await server(docker);
   try {
-    await deployWithBackup(s.base);
+    const agent = await deployWithBackup(s.base);
+    stops.push(serveChecks(s.base, agent, repositoryOk).stop);
     await call(s.base, 'POST', '/api/v1/backup/destination', destination);
-    const result = await json(await call(s.base, 'POST', '/api/v1/backup/destination/check', {}));
+    const { result } = await runCheck(s.base);
     assert.deepEqual(
       result.repositories.map((r: { name: string; state: string }) => [r.name, r.state]),
       [
@@ -476,17 +568,23 @@ test('a failing control repository skips the project repositories instead of tim
     );
     assert.match(result.repositories[1].error, /not checked: control's own repository failed/);
     assert.equal(result.ok, false, 'a skipped repository still fails the check');
+    assert.deepEqual(
+      result.nodes,
+      [{ project: 'site', node: 'n1', state: 'ok' }],
+      'nodes are still checked when control cannot reach the destination: they may use another network',
+    );
     assert.equal(
       docker.bodies.length,
       1,
       'no helper container is started for the skipped repository',
     );
   } finally {
+    await Promise.all(stops.map((stop) => stop()));
     await s.close();
   }
 });
 
-test('a second concurrent check is refused and a destination replaced mid-check keeps no stale result', async () => {
+test('a second concurrent check is refused, and replacing the destination aborts the running check without storing its result', async () => {
   let release: () => void = () => {};
   const gate = new Promise<void>((resolve) => (release = resolve));
   class GatedDocker extends RecordingDocker {
@@ -502,7 +600,8 @@ test('a second concurrent check is refused and a destination replaced mid-check 
   const s = await server(docker);
   try {
     await call(s.base, 'POST', '/api/v1/backup/destination', destination);
-    const first = call(s.base, 'POST', '/api/v1/backup/destination/check', {});
+    const first = await call(s.base, 'POST', '/api/v1/backup/destination/check', {});
+    assert.equal(first.status, 202, 'the check starts');
     await until(() => docker.bodies.length === 1, 'the first check to start its helper');
     const second = await call(s.base, 'POST', '/api/v1/backup/destination/check', {});
     assert.equal(second.status, 409, 'a check while another runs is refused');
@@ -511,13 +610,306 @@ test('a second concurrent check is refused and a destination replaced mid-check 
       ...destination,
       env: { ...destination.env, AWS_SECRET_ACCESS_KEY: 'rotated-secret-2' },
     });
-    release();
-    assert.equal((await first).status, 200, 'the running check still answers');
     const shown = await json(await call(s.base, 'GET', '/api/v1/backup/destination'));
-    assert.equal(shown.checkResult, null, 'a result for the replaced credentials is not stored');
-    assert.equal(shown.checkedAt, null, 'the replaced destination stays unchecked');
+    assert.equal(shown.checkResult, null, 'replacing the destination drops the running check');
+    // `destination set` starts its own check right after saving: the replaced check must not refuse it.
+    const next = await call(s.base, 'POST', '/api/v1/backup/destination/check', {});
+    assert.equal(
+      next.status,
+      202,
+      'a check right after replacing the destination starts, even though the old check is still unwinding',
+    );
+    const { checkId } = await json(next);
+    release();
+    const final = await runCheckResult(s.base, checkId);
+    assert.notEqual(
+      final.checkId,
+      (await json(first)).checkId,
+      'the result of the check that began before the replacement is never stored',
+    );
   } finally {
     release();
     await s.close();
+  }
+});
+
+const restDestination = {
+  url: 'rest:http://backup.internal:8030/tug',
+  env: { RESTIC_REST_USERNAME: 'tug', RESTIC_REST_PASSWORD: 'rest-secret-1' },
+};
+function resticDocker(): RecordingDocker {
+  const docker = new RecordingDocker();
+  docker.addImage('restic/restic:0.19.1');
+  docker.execResponder = () => ({ code: 0 });
+  return docker;
+}
+const withShortNodeLimit = async (ms: number, body: () => Promise<void>) => {
+  process.env.TUG_DESTINATION_CHECK_NODE_TIMEOUT_MS = String(ms);
+  try {
+    await body();
+  } finally {
+    delete process.env.TUG_DESTINATION_CHECK_NODE_TIMEOUT_MS;
+  }
+};
+
+test('a check queues one backup.check per project and node, routes the result to the check and leaves backup runs alone', async () => {
+  const s = await server(resticDocker());
+  let node: ReturnType<typeof serveChecks> | undefined;
+  try {
+    const agent = await deployWithBackup(s.base);
+    await call(s.base, 'POST', '/api/v1/backup/destination', restDestination);
+    // A backup run that is queued for the node when the check arrives.
+    const run = await json(await call(s.base, 'POST', '/api/v1/backups/run', { project: 'site' }));
+    assert.equal(run.runs.length, 1, 'a manual backup is queued');
+    node = serveChecks(s.base, agent, (payload) => ({
+      state: 'succeeded',
+      result: { runId: payload.runId, durationMs: 1, repository: 'missing' },
+    }));
+    const { result } = await runCheck(s.base);
+    assert.equal(node.seen.length, 1, 'one check command is queued for the one project and node');
+    const [seen] = node.seen;
+    assert.equal(seen.credentials, 200, 'the node gets credentials for its backup.check command');
+    assert.equal(seen.payload.project, 'site', 'the command names the project');
+    assert.equal(seen.payload.target, '', 'a check has no backup target');
+    assert.equal(seen.payload.node, 'n1', 'the command names the node');
+    assert.equal(
+      seen.payload.repository,
+      'rest:http://backup.internal:8030/tug/site',
+      "the command opens the project's repository",
+    );
+    assert.equal(seen.payload.resticImage, 'restic/restic:0.19.1', 'the command names the image');
+    assert.ok(seen.payload.limits.timeoutSec > 0, 'the command carries limits');
+    assert.deepEqual(
+      result.nodes,
+      [{ project: 'site', node: 'n1', state: 'missing' }],
+      'a repository the node cannot find is reported as missing',
+    );
+    assert.equal(
+      result.ok,
+      true,
+      'a missing repository is not a failure: the first backup creates it',
+    );
+
+    const db = await openDb(s.dbFile);
+    const runs = db.all<{ id: string; state: string }>('SELECT id,state FROM backup_runs');
+    assert.deepEqual(
+      runs.map((r) => [r.id, r.state]),
+      [[run.runs[0].runId, 'queued']],
+      'the check result neither created nor finished a backup run',
+    );
+    assert.equal(
+      db.get<{ last_status: string | null }>('SELECT last_status FROM backup_schedules')
+        ?.last_status ?? null,
+      null,
+      'the check result did not mark the backup target as run',
+    );
+    assert.equal(
+      db.get<{ state: string }>("SELECT state FROM commands WHERE type='backup.check'")?.state,
+      'succeeded',
+      'the check command is completed like any command',
+    );
+    assert.equal(
+      db.all("SELECT 1 FROM events WHERE type IN ('backup.completed','backup.failed')").length,
+      0,
+      'a check raises no backup events',
+    );
+  } finally {
+    await node?.stop();
+    await s.close();
+  }
+});
+
+test('a node that cannot reach the destination fails the check with its redacted error', async () => {
+  const s = await server(resticDocker());
+  let node: ReturnType<typeof serveChecks> | undefined;
+  try {
+    const agent = await deployWithBackup(s.base);
+    await call(s.base, 'POST', '/api/v1/backup/destination', restDestination);
+    node = serveChecks(s.base, agent, () => ({
+      state: 'failed',
+      result: {
+        error: 'repository check failed: dial tcp backup.internal:8030: i/o timeout rest-secret-1',
+      },
+    }));
+    const { result } = await runCheck(s.base);
+    assert.equal(result.nodes[0].state, 'error', 'the node reports an error');
+    assert.match(result.nodes[0].error, /i\/o timeout/, 'the reason is kept');
+    assert.ok(
+      !JSON.stringify(result).includes('rest-secret-1'),
+      'a credential value never reaches the stored result',
+    );
+    assert.equal(result.ok, false, 'a node that cannot reach the destination fails the check');
+    assert.equal(
+      result.repositories.every((r: { state: string }) => r.state === 'ok'),
+      true,
+      'control itself reached the destination: the node phase is what failed',
+    );
+  } finally {
+    await node?.stop();
+    await s.close();
+  }
+});
+
+test('an offline node is reported at once and gets no command', async () => {
+  const s = await server(resticDocker());
+  try {
+    await deployWithBackup(s.base);
+    await call(s.base, 'POST', '/api/v1/backup/destination', restDestination);
+    const db = await openDb(s.dbFile);
+    db.run("UPDATE nodes SET last_seen_at='2020-01-01T00:00:00.000Z'");
+    const { result } = await runCheck(s.base);
+    assert.equal(result.nodes[0].state, 'offline', 'a node that stopped reporting is offline');
+    assert.deepEqual(
+      [result.nodes[0].project, result.nodes[0].node],
+      ['site', 'n1'],
+      'the entry names the project and node',
+    );
+    assert.equal(result.ok, false, 'an offline node fails the check');
+    assert.equal(
+      db.all("SELECT 1 FROM commands WHERE type='backup.check'").length,
+      0,
+      'nothing is queued for an offline node',
+    );
+  } finally {
+    await s.close();
+  }
+});
+
+test('a node that never fetches its check is a timeout and the queued command is cancelled', async () => {
+  await withShortNodeLimit(150, async () => {
+    const s = await server(resticDocker());
+    try {
+      await deployWithBackup(s.base);
+      await call(s.base, 'POST', '/api/v1/backup/destination', restDestination);
+      const { result } = await runCheck(s.base);
+      assert.equal(result.nodes[0].state, 'timeout', 'a node that does not answer times out');
+      assert.match(result.nodes[0].error, /did not answer within/, 'the entry says why');
+      assert.equal(result.ok, false, 'a node that does not answer fails the check');
+      const db = await openDb(s.dbFile);
+      assert.equal(
+        db.get<{ state: string }>("SELECT state FROM commands WHERE type='backup.check'")?.state,
+        'cancelled',
+        'a command no node fetched is cancelled, so it is never delivered late',
+      );
+    } finally {
+      await s.close();
+    }
+  });
+});
+
+test('replacing the destination cancels the node checks of the running check at once', async () => {
+  await withShortNodeLimit(60_000, async () => {
+    const s = await server(resticDocker());
+    try {
+      await deployWithBackup(s.base);
+      await call(s.base, 'POST', '/api/v1/backup/destination', restDestination);
+      const started = await call(s.base, 'POST', '/api/v1/backup/destination/check', {});
+      assert.equal(started.status, 202, 'the check starts');
+      const db = await openDb(s.dbFile);
+      const commandState = () =>
+        db.get<{ state: string }>("SELECT state FROM commands WHERE type='backup.check'")?.state;
+      await until(() => commandState() === 'pending', 'the node check to be queued');
+      await call(s.base, 'POST', '/api/v1/backup/destination', {
+        ...restDestination,
+        url: 'rest:http://backup.internal:8030/tug-new',
+      });
+      await until(
+        () => commandState() === 'cancelled',
+        'the queued node check to be cancelled well before its 60 s limit',
+      );
+    } finally {
+      await s.close();
+    }
+  });
+});
+
+test('a node that fetched its check but did not answer gets a cancel and a late result changes nothing', async () => {
+  await withShortNodeLimit(150, async () => {
+    const s = await server(resticDocker());
+    try {
+      const agent = await deployWithBackup(s.base);
+      await call(s.base, 'POST', '/api/v1/backup/destination', restDestination);
+      const started = await json(
+        await call(s.base, 'POST', '/api/v1/backup/destination/check', {}),
+      );
+      const work = await json(await call(s.base, 'GET', '/agent/v1/work', undefined, agent));
+      const command = work.commands.find((c: { type: string }) => c.type === 'backup.check');
+      assert.ok(command, 'the node is handed its backup.check command');
+      const result = await runCheckResult(s.base, started.checkId);
+      assert.equal(result.nodes[0].state, 'timeout', 'a node that keeps the command times out');
+      const db = await openDb(s.dbFile);
+      const cancel = db.get<{ payload_json: string }>(
+        "SELECT payload_json FROM commands WHERE type='backup.cancel'",
+      );
+      assert.deepEqual(
+        cancel && JSON.parse(cancel.payload_json),
+        { commandId: command.id },
+        'the node is told to stop the job it still has',
+      );
+      const late = await call(
+        s.base,
+        'POST',
+        '/agent/v1/status',
+        {
+          projects: [],
+          commandResults: [
+            {
+              commandId: command.id,
+              state: 'succeeded',
+              result: { runId: 'x', durationMs: 1, repository: 'ok' },
+            },
+          ],
+        },
+        agent,
+      );
+      assert.equal(late.status, 200, 'a late result is accepted');
+      const shown = await json(await call(s.base, 'GET', '/api/v1/backup/destination'));
+      assert.equal(
+        shown.checkResult.nodes[0].state,
+        'timeout',
+        'the finished check is not rewritten',
+      );
+    } finally {
+      await s.close();
+    }
+  });
+});
+
+test('a check that was running when control restarted is marked interrupted instead of running forever', async () => {
+  const docker = resticDocker();
+  const first = await server(docker);
+  const started = await (async () => {
+    await deployWithBackup(first.base);
+    await call(first.base, 'POST', '/api/v1/backup/destination', restDestination);
+    const res = await call(first.base, 'POST', '/api/v1/backup/destination/check', {});
+    const body = await json(res);
+    // Nobody answers the node, so the check is still running when control goes away.
+    await until(async () => {
+      const shown = await json(await call(first.base, 'GET', '/api/v1/backup/destination'));
+      return shown.checkResult?.repositories?.length === 2;
+    }, 'the control-host part to finish');
+    const shown = await json(await call(first.base, 'GET', '/api/v1/backup/destination'));
+    assert.equal(shown.checkResult.state, 'running', 'the check waits for the node');
+    assert.equal(shown.checkedAt, null, 'a running check has no check time');
+    return body.checkId as string;
+  })();
+  await first.close();
+  const second = await server(resticDocker(), first.dir);
+  try {
+    const shown = await json(await call(second.base, 'GET', '/api/v1/backup/destination'));
+    assert.equal(shown.checkResult.checkId, started, 'the same check is shown');
+    assert.equal(shown.checkResult.state, 'done', 'a check control can no longer finish is done');
+    assert.equal(shown.checkResult.ok, false, 'an interrupted check is not a pass');
+    assert.match(shown.checkResult.error, /control restarted/, 'the result says what happened');
+    assert.equal(
+      shown.checkResult.nodes[0].state,
+      'timeout',
+      'a node that never answered is not pending',
+    );
+    assert.ok(shown.checkedAt, 'the interrupted check gets a time');
+    const again = await call(second.base, 'POST', '/api/v1/backup/destination/check', {});
+    assert.equal(again.status, 202, 'a new check can start after a restart');
+  } finally {
+    await second.close();
   }
 });

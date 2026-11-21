@@ -45,8 +45,11 @@ interface BackupListing {
   runs: BackupRunRecord[];
 }
 interface DestinationCheck {
-  ok: boolean;
-  checkedAt: string;
+  checkId: string;
+  state: 'running' | 'done';
+  /** Set once the check is done. */
+  ok?: boolean;
+  checkedAt?: string;
   from: 'control';
   url: string;
   repositories: {
@@ -55,41 +58,123 @@ interface DestinationCheck {
     state: 'ok' | 'initialized' | 'error' | 'skipped';
     error?: string;
   }[];
+  /** What each node that runs a project's backups saw; absent from a check that predates node checks. */
+  nodes?: {
+    project: string;
+    node: string;
+    state: 'ok' | 'missing' | 'error' | 'offline' | 'timeout' | 'pending';
+    error?: string;
+  }[];
+  /** Why the check stopped before every part answered, such as a control restart. */
+  error?: string;
 }
-/** Where the check runs, so a pass is not read as proof that every node can reach the destination. */
-const CHECK_SCOPE =
-  'Checked from the control host; each node connects to the destination at its first backup.';
-/** One line per repository on stderr, saying what the state means for the operator. */
+const CHECK_POLL_MS = 2000;
+const CHECK_DEADLINE_MS = 10 * 60_000;
+/** Where each part ran, so a pass is not read as more than it proves. */
+function checkScope(check: DestinationCheck): string {
+  return check.nodes?.length
+    ? "Control's own repository was checked from the control host; each project repository from the node that runs its backups."
+    : 'Checked from the control host only: no node has an enabled backup target yet, and a node connects to the destination at its first backup.';
+}
+/** One line per repository and per node on stderr, saying what the state means for the operator. */
 function reportCheck(rt: CliRuntime, check: DestinationCheck): void {
+  const host = "from control's host: ";
   for (const r of check.repositories) {
-    if (r.state === 'ok') err(rt, `ok: ${r.name} (${r.repository})`);
+    if (r.state === 'ok') err(rt, `${host}ok: ${r.name} (${r.repository})`);
     else if (r.state === 'initialized')
       err(
         rt,
-        `created a new, empty repository at ${r.repository} (${r.name}); if backups should already be there, the destination path is wrong`,
+        `${host}created a new, empty repository at ${r.repository} (${r.name}); if backups should already be there, the destination path is wrong`,
       );
-    else if (r.state === 'skipped') err(rt, `skipped: ${r.name}: ${r.error ?? 'not checked'}`);
+    else if (r.state === 'skipped')
+      err(rt, `${host}skipped: ${r.name}: ${r.error ?? 'not checked'}`);
     else {
-      err(rt, `failed: ${r.name} (${r.repository}): ${r.error ?? 'failed'}`);
-      err(
-        rt,
-        r.name === '_control'
-          ? "  control's own nightly backup will fail"
-          : '  failed from the control host; nodes connect to the destination themselves at their first backup, so check that path if control and nodes are on different networks',
-      );
+      err(rt, `${host}failed: ${r.name} (${r.repository}): ${r.error ?? 'failed'}`);
+      if (r.name === '_control') err(rt, "  control's own nightly backup will fail");
     }
   }
-  err(rt, CHECK_SCOPE);
+  for (const n of check.nodes ?? []) {
+    const who = `node ${n.node} (project ${n.project}): `;
+    err(
+      rt,
+      who +
+        (n.state === 'ok'
+          ? 'reaches the destination'
+          : n.state === 'missing'
+            ? 'repository not created yet; the first backup creates it'
+            : n.state === 'error'
+              ? `cannot reach the destination: ${n.error ?? 'the check failed'}`
+              : n.state === 'offline'
+                ? `offline${n.error ? ` (${n.error})` : ''}; not checked`
+                : n.state === 'timeout'
+                  ? (n.error ?? 'did not answer in time')
+                  : 'not answered yet'),
+    );
+  }
+  if (check.error) err(rt, `the check stopped early: ${check.error}`);
+  err(rt, checkScope(check));
 }
+/** What failed, for the warning after `destination set`. */
 const failedNames = (check: DestinationCheck): string =>
-  check.repositories
-    .filter((r) => r.state === 'error')
-    .map((r) => r.name)
-    .join(', ');
-const checkDestination = (rt: CliRuntime): Promise<DestinationCheck> =>
-  withProgress(rt, 'Checking the backup destination', () =>
-    request<DestinationCheck>(rt, 'POST', '/api/v1/backup/destination/check', {}),
-  );
+  [
+    ...check.repositories.filter((r) => r.state === 'error').map((r) => r.name),
+    ...(check.nodes ?? [])
+      .filter((n) => ['error', 'offline', 'timeout'].includes(n.state))
+      .map((n) => `node ${n.node} (project ${n.project})`),
+  ].join(', ');
+/**
+ * Starts a check and polls the stored result until it is done. Control answers the start at once because probing
+ * every repository and asking every node takes longer than one HTTP request may. When `TUG_CHECK_TIMEOUT_MS` (default
+ * 10 minutes) passes first, `finished` is false and `check` is the latest partial result.
+ */
+/** Consecutive failed polls tolerated (about 30 s at the default interval) before the CLI gives up. */
+const CHECK_POLL_RETRIES = 15;
+async function checkDestination(
+  rt: CliRuntime,
+): Promise<{ check: DestinationCheck; finished: boolean }> {
+  const pollMs = Number(rt.env.TUG_CHECK_POLL_MS) || CHECK_POLL_MS;
+  const deadline = Date.now() + (Number(rt.env.TUG_CHECK_TIMEOUT_MS) || CHECK_DEADLINE_MS);
+  return withProgress(rt, 'Checking the backup destination', async (progress) => {
+    const { checkId } = await request<{ checkId: string }>(
+      rt,
+      'POST',
+      '/api/v1/backup/destination/check',
+      {},
+    );
+    let failures = 0;
+    for (;;) {
+      let shown: { configured: boolean; checkResult?: DestinationCheck | null };
+      try {
+        shown = await request(rt, 'GET', '/api/v1/backup/destination');
+        failures = 0;
+      } catch (error) {
+        // Control restarting mid-check is brief, and on the way back it marks this check interrupted: keep polling.
+        if (++failures > CHECK_POLL_RETRIES || Date.now() + pollMs > deadline) throw error;
+        progress.stage('Waiting for control to answer');
+        await new Promise((resolve) => setTimeout(resolve, pollMs));
+        continue;
+      }
+      const check = shown.checkResult;
+      if (!shown.configured || !check)
+        throw new Error('the backup destination was changed while it was being checked');
+      if (check.checkId !== checkId)
+        throw new Error(
+          'another destination check replaced this one; see tug backup destination show',
+        );
+      if (check.state === 'done') return { check, finished: true };
+      const waiting = (check.nodes ?? []).filter((n) => n.state === 'pending');
+      progress.stage(
+        waiting.length
+          ? `Waiting for nodes: ${waiting.map((n) => n.node).join(', ')}`
+          : 'Checking the backup destination',
+      );
+      if (Date.now() + pollMs > deadline) return { check, finished: false };
+      await new Promise((resolve) => setTimeout(resolve, pollMs));
+    }
+  });
+}
+const STILL_RUNNING =
+  'the check is still running on control; see its result with tug backup destination show';
 export const formatBytes = (bytes: number | null): string =>
   bytes === null
     ? '-'
@@ -289,7 +374,7 @@ export function registerBackup(rt: CliRuntime, program: Command): void {
   destination
     .command('set <url>')
     .description(
-      'set where backups go, such as s3:https://s3.example.com/bucket/tug-backups, rest:http://backup.internal:8000/tug or b2:bucket:tug; credentials are stored encrypted on control. Then checks the destination from the control host (creating missing repositories); nodes connect at their first backup. A failed check is a warning and the exit code stays 0, since the destination is saved; --no-check skips it',
+      'set where backups go, such as s3:https://s3.example.com/bucket/tug-backups, rest:http://backup.internal:8000/tug or b2:bucket:tug; credentials are stored encrypted on control. Then checks the destination (see `backup destination check`). A failed check is a warning and the exit code stays 0, since the destination is saved; --no-check skips it',
     )
     .option(
       '--env <name>',
@@ -308,10 +393,11 @@ export function registerBackup(rt: CliRuntime, program: Command): void {
       );
       // Saving succeeded, so nothing below changes the exit code: a failed or unavailable check is a warning.
       let check: DestinationCheck | undefined;
+      let finished = true;
       let unavailable = false;
       if (o.check)
         try {
-          check = await checkDestination(rt);
+          ({ check, finished } = await checkDestination(rt));
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           if (!/destination\/check: 404/.test(message)) throw error;
@@ -328,7 +414,8 @@ export function registerBackup(rt: CliRuntime, program: Command): void {
           rt,
           'saved; this control is too old to check destinations (it has no destination check), so nothing was verified. Upgrade control to use tug backup destination check',
         );
-      if (check) {
+      if (check && !finished) err(rt, `saved; ${STILL_RUNNING}`);
+      else if (check) {
         reportCheck(rt, check);
         if (!check.ok)
           err(
@@ -340,11 +427,16 @@ export function registerBackup(rt: CliRuntime, program: Command): void {
   destination
     .command('check')
     .description(
-      'check the destination from the control host: open the control repository and the repository of every project with a backup target, and create the ones that do not exist yet (which also proves write access). Exits nonzero when any repository cannot be used. Nodes connect to the destination at their first backup, so this does not prove every node can reach it',
+      "check that backups can reach the destination: control's own repository from the control host, and each project's repository from the node that runs its backups. Control creates missing repositories (which also proves write access); a node only reports one as not created yet, since its first backup creates it. Exits nonzero when a repository cannot be used or a node is offline, fails or does not answer. Waits up to 10 minutes (TUG_CHECK_TIMEOUT_MS)",
     )
     .action(async () => {
-      const check = await checkDestination(rt);
+      const { check, finished } = await checkDestination(rt);
       print(rt, check);
+      if (!finished) {
+        err(rt, STILL_RUNNING);
+        rt.exitCode = 1;
+        return;
+      }
       reportCheck(rt, check);
       if (!check.ok) rt.exitCode = 1;
     });

@@ -566,7 +566,7 @@ test('the nightly control backup and a manual one wait while a destination check
     assert.equal(manual.status, 409, 'a manual control backup is refused while a check runs');
     assert.equal(helpers(), 1, 'the refused manual backup starts no helper either');
     release();
-    assert.equal((await check).status, 200, 'the check itself still completes');
+    assert.equal((await check).status, 202, 'the check starts in the background and completes');
     const done = await until(async () => {
       const { control } = await listing(s.base);
       return control?.lastStatus === 'completed' ? control : undefined;

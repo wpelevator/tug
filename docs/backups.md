@@ -19,8 +19,8 @@ tug backup password
 
 | Command | What it tells you |
 | --- | --- |
-| `backup destination set` | Saves the destination, then checks it from the control host. A failed check is a warning and the exit code stays 0 (`--no-check` skips the check) |
-| `backup destination check` | Opens the control repository and each project's repository, creates missing ones and exits nonzero if any fails. Skips project repositories when `_control` fails |
+| `backup destination set` | Saves the destination, then runs the same check as `destination check`. A failed check is a warning and the exit code stays 0 (`--no-check` skips the check) |
+| `backup destination check` | Opens control's repository from the control host and each project's repository from the node that runs its backups, and exits nonzero if any fails |
 | `backup run` | Waits for the configured targets and reports failure |
 | `backup list --check` | Whether each target succeeded, and exits nonzero if not |
 | `backup password` | The repository and its password. Store it, with the storage credentials, off the server |
@@ -67,11 +67,28 @@ Plain HTTP is acceptable only on a private network or VPN that the control host 
 tug backup destination check
 ```
 
-The check runs from the control host in a restic helper container. It opens `_control` and the repository of every project with an enabled backup target. An existing repository is `ok`. A missing one, which restic reports with exit code 10, is created with `restic init` and reported as `initialized`, which also proves the credentials can write. Anything else is `error` with restic's message: a wrong repository password (exit code 12), a bucket that does not exist, a refused login or an unreachable store. A bucket is never created by a check or a backup, so a typo in the bucket name fails instead. When `_control` fails, the project repositories are `skipped`, because they share the destination and would fail the same way, each after its own timeout. The command exits nonzero when any repository fails, and `tug backup destination show` returns the last result as `checkResult`. A check refuses to start while control's own backup runs or another check is running, and the whole check stops after four minutes.
+The check has two parts, because a node may reach the destination over a different network than control (a WireGuard address that only the node can route, for example).
+
+1. Control opens `_control` and the repository of every project with an enabled backup target from the control host, in a restic helper container. An existing repository is `ok`. A missing one, which restic reports with exit code 10, is created with `restic init` and reported as `initialized`, which also proves the credentials can write. Anything else is `error` with restic's message: a wrong repository password (exit code 12), a bucket that does not exist, a refused login or an unreachable store. A bucket is never created by a check or a backup, so a typo in the bucket name fails instead. When `_control` fails, the project repositories are `skipped`, because they share the destination and would fail the same way, each after its own timeout. `_control` is only ever checked from control, since only control backs it up.
+2. For each project and node that runs an enabled backup target, control queues a read-only `backup.check` job on that node, which opens the project repository with the node's own network path. A node reports `ok`, or `missing` when the repository is not there yet. `missing` is not a failure, because the node's first backup creates the repository. Anything else is `error` with restic's message. A node that is offline when the check starts is reported as `offline` and gets no job. A node that has not answered after three minutes is `timeout` and its job is cancelled; a node first finishes a backup it is running for the same project.
+
+The check runs in the background: `POST /api/v1/backup/destination/check` answers `202` with a `checkId`, and the CLI polls `tug backup destination show` until that check is `done`, for up to ten minutes (`TUG_CHECK_TIMEOUT_MS`). Past that the CLI says the check is still running and exits 1; it keeps running on control. The stored `checkResult` has `state` (`running` or `done`), `repositories` (the control-host part) and `nodes` (`project`, `node`, `state`, `error`); a running result may have `pending` nodes. `ok` is false when a control-host repository is `error`, or a node is `error`, `offline` or `timeout`, and the command exits nonzero. A check that was running when control restarted is marked done with `ok: false` and an `error` saying so. A check refuses to start while control's own backup runs or another check is running, and the control-host part stops after four minutes.
+
+Stderr has one line per repository, labelled `from control's host`, and one line per node naming the node and the project:
+
+| Node state | What it means |
+| --- | --- |
+| `ok` | The node opened the project repository |
+| `missing` | The node reached the destination and the repository does not exist yet; the node's first backup creates it |
+| `error` | restic could not open the repository from the node; the line carries restic's message |
+| `offline` | The node was not online when the check started, so it was not asked |
+| `timeout` | The node did not answer within three minutes (`TUG_DESTINATION_CHECK_NODE_TIMEOUT_MS`) |
+
+Replacing or removing the destination stops a running check, so the check that `destination set` starts afterwards is never refused.
 
 `initialized` means the check created a new, empty repository. During a [migration](migration.md#coming-from-an-existing-restic-setup) an unexpected `created a new, empty repository` means the destination path is wrong, because the repository you expected would have been found.
 
-`tug backup destination set` runs the same check right after saving. The destination stays saved and the exit code stays 0 when the check fails: stderr says `saved; the check failed` and names the failing repositories, and you fix the cause and run `tug backup destination check`. A control too old to check destinations prints a warning instead. Pass `--no-check` to skip it. Nodes connect to the destination at their first backup, so a passing check proves the control host's access, not that every node can reach the destination.
+`tug backup destination set` runs the same check right after saving. The destination stays saved and the exit code stays 0 when the check fails: stderr says `saved; the check failed` and names the failing repositories, and you fix the cause and run `tug backup destination check`. A control too old to check destinations prints a warning instead. Pass `--no-check` to skip it.
 
 Repositories are created by the first check or backup only when restic is 0.17 or newer, the first version that reports a missing repository with exit code 10. A failure from an image older than 0.17 says so. The stock image is new enough, so this matters only with a custom `TUG_RESTIC_IMAGE`.
 

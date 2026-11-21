@@ -411,3 +411,139 @@ test('backup destination set against a control without the check route saves, wa
     await new Promise<void>((resolve) => https.close(() => resolve()));
   }
 });
+
+/** A control that accepts a destination check and serves `results` one per poll (the last one repeats). */
+async function stubCheckControl(results: unknown[]) {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-check-poll-'));
+  const pki = await Pki.load(path.join(dir, 'pki'), true);
+  const issued = await pki.issueServer(serverNames('https://localhost:8443'));
+  const client = await pki.issueClient(
+    identityUri('operator', 'o1'),
+    86_400_000,
+    'https://localhost:8443',
+  );
+  let polls = 0;
+  const https = createServer(
+    serverTlsOptions({ cert: issued.cert, key: issued.key, ca: pki.caPem }),
+    (req, res) => {
+      res.setHeader('content-type', 'application/json');
+      res.setHeader('x-tug-version', packageVersion());
+      if (req.url === '/api/v1/version')
+        return void res.end(JSON.stringify({ v: packageVersion() }));
+      if (req.url === '/api/v1/backup/destination/check' && req.method === 'POST') {
+        res.statusCode = 202;
+        return void res.end(JSON.stringify({ checkId: 'chk_1', state: 'running' }));
+      }
+      if (req.url === '/api/v1/backup/destination' && req.method === 'POST')
+        return void res.end(JSON.stringify({ ok: true, url: 'rest:http://b/tug', envNames: [] }));
+      if (req.url === '/api/v1/backup/destination' && req.method === 'GET')
+        return void res.end(
+          JSON.stringify({
+            configured: true,
+            checkResult: results[Math.min(polls++, results.length - 1)],
+          }),
+        );
+      res.statusCode = 404;
+      res.end('{}');
+    },
+  );
+  https.listen(0, '127.0.0.1');
+  await once(https, 'listening');
+  const credentialFile = path.join(dir, 'operator.credential.json');
+  await fs.writeFile(credentialFile, JSON.stringify(client.credential), { mode: 0o600 });
+  return {
+    dir,
+    polls: () => polls,
+    env: {
+      ...process.env,
+      TUG_CONTROL_URL: `https://127.0.0.1:${(https.address() as { port: number }).port}`,
+      TUG_CREDENTIAL_FILE: credentialFile,
+      TUG_CONFIG: '',
+      TUG_CHECK_POLL_MS: '10',
+      TUG_CHECK_TIMEOUT_MS: '400',
+    },
+    close: async () => {
+      https.closeAllConnections();
+      await new Promise<void>((resolve) => https.close(() => resolve()));
+    },
+  };
+}
+const checkBase = {
+  checkId: 'chk_1',
+  from: 'control',
+  url: 'rest:http://b/tug',
+  repositories: [{ name: '_control', repository: 'rest:http://b/tug/_control', state: 'ok' }],
+};
+
+test('backup destination check polls until its check is done and prints one line per repository and node', async () => {
+  const done = {
+    ...checkBase,
+    state: 'done',
+    ok: false,
+    nodes: [
+      { project: 'site', node: 'web-1', state: 'ok' },
+      { project: 'site', node: 'web-2', state: 'missing' },
+      { project: 'blog', node: 'web-1', state: 'error', error: 'dial tcp: i/o timeout' },
+      { project: 'blog', node: 'web-3', state: 'offline', error: 'the node is stale' },
+      { project: 'shop', node: 'web-4', state: 'timeout', error: 'did not answer within 180 s' },
+    ],
+  };
+  const control = await stubCheckControl([
+    {
+      ...checkBase,
+      state: 'running',
+      nodes: [{ project: 'site', node: 'web-1', state: 'pending' }],
+    },
+    done,
+  ]);
+  try {
+    await assert.rejects(
+      execCli(['backup', 'destination', 'check'], { env: control.env, cwd: control.dir }),
+      (error: Error & { code: number; stdout: string; stderr: string }) => {
+        assert.equal(error.code, 1, 'check exits 1 when a node cannot reach the destination');
+        assert.equal(JSON.parse(error.stdout).state, 'done', 'stdout is the finished result');
+        for (const line of [
+          /from control's host: ok: _control/,
+          /node web-1 \(project site\): reaches the destination/,
+          /node web-2 \(project site\): repository not created yet; the first backup creates it/,
+          /node web-1 \(project blog\): cannot reach the destination: dial tcp: i\/o timeout/,
+          /node web-3 \(project blog\): offline/,
+          /node web-4 \(project shop\): did not answer within 180 s/,
+        ])
+          assert.match(error.stderr, line, `stderr should show ${line}`);
+        return true;
+      },
+    );
+    assert.ok(control.polls() >= 2, 'the CLI kept polling while the check was running');
+  } finally {
+    await control.close();
+  }
+});
+
+test('backup destination check stops waiting at its deadline, points to show and exits 1; set still exits 0', async () => {
+  const running = { ...checkBase, state: 'running', nodes: [] };
+  const control = await stubCheckControl([running]);
+  try {
+    await assert.rejects(
+      execCli(['backup', 'destination', 'check'], { env: control.env, cwd: control.dir }),
+      (error: Error & { code: number; stdout: string; stderr: string }) => {
+        assert.equal(error.code, 1, 'an unfinished check is not a pass');
+        assert.match(error.stderr, /still running.*tug backup destination show/);
+        assert.equal(
+          JSON.parse(error.stdout).state,
+          'running',
+          'stdout carries the partial result',
+        );
+        return true;
+      },
+    );
+    const set = await execCli(['backup', 'destination', 'set', 'rest:http://b/tug'], {
+      env: control.env,
+      cwd: control.dir,
+    });
+    assert.equal(JSON.parse(set.stdout).ok, true, 'the destination is saved');
+    assert.match(set.stderr, /saved; the check is still running/, 'set warns and exits 0');
+  } finally {
+    await control.close();
+  }
+});
