@@ -4,6 +4,11 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { startMtlsControl } from '../../tests/helpers.ts';
+import { once } from 'node:events';
+import { createServer } from 'node:https';
+import { Pki, identityUri, serverNames } from '../pki.ts';
+import { packageVersion } from '../images/image.ts';
+import { serverTlsOptions } from '../control/tls-server.ts';
 import { execCli } from '../../tests/cli-inprocess.ts';
 import { FakeDocker } from '../../tests/fake-docker.ts';
 
@@ -341,5 +346,68 @@ test('backup destination set checks the destination and check exits nonzero whil
     assert.equal(JSON.parse(ok.stdout).ok, true, 'check prints a passing result and exits zero');
   } finally {
     await control.close();
+  }
+});
+
+test('backup destination set against a control without the check route saves, warns on stderr and exits 0', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-old-control-'));
+  const pki = await Pki.load(path.join(dir, 'pki'), true);
+  const issued = await pki.issueServer(serverNames('https://localhost:8443'));
+  const client = await pki.issueClient(
+    identityUri('operator', 'o1'),
+    86_400_000,
+    'https://localhost:8443',
+  );
+  const routes: string[] = [];
+  // An older control: it stores the destination but has never heard of /api/v1/backup/destination/check.
+  const https = createServer(
+    serverTlsOptions({ cert: issued.cert, key: issued.key, ca: pki.caPem }),
+    (req, res) => {
+      routes.push(`${req.method} ${req.url}`);
+      res.setHeader('content-type', 'application/json');
+      res.setHeader('x-tug-version', packageVersion());
+      if (req.url === '/api/v1/version') {
+        res.end(JSON.stringify({ v: packageVersion() }));
+        return;
+      }
+      if (req.url === '/api/v1/backup/destination' && req.method === 'POST') {
+        res.end(
+          JSON.stringify({ ok: true, url: 'rest:http://backup.internal:8000/tug', envNames: [] }),
+        );
+        return;
+      }
+      res.statusCode = 404;
+      res.setHeader('content-type', 'text/plain');
+      res.end(`Cannot ${req.method} ${req.url}`);
+    },
+  );
+  https.listen(0, '127.0.0.1');
+  await once(https, 'listening');
+  const credentialFile = path.join(dir, 'operator.credential.json');
+  await fs.writeFile(credentialFile, JSON.stringify(client.credential), { mode: 0o600 });
+  const env = {
+    ...process.env,
+    TUG_CONTROL_URL: `https://127.0.0.1:${(https.address() as { port: number }).port}`,
+    TUG_CREDENTIAL_FILE: credentialFile,
+    TUG_CONFIG: '',
+  };
+  try {
+    const result = await execCli(
+      ['backup', 'destination', 'set', 'rest:http://backup.internal:8000/tug'],
+      { env, cwd: dir },
+    );
+    assert.equal(JSON.parse(result.stdout).ok, true, 'the destination is saved and printed');
+    assert.ok(
+      routes.includes('POST /api/v1/backup/destination/check'),
+      'the CLI asks the control to check the destination',
+    );
+    assert.match(
+      result.stderr,
+      /saved; this control is too old to check destinations/,
+      'stderr warns that this control cannot check destinations',
+    );
+  } finally {
+    https.closeAllConnections();
+    await new Promise<void>((resolve) => https.close(() => resolve()));
   }
 });

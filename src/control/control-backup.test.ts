@@ -8,6 +8,7 @@ import { json, testImageResolver, testControlUrl, testIdentity } from '../../tes
 import { FakeDocker } from '../../tests/fake-docker.ts';
 import { DatabaseSync } from 'node:sqlite';
 import type { ActivationStep } from './restore-activation.ts';
+import type { CreateContainerBody } from '../docker-api.ts';
 import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { until } from '../../tests/wait.ts';
@@ -522,6 +523,57 @@ test('a control backup that never finishes shows as stale instead of silently do
     await new Promise((resolve) => setTimeout(resolve, 300)); // several intervals while the push hangs
     assert.equal(attempts, 2, 'a stuck push is not started a second time');
   } finally {
+    await s.close();
+  }
+});
+
+test('the nightly control backup and a manual one wait while a destination check runs, starting nothing and storing no backup', async () => {
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  class GatedDocker extends FakeDocker {
+    async createContainer(name: string, body: CreateContainerBody): Promise<string> {
+      const id = await super.createContainer(name, body);
+      await gate;
+      return id;
+    }
+  }
+  const docker = new GatedDocker();
+  docker.addImage('restic/restic:0.17.3');
+  docker.execResponder = (cmd) =>
+    cmd[1] === 'backup'
+      ? { code: 0, out: '{"message_type":"summary","snapshot_id":"snap1"}\n' }
+      : { code: 0 };
+  // A slow tick, so the scheduler cannot start a push in the few milliseconds between saving the destination and the check.
+  const s = await server(docker, {
+    TUG_RESTIC_IMAGE: 'restic/restic:0.17.3',
+    TUG_BACKUP_TICK_MS: '100',
+  });
+  const helpers = () => docker.calls.filter((call) => call.startsWith('create ')).length;
+  try {
+    await call(s.base, 'POST', '/api/v1/backup/destination', DESTINATION);
+    const check = call(s.base, 'POST', '/api/v1/backup/destination/check', {});
+    await until(() => helpers() === 1, 'the destination check to start its helper');
+    await new Promise((resolve) => setTimeout(resolve, 500)); // several scheduler ticks while the check runs
+    assert.equal(helpers(), 1, 'the nightly backup starts no restic helper while a check runs');
+    assert.equal(
+      (await listing(s.base)).control?.lastStatus,
+      null,
+      'the skipped nightly backup stores no backup row',
+    );
+    const manual = await call(s.base, 'POST', '/api/v1/control/backups/run', {
+      toDestination: true,
+    });
+    assert.equal(manual.status, 409, 'a manual control backup is refused while a check runs');
+    assert.equal(helpers(), 1, 'the refused manual backup starts no helper either');
+    release();
+    assert.equal((await check).status, 200, 'the check itself still completes');
+    const done = await until(async () => {
+      const { control } = await listing(s.base);
+      return control?.lastStatus === 'completed' ? control : undefined;
+    }, 'the nightly backup to run once the check is over');
+    assert.equal(done.lastStatus, 'completed', 'the nightly backup resumes after the check');
+  } finally {
+    release();
     await s.close();
   }
 });
