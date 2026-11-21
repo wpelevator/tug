@@ -15,6 +15,7 @@ import { createProgress, withProgress } from '../progress.ts';
 import { canPrompt } from '../prompt.ts';
 import { composeNameSync, defaultComposeFileName, resolveProject } from '../project.ts';
 import {
+  buildSecretProblems,
   describeValues,
   findMissingValues,
   ignoredSourceNotes,
@@ -25,10 +26,14 @@ import {
 import { formatValuesTable, summarizeValues } from '../../values.ts';
 import {
   bindMountWarnings,
+  canonicalSecrets,
   composeHash,
+  describeBuildSecret,
+  usedBuildSecrets,
   ignoredBuildKeys,
   selectBuilds,
 } from '../../compose/compose.ts';
+import type { BuildSecretUse } from '../../compose/compose.ts';
 import { normalizeCompose } from '../../compose/normalize.ts';
 import {
   loadCfg,
@@ -290,15 +295,31 @@ export function registerDeploy(rt: CliRuntime, program: Command): void {
               rt,
               `warning: ${o.file} is named ${declared} but the Tug project is ${project}; secrets, backups and restores are scoped to the Tug project (set project: ${declared} in tug.yml, or pass --project)`,
             );
+          let declaredSecrets: BuildSecretUse[] = [];
           const normalized = await normalizeCompose(resolvePath(rt, o.file), secretNames, {
             project,
             composeCli: o.composeCli,
             hostEnv: rt.env,
             vars: { ...Object.fromEntries([...variables].map(([n, v]) => [n, v.value])), ...flags },
             profiles: o.profile,
+            onSecrets: (uses) => {
+              declaredSecrets = uses;
+            },
           });
           // A service with both build: and image: deploys its image; only --build or x-tug.build: true builds it.
-          const { compose, published } = selectBuilds(normalized, o.build);
+          const selected = selectBuilds(normalized, o.build);
+          const published = selected.published;
+          // A declaration only the image-wins services used is not needed: nothing builds with it.
+          const compose = canonicalSecrets(selected.compose);
+          const built = new Set(usedBuildSecrets(compose).map((use) => use.declaration));
+          const secretUses = declaredSecrets.filter((use) => built.has(use.declaration));
+          const secretProblems = buildSecretProblems(
+            secretUses,
+            new Set(secretNames),
+            new Set(variables.keys()),
+          );
+          if (secretProblems.length) throw new Error(secretProblems.join('\n'));
+          for (const use of secretUses) err(rt, `Build secret: ${describeBuildSecret(use)}`);
           for (const name of published)
             err(
               rt,
@@ -307,6 +328,7 @@ export function registerDeploy(rt: CliRuntime, program: Command): void {
           if (o.dryRun) {
             // Reading the file is part of the dry run: an env_file or an unsupported construct fails here too.
             out(rt, formatValuesTable(values));
+            for (const use of secretUses) out(rt, `build secret  ${describeBuildSecret(use)}`);
             // The checks a deploy makes against other projects (a host port another project already publishes on a node).
             await request(rt, 'POST', '/api/v1/deployments/check', { project, compose });
             err(rt, 'No host-port clash with another project on any node.');

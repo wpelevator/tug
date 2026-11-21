@@ -417,7 +417,6 @@ test('validateCompose rejects unsupported keys and names the key', () => {
     'ipc',
     'security_opt',
     'sysctls',
-    'secrets',
     'configs',
     'env_file',
     'links',
@@ -469,8 +468,8 @@ test('validateCompose rejects custom networks, unnamed volumes, relative binds a
   );
   assert.match(subset({ image: undefined, build: undefined }), /image or build is required/);
   assert.match(
-    subset({}, { secrets: { s: {} } } as Partial<ComposeFile>),
-    /secrets is not supported at the top level/,
+    subset({}, { configs: { s: {} } } as Partial<ComposeFile>),
+    /configs is not supported at the top level/,
   );
   assert.match(
     subset({}, { volumes: { data: { external: true, bogus: 1 } } } as Partial<ComposeFile>),

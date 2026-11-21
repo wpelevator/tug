@@ -63,15 +63,11 @@ import {
   publishesHostPort,
   loopbackIngressServices,
   serviceSecretNames,
+  serviceBuildSecrets,
   validateCompose,
 } from '../compose/compose.ts';
 import { findPortClashes, portClashMessage } from '../compose/port-clash.ts';
-import {
-  buildImage,
-  buildSecretSources,
-  unpackContext,
-  run as runCommand,
-} from '../images/build.ts';
+import { buildImage, unpackContext, run as runCommand } from '../images/build.ts';
 import { sentinelNames } from '../compose/normalize.ts';
 import {
   MAX_VAR_BYTES,
@@ -3287,10 +3283,12 @@ export async function createApp(
         );
       // The CLI interpolates control secrets as sentinels; a reference to a secret that is gone would deploy an empty value.
       const referenced = sentinelNames(compose);
-      // Secrets a build mounts (`build.secrets`) are read by control while it builds, so they must exist too.
-      const buildSecrets = Object.values(compose.services).flatMap((service) =>
-        buildSecretSources(service.build as Parameters<typeof buildSecretSources>[0]),
+      // Secrets a build mounts (`build.secrets` through the top-level `secrets`) are read by control while it
+      // builds, so they must exist too. A Compose secret is always a tug secret, never a variable.
+      const buildUses = Object.keys(compose.services).flatMap((service) =>
+        serviceBuildSecrets(compose, service),
       );
+      const buildSecrets = buildUses.map((use) => use.secret);
       if (referenced.includes(REGISTRY_AUTH_SECRET) || buildSecrets.includes(REGISTRY_AUTH_SECRET))
         throw httpError(
           400,
@@ -3305,6 +3303,15 @@ export async function createApp(
             .map((row) => row.name),
         );
         const missing = needed.filter((name) => !known.has(name));
+        for (const use of buildUses)
+          if (
+            missing.includes(use.secret) &&
+            db.get('SELECT 1 FROM project_vars WHERE project_id=? AND name=?', project, use.secret)
+          )
+            throw httpError(
+              400,
+              `${use.declaration} → secret ${use.secret}: ${use.secret} is a variable in project ${project}, and a Compose secret is always a tug secret. Remove the variable with tug var remove ${use.secret}, then run tug secret set ${use.secret}`,
+            );
         if (missing.length)
           throw httpError(
             400,
@@ -3446,26 +3453,22 @@ export async function createApp(
           } else {
             const buildSpec = compose.services[service].build!;
             // Decrypted only here, handed to the build through its environment, and never stored with the deployment.
-            const secrets = Object.fromEntries(
-              buildSecretSources(buildSpec as Parameters<typeof buildSecretSources>[0]).map(
-                (name) => {
-                  const row = db.get<SecretRow>(
-                    'SELECT * FROM secrets WHERE project_id=? AND name=?',
-                    project,
-                    name,
-                  );
-                  if (!row)
-                    throw httpError(400, `secrets not found in project ${project}: ${name}`);
-                  return [name, decrypt(row.encrypted_value, masterKey)];
-                },
-              ),
-            );
+            const secrets = serviceBuildSecrets(compose, service).map((use) => {
+              const row = db.get<SecretRow>(
+                'SELECT * FROM secrets WHERE project_id=? AND name=?',
+                project,
+                use.secret,
+              );
+              if (!row)
+                throw httpError(400, `secrets not found in project ${project}: ${use.secret}`);
+              return { id: use.id, value: decrypt(row.encrypted_value, masterKey) };
+            });
             await images.build({
               contextDir: contextDir!,
               service,
               buildSpec,
               imageRef,
-              ...(Object.keys(secrets).length ? { secrets } : {}),
+              ...(secrets.length ? { secrets } : {}),
             });
           }
           // An unchanged rebuild produces the image the project already has an archive for: point at that

@@ -10,7 +10,7 @@ import { composeErrors, ignoredBuildKeys, selectBuilds } from '../../compose/com
 import type { ComposeFile } from '../../protocol.ts';
 
 interface BuildCall {
-  secrets?: Record<string, string>;
+  secrets?: { id: string; value: string }[];
   imageRef: string;
   service: string;
   buildSpec: unknown;
@@ -232,6 +232,9 @@ const WITH_OPTIONS = [
   '        - NPM_TOKEN',
   '      additional_contexts:',
   '        base: docker-image://alpine:3.20',
+  'secrets:',
+  '  NPM_TOKEN:',
+  '    environment: NPM_TOKEN',
   '',
 ].join('\n');
 
@@ -245,11 +248,11 @@ test('build args, target and secrets reach the build on control, and the secret 
     const spec = builds[0].buildSpec as Record<string, unknown>;
     assert.equal(spec.target, 'production', 'the target stage reaches the build');
     assert.deepEqual(spec.args, { NODE_VERSION: '22' }, 'the build args reach the build');
-    assert.deepEqual(spec.secrets, ['NPM_TOKEN'], 'the build names the secret it mounts');
-    assert.equal(
-      builds[0].secrets?.NPM_TOKEN,
-      'npm-secret-value',
-      'control decrypts the project secret for the build',
+    assert.deepEqual(spec.secrets, ['NPM_TOKEN'], 'the build keeps the declaration key it mounts');
+    assert.deepEqual(
+      builds[0].secrets,
+      [{ id: 'NPM_TOKEN', value: 'npm-secret-value' }],
+      'control decrypts the mapped project secret for the build, under the BuildKit id',
     );
     const record = JSON.stringify(deployed);
     assert.ok(!record.includes('npm-secret-value'), 'the deploy result holds no secret value');
@@ -266,8 +269,8 @@ test('a build secret that is not a project secret fails the deploy before anythi
     await fs.writeFile(path.join(dir, 'Dockerfile'), 'FROM scratch\n');
     await assert.rejects(
       tug(['deploy', '--no-wait', '--project', 'shop']),
-      /secrets not found in project shop: NPM_TOKEN/,
-      'the missing secret is named',
+      /NPM_TOKEN → secret NPM_TOKEN .*tug secret set NPM_TOKEN/,
+      'the missing secret is named with the command that sets it',
     );
     assert.deepEqual(builds, [], 'no build ran');
   });
@@ -280,7 +283,7 @@ test('build.secrets cannot be built locally, because only control can read proje
     await tug(['secret', 'set', 'NPM_TOKEN', '--value', 'x', '--project', 'shop']);
     await assert.rejects(
       tug(['deploy', '--build-local', '--no-wait', '--project', 'shop']),
-      /web: build\.secrets are project secrets, which only control can read/,
+      /web: build\.secrets are tug project secrets, which only control can read/,
       'a local build says why it cannot take build secrets',
     );
   });
@@ -305,9 +308,9 @@ test('build keys Tug does not pass on are reported, and malformed ones fail vali
     'secrets is a list',
   );
   assert.match(
-    errors({ secrets: ['bad-name'] }),
-    /build\.secrets entries name a project secret/,
-    'a secret name is a valid value name',
+    errors({ secrets: ['bad name'] }),
+    /build\.secrets entries are a declared secret key/,
+    'a secret entry is a declaration key',
   );
   assert.match(
     errors({ target: 3 }),
@@ -315,12 +318,13 @@ test('build keys Tug does not pass on are reported, and malformed ones fail vali
     'target',
   );
   assert.match(errors({ args: 'A=1' }), /build\.args must be a mapping or a list/, 'args');
+  assert.match(
+    errors({ args: { A: '1' }, secrets: [{ source: 'T', target: 'npm' }] }),
+    /build\.secrets refers to T, which is not declared under secrets/,
+    'a reference to an undeclared key is refused, as Compose does',
+  );
   assert.equal(
-    errors({
-      args: { A: '1' },
-      secrets: [{ source: 'T', target: 'npm' }],
-      additional_contexts: { a: 'b' },
-    }),
+    errors({ args: { A: '1' }, additional_contexts: { a: 'b' } }),
     '',
     'the supported shapes pass',
   );

@@ -438,6 +438,44 @@ const volumeProperties = (): JsonSchema => ({
   'x-tug': volumeXtug(),
 });
 
+const secretDeclaration = (): JsonSchema => ({
+  description:
+    'A Compose secret. For a build it stands for a tug project secret (tug secret set): x-tug.secret, then the name of an external secret, then environment, then this key. file and environment are for plain docker compose only, and tug never reads their values.',
+  oneOf: [
+    { type: 'null' },
+    {
+      type: 'object',
+      properties: {
+        file: { type: 'string', description: 'Read by plain docker compose, ignored by tug.' },
+        environment: {
+          type: 'string',
+          description:
+            'Read by plain docker compose, ignored by tug, which uses the name as the tug secret unless x-tug.secret or an external name applies.',
+        },
+        external: { type: 'boolean' },
+        name: {
+          type: 'string',
+          description:
+            'With external: true, the name of the tug secret. A variable reference is not accepted.',
+        },
+        'x-tug': {
+          type: 'object',
+          properties: {
+            secret: {
+              type: 'string',
+              pattern: '^[A-Za-z_][A-Za-z0-9_]*$',
+              description:
+                'The tug project secret this declaration reads; it wins over every other rule.',
+            },
+          },
+          additionalProperties: false,
+        },
+      },
+      propertyNames: composePropertyNames(['file', 'environment', 'external', 'name', 'x-tug']),
+    },
+  ],
+});
+
 /** Tug ignores `pull_policy` on purpose, so the schema names it; `deploy` (Swarm) is not listed, and the validator rejects it. */
 const serviceKeys = [
   ...SUPPORTED_SERVICE_KEYS.filter((key) => key !== 'x-tug'),
@@ -479,6 +517,12 @@ export function xTugSchema(): JsonSchema {
         type: 'object',
         patternProperties: { '.+': volume() },
       },
+      secrets: {
+        description:
+          'Compose secrets that build.secrets refers to, as in docker compose. Each maps to a tug project secret. A service-level secrets: is not supported.',
+        type: 'object',
+        patternProperties: { '.+': secretDeclaration() },
+      },
       networks: {
         description: 'Only the default network is accepted.',
         oneOf: [
@@ -495,7 +539,10 @@ export function xTugSchema(): JsonSchema {
     },
     required: ['services'],
     propertyNames: {
-      anyOf: [{ enum: ['name', 'networks', 'services', 'volumes', 'x-tug'] }, { pattern: '^x-' }],
+      anyOf: [
+        { enum: ['name', 'networks', 'secrets', 'services', 'volumes', 'x-tug'] },
+        { pattern: '^x-' },
+      ],
     },
   };
 }

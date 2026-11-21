@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { buildCommand, buildImage } from './build.ts';
-import type { BuildSpec } from './build.ts';
+import type { BuildSecretValue, BuildSpec } from './build.ts';
 
 async function withDir(run: (dir: string) => Promise<void>): Promise<void> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-build-options-'));
@@ -15,7 +15,7 @@ async function withDir(run: (dir: string) => Promise<void>): Promise<void> {
   }
 }
 
-const command = (dir: string, buildSpec: BuildSpec | string, secrets?: Record<string, string>) =>
+const command = (dir: string, buildSpec: BuildSpec | string, secrets?: BuildSecretValue[]) =>
   buildCommand({
     contextDir: dir,
     service: 'web',
@@ -57,11 +57,10 @@ test('build args and target become --build-arg and --target, in either Compose s
 
 test('build secrets reach docker through the environment and never through the arguments', async () => {
   await withDir(async (dir) => {
-    const built = command(
-      dir,
-      { secrets: ['NPM_TOKEN', { source: 'GH_TOKEN', target: 'gh' }] },
-      { NPM_TOKEN: 'npm-secret-value', GH_TOKEN: 'gh-secret-value' },
-    );
+    const built = command(dir, {}, [
+      { id: 'NPM_TOKEN', value: 'npm-secret-value' },
+      { id: 'gh', value: 'gh-secret-value' },
+    ]);
     assert.deepEqual(
       built.args.slice(0, 4),
       [
@@ -86,10 +85,10 @@ test('build secrets reach docker through the environment and never through the a
       '1',
       'BuildKit is requested because only it has --secret',
     );
-    assert.throws(
-      () => command(dir, { secrets: ['MISSING'] }, {}),
-      /build secret MISSING of web is not a project secret/,
-      'a secret that control did not supply fails the build',
+    assert.deepEqual(
+      command(dir, { secrets: ['npm_token'] }).args.filter((arg) => arg === '--secret'),
+      [],
+      'the names in build.secrets alone mount nothing: only the secrets control resolved are passed',
     );
   });
 });
@@ -152,10 +151,10 @@ test('a failed build never shows a secret value, even when the Dockerfile printe
       buildImage({
         contextDir: dir,
         service: 'web',
-        buildSpec: { secrets: ['TOKEN'] },
+        buildSpec: {},
         imageRef: 'tug-build/p/web:1',
         env: docker.env,
-        secrets: { TOKEN: 'hunter2-value' },
+        secrets: [{ id: 'TOKEN', value: 'hunter2-value' }],
       }),
       (error: Error) => {
         assert.ok(

@@ -44,7 +44,11 @@ test('registry login reads the token from stdin, prints no token, refuses empty 
     assert.match(empty.stderr, /stdin was empty/, 'the failure says what to pipe');
     const tty = await login('ghcr.io', undefined, true);
     assert.notEqual(tty.code, 0, 'a terminal that cannot prompt (CI set) is refused');
-    assert.match(tty.stderr, /no terminal to ask in: pipe the token/, 'the failure shows the piped form');
+    assert.match(
+      tty.stderr,
+      /no terminal to ask in: pipe the token/,
+      'the failure shows the piped form',
+    );
   } finally {
     await control.close();
     await fs.rm(dir, { recursive: true, force: true });

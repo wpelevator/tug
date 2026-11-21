@@ -170,7 +170,7 @@ The `build:` keys tug passes to the build are below. Any other key is ignored, a
 | `context`, `dockerfile` | Where the source is, and the Dockerfile inside it |
 | `args` | `--build-arg` pairs. They stay in the image history, so never put a credential here. A name without a value is dropped, because tug does not read your shell |
 | `target` | The stage of a multi-stage Dockerfile to build |
-| `secrets` | Names of project secrets (`tug secret set NAME`) that the Dockerfile reads with `RUN --mount=type=secret,id=NAME`. A `{ source, target }` entry mounts the secret under another id. Control hands them to BuildKit through its environment, so they are in no layer, process argument, build error or deployment record. A service that uses them builds on control, and `--build-local` refuses it |
+| `secrets` | Keys of the top-level `secrets:`, exactly as in Compose: `- npm_token`, or `{ source, target }` where `target` is the BuildKit id (default: the key). Each declaration maps to a tug project secret, see [Compose secrets](#compose-secrets). The Dockerfile reads it with `RUN --mount=type=secret,id=npm_token`. Control hands the values to BuildKit through its environment, so they are in no layer, process argument, build error or deployment record. A service that uses them builds on control, and `--build-local` refuses it |
 | `additional_contexts` | Named contexts for `COPY --from=name` and `FROM name`. They need `docker buildx` where the image is built, and the deploy fails saying so when it is missing |
 
 ## Rolling rollouts
@@ -352,6 +352,58 @@ Only the main Compose file is scanned for the record and the missing-value check
 
 Reference a secret with `${NAME}` in a service's `environment`, `command`, `entrypoint` or `healthcheck.test`. `environment: [DB_PASSWORD]` passes it through. Control resolves it at deploy time, and the `@@tug:secret:NAME@@` placeholder you may see in a normalized file is internal. Only secrets a service references go to its node, and a changed secret recreates exactly the services that use it. Deploying a file that references a secret the project lacks is rejected. Secrets reach the container environment, so keep them out of `command` unless you accept them showing in `docker inspect`.
 
+## Compose secrets
+
+A build reads secrets through the top-level `secrets:` key, as `docker compose build` does, so one file builds with plain Compose and with tug. tug takes the value of each secret from control and never reads the local source.
+
+```yaml
+# yaml-language-server: $schema=https://unpkg.com/@wpelevator/tug/x-tug.schema.json
+services:
+  web:
+    build:
+      context: .
+      secrets:
+        - composer_auth
+        - npm_token
+        - source: ghcr
+          target: registry
+secrets:
+  composer_auth:
+    environment: COMPOSER_AUTH
+  npm_token:
+    file: ./secrets/npm_token
+  ghcr:
+    external: true
+    name: ghcr_pat
+```
+
+The Dockerfile mounts each one with `RUN --mount=type=secret,id=npm_token`. The id is the key, or `target` in the long form (`registry` above). Store the values on control:
+
+```sh
+tug secret set COMPOSER_AUTH
+tug secret set npm_token --from-file ./secrets/npm_token
+tug secret set ghcr_pat
+```
+
+Each declaration is a project secret, and the first rule below that applies names it.
+
+| Order | Rule | In the example |
+| --- | --- | --- |
+| 1 | `x-tug.secret: NAME` on the declaration | none |
+| 2 | `name:`, when `external: true` | `ghcr` is `ghcr_pat` |
+| 3 | `environment: NAME` | `composer_auth` is `COMPOSER_AUTH` |
+| 4 | The declaration key | `npm_token` is `npm_token` |
+
+- **A secret, never a variable.** A Compose secret always resolves to a tug secret. A name that exists only as a variable fails the deploy, and the message says to use `tug secret set`.
+- **Missing secrets.** The deploy fails and prints the command: `tug secret set npm_token --from-file ./secrets/npm_token` when the declaration has a `file:`, and `tug secret set NAME` otherwise.
+- **Local sources are for plain Compose.** `file:` and `environment:` are what `docker compose build` reads. tug ignores their contents, like `.env`, so a laptop and a CI job deploy the same thing. The deployed file carries only the mapping, not the path, so the default `git-<hash>` version label is the same from every directory.
+- **Reported.** `tug deploy --dry-run`, the deploy report and `tug values` list each declaration a build uses, for example `npm_token → secret npm_token (file ./secrets/npm_token ignored)`.
+- **Where it builds.** Control reads the values when it builds and hands them to BuildKit through its environment. They are in no image layer, process argument, build error or deployment record, and no node receives them. A service that uses them builds on control, and `--build-local` refuses it.
+- **Rejected.** A `build.secrets` entry for a key that is not declared, a declaration field other than `file`, `environment`, `external`, `name` and `x-tug`, `content:`, a `name:` written as a variable reference, and a declaration that maps to `TUG_REGISTRY_AUTH`. A service-level `secrets:`, which would mount files under `/run/secrets`, is rejected too: file mounts are not built yet, see [File-mounted workload secrets](workload-secrets.md).
+- **Unused declarations** are allowed. They release nothing, restart nothing and are not deployed.
+
+`tug lint` checks the declarations offline. Whether the secret exists on control is checked at deploy and by `tug values`.
+
 ## Example: an app and a database on one node
 
 <!-- tug-values: DB_PASSWORD, DB_ROOT_PASSWORD -->
@@ -429,7 +481,8 @@ A file that uses `include`, an `!reset` or `!override` tag, or a non-dotenv `env
 | --- | --- |
 | Service | `image`, `build` (`context`, `dockerfile`, `args`, `target`, `secrets`, `additional_contexts`), `command`, `entrypoint`, `environment`, `ports`, `expose`, `volumes` (named volumes and absolute bind mounts), `tmpfs`, `healthcheck`, `restart`, `labels`, `depends_on` (`service_started`, `service_healthy`), `extra_hosts`, `user`, `working_dir`, `hostname`, `init`, `read_only`, `shm_size`, `mem_limit`, `mem_reservation`, `cpus`, `pids_limit`, `cap_add`, `cap_drop`, `ulimits`, `logging`, `stop_grace_period`, `stop_signal`, `x-tug` |
 | Top-level volume | `driver`, `driver_opts`, `labels`, `external`, `name`, `x-tug` |
+| Top-level secret | `file`, `environment`, `external`, `name`, `x-tug` (`x-tug.secret`), for `build.secrets` only, see [Compose secrets](#compose-secrets) |
 | Ignored | `pull_policy`, because tug decides when images change |
-| Rejected, with the key named | Everything else, including `network_mode`, `privileged`, `devices`, `pid`, `ipc`, `container_name`, `env_file`, custom networks, and top-level `configs` and `secrets` |
+| Rejected, with the key named | Everything else, including `network_mode`, `privileged`, `devices`, `pid`, `ipc`, `container_name`, `env_file`, custom networks, service-level `secrets` (file mounts are not built yet, see [File-mounted workload secrets](workload-secrets.md)), and top-level `configs` |
 
 Containers use tug's own network, volume and container names (`tug_<project>`, `tug_v<project-length>_<project>_<volume>`), so existing Compose-created volumes are not reused. If an owned volume exists under an earlier tug name and its new-name volume does not, tug refuses to create an empty replacement or restart the workload. The older volume stays on the node, so recover or copy its data before deploying.

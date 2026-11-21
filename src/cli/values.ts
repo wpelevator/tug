@@ -9,6 +9,8 @@ import * as yaml from 'js-yaml';
 import { parseDotenv } from '../compose/load.ts';
 import { MAX_VAR_BYTES, RESERVED_VALUE_NAMES, VALUE_NAME, VALUE_NAME_MESSAGE } from '../values.ts';
 import type { DeploymentValue } from '../values.ts';
+import { describeBuildSecret } from '../compose/compose.ts';
+import type { BuildSecretUse } from '../compose/compose.ts';
 import { prompter } from './prompt.ts';
 import type { CliRuntime } from './runtime.ts';
 import type { Prompter } from './prompt.ts';
@@ -244,6 +246,34 @@ export async function ignoredSourceNotes(
       `Ignored COMPOSE_PROFILES=${env.COMPOSE_PROFILES} (Tug does not read your shell); select profiles with tug deploy --profile <name>`,
     );
   return notes;
+}
+
+/** The fix for a declaration whose tug secret is missing, with the path of the file Compose would have read. */
+export function buildSecretFix(use: BuildSecretUse): string {
+  const file = use.ignoredSource?.startsWith('file ') ? use.ignoredSource.slice(5) : undefined;
+  const quoted = file && /\s/.test(file) ? JSON.stringify(file) : file;
+  return `tug secret set ${use.secret}${quoted ? ` --from-file ${quoted}` : ''}`;
+}
+
+/**
+ * What stops a deploy that builds with Compose secrets: a mapped tug secret that is missing (with the exact command
+ * that stores it) or that exists only as a variable. A Compose secret is always a tug secret, never a variable.
+ */
+export function buildSecretProblems(
+  uses: readonly BuildSecretUse[],
+  secrets: ReadonlySet<string>,
+  vars: ReadonlySet<string>,
+): string[] {
+  const problems: string[] = [];
+  for (const use of uses) {
+    if (secrets.has(use.secret)) continue;
+    problems.push(
+      vars.has(use.secret)
+        ? `${describeBuildSecret(use)}: ${use.secret} is a variable, and a Compose secret is always a tug secret. Run tug var remove ${use.secret}, then ${buildSecretFix(use)}`
+        : `${describeBuildSecret(use)}: the secret is not set on control. Run ${buildSecretFix(use)}`,
+    );
+  }
+  return problems;
 }
 
 /** A URL-safe random secret with 192 bits of entropy. */

@@ -13,34 +13,20 @@ import { run } from '../images/build.ts';
 import { loadCompose } from './load.ts';
 import type { RunResult } from '../images/build.ts';
 import type { ComposeFile } from '../protocol.ts';
+import { secretSentinel } from './sentinel.ts';
+import {
+  canonicalSecrets,
+  composeSecretErrors,
+  secretDeclarationErrors,
+  usedBuildSecrets,
+} from './compose.ts';
+import type { BuildSecretUse } from './compose.ts';
 
 export type ComposeRunner = (
   cmd: string,
   args: string[],
   opts: { env: NodeJS.ProcessEnv },
 ) => Promise<RunResult>;
-
-const SECRET_NAME = '[A-Za-z_][A-Za-z0-9_]*';
-const SENTINEL = new RegExp(`@@tug:secret:(${SECRET_NAME})@@`, 'g');
-
-export const secretSentinel = (name: string): string => `@@tug:secret:${name}@@`;
-
-/** Names of the control secrets that `value` references through sentinels, in order of appearance. */
-export function sentinelNames(value: unknown): string[] {
-  const names = new Set<string>();
-  const visit = (v: unknown): void => {
-    if (typeof v === 'string') for (const m of v.matchAll(SENTINEL)) names.add(m[1]);
-    else if (Array.isArray(v)) v.forEach(visit);
-    else if (v && typeof v === 'object') Object.values(v).forEach(visit);
-  };
-  visit(value);
-  return [...names];
-}
-
-/** `value` with every sentinel replaced by the secret's value; a sentinel with no value becomes empty. */
-export function substituteSentinels(value: string, secrets: Record<string, string>): string {
-  return value.replace(SENTINEL, (_all, name: string) => secrets[name] ?? '');
-}
 
 /**
  * Arguments of the `docker compose` call that renders `file` canonically (as YAML, which keeps `x-tug`).
@@ -105,25 +91,56 @@ async function composeCliEnv(
   return { env, emptyEnvFile, cleanup: () => fs.rm(dir, { recursive: true, force: true }) };
 }
 
+/** The options of `normalizeCompose`. */
+export { secretSentinel, sentinelNames, substituteSentinels } from './sentinel.ts';
+
+export interface NormalizeOptions {
+  project?: string;
+  runner?: ComposeRunner;
+  composeCli?: boolean;
+  /** Variable values from control and `--var`; the only plain values the file can see. */
+  vars?: Readonly<Record<string, string>>;
+  /** Active profiles, in place of `COMPOSE_PROFILES`. */
+  profiles?: readonly string[];
+  /** The environment of the machine running the CLI, of which only what Docker needs reaches `docker compose`; default `process.env`. */
+  hostEnv?: NodeJS.ProcessEnv;
+  /** Called with the declarations a build uses and the local source each one names, which tug ignores. */
+  onSecrets?: (uses: BuildSecretUse[]) => void;
+}
+
 /**
- * Reads `file` and returns the canonical definition. Every name in `secretNames` is set to its sentinel in the
- * environment, next to the `vars` control supplied; nothing is read from the deploy machine. `composeCli` (or `TUG_COMPOSE_CLI=1`) renders it with
- * `docker compose config` instead of the native reader.
+ * Reads `file` as `readCompose` does, checks its Compose secrets, and rewrites each used declaration to the canonical
+ * form control receives, so a laptop path or a project-prefixed name never reaches the deployed file or its hash.
  */
 export async function normalizeCompose(
   file: string,
   secretNames: readonly string[],
-  options: {
-    project?: string;
-    runner?: ComposeRunner;
-    composeCli?: boolean;
-    /** Variable values from control and `--var`; the only plain values the file can see. */
-    vars?: Readonly<Record<string, string>>;
-    /** Active profiles, in place of `COMPOSE_PROFILES`. */
-    profiles?: readonly string[];
-    /** The environment of the machine running the CLI, of which only what Docker needs reaches `docker compose`; default `process.env`. */
-    hostEnv?: NodeJS.ProcessEnv;
-  } = {},
+  options: NormalizeOptions = {},
+): Promise<ComposeFile> {
+  // A `name:` written as a variable reference is gone once the file is interpolated, so read the declarations as written.
+  const written = await fs
+    .readFile(file, 'utf8')
+    .then((text) => yaml.load(text) as { secrets?: unknown } | undefined)
+    .catch(() => undefined);
+  const writtenErrors =
+    written && typeof written === 'object' ? secretDeclarationErrors(written.secrets) : [];
+  if (writtenErrors.length) throw new Error(`${file}: ${writtenErrors.join('; ')}`);
+  const compose = await readCompose(file, secretNames, options);
+  const errors = composeSecretErrors(compose);
+  if (errors.length) throw new Error(`${file}: ${errors.join('; ')}`);
+  options.onSecrets?.(usedBuildSecrets(compose));
+  return canonicalSecrets(compose);
+}
+
+/**
+ * Reads `file` and returns the definition. Every name in `secretNames` is set to its sentinel in the
+ * environment, next to the `vars` control supplied; nothing is read from the deploy machine. `composeCli` (or `TUG_COMPOSE_CLI=1`) renders it with
+ * `docker compose config` instead of the native reader.
+ */
+async function readCompose(
+  file: string,
+  secretNames: readonly string[],
+  options: NormalizeOptions,
 ): Promise<ComposeFile> {
   // Nothing here comes from the deploy machine: not its shell, not `.env`, not `env_file`. The names control holds
   // are the whole environment, so two machines that run the same deploy read the same values.

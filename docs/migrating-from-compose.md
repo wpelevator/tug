@@ -17,7 +17,8 @@ tug reads the Compose file itself and rejects what it cannot honor, naming the k
 | In your file | What tug does | Change |
 | --- | --- | --- |
 | `env_file` | Rejected. Values come only from control | `tug secret import .env` or `tug var import .env`, then list each name under `environment` |
-| Top-level `secrets`, `configs` | Rejected | Store the value with `tug secret set NAME` and write `NAME: ${NAME}` under `environment` (a certificate for ingress is a secret named by `x-tug.ingress.cert`) |
+| Top-level `secrets` used by `build.secrets` | Accepted. Each declaration maps to a tug secret, and the local `file:` or `environment:` is ignored | Store the value with `tug secret set NAME` (`--from-file` for a file), see [Compose secrets](compose.md#compose-secrets) |
+| Service-level `secrets:`, top-level `configs` | Rejected. Secret file mounts are not built yet | Pass the value through `environment` as `NAME: ${NAME}` after `tug secret set NAME` (a certificate for ingress is a secret named by `x-tug.ingress.cert`) |
 | `deploy:` | Rejected, because it has Swarm meaning | Use `x-tug.replicas`, `x-tug.placement` and `x-tug.health` |
 | `container_name`, `network_mode`, custom networks | Rejected | Remove them. Service names resolve inside the project network |
 | `build:` and `image:` on one service | The image is deployed, nothing is built | Keep both when CI pushes the image. Use `tug deploy --build` or `x-tug.build: true` to build on control, see [Build or pull](compose.md#build-or-pull) |

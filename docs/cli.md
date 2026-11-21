@@ -300,7 +300,7 @@ By default it deploys the first of `compose.yaml`, `compose.yml`, `docker-compos
 | `--var <NAME=value>` | Value for this deploy only. Repeatable. A value may contain commas | none |
 | `--profile <name>` | Enable a Compose profile. Repeatable or comma-separated | none |
 | `--move <service>` | Acknowledge that a service with data placed on another node starts empty there. Repeatable or comma-separated | Such a deploy is refused |
-| `--dry-run` | Resolve every value, print each name with its source (secrets as `•••`), ask control to check the file against other projects (a host port another project already publishes on the node, see [Checks against other projects](compose.md#checks-against-other-projects)) and stop before building or uploading. Never prompts or stores | off |
+| `--dry-run` | Resolve every value, print each name with its source (secrets as `•••`) and each Compose secret a build uses with its mapping, ask control to check the file against other projects (a host port another project already publishes on the node, see [Checks against other projects](compose.md#checks-against-other-projects)) and stop before building or uploading. Never prompts or stores | off |
 | `--no-wait` | Return once desired state exists | wait |
 | `--timeout <seconds>` | Wait limit | `300` |
 
@@ -358,7 +358,7 @@ Every `${NAME}` in the Compose file comes from control: a project secret, a proj
 | `tug secret list` | | Names and versions, never values |
 | `tug secret remove [name]` | | Deletes a secret |
 | `tug secret import [file]` | `--vars <names>`, `--secrets <names>`, `--select`, `--overwrite`, `-y` | Stores the entries of a dotenv file (default `./.env`). Every entry is a secret unless `--vars` names it. A terminal lists the result and confirms. `--select` picks secret, variable or exclude per entry. Existing names are skipped unless `--overwrite` (a name of the other kind is always skipped), a bare `KEY` is skipped, and values are never printed |
-| `tug values` | `-f, --file <file>`, `--json` | Lists every `${NAME}` and bare `environment` key the file references with its status: `secret` or `var` (set on control), `default` (the file supplies one) or `missing`. Exits 1 while one is missing. Secret values are never shown |
+| `tug values` | `-f, --file <file>`, `--json` | Lists every `${NAME}` and bare `environment` key the file references with its status: `secret` or `var` (set on control), `default` (the file supplies one) or `missing`. Below the table, each Compose secret a build uses is listed with its mapping (`npm_token → secret npm_token (file ./secrets/npm_token ignored)`), see [Compose secrets](compose.md#compose-secrets). Exits 1 while a name or a mapped secret is missing. Secret values are never shown |
 | `tug registry login <host>` | `-u, --username <name>` (required) | Adds a registry host to the project secret `TUG_REGISTRY_AUTH` and keeps its other hosts. In a terminal it asks for the token without echoing it; otherwise it reads the token from stdin, as in CI: `printf %s "$TOKEN" \| tug registry login ghcr.io --username octo`. The token is never printed. Needs admin. GHCR accepts a classic personal access token with `read:packages`, not a fine-grained one |
 | `tug var set <name>` | `--value`, `--from-file` | Sets a project variable: a visible value such as an image tag, host or port |
 | `tug var list` | `--values` | Lists variables. Without `--values` it needs only `read` |
