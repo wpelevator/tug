@@ -57,6 +57,24 @@ tug backup destination set rest:http://backup.internal:8000/tug --env RESTIC_RES
 
 Plain HTTP is acceptable only on a private network or VPN that the control host and every node share. Use `rest:https://` anywhere else. A server started with `--no-auth` needs no `--env`.
 
+### Append-only destinations
+
+A server that refuses deletes, such as `rest-server --append-only`, protects snapshots from a compromised node, and it also refuses the `restic forget --prune` that tug runs after each backup. Tell tug that pruning is yours:
+
+```sh
+tug backup destination set rest:http://backup.internal:8000/tug --retention external
+```
+
+With only `--retention` and the URL already in use, the stored credentials are kept. The mode belongs to the destination, so it applies to every project and to control's own backup, and setting the same URL again keeps it. `--retention managed` turns pruning back on, and a different URL starts managed. `tug backup destination show` and `destination check` print the mode. The check does not test whether the credentials can delete.
+
+With `external`, tug never runs `forget --prune`, and each run records `retention: external`. You then own:
+
+- **Pruning from the storage side**, by whatever your server offers, or by `restic forget --prune` with credentials that may delete (the repository and password come from `tug backup password`).
+- **Safety snapshots.** The snapshot before each in-place restore is tagged `trigger:pre-restore` and is kept by tug's own retention. Keep that tag when you prune: `--keep-tag trigger:pre-restore`.
+- **Partial snapshots.** When a command backup fails after restic stored a partial snapshot, tug forgets it. On an append-only server that cleanup fails, and the failed run's error says so.
+
+Without the setting, an append-only server shows as a retention failure, which is the signal to set it. Two consecutive failed prunes turn `tug backup list --check` red, see [Watch your backups](#watch-your-backups).
+
 ### Not supported
 
 `sftp:` is rejected because tug cannot give the restic helper container SSH keys or a `known_hosts` file. Run a rest-server and reach it over a private network or VPN, or use S3. `rclone:` is rejected because the helper image does not configure rclone.
@@ -166,13 +184,15 @@ backup:
 | Event | Meaning |
 | --- | --- |
 | `backup.completed` | A run succeeded |
-| `backup.failed` | A run failed. A failed scheduled run is retried once after ten minutes |
+| `backup.failed` | A run failed. A failed scheduled run is retried once after ten minutes. When restic exited with its lock code (11), the event metadata has `cause: "locked"`: the repository is locked by another restic, or by one that was killed |
+| `backup.retention_failed` | The backup succeeded but pruning old snapshots failed, so the repository grows. Raised once, when pruning starts failing (and for control's own backup). The event metadata has `cause: "locked"` for a lock failure |
+| `backup.retention_recovered` | Pruning worked again after `backup.retention_failed` |
 | `backup.missed` | The node did not pick it up before its deadline (`node_offline`), or control was not running at the slot. A week of downtime gives one missed event and one catch-up run per target, not a burst |
 | `backup.stale` | A target has no success for two periods. Raised once a day, which catches a destination key that quietly stopped working |
 | `backup.no_destination` | No destination is configured |
 | `backup.cancelled` | Someone ran `tug backup cancel <run>`. A cancelled backup is a warning and is not retried |
 
-Exit status is the signal to wire into monitoring: `tug backup list --check` exits nonzero when a target is stale, failed or missed, or when nothing is protected. Run it from cron or a monitor, and keep running it during a [migration](migration.md#coming-from-an-existing-restic-setup), when the old backup system may be failing without anyone noticing.
+Exit status is the signal to wire into monitoring: `tug backup list --check` exits nonzero when a target is stale, failed or missed, when its retention failed in two runs in a row (or once with a lock failure), or when nothing is protected. One failed prune is not a problem: on a project with several nodes a prune takes an exclusive lock on the shared repository while another node's backup holds a shared one, so a single overlap is harmless. A run whose retention works clears the problem. A destination set to `--retention external` never reports one. Run it from cron or a monitor, and keep running it during a [migration](migration.md#coming-from-an-existing-restic-setup), when the old backup system may be failing without anyone noticing.
 
 While control is down no backup starts, which is the price of one scheduler. Running jobs finish and report when control returns. `tug backup run` takes a backup now, and `tug backup list` shows the catalog, see [CLI](cli.md#backups).
 
@@ -288,7 +308,7 @@ A node runs backup and restore jobs in lanes: a restore and its safety backup fi
 
 | Limit | Detail |
 | --- | --- |
-| Best-effort notification | A failed night produces a `backup.failed` or `backup.stale` event and a [configured webhook](observability.md#alerting). Delivery may be lost across control outages or shutdown. Run `tug backup list --check` from cron or a monitor. It exits nonzero when a target is stale, failed or missed, and when nothing is protected (pass `--allow-empty` for a project without data) |
+| Best-effort notification | A failed night produces a `backup.failed` or `backup.stale` event and a [configured webhook](observability.md#alerting). Delivery may be lost across control outages or shutdown. Run `tug backup list --check` from cron or a monitor. It exits nonzero when a target is stale, failed or missed, when its retention keeps failing, and when nothing is protected (pass `--allow-empty` for a project without data) |
 | Control down | No backup starts. Running jobs finish and report when control returns, and a long gap yields one missed event and one catch-up run per target |
 | Consistency | Live volumes are crash-consistent, not application-consistent. Use a command backup for anything with its own consistency |
 | One node per volume | A volume is backed up from the node that holds it. A volume mounted from a file server with `driver_opts` is read through that node's mount, so back up the file server's own disk where you can |

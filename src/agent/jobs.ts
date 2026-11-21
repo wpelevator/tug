@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { runBackupJob, removeStaleJobContainers } from '../backup/job.ts';
+import { JobError, runBackupJob, removeStaleJobContainers } from '../backup/job.ts';
 import { JOB_CANCELLED } from '../protocol.ts';
 import { redactSecrets } from '../backup/destination.ts';
 import { errMessage } from '../errors.ts';
@@ -240,7 +240,11 @@ export class JobRunner {
       this.results.push({
         commandId: command.id,
         state: 'failed',
-        result: { error: redactSecrets(errMessage(controller.signal.reason ?? error), values) },
+        result: {
+          error: redactSecrets(errMessage(controller.signal.reason ?? error), values),
+          // restic's lock exit code, so control can tell a stuck repository from any other failure without reading wording.
+          ...(error instanceof JobError && error.jobCause ? { cause: error.jobCause } : {}),
+        },
       });
     } finally {
       clearTimeout(timeout);

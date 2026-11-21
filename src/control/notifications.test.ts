@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
 import {
   createWebhookNotifier,
+  sanitizeNotificationEvent,
   validateWebhookUrl,
   webhookOptionsFromEnv,
 } from './notifications.ts';
@@ -271,4 +272,18 @@ test('shutdown aborts active delivery and discards queued work', async () => {
   assert.equal(requests, 1, 'shutdown does not attempt waiting notifications');
   assert.equal(notifier.pending, 0, 'shutdown clears active and waiting work');
   assert.equal(notifier.stats.dropped, 2, 'shutdown reports discarded delivery work');
+});
+
+test('retention failure and recovery events are delivered as whitelisted transitions without their metadata', () => {
+  for (const type of ['backup.retention_failed', 'backup.retention_recovered']) {
+    const wire = sanitizeNotificationEvent({
+      id: 'evt_1',
+      type,
+      project_id: 'site',
+      metadata_json: JSON.stringify({ message: 'token=private' }),
+    } as never);
+    assert.ok(wire, `${type} should be delivered to webhooks`);
+    assert.ok(wire.message.length > 0, `${type} should carry a generic message`);
+    assert.ok(!('metadata_json' in wire), 'arbitrary metadata is never sent');
+  }
 });

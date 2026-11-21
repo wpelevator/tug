@@ -1,8 +1,38 @@
+/** Retention as `GET /api/v1/backups` reports it for a target, or for control's own backup. */
+export interface RetentionInput {
+  state: 'ok' | 'failed' | 'external';
+  message?: string;
+  /** Consecutive runs whose retention failed. */
+  failures: number;
+  /** The newest failure was restic's lock exit code. */
+  locked?: boolean;
+}
+
 /** The part of `GET /api/v1/backups` that `tug backup list --check` judges. */
 export interface BackupCheckInput {
   destinationConfigured: boolean;
-  targets: { target: string; enabled: boolean; problem?: string | null }[];
-  control?: { problem: string | null } | null;
+  targets: {
+    target: string;
+    enabled: boolean;
+    problem?: string | null;
+    retention?: RetentionInput | null;
+  }[];
+  control?: { problem: string | null; retention?: RetentionInput | null } | null;
+}
+
+/**
+ * Retention failures that must fail a monitor: two in a row, or one that was a lock failure. A single failure is
+ * often only an overlap: on a project with several nodes a prune takes an exclusive lock on the shared repository
+ * while another node's backup holds a shared one. A run whose retention works clears it, so a recovery turns it green.
+ */
+export const RETENTION_STRIKES = 2;
+export function retentionProblem(retention: RetentionInput | null | undefined): string | null {
+  if (retention?.state !== 'failed') return null;
+  if (!retention.locked && retention.failures < RETENTION_STRIKES) return null;
+  const why = retention.locked
+    ? 'the repository is locked'
+    : `it failed in ${retention.failures} runs in a row`;
+  return `retention is failing, so old snapshots are not removed (${why})${retention.message ? `: ${retention.message}` : ''}`;
 }
 
 export interface BackupCheckOptions {
@@ -26,12 +56,16 @@ export function backupCheckProblems(
   options: BackupCheckOptions = {},
 ): string[] {
   const active = listing.targets.filter((target) => target.enabled);
-  const problems = active
-    .filter((target) => target.problem)
-    .map((target) => `${target.target}: ${target.problem}`);
+  const problems = active.flatMap((target) =>
+    [target.problem, retentionProblem(target.retention)]
+      .filter((problem): problem is string => Boolean(problem))
+      .map((problem) => `${target.target}: ${problem}`),
+  );
   if (!listing.destinationConfigured && (active.length || options.requireProtection))
     problems.unshift(NO_DESTINATION);
   if (options.requireProtection && !options.allowEmpty && !active.length) problems.push(NO_TARGETS);
   if (listing.control?.problem) problems.push(`control: ${listing.control.problem}`);
+  const controlRetention = retentionProblem(listing.control?.retention);
+  if (controlRetention) problems.push(`control: ${controlRetention}`);
   return problems;
 }

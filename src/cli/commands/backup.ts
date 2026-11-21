@@ -1,7 +1,9 @@
 import { selectBackups } from './selection.ts';
 import { withProgress } from '../progress.ts';
+import { Option } from 'commander';
 import type { Command } from 'commander';
 import { backupCheckProblems } from '../../backup/check.ts';
+import type { RetentionInput } from '../../backup/check.ts';
 import { collectList, loadCfg, print, readEnvValues, request } from './context.ts';
 import { out, err } from '../runtime.ts';
 import type { CliRuntime } from '../runtime.ts';
@@ -31,6 +33,8 @@ interface BackupListing {
     problem: string | null;
     /** A local path is for development: it is not protection against losing the host. */
     scope?: 'shared' | 'local';
+    retention?: RetentionInput | null;
+    lock?: { message?: string } | null;
   } | null;
   targets: {
     target: string;
@@ -41,8 +45,22 @@ interface BackupListing {
     lastSuccessAt: string | null;
     lastStatus: string | null;
     problem: string | null;
+    retention?: RetentionInput | null;
+    lock?: { message?: string } | null;
   }[];
   runs: BackupRunRecord[];
+}
+/** `retention ok`, `retention failed (2 runs)`, `retention external` or nothing before a run applied it; with the lock state. */
+export function retentionColumns(item: {
+  retention?: RetentionInput | null;
+  lock?: { message?: string } | null;
+}): string {
+  const retention = item.retention
+    ? item.retention.state === 'failed'
+      ? `\tretention failed (${item.retention.failures} run${item.retention.failures === 1 ? '' : 's'}${item.retention.locked ? ', locked' : ''})`
+      : `\tretention ${item.retention.state}`
+    : '';
+  return `${retention}${item.lock ? '\tREPOSITORY LOCKED' : ''}`;
 }
 interface DestinationCheck {
   checkId: string;
@@ -67,6 +85,8 @@ interface DestinationCheck {
   }[];
   /** Why the check stopped before every part answered, such as a control restart. */
   error?: string;
+  /** Who prunes the destination; absent from a check made by an older control. */
+  retention?: 'managed' | 'external';
 }
 const CHECK_POLL_MS = 2000;
 const CHECK_DEADLINE_MS = 10 * 60_000;
@@ -112,6 +132,16 @@ function reportCheck(rt: CliRuntime, check: DestinationCheck): void {
     );
   }
   if (check.error) err(rt, `the check stopped early: ${check.error}`);
+  if (check.retention === 'external')
+    err(
+      rt,
+      'retention: external. tug never prunes this destination, so pruning from the storage side is yours to do. This check does not test delete permission.',
+    );
+  else if (check.retention)
+    err(
+      rt,
+      'retention: managed. tug prunes with restic forget --prune after each backup; an append-only destination refuses that, and a retention failure then shows in tug backup list --check. For an append-only destination run tug backup destination set <url> --retention external. This check does not test delete permission.',
+    );
   err(rt, checkScope(check));
 }
 /** What failed, for the warning after `destination set`. */
@@ -286,7 +316,7 @@ export function registerBackup(rt: CliRuntime, program: Command): void {
     .option('--limit <n>', 'number of recent runs to show', '20')
     .option(
       '--check',
-      'exit nonzero when a target is stale, or its last run failed or was missed, or nothing is protected (no destination, or no enabled target); for cron and monitors',
+      'exit nonzero when a target is stale, or its last run failed or was missed, or its retention failed twice in a row or found the repository locked, or nothing is protected (no destination, or no enabled target); for cron and monitors',
     )
     .option(
       '--allow-empty',
@@ -307,13 +337,13 @@ export function registerBackup(rt: CliRuntime, program: Command): void {
       if (!o.json && listing.control)
         out(
           rt,
-          `control\t-\tnightly\tlast success ${listing.control.lastSuccessAt ?? 'never'}${listing.control.scope === 'local' ? '\tlocal path only: not off-host' : ''}${listing.control.problem ? `\t${listing.control.problem}` : ''}`,
+          `control\t-\tnightly\tlast success ${listing.control.lastSuccessAt ?? 'never'}${listing.control.scope === 'local' ? '\tlocal path only: not off-host' : ''}${retentionColumns(listing.control)}${listing.control.problem ? `\t${listing.control.problem}` : ''}`,
         );
       if (!o.json)
         for (const t of listing.targets)
           out(
             rt,
-            `${t.target}\t${t.node ?? '-'}\t${t.schedule}\tlast success ${t.lastSuccessAt ?? 'never'}\tnext ${t.enabled ? t.nextRunAt : 'disabled'}`,
+            `${t.target}\t${t.node ?? '-'}\t${t.schedule}\tlast success ${t.lastSuccessAt ?? 'never'}\tnext ${t.enabled ? t.nextRunAt : 'disabled'}${retentionColumns(t)}`,
           );
       if (!o.json)
         for (const r of listing.runs)
@@ -382,14 +412,21 @@ export function registerBackup(rt: CliRuntime, program: Command): void {
       collectList,
       [],
     )
+    .addOption(
+      new Option(
+        '--retention <mode>',
+        'who prunes old snapshots: managed (default; tug runs restic forget --prune after each backup) or external (an append-only destination such as rest-server --append-only: tug never prunes, so you prune from the storage side). Setting only this on the destination already in use keeps its credentials; when omitted, the current mode is kept for the same URL',
+      ).choices(['managed', 'external']),
+    )
     .option('--no-check', 'save the destination without checking it')
-    .action(async (url: string, o: { env: string[]; check: boolean }) => {
-      const env = await readEnvValues(rt, o.env);
+    .action(async (url: string, o: { env: string[]; check: boolean; retention?: string }) => {
+      // Only the mode for the destination in use: no credentials are sent, so control keeps the stored ones.
+      const env = o.env.length || !o.retention ? await readEnvValues(rt, o.env) : undefined;
       const saved = await request<Record<string, unknown>>(
         rt,
         'POST',
         '/api/v1/backup/destination',
-        { url, env },
+        { url, ...(env ? { env } : {}), ...(o.retention ? { retention: o.retention } : {}) },
       );
       // Saving succeeded, so nothing below changes the exit code: a failed or unavailable check is a warning.
       let check: DestinationCheck | undefined;
@@ -409,6 +446,11 @@ export function registerBackup(rt: CliRuntime, program: Command): void {
         rt,
         'Control now backs itself up here every night. Keep its password with these credentials: tug backup password --control',
       );
+      if (saved.retention === 'external')
+        err(
+          rt,
+          "retention is external: tug will not prune this destination. You own pruning from the storage side, keeping snapshots tagged trigger:pre-restore, and a failed backup's partial snapshot cannot be cleaned up.",
+        );
       if (unavailable)
         err(
           rt,

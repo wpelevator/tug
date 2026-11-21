@@ -366,6 +366,107 @@ test('long-wait commands report progress on stderr and retain their results and 
         session.env = previousEnv;
       }
     });
+    await t.test(
+      'backup destination set --retention sends the mode, and only it when no credentials are given',
+      async () => {
+        routes = {
+          'POST /api/v1/backup/destination': {
+            ok: true,
+            url: 'rest:http://backup.internal:8000/tug',
+            envNames: [],
+            retention: 'external',
+          },
+          'POST /api/v1/backup/destination/check': { checkId: 'chk_1' },
+          'GET /api/v1/backup/destination': {
+            configured: true,
+            checkResult: {
+              checkId: 'chk_1',
+              state: 'done',
+              ok: true,
+              from: 'control',
+              url: 'rest:http://backup.internal:8000/tug',
+              retention: 'external',
+              repositories: [],
+              nodes: [],
+            },
+          },
+        };
+        await run(
+          'backup',
+          'destination',
+          'set',
+          'rest:http://backup.internal:8000/tug',
+          '--retention',
+          'external',
+        );
+        assert.deepEqual(
+          bodies['POST /api/v1/backup/destination'],
+          { url: 'rest:http://backup.internal:8000/tug', retention: 'external' },
+          'with only --retention the request carries no env, so control keeps the stored credentials',
+        );
+        assert.match(
+          err.join(''),
+          /retention is external: tug will not prune/,
+          'the operator is told what they now own',
+        );
+        assert.match(
+          err.join(''),
+          /retention: external\. tug never prunes.*does not test delete permission/s,
+          'the check reports the mode and that delete permission is not probed',
+        );
+        await run('backup', 'destination', 'set', 'rest:http://backup.internal:8000/tug');
+        assert.deepEqual(
+          bodies['POST /api/v1/backup/destination'],
+          { url: 'rest:http://backup.internal:8000/tug', env: {} },
+          'without --retention the request is what it always was',
+        );
+      },
+    );
+    await t.test(
+      'backup list prints retention and lock state, and --check applies the two-strike rule',
+      async () => {
+        const listing = (retention: unknown, lock: unknown = null) => ({
+          destinationConfigured: true,
+          control: null,
+          targets: [
+            {
+              target: 'service:db',
+              node: 'n1',
+              schedule: '0 3 * * *',
+              enabled: true,
+              nextRunAt: '2026-11-02T03:00:00.000Z',
+              lastSuccessAt: '2026-11-01T03:00:00.000Z',
+              lastStatus: 'succeeded',
+              problem: null,
+              retention,
+              lock,
+            },
+          ],
+          runs: [],
+        });
+        routes = {
+          'GET /api/v1/backups': listing({ state: 'failed', failures: 1, message: 'overlap' }),
+        };
+        await run('backup', 'list', '--check');
+        assert.match(out.join(''), /retention failed \(1 run\)/, 'list shows a failing retention');
+        assert.notEqual(last.rt.exitCode, 1, 'one failed prune does not fail --check');
+        routes = {
+          'GET /api/v1/backups': listing({ state: 'failed', failures: 2, message: 'denied' }),
+        };
+        await run('backup', 'list', '--check');
+        assert.match(err.join(''), /PROBLEM service:db: retention is failing/, 'two do');
+        assert.equal(last.rt.exitCode, 1, 'two consecutive failures exit nonzero');
+        routes = {
+          'GET /api/v1/backups': listing({ state: 'ok', failures: 0 }, { message: 'locked' }),
+        };
+        await run('backup', 'list');
+        assert.match(out.join(''), /retention ok.*REPOSITORY LOCKED/s, 'list shows a lock');
+        routes = { 'GET /api/v1/backups': listing({ state: 'external', failures: 0 }) };
+        await run('backup', 'list', '--check');
+        assert.match(out.join(''), /retention external/, 'list shows external retention');
+        assert.equal(last.rt.exitCode, undefined, 'external retention passes --check');
+      },
+    );
     await t.test('control backup and restore keep JSON results on stdout', async () => {
       routes = {
         'POST /api/v1/control/backups/run': { artifactRef: 'backup.tgz' },

@@ -239,6 +239,24 @@ export interface BackupCredentialsResponse {
   env: Record<string, string>;
 }
 
+/** restic's exit code when it cannot lock the repository (0.17 and newer). Lock failures are classified by this code, never by wording. */
+export const RESTIC_EXIT_LOCKED = 11;
+/** Why a backup job failed, when more than its message says; only `locked` exists. */
+export type BackupCause = 'locked';
+/**
+ * What happened to retention (`restic forget --prune`) in a run: `ok`, `failed` (the snapshot is safe, the pruning is
+ * not), or `external` (the destination is append-only and pruning is the operator's job, so tug did not try).
+ * `locked` marks a failure that was restic's lock exit code.
+ */
+export interface BackupRetentionOutcome {
+  state: 'ok' | 'failed' | 'external';
+  /** Redacted restic message when `state` is `failed`. */
+  message?: string;
+  locked?: boolean;
+}
+/** Who prunes the destination: tug (`managed`, the default) or the storage side (`external`, for append-only servers). */
+export type RetentionMode = 'managed' | 'external';
+
 /** Why a command may be refused or a run marked missed; recorded on the run. */
 export type BackupMissReason = 'node_offline' | 'control_down' | 'deadline';
 
@@ -259,6 +277,8 @@ export interface BackupJobPayload {
   node: string;
   tags: string[];
   retention?: BackupRetention;
+  /** `external`: the destination is append-only, so `forget --prune` is skipped and reported as `retention.state: external`. */
+  retentionMode?: 'external';
   /** Command targets: what to run in the service's container, and how to name and check its output. */
   command?: {
     service: string;
@@ -288,6 +308,8 @@ export interface BackupJobResult {
   /** Repository state: `missing` only from the read-only `backup.check`; `backup.run` initializes instead. */
   repository?: 'ok' | 'initialized' | 'missing';
   warnings?: string[];
+  /** What happened to retention; absent when the run applies none (a safety backup before a restore). */
+  retention?: BackupRetentionOutcome;
 }
 
 /** Live jobs in `StatusReport.jobs`, so control can tell "running" from "lost". */
@@ -349,7 +371,7 @@ export type CommandResultPayload =
   | { project: string; volume: string; deleted: true }
   | BackupJobResult
   | { found: boolean }
-  | { error: string };
+  | { error: string; cause?: BackupCause };
 
 export interface CommandResult {
   commandId: string;

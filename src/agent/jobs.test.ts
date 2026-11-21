@@ -840,3 +840,149 @@ test('leftover helpers of a previous agent are stopped gracefully when running a
   );
   assert.deepEqual(docker.names(), [], 'every leftover is removed');
 });
+
+/** A volume backup with retention, whose restic commands the test scripts by subcommand. */
+async function retentionRun(
+  scripted: (cmd: string[]) => { code: number; out?: string; err?: string } | undefined,
+  overrides: Partial<BackupJobPayload> = {},
+) {
+  const docker = dockerWith((cmd) => {
+    if (cmd[0] === 'restic' && cmd[1] === 'backup') return { code: 0, out: SUMMARY };
+    return scripted(cmd) ?? { code: 0 };
+  });
+  docker.volumes.set('tug_v4_site_uploads', {
+    Name: 'tug_v4_site_uploads',
+    Labels: { 'tug.project': 'site', 'tug.volume': 'uploads' },
+  });
+  const result = await runBackupJob(
+    payload({
+      type: 'volume',
+      target: 'volume:uploads',
+      volume: { name: 'uploads', dockerVolume: 'tug_v4_site_uploads' },
+      retention: { daily: 7 },
+      ...overrides,
+    }),
+    'cmd',
+    { docker, credentials },
+    'backup.run',
+  );
+  return { docker, result };
+}
+const ranForget = (docker: FakeDocker) => docker.execOptions.some((e) => e.cmd[1] === 'forget');
+
+test('a successful prune is reported as retention ok', async () => {
+  const { result } = await retentionRun(() => ({ code: 0 }));
+  assert.deepEqual(result.retention, { state: 'ok' }, 'the run reports that retention worked');
+  assert.equal(result.warnings, undefined, 'a working prune adds no warning');
+});
+
+test('a failed prune is retention failed with a redacted message, and the backup still succeeds', async () => {
+  const { result } = await retentionRun((cmd) =>
+    cmd[1] === 'forget' ? { code: 1, err: 'Fatal: access denied for sekret-value-1' } : undefined,
+  );
+  assert.equal(result.snapshotId, 'snap1234', 'the snapshot is kept');
+  assert.equal(result.retention?.state, 'failed', 'the prune failure is structured data');
+  assert.ok(
+    !result.retention?.message?.includes('sekret-value-1'),
+    'the stored message never carries a credential',
+  );
+  assert.equal(result.retention?.locked, undefined, 'a plain failure is not a lock');
+  assert.match(result.warnings?.[0] ?? '', /^retention failed:/, 'the existing warning stays');
+});
+
+test("a prune that exits with restic's lock code is classified locked, whatever restic printed", async () => {
+  const { result } = await retentionRun((cmd) =>
+    cmd[1] === 'forget' ? { code: 11, err: 'some wording a future restic changed' } : undefined,
+  );
+  assert.equal(result.retention?.state, 'failed', 'the prune failed');
+  assert.equal(result.retention?.locked, true, 'exit code 11 marks it locked');
+  const plain = await retentionRun((cmd) =>
+    cmd[1] === 'forget'
+      ? { code: 1, err: 'unable to create lock in backend: repository is already locked' }
+      : undefined,
+  );
+  assert.equal(
+    plain.result.retention?.locked,
+    undefined,
+    'wording that sounds like a lock is not a lock without the exit code',
+  );
+});
+
+test('an external destination skips forget --prune and reports retention external', async () => {
+  const { docker, result } = await retentionRun(
+    (cmd) => (cmd[1] === 'forget' ? { code: 1, err: 'append-only' } : undefined),
+    {
+      retention: undefined,
+      retentionMode: 'external',
+    },
+  );
+  assert.ok(!ranForget(docker), 'forget is never run against an append-only destination');
+  assert.deepEqual(result.retention, { state: 'external' }, 'the run says pruning is external');
+  assert.equal(result.warnings, undefined, 'an external destination is not a warning');
+});
+
+test('a run without a retention policy (a safety backup before a restore) reports no retention', async () => {
+  const { docker, result } = await retentionRun(() => undefined, { retention: undefined });
+  assert.ok(!ranForget(docker), 'no policy, no forget');
+  assert.equal(
+    result.retention,
+    undefined,
+    'nothing is reported, so it cannot reset a failing streak',
+  );
+});
+
+test("a backup that exits with restic's lock code fails with cause locked, and the node reports it", async () => {
+  const docker = dockerWith((cmd) =>
+    cmd[0] === 'restic' && cmd[1] === 'backup'
+      ? { code: 11, err: 'unable to create lock in backend' }
+      : { code: 0 },
+  );
+  docker.volumes.set('tug_v4_site_uploads', {
+    Name: 'tug_v4_site_uploads',
+    Labels: { 'tug.project': 'site', 'tug.volume': 'uploads' },
+  });
+  const { jobs } = await runner(docker);
+  await jobs.start(
+    command(
+      'cmd_lock',
+      payload({
+        type: 'volume',
+        target: 'volume:uploads',
+        volume: { name: 'uploads', dockerVolume: 'tug_v4_site_uploads' },
+      }),
+      'backup.run',
+    ),
+  );
+  await settle(jobs, 1);
+  const [result] = jobs.pending();
+  assert.equal(result.state, 'failed', 'a locked backup is a failed run');
+  assert.equal(
+    (result.result as { cause?: string }).cause,
+    'locked',
+    'the failed result carries cause locked',
+  );
+  const other = dockerWith((cmd) =>
+    cmd[0] === 'restic' && cmd[1] === 'backup'
+      ? { code: 1, err: 'repository is already locked' }
+      : { code: 0 },
+  );
+  other.volumes = docker.volumes;
+  const second = await runner(other);
+  await second.jobs.start(
+    command(
+      'cmd_plain',
+      payload({
+        type: 'volume',
+        target: 'volume:uploads',
+        volume: { name: 'uploads', dockerVolume: 'tug_v4_site_uploads' },
+      }),
+      'backup.run',
+    ),
+  );
+  await settle(second.jobs, 1);
+  assert.equal(
+    (second.jobs.pending()[0].result as { cause?: string }).cause,
+    undefined,
+    'a failure with lock-like wording but another exit code has no cause',
+  );
+});

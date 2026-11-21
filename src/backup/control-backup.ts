@@ -13,7 +13,9 @@ import {
 } from './job.ts';
 import { classifyRepositoryProbe, describeProbeFailure } from './repository-probe.ts';
 import type { Collected } from './job.ts';
+import { RESTIC_EXIT_LOCKED } from '../protocol.ts';
 import type { AttachedProcess, DockerApi } from '../docker-api.ts';
+import type { BackupCause, BackupRetentionOutcome } from '../protocol.ts';
 
 /** Name of the stdin stream restic stores the archive under; `restic dump` reads it back by this path. */
 export const CONTROL_ARCHIVE_NAME = 'control.tar.gz';
@@ -87,7 +89,14 @@ export function controlRepositoryPassword(masterKey: string): string {
   return createHmac('sha256', masterKey).update('tug-control').digest('hex');
 }
 
-export class ControlBackupError extends Error {}
+/** A failed control backup. `jobCause` is `locked` when restic exited with its lock code (see `RESTIC_EXIT_LOCKED`). */
+export class ControlBackupError extends Error {
+  readonly jobCause?: BackupCause;
+  constructor(message: string, options?: ErrorOptions & { exitCode?: number }) {
+    super(message, options);
+    if (options?.exitCode === RESTIC_EXIT_LOCKED) this.jobCause = 'locked';
+  }
+}
 
 const isPipeBreak = (error: unknown): boolean =>
   ['EPIPE', 'ERR_STREAM_PREMATURE_CLOSE', 'ERR_STREAM_DESTROYED', 'ECONNRESET'].includes(
@@ -329,6 +338,8 @@ export interface ControlPush {
   repository: 'ok' | 'initialized';
   /** Retention could not run; the backup itself succeeded. */
   warning?: string;
+  /** What happened to retention: `external` when the destination is append-only and tug did not prune. */
+  retention: BackupRetentionOutcome;
 }
 
 /** Stores the archive file as a new snapshot in the `_control` repository, creating it when it does not exist yet. */
@@ -336,7 +347,7 @@ export async function pushControlArchive(
   docker: DockerApi,
   access: ControlRepositoryAccess,
   archivePath: string,
-  options: { tags?: string[] } = {},
+  options: { tags?: string[]; retentionMode?: 'external' } = {},
 ): Promise<ControlPush> {
   return withRestic(docker, controlAccess(access), async (exec, run) => {
     let repository: ControlPush['repository'] = 'ok';
@@ -348,7 +359,9 @@ export async function pushControlArchive(
         throw new ControlBackupError(`repository check failed: ${await explainProbe(exec, probe)}`);
       const init = await exec(['restic', 'init']);
       if (init.code !== 0)
-        throw new ControlBackupError(`repository init failed: ${summarize(init.err || init.out)}`);
+        throw new ControlBackupError(`repository init failed: ${summarize(init.err || init.out)}`, {
+          exitCode: init.code,
+        });
       repository = 'initialized';
     }
     const backup = await run(
@@ -371,7 +384,13 @@ export async function pushControlArchive(
       'write',
     );
     if (backup.code !== 0)
-      throw new ControlBackupError(`backup failed: ${summarize(backup.err || backup.out)}`);
+      throw new ControlBackupError(`backup failed: ${summarize(backup.err || backup.out)}`, {
+        exitCode: backup.code,
+      });
+    const snapshotId = parseSummary(backup.out).snapshotId;
+    // An append-only destination is pruned from the storage side: tug does not try and fail.
+    if (options.retentionMode === 'external')
+      return { snapshotId, repository, retention: { state: 'external' } };
     const forget = await exec([
       'restic',
       'forget',
@@ -386,12 +405,17 @@ export async function pushControlArchive(
       '--retry-lock',
       RESTIC_LOCK_WAIT,
     ]);
+    if (forget.code === 0) return { snapshotId, repository, retention: { state: 'ok' } };
+    const message = summarize(forget.err || forget.out);
     return {
-      snapshotId: parseSummary(backup.out).snapshotId,
+      snapshotId,
       repository,
-      ...(forget.code === 0
-        ? {}
-        : { warning: `retention failed: ${summarize(forget.err || forget.out)}` }),
+      warning: `retention failed: ${message}`,
+      retention: {
+        state: 'failed',
+        message,
+        ...(forget.code === RESTIC_EXIT_LOCKED ? { locked: true } : {}),
+      },
     };
   });
 }

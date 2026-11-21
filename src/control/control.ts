@@ -127,10 +127,12 @@ import {
   compareCompat,
   majorMinor,
 } from '../protocol.ts';
-import type { BackupJobPayload } from '../protocol.ts';
+import type { BackupCause, BackupJobPayload, BackupRetentionOutcome } from '../protocol.ts';
+import type { RetentionStatus } from '../backup/scheduler.ts';
 import {
   isReservedProject,
   parseBackupDestination,
+  parseRetentionMode,
   projectRepository,
   repositoryPassword,
   redactSecrets,
@@ -139,13 +141,14 @@ import {
   CONTROL_SNAPSHOT_ID,
   controlRepository,
   controlRepositoryPassword,
+  ControlBackupError,
   checkRepository,
   fetchControlArchive,
   listControlSnapshots,
   pushControlArchive,
 } from '../backup/control-backup.ts';
 import { stopResticGracefully } from '../backup/job.ts';
-import { DEFAULT_RESTIC_IMAGE, createBackupService } from '../backup/scheduler.ts';
+import { DEFAULT_RESTIC_IMAGE, createBackupService, retentionStatus } from '../backup/scheduler.ts';
 import { CheckCommands, checkPassed, nodeCheckFromResult } from '../backup/destination-check.ts';
 import type { DestinationCheckResult, NodeCheck } from '../backup/destination-check.ts';
 import {
@@ -2420,6 +2423,7 @@ export async function createApp(
             configured: true,
             url: row.url,
             envNames: JSON.parse(row.env_names_json),
+            retention: destinationQueries.retention(),
             checkedAt: row.checked_at,
             checkResult: row.check_result_json ? JSON.parse(row.check_result_json) : null,
             updatedAt: row.updated_at,
@@ -2428,12 +2432,42 @@ export async function createApp(
     );
   });
   api('post', '/api/v1/backup/destination', null, async (req, res) => {
+    const current = backupDestination();
+    // Only the mode, for the destination already in use: a request with a `retention` and no `env` keeps the stored credentials.
+    if (current && req.body?.env === undefined && req.body?.retention !== undefined) {
+      let mode;
+      try {
+        mode = parseRetentionMode(req.body.retention)!;
+      } catch (e) {
+        return res.status(400).json({ error: errMessage(e) });
+      }
+      const sameUrl =
+        typeof req.body.url === 'string' && req.body.url.trim().replace(/\/+$/, '') === current.url;
+      if (sameUrl) {
+        destinationQueries.setRetention(mode);
+        audit(req.actor!, {
+          type: 'backup.destination_set',
+          message: `backup destination retention set to ${mode} by ${req.actor!.name}`,
+          metadata: { url: current.url, retention: mode },
+        });
+        return res.json({
+          ok: true,
+          url: current.url,
+          envNames: JSON.parse(current.env_names_json),
+          retention: mode,
+        });
+      }
+    }
     let parsed;
     try {
       parsed = parseBackupDestination(req.body);
     } catch (e) {
       return res.status(400).json({ error: errMessage(e) });
     }
+    // The mode is kept when the same destination is set again (rotating a key must not turn pruning back on).
+    const retention =
+      parsed.retention ??
+      (current?.url === parsed.url ? destinationQueries.retention() : 'managed');
     const ts = now();
     abortRunningCheck();
     abortControlPush();
@@ -2445,13 +2479,14 @@ export async function createApp(
         encryptedValue: encrypt(value, masterKey),
       })),
       ts,
+      retention,
     );
     audit(req.actor!, {
       type: 'backup.destination_set',
       message: `backup destination set to ${parsed.url} by ${req.actor!.name}`,
-      metadata: { url: parsed.url, envNames: Object.keys(parsed.env).sort() },
+      metadata: { url: parsed.url, envNames: Object.keys(parsed.env).sort(), retention },
     });
-    res.json({ ok: true, url: parsed.url, envNames: Object.keys(parsed.env).sort() });
+    res.json({ ok: true, url: parsed.url, envNames: Object.keys(parsed.env).sort(), retention });
   });
   api('delete', '/api/v1/backup/destination', null, async (req, res) => {
     abortRunningCheck();
@@ -2549,6 +2584,7 @@ export async function createApp(
       startedAt: now(),
       from: 'control',
       url: destinationUrl,
+      retention: destinationQueries.retention(),
       repositories: [],
       nodes: [],
     };
@@ -4346,6 +4382,24 @@ export async function createApp(
       `SELECT state,created_at,metadata_json FROM backups WHERE project_id='_control' AND target='control-destination' AND json_extract(metadata_json,'$.destination')=?${onlyCompleted ? " AND state='completed'" : ''} ORDER BY created_at DESC LIMIT 1`,
       key,
     );
+  /** Retention outcomes of control's completed backups in a destination, newest first. */
+  const controlRetentionOutcomes = (key: string, limit = 30): BackupRetentionOutcome[] =>
+    db
+      .all<{ metadata_json: string }>(
+        "SELECT metadata_json FROM backups WHERE project_id='_control' AND target='control-destination' AND state='completed' AND json_extract(metadata_json,'$.destination')=? ORDER BY created_at DESC LIMIT ?",
+        key,
+        limit,
+      )
+      .flatMap((row) => {
+        try {
+          return (
+            (JSON.parse(row.metadata_json) as { retention?: BackupRetentionOutcome }).retention ??
+            []
+          );
+        } catch {
+          return [];
+        }
+      });
   /** What `tug backup list` shows about control's own backup in the current destination; null while there is none. */
   function controlDestinationStatus(): {
     lastSuccessAt: string | null;
@@ -4353,12 +4407,27 @@ export async function createApp(
     problem: string | null;
     scope: 'shared' | 'local';
     repository: string;
+    retention: RetentionStatus | null;
+    lock: { message?: string } | null;
+    cause: BackupCause | null;
   } | null {
     const destination = backupDestination();
     if (!destination) return null;
     const key = destinationKey(destination.url);
     const ok = lastControlDestination(key, true);
     const last = lastControlDestination(key, false);
+    const lastMeta = last
+      ? (JSON.parse(last.metadata_json) as {
+          error?: string;
+          cause?: BackupCause;
+          retention?: BackupRetentionOutcome;
+        })
+      : {};
+    const retention = retentionStatus(controlRetentionOutcomes(key));
+    const cause = last?.state === 'failed' ? (lastMeta.cause ?? null) : null;
+    const locked =
+      cause === 'locked' || (last?.state === 'completed' && lastMeta.retention?.locked);
+    const lockMessage = cause === 'locked' ? lastMeta.error : lastMeta.retention?.message;
     const failure =
       last?.state === 'failed'
         ? `the last control backup failed: ${(JSON.parse(last.metadata_json) as { error?: string }).error ?? 'unknown error'}`
@@ -4379,6 +4448,9 @@ export async function createApp(
       // A local path is for development: it does not survive losing the host, so it is never shown as off-host.
       scope: destination.url.startsWith('/') ? 'local' : 'shared',
       repository: controlRepository(destination.url),
+      retention,
+      lock: locked ? { ...(lockMessage ? { message: lockMessage } : {}) } : null,
+      cause,
     };
   }
   /**
@@ -4432,10 +4504,17 @@ export async function createApp(
           signal: push.signal,
         },
         archive.artifactRef,
-        // What the snapshot holds, visible when choosing one: no images and, always, no workload data.
-        { tags: ['images:none', `tug:${ownVersion}`, `trigger:${trigger}`] },
+        {
+          // What the snapshot holds, visible when choosing one: no images and, always, no workload data.
+          tags: ['images:none', `tug:${ownVersion}`, `trigger:${trigger}`],
+          ...(destinationQueries.retention() === 'external'
+            ? { retentionMode: 'external' as const }
+            : {}),
+        },
       );
       if (restartRequired) return null;
+      // Read before this backup is recorded: the state to compare with is the one the backup before it left.
+      const before = controlRetentionOutcomes(key, 1)[0];
       const meta = {
         type: 'control',
         destination: key,
@@ -4461,6 +4540,24 @@ export async function createApp(
         'control backup stored in the backup destination',
         meta,
       );
+      // Only a change is an event: one alert when pruning starts failing, one when it works again.
+      if (pushed.retention.state === 'failed' && before?.state !== 'failed')
+        controlEvent(
+          'error',
+          'backup.retention_failed',
+          `retention of the control backups failed, so old snapshots are not being removed: ${pushed.retention.message ?? 'restic reported an error'}`,
+          {
+            message: pushed.retention.message,
+            ...(pushed.retention.locked ? { cause: 'locked' } : {}),
+          },
+        );
+      else if (pushed.retention.state === 'ok' && before?.state === 'failed')
+        controlEvent(
+          'info',
+          'backup.retention_recovered',
+          'retention of the control backups works again',
+          {},
+        );
       return {
         ok: true,
         stored: 'destination',
@@ -4475,6 +4572,7 @@ export async function createApp(
       // because the destination was replaced or removed is not a failure of any destination in use.
       if (restartRequired || push.signal.aborted) return null;
       const error = errMessage(e);
+      const cause = e instanceof ControlBackupError ? e.jobCause : undefined;
       db.run(
         'INSERT INTO backups(id,project_id,target,node_id,state,artifact_ref,metadata_json,created_at,completed_at) VALUES(?,?,?,?,?,?,?,?,?)',
         id('cbak'),
@@ -4483,11 +4581,14 @@ export async function createApp(
         null,
         'failed',
         null,
-        JSON.stringify({ type: 'control', destination: key, error }),
+        JSON.stringify({ type: 'control', destination: key, error, ...(cause ? { cause } : {}) }),
         startedAt,
         now(),
       );
-      controlEvent('error', 'backup.failed', `control backup failed: ${error}`, { error });
+      controlEvent('error', 'backup.failed', `control backup failed: ${error}`, {
+        error,
+        ...(cause ? { cause } : {}),
+      });
       return { ok: false, stored: 'destination', error };
     } finally {
       if (archive) await fs.rm(archive.artifactRef, { force: true });

@@ -15,12 +15,15 @@ import type {
   ExecOptions,
 } from '../docker-api.ts';
 import type {
+  BackupCause,
   BackupCredentialsResponse,
   BackupJobPayload,
   BackupJobResult,
   BackupRetention,
+  BackupRetentionOutcome,
   JobPhase,
 } from '../protocol.ts';
+import { RESTIC_EXIT_LOCKED } from '../protocol.ts';
 
 /** Docker volume holding restic's cache across jobs, so repeated runs do not re-read the repository index. */
 export const RESTIC_CACHE_VOLUME = 'tug_restic_cache';
@@ -229,7 +232,14 @@ class Tail extends Transform {
   }
 }
 
-export class JobError extends Error {}
+/** A failed job. `jobCause` is `locked` when restic exited with its lock code, which is how a stuck repository is told from other failures. */
+export class JobError extends Error {
+  readonly jobCause?: BackupCause;
+  constructor(message: string, jobCause?: BackupCause) {
+    super(message);
+    this.jobCause = jobCause;
+  }
+}
 
 export async function ensureImage(docker: DockerApi, ref: string): Promise<void> {
   if (await docker.inspectImage(ref)) return;
@@ -255,8 +265,12 @@ export async function runBackupJob(
   let running = 0;
   const labels = { [LABEL_JOB]: commandId };
   const name = (suffix: string) => `tug-job-${payload.runId}-${suffix}`;
-  const fail = (what: string, detail: string): JobError =>
-    new JobError(`${what}: ${redact(detail).trim().split('\n').slice(-6).join(' | ')}`);
+  /** A failure with restic's message; `code` is restic's exit code, whose lock value marks the failure as `locked`. */
+  const fail = (what: string, detail: string, code?: number): JobError =>
+    new JobError(
+      `${what}: ${redact(detail).trim().split('\n').slice(-6).join(' | ')}`,
+      code === RESTIC_EXIT_LOCKED ? 'locked' : undefined,
+    );
 
   const helper = async (suffix: string, body: CreateContainerBody): Promise<string> => {
     const id = await docker.createContainer(name(suffix), { ...body, Labels: labels });
@@ -413,13 +427,14 @@ export async function runBackupJob(
       throw fail(
         'repository check failed',
         describeProbeFailure(probe, probe.err || probe.out, version),
+        probe.code,
       );
     if (state === 'missing') {
       // `backup.check` only reports; `backup.run` creates the repository, as only restic exit code 10 means it is absent.
       if (kind === 'backup.check') repository = 'missing';
       else {
         const init = await exec(['restic', 'init']);
-        if (init.code !== 0) throw fail('repository init failed', init.err || init.out);
+        if (init.code !== 0) throw fail('repository init failed', init.err || init.out, init.code);
         repository = 'initialized';
       }
     }
@@ -445,7 +460,11 @@ export async function runBackupJob(
         }
       })();
       if (listed.code !== 0 || !snapshot)
-        throw fail(`snapshot ${restore.snapshotId} was not found in the repository`, listed.err);
+        throw fail(
+          `snapshot ${restore.snapshotId} was not found in the repository`,
+          listed.err,
+          listed.code,
+        );
       for (const tag of [`project:${payload.project}`, `target:${payload.target}`])
         if (!snapshot.tags?.includes(tag))
           throw new JobError(
@@ -471,7 +490,7 @@ export async function runBackupJob(
         const loading = collect(loader);
         dump.stdout.pipe(loader.stdin!);
         const [read, loaded] = await Promise.all([reading, loading]);
-        if (read.code !== 0) throw fail('could not read the snapshot', read.err);
+        if (read.code !== 0) throw fail('could not read the snapshot', read.err, read.code);
         if (loaded.code !== 0)
           throw fail(
             `the restore command exited with code ${loaded.code}`,
@@ -503,6 +522,7 @@ export async function runBackupJob(
             throw fail(
               'restic restore failed; the volume was not changed',
               staged.err || staged.out,
+              staged.code,
             );
           }
           // The snapshot holds /data, so its files are under <staging>/data. Keep the staged copy if the swap fails.
@@ -525,7 +545,8 @@ export async function runBackupJob(
             '/',
             '--verify',
           ]);
-          if (result.code !== 0) throw fail('restic restore failed', result.err || result.out);
+          if (result.code !== 0)
+            throw fail('restic restore failed', result.err || result.out, result.code);
         }
       }
       return {
@@ -595,32 +616,43 @@ export async function runBackupJob(
         throw fail(
           `${problem}${note}`,
           `${Buffer.concat(commandStderr).toString('utf8')}\n${result.err}`,
+          result.code,
         );
       }
     } else {
       phase('uploading');
       const result = await exec(['restic', ...backupArgs(payload)]);
-      if (result.code !== 0) throw fail('backup failed', result.err || result.out);
+      if (result.code !== 0) throw fail('backup failed', result.err || result.out, result.code);
       summary = parseSummary(result.out);
     }
     if (!summary.snapshotId)
       throw fail('backup finished without a snapshot', 'restic reported no snapshot id');
 
     const warnings: string[] = [];
-    if (payload.retention) {
+    let retention: BackupRetentionOutcome | undefined;
+    if (payload.retentionMode === 'external') {
+      // The destination is append-only: pruning is done from the storage side, so tug does not try and fail.
+      retention = { state: 'external' };
+    } else if (payload.retention) {
       phase('forgetting');
       // The snapshot is safe; failing to apply retention, or a prune that stalls, is reported without failing the backup.
+      const failed = (message: string, locked: boolean): void => {
+        warnings.push(`retention failed: ${message}`);
+        retention = { state: 'failed', message, ...(locked ? { locked: true } : {}) };
+      };
       try {
         const forget = await exec(['restic', ...forgetArgs(payload, payload.retention)]);
-        if (forget.code !== 0)
-          warnings.push(
-            `retention failed: ${redact(forget.err || forget.out)
+        if (forget.code === 0) retention = { state: 'ok' };
+        else
+          failed(
+            redact(forget.err || forget.out)
               .trim()
-              .slice(-300)}`,
+              .slice(-300),
+            forget.code === RESTIC_EXIT_LOCKED,
           );
       } catch (error) {
         if (ctx.signal?.aborted || !(error instanceof JobError)) throw error;
-        warnings.push(`retention failed: ${error.message}`);
+        failed(error.message, false);
       }
     }
     return {
@@ -631,6 +663,7 @@ export async function runBackupJob(
       durationMs: Date.now() - started,
       resticVersion: version,
       ...(warnings.length ? { warnings } : {}),
+      ...(retention ? { retention } : {}),
     };
   } finally {
     // A restic still running here (aborted, timed out or stalled) must release its repository lock before it is removed.

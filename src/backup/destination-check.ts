@@ -1,4 +1,4 @@
-import type { BackupJobResult, CommandResultPayload } from '../protocol.ts';
+import type { BackupJobResult, CommandResultPayload, RetentionMode } from '../protocol.ts';
 
 /** One repository probed from control's host. `skipped` follows a failed `_control` on the same destination. */
 export interface ControlRepositoryCheck {
@@ -30,6 +30,8 @@ export interface DestinationCheckResult {
   checkedAt?: string;
   from: 'control';
   url: string;
+  /** Who prunes the destination, as set with `tug backup destination set --retention`; absent from a check that predates it. */
+  retention?: RetentionMode;
   repositories: ControlRepositoryCheck[];
   nodes: NodeCheck[];
   /** Why the check stopped before every part answered, such as a control restart. */

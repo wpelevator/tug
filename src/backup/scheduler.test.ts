@@ -502,3 +502,158 @@ test('cancelling a run asks its node to stop the job, and a cancelled job is a w
     'a finished run cannot be cancelled again',
   );
 });
+
+/** Runs the db target's backup at `when` and returns what the node would have been told. */
+function runAt(f: Awaited<ReturnType<typeof fixture>>, when: string) {
+  f.set(when);
+  f.service.tick(at(when));
+  return f.queued.filter((q) => q.payload.target === 'service:db').at(-1)!;
+}
+const succeed = (
+  f: Awaited<ReturnType<typeof fixture>>,
+  job: Queued,
+  retention?: { state: 'ok' | 'failed' | 'external'; message?: string; locked?: boolean },
+) =>
+  f.service.onResult(job.id, 'succeeded', {
+    runId: job.payload.runId,
+    snapshotId: 'abcdef123456',
+    durationMs: 5,
+    ...(retention ? { retention } : {}),
+  });
+const dbTarget = (f: Awaited<ReturnType<typeof fixture>>) =>
+  f.service.list('site').targets.find((t) => t.target === 'service:db')!;
+
+test('a run stores its retention outcome as data, and the listing serves parsed fields, not the raw metadata', async () => {
+  const f = await fixture();
+  f.service.tick(at('2026-11-01T00:00:00Z'));
+  succeed(f, runAt(f, '2026-11-01T03:00:30Z'), { state: 'failed', message: 'prune failed' });
+  const stored = f.db.get<{ metadata_json: string }>(
+    "SELECT metadata_json FROM backup_runs WHERE state='succeeded'",
+  )!;
+  assert.deepEqual(
+    JSON.parse(stored.metadata_json).retention,
+    { state: 'failed', message: 'prune failed' },
+    'the outcome is stored in the run metadata next to the warnings',
+  );
+  const listing = f.service.list('site');
+  assert.ok(
+    !('metadata_json' in listing.runs[0]),
+    'the raw metadata string is not part of the API',
+  );
+  assert.deepEqual(
+    listing.runs[0].retention,
+    { state: 'failed', message: 'prune failed' },
+    'the run lists its retention as a parsed field',
+  );
+  assert.deepEqual(
+    dbTarget(f).retention,
+    { state: 'failed', message: 'prune failed', failures: 1 },
+    'the target reports the newest outcome and a streak of one',
+  );
+});
+
+test('retention failures count consecutively and a run whose retention works clears the streak', async () => {
+  const f = await fixture();
+  f.service.tick(at('2026-11-01T00:00:00Z'));
+  succeed(f, runAt(f, '2026-11-01T03:00:30Z'), { state: 'failed', message: 'overlap' });
+  succeed(f, runAt(f, '2026-11-02T03:00:30Z'), { state: 'failed', message: 'overlap' });
+  assert.equal(
+    dbTarget(f).retention?.failures,
+    2,
+    'two failed prunes in a row are a streak of two',
+  );
+  succeed(f, runAt(f, '2026-11-03T03:00:30Z'), { state: 'ok' });
+  assert.deepEqual(
+    dbTarget(f).retention,
+    { state: 'ok', failures: 0 },
+    'a prune that works again ends the streak',
+  );
+  succeed(f, runAt(f, '2026-11-04T03:00:30Z'), { state: 'external' });
+  assert.equal(
+    dbTarget(f).retention?.state,
+    'external',
+    'an external destination is reported as such',
+  );
+});
+
+test('retention events fire on transition only, once on the way down and once on recovery', async () => {
+  const f = await fixture();
+  f.service.tick(at('2026-11-01T00:00:00Z'));
+  succeed(f, runAt(f, '2026-11-01T03:00:30Z'), { state: 'ok' });
+  assert.equal(f.events('backup.retention_failed').length, 0, 'a healthy prune raises nothing');
+  succeed(f, runAt(f, '2026-11-02T03:00:30Z'), { state: 'failed', message: 'prune failed' });
+  succeed(f, runAt(f, '2026-11-03T03:00:30Z'), { state: 'failed', message: 'prune failed' });
+  assert.equal(
+    f.events('backup.retention_failed').length,
+    1,
+    'a second failure in a row is not another alert',
+  );
+  assert.equal(f.events('backup.retention_recovered').length, 0, 'nothing recovered yet');
+  succeed(f, runAt(f, '2026-11-04T03:00:30Z'), { state: 'ok' });
+  assert.equal(f.events('backup.retention_recovered').length, 1, 'recovery is announced once');
+  succeed(f, runAt(f, '2026-11-05T03:00:30Z'), { state: 'ok' });
+  assert.equal(
+    f.events('backup.retention_recovered').length,
+    1,
+    'a run that stays healthy is not another recovery',
+  );
+});
+
+test('an external destination skips pruning in the job payload and never raises retention events', async () => {
+  const f = await fixture();
+  f.db.run("INSERT INTO meta(key,value) VALUES('backup_destination_retention','external')");
+  f.service.tick(at('2026-11-01T00:00:00Z'));
+  const job = runAt(f, '2026-11-01T03:00:30Z');
+  assert.equal(job.payload.retentionMode, 'external', 'the node is told not to prune');
+  assert.equal(
+    job.payload.retention,
+    undefined,
+    'no retention policy is sent to a node that must not prune',
+  );
+  succeed(f, job, { state: 'external' });
+  assert.equal(
+    f.events('backup.retention_failed').length,
+    0,
+    'external retention is not a failure',
+  );
+});
+
+test("a run that failed on restic's lock exit records cause locked, shows the lock and carries the cause on backup.failed", async () => {
+  const f = await fixture();
+  f.service.tick(at('2026-11-01T00:00:00Z'));
+  const job = runAt(f, '2026-11-01T03:00:30Z');
+  f.service.onResult(job.id, 'failed', {
+    error: 'backup failed: unable to create lock in backend',
+    cause: 'locked',
+  });
+  const target = dbTarget(f);
+  assert.equal(target.cause, 'locked', 'the target reports the cause of its last failed run');
+  assert.deepEqual(
+    target.lock,
+    { message: 'backup failed: unable to create lock in backend' },
+    "the lock carries restic's message for display only",
+  );
+  assert.match(target.problem ?? '', /repository is locked/, 'the problem says why the run failed');
+  const failedEvent = f.db.get<{ metadata_json: string }>(
+    "SELECT metadata_json FROM events WHERE type='backup.failed'",
+  )!;
+  assert.equal(
+    JSON.parse(failedEvent.metadata_json).cause,
+    'locked',
+    'the existing backup.failed event carries cause locked',
+  );
+  assert.equal(f.events('backup.locked').length, 0, 'no separate locked event exists');
+  succeed(f, runAt(f, '2026-11-02T03:00:30Z'), { state: 'ok' });
+  assert.equal(dbTarget(f).lock, null, 'the next successful run clears the lock');
+  assert.equal(dbTarget(f).cause, null, 'and the cause');
+});
+
+test("a failure that is not restic's lock exit has no cause and no lock", async () => {
+  const f = await fixture();
+  f.service.tick(at('2026-11-01T00:00:00Z'));
+  f.service.onResult(runAt(f, '2026-11-01T03:00:30Z').id, 'failed', {
+    error: 'backup failed: no space',
+  });
+  assert.equal(dbTarget(f).cause, null, 'only the lock exit code makes a cause');
+  assert.equal(dbTarget(f).lock, null, 'and a lock');
+});

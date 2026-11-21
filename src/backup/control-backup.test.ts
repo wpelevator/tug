@@ -859,3 +859,78 @@ test('a cancelled control backup interrupts restic before its helper is removed,
     await fs.rm(dir, { recursive: true, force: true });
   }
 });
+
+test("a push reports retention as data: ok, failed with restic's lock exit marked locked, or external without running forget", async () => {
+  const dir = await scratch();
+  const archive = path.join(dir, 'a.tar.gz');
+  await fs.writeFile(archive, 'x');
+  try {
+    const ok = await pushControlArchive(
+      dockerWith(() => ({ code: 0 })),
+      S3,
+      archive,
+    );
+    assert.deepEqual(ok.retention, { state: 'ok' }, 'a prune that works is ok');
+    const locked = await pushControlArchive(
+      dockerWith((cmd) => (cmd[1] === 'forget' ? { code: 11, err: 'any wording' } : { code: 0 })),
+      S3,
+      archive,
+    );
+    assert.equal(locked.retention.state, 'failed', 'a failed prune is reported as failed');
+    assert.equal(locked.retention.locked, true, 'restic exit 11 marks it locked, not its wording');
+    assert.match(locked.warning ?? '', /retention failed/, 'the existing warning stays');
+    const plain = await pushControlArchive(
+      dockerWith((cmd) =>
+        cmd[1] === 'forget' ? { code: 1, err: 'repository is already locked' } : { code: 0 },
+      ),
+      S3,
+      archive,
+    );
+    assert.equal(plain.retention.locked, undefined, 'lock-like wording without exit 11 is no lock');
+    const external = dockerWith(() => ({ code: 1, err: 'append-only' }));
+    external.execResponder = (cmd) =>
+      cmd[1] === 'backup'
+        ? { code: 0, out: '{"message_type":"summary","snapshot_id":"abc123def456"}\n' }
+        : { code: 0 };
+    const skipped = await pushControlArchive(external, S3, archive, { retentionMode: 'external' });
+    assert.deepEqual(skipped.retention, { state: 'external' }, 'external retention is reported');
+    assert.ok(
+      !execs(external).some((line) => line.startsWith('restic forget')),
+      'forget --prune is not run against an append-only destination',
+    );
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a push that fails on restic's lock exit throws an error with cause locked", async () => {
+  const dir = await scratch();
+  const archive = path.join(dir, 'a.tar.gz');
+  await fs.writeFile(archive, 'x');
+  try {
+    await assert.rejects(
+      () =>
+        pushControlArchive(
+          dockerWith((cmd) => (cmd[1] === 'backup' ? { code: 11, err: 'locked' } : { code: 0 })),
+          S3,
+          archive,
+        ),
+      (error: Error & { jobCause?: string }) => error.jobCause === 'locked',
+      'a backup that exits 11 is classified locked',
+    );
+    await assert.rejects(
+      () =>
+        pushControlArchive(
+          dockerWith((cmd) =>
+            cmd[1] === 'backup' ? { code: 1, err: 'repository is locked' } : { code: 0 },
+          ),
+          S3,
+          archive,
+        ),
+      (error: Error & { jobCause?: string }) => error.jobCause === undefined,
+      'the same wording with another exit code is not',
+    );
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});

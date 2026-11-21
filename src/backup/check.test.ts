@@ -102,3 +102,60 @@ test('--allow-empty accepts a project without targets but still requires a desti
     'a missing destination still fails with --allow-empty',
   );
 });
+
+const withRetention = (retention: {
+  state: 'ok' | 'failed' | 'external';
+  failures: number;
+  message?: string;
+  locked?: boolean;
+}) => ({
+  ...target('service:db'),
+  retention,
+});
+
+test('one retention failure is not a problem, two in a row are, and a recovery clears it', () => {
+  const check = (retention: Parameters<typeof withRetention>[0]) =>
+    backupCheckProblems({ destinationConfigured: true, targets: [withRetention(retention)] });
+  assert.deepEqual(
+    check({ state: 'failed', failures: 1, message: 'overlap' }),
+    [],
+    "a single failure is harmless: a prune can overlap another node's backup on a shared repository",
+  );
+  assert.match(
+    check({ state: 'failed', failures: 2, message: 'prune failed' })[0],
+    /service:db: retention is failing.*2 runs in a row.*prune failed/,
+    'two consecutive failures make the monitor fail and say why',
+  );
+  assert.deepEqual(check({ state: 'ok', failures: 0 }), [], 'a prune that works again is green');
+});
+
+test("a retention failure that was restic's lock exit fails the check at once", () => {
+  assert.match(
+    backupCheckProblems({
+      destinationConfigured: true,
+      targets: [withRetention({ state: 'failed', failures: 1, locked: true })],
+    })[0],
+    /retention is failing.*repository is locked/,
+    'a lock failure is not an overlap to wait out',
+  );
+});
+
+test("external retention never fails the check, and control's retention follows the same rule", () => {
+  assert.deepEqual(
+    backupCheckProblems({
+      destinationConfigured: true,
+      targets: [withRetention({ state: 'external', failures: 0 })],
+    }),
+    [],
+    'an append-only destination that is managed from the storage side is healthy',
+  );
+  assert.match(
+    backupCheckProblems({
+      destinationConfigured: true,
+      targets: [],
+      control: { problem: null, retention: { state: 'failed', failures: 2, message: 'denied' } },
+    })[0],
+    /^control: retention is failing/,
+    "control's own backup is judged like a target",
+  );
+});
