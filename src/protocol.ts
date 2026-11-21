@@ -17,6 +17,10 @@ export interface HealthCheck {
   type: 'docker' | 'tcp' | 'http';
   port?: number | string;
   path?: string;
+  /** http only: the `Host` header to send, for an app that serves several virtual hosts. */
+  host?: string;
+  /** http only: the status codes that pass (default: any 2xx). Redirects are not followed, so list a 301 to accept it. */
+  expect?: number[];
   /** Duration: number (ms) or "2s" / "500ms" / "1m". */
   interval?: string | number;
   timeout?: string | number;
@@ -100,6 +104,8 @@ export interface RolloutSpec {
 
 /** The `x-tug` extension on a Compose service. */
 export interface ServiceExtension {
+  /** `true` builds the service on every deploy even when it also names an `image:` (otherwise the image wins). Needs `build:`. */
+  build?: boolean;
   placement?: Placement;
   replicas?: number;
   global?: boolean;

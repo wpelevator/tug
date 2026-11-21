@@ -63,6 +63,7 @@ import {
   publishesHostPort,
   loopbackIngressServices,
   serviceSecretNames,
+  serviceBuildSecrets,
   validateCompose,
 } from '../compose/compose.ts';
 import { findPortClashes, portClashMessage } from '../compose/port-clash.ts';
@@ -1829,6 +1830,10 @@ export async function createApp(
       res.json(db.get('SELECT * FROM projects WHERE id=?', String(req.params.project))),
   );
 
+  /** The last applying heartbeat of each node: in memory, because it is a hint that a restart may lose. */
+  const applyingSince = new Map<string, number>();
+  /** True while an agent's heartbeat says it is applying work: three missed beats of 15 s end it. */
+  const isApplying = (nodeId: string) => Date.now() - (applyingSince.get(nodeId) ?? 0) < 45_000;
   /** A node whose agent has been seen before but not within TUG_STALE_SECONDS; never-seen (just registered) nodes stay schedulable. */
   const isStale = (row: { last_seen_at: string | null }) =>
     !!row.last_seen_at &&
@@ -2115,6 +2120,7 @@ export async function createApp(
         return {
           ...rest,
           status: statusOf(row),
+          applying: isApplying(row.id),
           connected: wakeHub.connected(row.id),
           labels: labels_json ? (JSON.parse(labels_json) as string[]) : [],
         };
@@ -2750,6 +2756,66 @@ export async function createApp(
         metadata: { name, version: (old?.version || 0) + 1 },
       });
       res.json({ ok: true, name, version: (old?.version || 0) + 1 });
+    } catch (e) {
+      sendError(res, e);
+    } finally {
+      releaseLock(lock);
+    }
+  });
+  /**
+   * Adds or replaces one registry host in the project's TUG_REGISTRY_AUTH secret, keeping every other host. The stored
+   * JSON is never readable through the API, so the merge happens here rather than in the CLI.
+   */
+  api('post', '/api/v1/registry/login', bodyProject, async (req, res) => {
+    const { project = 'site', host, username, password } = req.body;
+    if (isReservedProject(String(project)))
+      return res.status(400).json({ error: 'project names starting with _ are reserved' });
+    if (typeof host !== 'string' || !/^[a-zA-Z0-9.:[\]-]+$/.test(host))
+      return res.status(400).json({ error: 'host must be a registry host such as ghcr.io' });
+    if (typeof username !== 'string' || !username || typeof password !== 'string' || !password)
+      return res.status(400).json({ error: 'username and password required' });
+    let lock;
+    try {
+      lock = acquireProjectLock(project, 'registry.login');
+      const old = db.get<SecretRow>(
+        'SELECT * FROM secrets WHERE project_id=? AND name=?',
+        project,
+        REGISTRY_AUTH_SECRET,
+      );
+      let credentials;
+      try {
+        credentials = parseRegistryCredentials(
+          old ? decrypt(old.encrypted_value, masterKey) : undefined,
+        );
+      } catch (e) {
+        throw httpError(
+          409,
+          `${errMessage(e)}; replace it with tug secret set ${REGISTRY_AUTH_SECRET}`,
+        );
+      }
+      const replaced = !!credentials[host];
+      credentials[host] = { username, password };
+      const version = (old?.version || 0) + 1;
+      const ts = now();
+      db.run(
+        `INSERT INTO secrets(id,project_id,name,encrypted_value,version,created_at,updated_at) VALUES(?,?,?,?,?,?,?)
+        ON CONFLICT(project_id,name) DO UPDATE SET encrypted_value=excluded.encrypted_value,version=excluded.version,updated_at=excluded.updated_at`,
+        id('sec'),
+        project,
+        REGISTRY_AUTH_SECRET,
+        encrypt(JSON.stringify(credentials), masterKey),
+        version,
+        ts,
+        ts,
+      );
+      wakeAll(project);
+      audit(req.actor!, {
+        type: 'secret.set',
+        project,
+        message: `registry login for ${host} ${replaced ? 'replaced' : 'added'} by ${req.actor!.name}`,
+        metadata: { name: REGISTRY_AUTH_SECRET, version, host },
+      });
+      res.json({ ok: true, host, hosts: Object.keys(credentials).sort(), version });
     } catch (e) {
       sendError(res, e);
     } finally {
@@ -3459,19 +3525,35 @@ export async function createApp(
         );
       // The CLI interpolates control secrets as sentinels; a reference to a secret that is gone would deploy an empty value.
       const referenced = sentinelNames(compose);
-      if (referenced.includes(REGISTRY_AUTH_SECRET))
+      // Secrets a build mounts (`build.secrets` through the top-level `secrets`) are read by control while it
+      // builds, so they must exist too. A Compose secret is always a tug secret, never a variable.
+      const buildUses = Object.keys(compose.services).flatMap((service) =>
+        serviceBuildSecrets(compose, service),
+      );
+      const buildSecrets = buildUses.map((use) => use.secret);
+      if (referenced.includes(REGISTRY_AUTH_SECRET) || buildSecrets.includes(REGISTRY_AUTH_SECRET))
         throw httpError(
           400,
           REGISTRY_AUTH_SECRET +
             ' is reserved for registry authentication and cannot be used in service definitions',
         );
-      if (referenced.length) {
+      const needed = [...new Set([...referenced, ...buildSecrets])];
+      if (needed.length) {
         const known = new Set(
           db
             .all<{ name: string }>('SELECT name FROM secrets WHERE project_id=?', project)
             .map((row) => row.name),
         );
-        const missing = referenced.filter((name) => !known.has(name));
+        const missing = needed.filter((name) => !known.has(name));
+        for (const use of buildUses)
+          if (
+            missing.includes(use.secret) &&
+            db.get('SELECT 1 FROM project_vars WHERE project_id=? AND name=?', project, use.secret)
+          )
+            throw httpError(
+              400,
+              `${use.declaration} → secret ${use.secret}: ${use.secret} is a variable in project ${project}, and a Compose secret is always a tug secret. Remove the variable with tug var remove ${use.secret}, then run tug secret set ${use.secret}`,
+            );
         if (missing.length)
           throw httpError(
             400,
@@ -3610,13 +3692,27 @@ export async function createApp(
             if (imported.platform !== info.platform)
               throw httpError(400, 'imported image identity mismatch');
             await images.run('docker', ['tag', item.imageRef, imageRef]);
-          } else
+          } else {
+            const buildSpec = compose.services[service].build!;
+            // Decrypted only here, handed to the build through its environment, and never stored with the deployment.
+            const secrets = serviceBuildSecrets(compose, service).map((use) => {
+              const row = db.get<SecretRow>(
+                'SELECT * FROM secrets WHERE project_id=? AND name=?',
+                project,
+                use.secret,
+              );
+              if (!row)
+                throw httpError(400, `secrets not found in project ${project}: ${use.secret}`);
+              return { id: use.id, value: decrypt(row.encrypted_value, masterKey) };
+            });
             await images.build({
               contextDir: contextDir!,
               service,
-              buildSpec: compose.services[service].build!,
+              buildSpec,
               imageRef,
+              ...(secrets.length ? { secrets } : {}),
             });
+          }
           // An unchanged rebuild produces the image the project already has an archive for: point at that
           // artifact instead of saving, hashing and storing another full copy. Nodes match by image ID, so they
           // download nothing and the running container is kept. The stored `image_id` is the archive's config
@@ -3899,6 +3995,53 @@ export async function createApp(
           metadata: { version: out.desiredState.version, force: Boolean(req.body.force) },
         });
         res.json(out);
+      } catch (e) {
+        sendError(res, e);
+      }
+    }),
+  );
+  /**
+   * `tug deploy --retry`: runs a failed deployment's rollout again without creating a deployment. The same desired
+   * state is published under a fresh revision id, which is what makes agents forget the per-revision failure of a
+   * rolling service and pull and health-check everything once more; the deployment goes back to `rolling_out` and
+   * succeeds or fails on the new reports (reports of the old revision are ignored).
+   */
+  api('post', '/api/v1/deployments/retry', bodyProject, async (req, res) =>
+    withWriter(async () => {
+      const project = String(req.body?.project || 'site');
+      try {
+        const ds = currentDesired(project);
+        const current = db.get<DeploymentRow>(
+          'SELECT d.* FROM deployments d JOIN projects p ON p.current_deployment_id=d.id WHERE p.id=?',
+          project,
+        );
+        if (!ds || !current) throw httpError(404, missingProject(project));
+        if (current.state !== 'failed')
+          throw httpError(
+            409,
+            `deployment ${current.id} is ${current.state}; only a failed deployment can be retried (deploy again, or roll back with tug rollback)`,
+          );
+        const state: DesiredState = JSON.parse(ds.state_json);
+        state.revision = id('rev');
+        const moved = advance(db, deploymentLifecycle, current.id, 'failed', 'rolling_out', {
+          error_message: null,
+          updated_at: now(),
+        });
+        if (!moved) throw httpError(409, `deployment ${current.id} changed while retrying`);
+        db.run('UPDATE desired_states SET state_json=? WHERE id=?', JSON.stringify(state), ds.id);
+        audit(req.actor!, {
+          type: 'deployment.retry',
+          project,
+          deploymentId: current.id,
+          message: `deployment ${current.id} retried by ${req.actor!.name}`,
+          metadata: { previousError: current.error_message ?? null, revision: state.revision },
+        });
+        wakeAll(project);
+        watch.mark('status', project);
+        res.json({
+          deployment: { ...current, state: 'rolling_out', error_message: null },
+          desiredState: state,
+        });
       } catch (e) {
         sendError(res, e);
       }
@@ -5226,10 +5369,14 @@ export async function createApp(
       Math.max(0, Number.parseInt(String(req.query.timeout ?? '25000'), 10) || 0),
     );
     db.run('UPDATE nodes SET last_seen_at=?,status=? WHERE id=?', now(), 'online', req.node!.id);
+    // `applying=1` is the heartbeat of an agent in the middle of a long reconcile; any other call or report ends it.
+    if (String(req.query.applying) === '1') applyingSince.set(req.node!.id, Date.now());
+    else applyingSince.delete(req.node!.id);
     res.json(await wakeHub.wait(req.node!.id, after, timeoutMs));
   });
   get('/agent/v1/work', authAgent, async (req, res) => {
     db.run('UPDATE nodes SET last_seen_at=?,status=? WHERE id=?', now(), 'online', req.node!.id);
+    applyingSince.delete(req.node!.id);
     const node = db.get<NodeRow>('SELECT * FROM nodes WHERE id=?', req.node!.id)!;
     const allStates = currentDesiredStates();
     const desiredStates = allStates.filter((st) =>
@@ -5391,6 +5538,7 @@ export async function createApp(
       );
     }
     db.run('UPDATE nodes SET last_seen_at=?,status=? WHERE id=?', ts, 'online', req.node!.id);
+    applyingSince.delete(req.node!.id);
     if (report.sentAt)
       db.run(
         'UPDATE nodes SET clock_skew_ms=?,clock_observed_at=? WHERE id=?',

@@ -727,3 +727,47 @@ test('withHostPort replaces the host side of every binding and keeps the bind ad
     '80/tcp': [{ HostIp: '10.0.0.2', HostPort: '20001' }],
   });
 });
+
+test('a rejected revision is tried again once the same desired state arrives under a new revision id (deploy --retry)', async () => {
+  const host = fakeHost();
+  const ctx = await makeCtx(host);
+  await reconcile(desired(rolling('web:1'), 'v1'), ctx);
+  host.unhealthy.add('web:2');
+  const state = (revision: string) =>
+    buildDesiredState({
+      project: 'proj',
+      version: 'v2',
+      revision,
+      compose: normalized(rolling('web:2')),
+      defaultNode: 'n1',
+    });
+  assert.equal(
+    (await reconcile(state('rev-a'), ctx)).health,
+    'failed',
+    'the revision fails its health check',
+  );
+  const createsBefore = host.docker.verbs('create').length;
+  assert.equal(
+    (await reconcile(state('rev-a'), ctx)).health,
+    'failed',
+    'the same revision stays rejected and is not started again on a later poll',
+  );
+  assert.equal(host.docker.verbs('create').length, createsBefore, 'nothing was created again');
+
+  host.unhealthy.clear();
+  const retried = await reconcile(state('rev-b'), ctx);
+  assert.equal(
+    retried.health,
+    'serving',
+    'the retried revision runs its health checks again and passes once the cause is fixed',
+  );
+  assert.equal(
+    retried.observedRevision,
+    'rev-b',
+    'the success is reported against the new revision id',
+  );
+  assert.ok(
+    host.docker.verbs('create').length > createsBefore,
+    'the new revision id started the rollout again',
+  );
+});

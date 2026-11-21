@@ -1,7 +1,9 @@
 import crypto from 'node:crypto';
 import { resolveBackups, validateBackupDefaults } from '../backup/config.ts';
 import { isDuration } from '../duration.ts';
-import { sentinelNames } from './normalize.ts';
+import { SUPPORTED_BUILD_KEYS } from '../images/build.ts';
+import { REGISTRY_AUTH_SECRET } from '../images/registry.ts';
+import { sentinelNames } from './sentinel.ts';
 import type {
   ComposeFile,
   ComposeService,
@@ -324,7 +326,7 @@ export const SUPPORTED_SERVICE_KEYS: readonly string[] = [
 ];
 /** Keys Compose adds or that Tug ignores on purpose: the default network, and `pull_policy` because Tug decides when images change. */
 const IGNORED_SERVICE_KEYS = ['networks', 'pull_policy'];
-const SUPPORTED_TOP_LEVEL = ['services', 'volumes', 'networks', 'name', 'x-tug'];
+export const SUPPORTED_TOP_LEVEL = ['services', 'volumes', 'networks', 'secrets', 'name', 'x-tug'];
 export const SUPPORTED_VOLUME_KEYS = [
   'name',
   'driver',
@@ -347,6 +349,7 @@ export const SERVICE_EXTENSION_KEYS = [
   'ingress',
   'rollout',
   'backup',
+  'build',
 ];
 /** Keys of the top-level-volume `x-tug` block (control records `type` and `driver`). */
 export const VOLUME_EXTENSION_KEYS = ['type', 'driver', 'persistent', 'placement', 'backup'];
@@ -382,9 +385,9 @@ function validateHealth(name: string, health: unknown, errors: string[]): void {
     return;
   }
   for (const key of Object.keys(health))
-    if (!['type', 'port', 'path', 'interval', 'timeout', 'retries'].includes(key))
+    if (!['type', 'port', 'path', 'host', 'expect', 'interval', 'timeout', 'retries'].includes(key))
       errors.push(
-        `${name}: x-tug.health.${key} is not supported (supported: type, port, path, interval, timeout, retries)`,
+        `${name}: x-tug.health.${key} is not supported (supported: type, port, path, host, expect, interval, timeout, retries)`,
       );
   const type = typeof health.type === 'string' ? health.type : undefined;
   if (!type) errors.push(`${name}: x-tug.health needs type: docker, tcp or http`);
@@ -405,6 +408,26 @@ function validateHealth(name: string, health: unknown, errors: string[]): void {
     (typeof health.path !== 'string' || !health.path.startsWith('/'))
   )
     errors.push(`${name}: x-tug.health.path must be an absolute path such as / or /healthz`);
+  for (const key of ['host', 'expect'] as const)
+    if (health[key] !== undefined && type !== undefined && type !== 'http')
+      errors.push(`${name}: x-tug.health.${key} applies only to type http`);
+  if (
+    health.host !== undefined &&
+    (typeof health.host !== 'string' ||
+      !/^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:\d{1,5})?$/.test(health.host))
+  )
+    errors.push(
+      `${name}: x-tug.health.host must be a host name such as blog.example.com, optionally with :port`,
+    );
+  if (
+    health.expect !== undefined &&
+    (!Array.isArray(health.expect) ||
+      !health.expect.length ||
+      health.expect.some((status) => !Number.isInteger(status) || status < 100 || status > 599))
+  )
+    errors.push(
+      `${name}: x-tug.health.expect must be a list of HTTP status codes such as [200, 301]`,
+    );
   for (const key of ['interval', 'timeout'] as const)
     if (health[key] !== undefined && !isDuration(health[key]))
       errors.push(
@@ -438,6 +461,11 @@ function validateServiceExtension(name: string, svc: ComposeService, errors: str
   const global = ext.global as unknown;
   if (global !== undefined && global !== true && global !== false)
     errors.push(`${name}: x-tug.global must be true or false`);
+  const build = ext.build as unknown;
+  if (build !== undefined && build !== true && build !== false)
+    errors.push(`${name}: x-tug.build must be true or false`);
+  else if (build === true && !svc.build)
+    errors.push(`${name}: x-tug.build: true needs a build: section to build from`);
   if ('placement' in ext) validatePlacement(name, ext.placement, errors);
   if (ext.health !== undefined) validateHealth(name, ext.health, errors);
 }
@@ -465,6 +493,251 @@ function validateVolumeExtension(name: string, def: unknown, errors: string[]): 
   if ('placement' in ext) validatePlacement(label, ext.placement, errors);
 }
 
+/** The `build:` keys of every service that will be built and that Tug ignores, as `service: key` strings for a warning. */
+export function ignoredBuildKeys(compose: ComposeFile): string[] {
+  const found: string[] = [];
+  for (const [name, svc] of Object.entries(compose.services || {}))
+    if (isObject(svc.build))
+      for (const key of Object.keys(svc.build))
+        if (!(SUPPORTED_BUILD_KEYS as readonly string[]).includes(key))
+          found.push(`${name}: build.${key}`);
+  return found;
+}
+
+/** The shape of the build keys Tug passes through, so a typo fails the deploy instead of building a different image. */
+function validateBuild(
+  name: string,
+  build: Record<string, unknown>,
+  compose: ComposeFile,
+  errors: string[],
+): void {
+  const mapOrList = (key: string) => {
+    const value = build[key];
+    if (value === undefined || value === null) return;
+    if (!isObject(value) && !(Array.isArray(value) && value.every((v) => typeof v === 'string')))
+      errors.push(`${name}: build.${key} must be a mapping or a list of NAME=value entries`);
+  };
+  mapOrList('args');
+  mapOrList('additional_contexts');
+  if (build.target !== undefined && (typeof build.target !== 'string' || !build.target))
+    errors.push(`${name}: build.target must be the name of a Dockerfile stage`);
+  errors.push(...buildSecretReferenceErrors(name, build, compose));
+}
+
+// ---- Compose secrets -----------------------------------------------------------------------------------------------
+
+/** A tug secret name: what `${NAME}` accepts, and what `tug secret set` stores. */
+const TUG_SECRET_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+/** A Compose key or a BuildKit secret id. */
+const SECRET_KEY = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
+const SECRET_DECLARATION_KEYS = ['file', 'environment', 'external', 'name'];
+
+/** One `build.secrets` entry resolved to the tug project secret it reads. */
+export interface BuildSecretUse {
+  /** The tug project secret that holds the value. */
+  secret: string;
+  /** The BuildKit secret id the Dockerfile mounts: the entry's `target`, else the declaration key. */
+  id: string;
+  /** The key under the top-level `secrets`. */
+  declaration: string;
+  /** The local source Compose would use and tug never reads, such as `file ./secrets/npm_token`. */
+  ignoredSource?: string;
+}
+
+/**
+ * The tug secret a top-level `secrets` declaration stands for, and the local source it also names. The first rule that
+ * applies wins: `x-tug.secret`, then `name` of an `external` secret, then `environment`, then the declaration key.
+ */
+export function declarationSecret(
+  key: string,
+  declaration: unknown,
+): { secret: string; ignoredSource?: string } {
+  const d = isObject(declaration) ? declaration : {};
+  const ext = isObject(d['x-tug']) ? d['x-tug'] : {};
+  const ignoredSource =
+    typeof d.file === 'string'
+      ? `file ${d.file}`
+      : typeof d.environment === 'string'
+        ? `environment ${d.environment}`
+        : undefined;
+  const secret =
+    (typeof ext.secret === 'string' ? ext.secret : undefined) ??
+    (d.external === true && typeof d.name === 'string' ? d.name : undefined) ??
+    (typeof d.environment === 'string' ? d.environment : undefined) ??
+    key;
+  return { secret, ...(ignoredSource ? { ignoredSource } : {}) };
+}
+
+/** The key and BuildKit id of one `build.secrets` entry, or undefined when it is not a valid entry. */
+function buildSecretEntry(entry: unknown): { source: string; target?: string } | undefined {
+  if (typeof entry === 'string') return { source: entry };
+  if (isObject(entry) && typeof entry.source === 'string')
+    return {
+      source: entry.source,
+      ...(typeof entry.target === 'string' ? { target: entry.target } : {}),
+    };
+  return undefined;
+}
+
+/**
+ * The tug secrets a service's build reads, from its `build.secrets` and the top-level declarations they name. This
+ * is the one place the mapping is resolved: the CLI, control and the build all call it. It throws on an entry that
+ * names no declaration, so validate with `composeErrors` first.
+ */
+export function serviceBuildSecrets(compose: ComposeFile, service: string): BuildSecretUse[] {
+  const build = compose.services?.[service]?.build;
+  if (!isObject(build) || !Array.isArray(build.secrets)) return [];
+  return build.secrets.map((raw): BuildSecretUse => {
+    const entry = buildSecretEntry(raw);
+    const declaration =
+      entry && isObject(compose.secrets) ? compose.secrets[entry.source] : undefined;
+    if (!entry || declaration === undefined)
+      throw new Error(
+        `${service}: build.secrets refers to ${entry?.source ?? JSON.stringify(raw)}, which is not declared under secrets`,
+      );
+    const { secret, ignoredSource } = declarationSecret(entry.source, declaration);
+    return {
+      secret,
+      id: entry.target || entry.source,
+      declaration: entry.source,
+      ...(ignoredSource ? { ignoredSource } : {}),
+    };
+  });
+}
+
+/** Every distinct declaration that a build uses, in the order the services first use them. */
+export function usedBuildSecrets(compose: ComposeFile): BuildSecretUse[] {
+  const seen = new Map<string, BuildSecretUse>();
+  for (const service of Object.keys(compose.services || {}))
+    for (const use of serviceBuildSecrets(compose, service))
+      if (!seen.has(use.declaration)) seen.set(use.declaration, use);
+  return [...seen.values()];
+}
+
+/** `npm_token → secret npm_token (file ./secrets/npm_token ignored)`: what the deploy report shows for a declaration. */
+export function describeBuildSecret(use: BuildSecretUse): string {
+  return `${use.declaration} → secret ${use.secret}${use.ignoredSource ? ` (${use.ignoredSource} ignored)` : ''}`;
+}
+
+/**
+ * The file to deploy: each used declaration rewritten to `{ x-tug: { secret } }` and unused ones dropped. The local
+ * source (an absolute path `docker compose config` may have made, or the project-prefixed `name` it adds) differs
+ * between machines, so it would change the Compose hash and the default version label depending on who deploys.
+ */
+export function canonicalSecrets(compose: ComposeFile): ComposeFile {
+  const { secrets: _secrets, ...rest } = compose;
+  void _secrets;
+  const used = usedBuildSecrets(compose);
+  if (!used.length) return rest as ComposeFile;
+  return {
+    ...rest,
+    secrets: Object.fromEntries(
+      used.map((use) => [use.declaration, { 'x-tug': { secret: use.secret } }]),
+    ),
+  } as ComposeFile;
+}
+
+/** Findings for the top-level `secrets` declarations. */
+export function secretDeclarationErrors(secrets: unknown): string[] {
+  if (secrets === undefined) return [];
+  if (!isObject(secrets)) return ['secrets must be a mapping of declarations'];
+  const errors: string[] = [];
+  for (const [key, declaration] of Object.entries(secrets)) {
+    const at = `secrets.${key}`;
+    if (!SECRET_KEY.test(key))
+      errors.push(`${at}: the key must be letters, digits, dots, underscores or hyphens`);
+    if (declaration === null) continue;
+    if (!isObject(declaration)) {
+      errors.push(`${at} must be a mapping`);
+      continue;
+    }
+    for (const field of Object.keys(declaration)) {
+      if (field === 'content')
+        errors.push(
+          `${at}: content is not supported: tug takes secret values only from control, so store it with tug secret set`,
+        );
+      else if (!SECRET_DECLARATION_KEYS.includes(field) && field !== 'x-tug')
+        errors.push(
+          `${at}: ${field} is not supported (supported: ${[...SECRET_DECLARATION_KEYS, 'x-tug'].join(', ')})`,
+        );
+    }
+    for (const field of ['file', 'environment', 'name'] as const)
+      if (declaration[field] !== undefined && typeof declaration[field] !== 'string')
+        errors.push(`${at}: ${field} must be a string`);
+    if (declaration.external !== undefined && typeof declaration.external !== 'boolean')
+      errors.push(`${at}: external must be true or false`);
+    if (typeof declaration.name === 'string' && declaration.name.includes('$'))
+      errors.push(
+        `${at}: name must not use a variable reference: write the name of the tug secret`,
+      );
+    if (declaration['x-tug'] !== undefined) {
+      const ext = declaration['x-tug'];
+      if (!isObject(ext)) errors.push(`${at}: x-tug must be a mapping`);
+      else {
+        for (const field of Object.keys(ext))
+          if (field !== 'secret')
+            errors.push(`${at}: x-tug.${field} is not supported (supported: secret)`);
+        if (ext.secret !== undefined && typeof ext.secret !== 'string')
+          errors.push(`${at}: x-tug.secret must be the name of a tug secret`);
+      }
+    }
+    const { secret } = declarationSecret(key, declaration);
+    if (secret === REGISTRY_AUTH_SECRET)
+      errors.push(
+        `${at}: maps to ${REGISTRY_AUTH_SECRET}, which is reserved for registry authentication`,
+      );
+    else if (!TUG_SECRET_NAME.test(secret) && !errors.some((e) => e.startsWith(`${at}: name must`)))
+      errors.push(
+        `${at}: the tug secret name ${JSON.stringify(secret)} must be letters, digits and underscores (set x-tug.secret to a valid name)`,
+      );
+  }
+  return errors;
+}
+
+/** Findings for a service's `build.secrets` entries against the declarations. */
+function buildSecretReferenceErrors(
+  name: string,
+  build: Record<string, unknown>,
+  compose: ComposeFile,
+): string[] {
+  if (build.secrets === undefined) return [];
+  if (!Array.isArray(build.secrets))
+    return [`${name}: build.secrets must be a list of declared secret keys`];
+  const errors: string[] = [];
+  for (const raw of build.secrets) {
+    const entry = buildSecretEntry(raw);
+    if (!entry || !SECRET_KEY.test(entry.source)) {
+      errors.push(
+        `${name}: build.secrets entries are a declared secret key or { source, target }, got ${JSON.stringify(raw)}`,
+      );
+      continue;
+    }
+    if (!isObject(compose.secrets) || !(entry.source in compose.secrets))
+      errors.push(
+        `${name}: build.secrets refers to ${entry.source}, which is not declared under secrets`,
+      );
+    if (entry.target !== undefined && !SECRET_KEY.test(entry.target))
+      errors.push(
+        `${name}: build.secrets target for ${entry.source} must be a secret id such as npm_token`,
+      );
+  }
+  return errors;
+}
+
+/** The message for a service-level `secrets:`, which would mount files under /run/secrets. */
+const SERVICE_SECRETS_MESSAGE = (name: string) =>
+  `${name}: secrets (file mounts under /run/secrets) are not built yet; only build.secrets uses the top-level secrets. See https://github.com/wpelevator/tug/blob/main/docs/workload-secrets.md`;
+
+/** Every finding about Compose secrets in a file as written, for callers that check before the full validation. */
+export function composeSecretErrors(compose: ComposeFile): string[] {
+  const errors = secretDeclarationErrors(compose.secrets);
+  for (const [name, svc] of Object.entries(compose.services || {})) {
+    if ('secrets' in svc) errors.push(SERVICE_SECRETS_MESSAGE(name));
+    if (isObject(svc.build)) errors.push(...buildSecretReferenceErrors(name, svc.build, compose));
+  }
+  return errors;
+}
+
 function validateSubset(
   name: string,
   svc: ComposeService,
@@ -478,7 +751,9 @@ function validateSubset(
     errors.push(
       key === 'deploy'
         ? `${name}: deploy (swarm) is not supported; use x-tug placement`
-        : `${name}: ${key} is not supported`,
+        : key === 'secrets'
+          ? SERVICE_SECRETS_MESSAGE(name)
+          : `${name}: ${key} is not supported`,
     );
   }
   if (svc.networks !== undefined && svc.networks !== null) {
@@ -488,6 +763,7 @@ function validateSubset(
       errors.push(`${name}: networks other than the default network are not supported`);
   }
   if (!svc.image && !svc.build) errors.push(`${name}: image or build is required`);
+  if (isObject(svc.build)) validateBuild(name, svc.build, compose, errors);
   for (const mount of svc.volumes || []) {
     // Short syntax is valid operator input: deploy normalizes it away with `docker compose config`,
     // so only definitions checked in their canonical form have no business still writing it.
@@ -524,6 +800,7 @@ function validateTopLevel(compose: ComposeFile, errors: string[]): void {
   for (const key of Object.keys(compose))
     if (!SUPPORTED_TOP_LEVEL.includes(key) && !isExtension(key))
       errors.push(`${key} is not supported at the top level of the Compose file`);
+  errors.push(...secretDeclarationErrors(compose.secrets));
   const networks = compose.networks;
   if (isObject(networks)) {
     for (const [key, def] of Object.entries(networks))
@@ -539,6 +816,32 @@ function validateTopLevel(compose: ComposeFile, errors: string[]): void {
 }
 
 /**
+ * Applies the rule that `image:` wins over `build:`: a service that names both is deployed from its published image
+ * and is not built, unless `forceBuild` (`tug deploy --build`) or `x-tug.build: true` asks for the build. A service
+ * with only `build:` always builds. Returns the compose file to deploy (the input is not changed) and the services
+ * whose `build:` was set aside, so the caller can say so.
+ */
+export function selectBuilds(
+  compose: ComposeFile,
+  forceBuild = false,
+): { compose: ComposeFile; published: string[] } {
+  const published: string[] = [];
+  const services: ComposeFile['services'] = {};
+  for (const [name, svc] of Object.entries(compose.services || {})) {
+    if (svc.build && svc.image && !forceBuild && svc['x-tug']?.build !== true) {
+      const { build: _build, ...rest } = svc;
+      void _build;
+      services[name] = rest;
+      published.push(name);
+    } else services[name] = svc;
+  }
+  return { compose: { ...compose, services }, published };
+}
+
+/** The paths of the Docker socket, present on every node because the agent mounts it. */
+const DOCKER_SOCKETS = new Set(['/var/run/docker.sock', '/run/docker.sock']);
+
+/**
  * Warnings for absolute bind mounts: the path is a directory of one specific host, so the service cannot move to
  * another node or VM without someone recreating and filling that path by hand. Named volumes move with a backup and
  * restore, so they are the portable choice. A bind mount stays valid; this only tells the operator what it costs.
@@ -548,6 +851,8 @@ export function bindMountWarnings(compose: ComposeFile): string[] {
   for (const [name, svc] of Object.entries(compose.services || {}))
     for (const mount of svc.volumes || []) {
       if (typeof mount === 'string' || String(mount.type ?? '') !== 'bind') continue;
+      // The agent itself needs the Docker socket, so every node has it: it never ties a service to one host.
+      if (DOCKER_SOCKETS.has(String(mount.source))) continue;
       warnings.push(
         `warning: ${name} bind-mounts ${String(mount.source)}, a path on one host; the service cannot move to another node or VM without recreating that path by hand (a named volume moves with tug backup and restore)`,
       );

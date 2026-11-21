@@ -995,3 +995,102 @@ test('an agent refused as newer than its control reports the remedy, not raw JSO
   );
   assert.equal(fake(ctx).calls?.length ?? 0, 0, 'a refused poll performs no Docker work');
 });
+
+test('http health: a redirect fails with advice, and expect accepts the statuses it lists', async () => {
+  const inits: RequestInit[] = [];
+  let status = 301;
+  const http = (async (_url: string | URL | Request, init?: RequestInit) => {
+    inits.push(init ?? {});
+    return new Response(null, { status });
+  }) as HttpClient;
+  const ctx = await makeCtx({ http });
+  await withContainer(ctx, { ip: '10.1.2.3' });
+  await assert.rejects(
+    waitForHealth(ctx, 'proj', 'web', 'web', { type: 'http', ...fastRetry }),
+    /web: http 301 \(a redirect is not followed: point path at a URL that answers 200, or list the status in x-tug\.health\.expect\)/,
+    'a redirect without expect fails and says how to accept it',
+  );
+  assert.equal(
+    inits[0].redirect,
+    'manual',
+    'the probe asks to see the redirect instead of failing on it',
+  );
+  await waitForHealth(ctx, 'proj', 'web', 'web', {
+    type: 'http',
+    expect: [200, 301],
+    ...fastRetry,
+  });
+  status = 404;
+  await assert.rejects(
+    waitForHealth(ctx, 'proj', 'web', 'web', { type: 'http', expect: [200, 301], ...fastRetry }),
+    /web: http 404 \(x-tug\.health\.expect accepts 200, 301\)/,
+    'a status outside expect fails and lists what is accepted',
+  );
+  status = 204;
+  await waitForHealth(ctx, 'proj', 'web', 'web', { type: 'http', ...fastRetry });
+});
+
+test('http health: host sends that Host header through the host probe and names it in a failure', async () => {
+  const calls: [string, string][] = [];
+  let status = 200;
+  const ctx = await makeCtx({
+    hostProbe: async (url, host) => {
+      calls.push([url, host]);
+      return status;
+    },
+  });
+  await withContainer(ctx, { ip: '10.1.2.3' });
+  const health: HealthCheck = {
+    type: 'http',
+    port: 8080,
+    path: '/healthz',
+    host: 'blog.example.com',
+    ...fastRetry,
+  };
+  await waitForHealth(ctx, 'proj', 'web', 'web', health);
+  assert.deepEqual(
+    calls,
+    [['http://10.1.2.3:8080/healthz', 'blog.example.com']],
+    'the container address is dialed with the configured Host header',
+  );
+  status = 500;
+  await assert.rejects(
+    waitForHealth(ctx, 'proj', 'web', 'web', health),
+    /http health check GET http:\/\/10\.1\.2\.3:8080\/healthz with Host: blog\.example\.com failed/,
+    'a failure names the Host header that was sent',
+  );
+});
+
+test('requestStatus sends the Host header and reports a redirect instead of following it', async () => {
+  const { createServer } = await import('node:http');
+  const seen: string[] = [];
+  const server = createServer((req, res) => {
+    seen.push(String(req.headers.host));
+    if (req.headers.host === 'blog.example.com') {
+      res.writeHead(301, { location: 'https://blog.example.com/' });
+      res.end();
+    } else res.writeHead(200).end('ok');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = (server.address() as { port: number }).port;
+  try {
+    const { requestStatus } = await import('./agent.ts');
+    assert.equal(
+      await requestStatus(`http://127.0.0.1:${port}/`, 'blog.example.com', 2000),
+      301,
+      'the redirect status is returned, not followed',
+    );
+    assert.equal(
+      await requestStatus(`http://127.0.0.1:${port}/`, 'other.example.com', 2000),
+      200,
+      'another Host header reaches the other virtual host',
+    );
+    assert.deepEqual(
+      seen,
+      ['blog.example.com', 'other.example.com'],
+      'the server saw exactly the Host headers sent',
+    );
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});

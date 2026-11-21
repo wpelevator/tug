@@ -101,8 +101,11 @@ test('connection resolution consistently uses explicit options, then environment
     );
     assert.equal(
       fallback.project,
-      'site',
-      'missing implicit config should use the documented default project',
+      path
+        .basename(dir)
+        .toLowerCase()
+        .replace(/[^a-z0-9_-]/g, ''),
+      'with no config and no Compose file the project is the working directory name, never a shared default',
     );
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
@@ -119,9 +122,9 @@ test('invalid and explicitly missing config produce errors instead of silently s
     );
     const created = await resolveCliConfig({ config: 'missing.json' }, {}, dir, true);
     assert.equal(
-      created.project,
-      'site',
-      'init should be able to create an explicitly selected new config file',
+      created.projectSource,
+      'directory',
+      'init should be able to create an explicitly selected new config file, deriving the project from the directory',
     );
     await fs.writeFile(path.join(dir, '.tug.json'), '{broken');
     await assert.rejects(
@@ -912,7 +915,7 @@ test('source archive excludes a custom credential file and honours character-cla
 
 test('deploy summaries are one line and a compose file name is read for the project warning', async () => {
   const { formatDeployment } = await import('./commands/context.ts');
-  const { composeName } = await import('./commands/deploy.ts');
+  const { composeNameSync } = await import('./project.ts');
   assert.equal(
     formatDeployment({
       deployment: { id: 'dep_1', state: 'succeeded' },
@@ -940,8 +943,8 @@ test('deploy summaries are one line and a compose file name is read for the proj
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-name-'));
   await fs.writeFile(path.join(dir, 'a.yml'), 'name: "rug"  # project\nservices: {}\n');
   await fs.writeFile(path.join(dir, 'b.yml'), 'services:\n  web:\n    name: nope\n');
-  assert.equal(await composeName(path.join(dir, 'a.yml')), 'rug', 'a top-level name is read');
-  assert.equal(await composeName(path.join(dir, 'b.yml')), undefined, 'nested names are ignored');
+  assert.equal(composeNameSync(path.join(dir, 'a.yml')), 'rug', 'a top-level name is read');
+  assert.equal(composeNameSync(path.join(dir, 'b.yml')), undefined, 'nested names are ignored');
 });
 
 test('teardown stops the agent and removes Tug state, and only deletes volumes on request', async () => {

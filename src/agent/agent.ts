@@ -8,6 +8,7 @@ import { pipeline } from 'node:stream/promises';
 import { validateImageArchive, verifyDownload } from '../images/artifacts.ts';
 import path from 'node:path';
 import net from 'node:net';
+import { request as httpRequest } from 'node:http';
 import dns from 'node:dns/promises';
 import { WebSocket } from 'ws';
 import {
@@ -119,6 +120,8 @@ export interface AgentContext {
   controlUrl: string;
   /** The node credential presented to control; absent only in tests with a fake `http`. */
   credential?: Credential;
+  /** Sends an http health probe that needs a `Host` header and returns the status; fetch cannot set that header. Tests inject a fake. */
+  hostProbe?: (url: string, host: string, timeoutMs: number) => Promise<number>;
   caddyImage?: string;
   /** Per-host TLS observation for the ingress status; created on first use, injected by tests. */
   tlsMonitor?: TlsMonitor;
@@ -748,10 +751,9 @@ export async function waitForHealth(
         await assertRunning(ctx, container, service);
         const ip = await containerIp(ctx, project, container);
         probed = `http://${ip}:${health.port || 80}${health.path || '/'}`;
-        const res = await ctx.http(probed, {
-          signal: AbortSignal.timeout(parseDuration(health.timeout || '2s')),
-        });
-        if (!res.ok) throw new Error(`${service}: http ${res.status}`);
+        const status = await probeStatus(ctx, probed, health);
+        if (!healthStatusPasses(status, health))
+          throw new Error(`${service}: http ${status}${statusHint(status, health)}`);
       }
       return;
     } catch (e) {
@@ -762,6 +764,44 @@ export async function waitForHealth(
   throw new Error(
     `${service}: ${describeHealthCheck(health, probed)} failed after ${retries} attempt${retries === 1 ? '' : 's'}: ${describeError(last)}${outsideContainerHint(health)}`,
   );
+}
+
+/** Whether a probe status passes: one of `expect` when listed, otherwise any 2xx. */
+export function healthStatusPasses(status: number, health: Pick<HealthCheck, 'expect'>): boolean {
+  return health.expect?.length ? health.expect.includes(status) : status >= 200 && status < 300;
+}
+
+/** Says what to change when a redirect (never followed) or another status fails the probe. */
+function statusHint(status: number, health: HealthCheck): string {
+  if (health.expect?.length) return ` (x-tug.health.expect accepts ${health.expect.join(', ')})`;
+  if (status >= 300 && status < 400)
+    return ' (a redirect is not followed: point path at a URL that answers 200, or list the status in x-tug.health.expect)';
+  return '';
+}
+
+/** GET with a `Host` header over a plain socket, never following a redirect; resolves to the status code. */
+export function requestStatus(url: string, host: string, timeoutMs: number): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(
+      url,
+      { method: 'GET', headers: { host }, timeout: timeoutMs },
+      (res) => {
+        res.resume();
+        resolve(res.statusCode ?? 0);
+      },
+    );
+    req.on('timeout', () => req.destroy(new Error(`no response within ${timeoutMs} ms`)));
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+/** The status of one http probe. Without `host` it goes through `ctx.http` and a redirect is reported, not followed. */
+async function probeStatus(ctx: AgentContext, url: string, health: HealthCheck): Promise<number> {
+  const timeoutMs = parseDuration(health.timeout || '2s');
+  if (health.host) return (ctx.hostProbe ?? requestStatus)(url, health.host, timeoutMs);
+  const res = await ctx.http(url, { redirect: 'manual', signal: AbortSignal.timeout(timeoutMs) });
+  return res.status;
 }
 
 /** Fails fast with the exit code and last log lines when the container is gone, instead of dialing a dead address. */
@@ -800,10 +840,12 @@ function describeError(error: unknown): string {
   return cause ? `${e?.message ?? 'error'} (${cause})` : (e?.message ?? 'no response');
 }
 function describeHealthCheck(health: HealthCheck, probed?: string): string {
-  if (health.type === 'http')
+  if (health.type === 'http') {
+    const host = health.host ? ` with Host: ${health.host}` : '';
     return probed
-      ? `http health check GET ${probed}`
-      : `http health check on port ${health.port || 80}${health.path || '/'}`;
+      ? `http health check GET ${probed}${host}`
+      : `http health check on port ${health.port || 80}${health.path || '/'}${host}`;
+  }
   if (health.type === 'tcp') return `tcp health check on port ${health.port}`;
   return 'docker health check';
 }
@@ -1471,8 +1513,38 @@ export async function endpointAddressesForAgent(
   );
 }
 
+/** How often an agent that is still applying work tells control, so a long image pull does not look like a lost node. */
+export const APPLY_HEARTBEAT_MS = Number(process.env.TUG_APPLY_HEARTBEAT_MS || 15_000);
+
+/**
+ * Starts telling control, every `intervalMs`, that this agent is alive and applying. The first beat comes after one
+ * interval, so a poll that finishes quickly sends none. Returns the function that stops it. A beat that fails is
+ * ignored: the next poll reports for real.
+ */
+export function startApplyHeartbeat(
+  ctx: AgentContext,
+  intervalMs = APPLY_HEARTBEAT_MS,
+): () => void {
+  const timer = setInterval(() => {
+    void api(ctx, '/agent/v1/wake?after=0&timeout=0&applying=1').catch(() => undefined);
+  }, intervalMs);
+  timer.unref();
+  return () => clearInterval(timer);
+}
+
 export async function pollOnce(ctx: AgentContext = defaultContext()): Promise<ProjectStatus[]> {
-  const work = await api<WorkResponse & { desiredState?: DesiredState }>(ctx, '/agent/v1/work');
+  const work = await api<PolledWork>(ctx, '/agent/v1/work');
+  const stopHeartbeat = startApplyHeartbeat(ctx);
+  try {
+    return await applyWork(ctx, work);
+  } finally {
+    stopHeartbeat();
+  }
+}
+
+type PolledWork = WorkResponse & { desiredState?: DesiredState };
+
+async function applyWork(ctx: AgentContext, work: PolledWork): Promise<ProjectStatus[]> {
   const projects: ProjectStatus[] = [];
   for (const desired of work.desiredStates || (work.desiredState ? [work.desiredState] : [])) {
     try {

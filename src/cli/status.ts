@@ -142,6 +142,8 @@ export interface NodeListing {
   labels: string[];
   last_seen_at: string | null;
   disabled_at?: string | null;
+  /** True while the node's agent reports that it is applying work (control 4.0 and later). */
+  applying?: boolean;
 }
 
 /** A table of the registered nodes: state, inter-node address, ingress role, labels and last contact. */
@@ -153,7 +155,7 @@ export function formatNodes(nodes: NodeListing[]): string {
       .sort((a, b) => a.name.localeCompare(b.name))
       .map((node) => [
         node.name,
-        node.disabled_at ? 'disabled' : node.status,
+        node.disabled_at ? 'disabled' : node.applying ? 'busy' : node.status,
         node.address || '-',
         node.ingress ? 'yes' : 'no',
         node.labels.join(',') || '-',

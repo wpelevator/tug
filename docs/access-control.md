@@ -50,7 +50,13 @@ Create a project-scoped `deploy` credential and store it as a repository secret.
 tug credential create github-site --role deploy --project site
 ```
 
-Add `TUG_CREDENTIAL` (the printed credential) under the repository's Settings, Secrets and variables, Actions. Then use a workflow like this:
+Add `TUG_CREDENTIAL` under the repository's Settings, Secrets and variables, Actions. With the GitHub CLI, `--raw` prints only the token, so nothing is copied by hand:
+
+```sh
+tug credential create github-site --role deploy --project site --raw | gh secret set TUG_CREDENTIAL
+```
+
+Then use a workflow like this:
 
 ```yaml
 name: Deploy
@@ -77,8 +83,10 @@ jobs:
         run: npx --yes @wpelevator/tug deploy -f docker-compose.yml --version "git-${GITHUB_SHA::12}"
 ```
 
+- **Package name.** Run `npx @wpelevator/tug`, or `npm ci` first when the repository lists it as a dependency and then `npx tug`. The unscoped `tug` package on npm is someone else's, and `npx tug` without an installed dependency runs it.
+
 - `deploy` waits for the rollout and fails the job when the deployment fails or times out. Add `--no-wait` to return at once.
-- Services with `build:` upload the checkout for a remote build on control. Add `--build-local` to build on the runner, which has Docker, and upload the images instead.
+- Services with `build:` and no `image:` upload the checkout for a remote build on control. A service with both deploys its `image:`, so a workflow that pushes the image first needs no build flag, and one that wants control to build adds `--build`. Add `--build-local` to build on the runner, which has Docker, and upload the images instead.
 - Pin the CLI version (`@wpelevator/tug@<version>`) to match your control plane.
 - Rolling back from CI needs only the same credential: `npx @wpelevator/tug rollback`.
 
@@ -144,6 +152,7 @@ The project column says how a scoped credential's allowed projects are checked: 
 | `POST /api/v1/projects` | `deploy` | Body `name` |
 | `POST /api/v1/deployments` | `deploy` | Body or upload payload `project` |
 | `POST /api/v1/deployments/check` | `deploy` | Body |
+| `POST /api/v1/deployments/retry` | `deploy` | Body; runs the project's failed deployment again under a new revision |
 | `POST /api/v1/deployments/:id/cancel` | `deploy` | Deployment's project |
 | `POST /api/v1/rollback` | `deploy` | Body |
 | `POST /api/v1/scale` | `deploy` | Body |
@@ -170,6 +179,7 @@ The project column says how a scoped credential's allowed projects are checked: 
 | `POST /api/v1/backup/destination/check` | `admin` | Control-wide; starts a background check of the destination from control and from the nodes, and creates missing control-side repositories |
 | `GET /api/v1/backup/repository-password` | `admin` | Query `project` prints that project's repository password; `control` prints the control repository password |
 | `POST /api/v1/secrets` | `admin` | Control-wide |
+| `POST /api/v1/registry/login` | `admin` | Body `project`, `host`, `username`, `password`; adds the host to `TUG_REGISTRY_AUTH` and keeps the others |
 | `DELETE /api/v1/secrets/:name` | `admin` | Control-wide |
 | `POST /api/v1/vars` | `deploy` | Body `project`; refuses a name that is a secret |
 | `DELETE /api/v1/vars/:name` | `deploy` | Query `project` |

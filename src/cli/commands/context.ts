@@ -334,9 +334,9 @@ export async function request<T = any>(
     void transport.close();
   }
 }
-/** The project a project-scoped command works on: `--project`, then the resolved config, then `site`. */
+/** The project a project-scoped command works on: `--project`, else the one `resolveProject` chose for this run. */
 export function projectOf(rt: CliRuntime, o: CommonOpts): string {
-  return o.project || loadCfg(rt).project || 'site';
+  return o.project || loadCfg(rt).project;
 }
 /**
  * Saves a control response body to `file` (mode 0600, never overwriting) without buffering it. The archive holds
@@ -472,7 +472,7 @@ export async function runLive(
     const { services: listing } = await request<{ services: ServiceChoice[] }>(
       rt,
       'GET',
-      `/api/v1/services?project=${encodeURIComponent(cfg.project || 'site')}`,
+      `/api/v1/services?project=${encodeURIComponent(cfg.project)}`,
     );
     const candidates = new Map(
       listing
@@ -496,7 +496,7 @@ export async function runLive(
   // live channel alone; the same per-control preflight as ordinary API requests applies here.
   await transportFor(rt, cfg, 'probe').then((t) => t.close());
   rt.exitCode = await runCliLive(
-    parseLiveRequest(operation, { ...input, project: cfg.project || 'site' }),
+    parseLiveRequest(operation, { ...input, project: cfg.project }),
     createCliLiveTransport(cfg.credential, cfg.controlUrl, rt.version),
     {
       stdin: rt.stdin,

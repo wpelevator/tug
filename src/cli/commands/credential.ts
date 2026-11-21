@@ -4,7 +4,7 @@ import type { Command } from 'commander';
 import { Option } from 'commander';
 import { ROLES } from '../../roles.ts';
 import { collectList, print, request } from './context.ts';
-import { err } from '../runtime.ts';
+import { err, out } from '../runtime.ts';
 import type { CliRuntime } from '../runtime.ts';
 
 export function registerCredential(rt: CliRuntime, program: Command): void {
@@ -34,13 +34,23 @@ export function registerCredential(rt: CliRuntime, program: Command): void {
     )
     .option('--select-projects', 'choose existing projects for the credential scope')
     .option(
+      '--raw',
+      'print only the credential token on standard output, to pipe into a secret store (tug credential create ci --role deploy --raw | gh secret set TUG_CREDENTIAL)',
+    )
+    .option(
       '--expires-in-days <n>',
       'expire the credential after this many days (default and maximum: 365)',
     )
     .action(
       async (
         name: string,
-        o: { role: string; project: string[]; expiresInDays?: string; selectProjects?: boolean },
+        o: {
+          role: string;
+          project: string[];
+          expiresInDays?: string;
+          selectProjects?: boolean;
+          raw?: boolean;
+        },
       ) => {
         if (o.selectProjects) {
           if (o.role === 'admin' || o.project.length)
@@ -65,7 +75,7 @@ export function registerCredential(rt: CliRuntime, program: Command): void {
             o.project = [];
           }
         }
-        const created = await request(rt, 'POST', '/api/v1/credentials', {
+        const created = await request<{ credential: string }>(rt, 'POST', '/api/v1/credentials', {
           name,
           role: o.role,
           projects: o.project.length ? o.project : undefined,
@@ -75,7 +85,8 @@ export function registerCredential(rt: CliRuntime, program: Command): void {
           rt,
           'Store this credential now (for example as the TUG_CREDENTIAL secret in CI); it is not shown again. Replace one by creating a new name, verifying it, then revoking the old name.',
         );
-        print(rt, created);
+        if (o.raw) out(rt, created.credential);
+        else print(rt, created);
       },
     );
   credential

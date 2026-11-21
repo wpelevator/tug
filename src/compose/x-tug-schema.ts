@@ -69,6 +69,19 @@ const health = (): JsonSchema => ({
       pattern: '^/',
       description: 'http only: the request path (default /).',
     },
+    host: {
+      type: 'string',
+      pattern: '^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:\\d{1,5})?$',
+      description:
+        'http only: the Host header to send, for an app that serves several virtual hosts (a WordPress multisite redirects any other name).',
+    },
+    expect: {
+      type: 'array',
+      minItems: 1,
+      items: { type: 'integer', minimum: 100, maximum: 599 },
+      description:
+        'http only: the status codes that pass (default: any 2xx). Redirects are not followed, so list 301 or 302 to accept one.',
+    },
     interval: duration('Time between attempts (default 2s).'),
     timeout: duration('Per-attempt limit (default 2s).'),
     retries: {
@@ -215,6 +228,11 @@ const serviceXtug = (): JsonSchema => ({
     'Tug settings for this service, described in docs/compose.md and checked by `tug lint`.',
   type: 'object',
   properties: {
+    build: {
+      type: 'boolean',
+      description:
+        'Build this service from its build: section on every deploy even when it also names an image: (by default the image wins and nothing is built). Needs build:.',
+    },
     placement: placement(),
     replicas: {
       type: 'integer',
@@ -308,11 +326,13 @@ const projectXtug = (): JsonSchema => ({
 const serviceProperties = (): JsonSchema => ({
   image: {
     type: 'string',
-    description: 'The image reference; control resolves published tags to image@sha256 once.',
+    description:
+      'The image reference; control resolves published tags to image@sha256 once. With build: also set, this image is deployed and nothing is built, unless `tug deploy --build` or x-tug.build: true.',
   },
   build: {
     oneOf: [{ type: 'string' }, { type: 'object' }],
-    description: 'Built by control from uploaded source, or here with `tug deploy --build-local`.',
+    description:
+      'Built by control from uploaded source, or here with `tug deploy --build-local`. With image: also set it builds only for `tug deploy --build` or x-tug.build: true.',
   },
   command: { oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }] },
   entrypoint: { oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }] },
@@ -418,6 +438,44 @@ const volumeProperties = (): JsonSchema => ({
   'x-tug': volumeXtug(),
 });
 
+const secretDeclaration = (): JsonSchema => ({
+  description:
+    'A Compose secret. For a build it stands for a tug project secret (tug secret set): x-tug.secret, then the name of an external secret, then environment, then this key. file and environment are for plain docker compose only, and tug never reads their values.',
+  oneOf: [
+    { type: 'null' },
+    {
+      type: 'object',
+      properties: {
+        file: { type: 'string', description: 'Read by plain docker compose, ignored by tug.' },
+        environment: {
+          type: 'string',
+          description:
+            'Read by plain docker compose, ignored by tug, which uses the name as the tug secret unless x-tug.secret or an external name applies.',
+        },
+        external: { type: 'boolean' },
+        name: {
+          type: 'string',
+          description:
+            'With external: true, the name of the tug secret. A variable reference is not accepted.',
+        },
+        'x-tug': {
+          type: 'object',
+          properties: {
+            secret: {
+              type: 'string',
+              pattern: '^[A-Za-z_][A-Za-z0-9_]*$',
+              description:
+                'The tug project secret this declaration reads; it wins over every other rule.',
+            },
+          },
+          additionalProperties: false,
+        },
+      },
+      propertyNames: composePropertyNames(['file', 'environment', 'external', 'name', 'x-tug']),
+    },
+  ],
+});
+
 /** Tug ignores `pull_policy` on purpose, so the schema names it; `deploy` (Swarm) is not listed, and the validator rejects it. */
 const serviceKeys = [
   ...SUPPORTED_SERVICE_KEYS.filter((key) => key !== 'x-tug'),
@@ -459,6 +517,12 @@ export function xTugSchema(): JsonSchema {
         type: 'object',
         patternProperties: { '.+': volume() },
       },
+      secrets: {
+        description:
+          'Compose secrets that build.secrets refers to, as in docker compose. Each maps to a tug project secret. A service-level secrets: is not supported.',
+        type: 'object',
+        patternProperties: { '.+': secretDeclaration() },
+      },
       networks: {
         description: 'Only the default network is accepted.',
         oneOf: [
@@ -475,7 +539,10 @@ export function xTugSchema(): JsonSchema {
     },
     required: ['services'],
     propertyNames: {
-      anyOf: [{ enum: ['name', 'networks', 'services', 'volumes', 'x-tug'] }, { pattern: '^x-' }],
+      anyOf: [
+        { enum: ['name', 'networks', 'secrets', 'services', 'volumes', 'x-tug'] },
+        { pattern: '^x-' },
+      ],
     },
   };
 }

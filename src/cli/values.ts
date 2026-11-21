@@ -9,6 +9,8 @@ import * as yaml from 'js-yaml';
 import { parseDotenv } from '../compose/load.ts';
 import { MAX_VAR_BYTES, RESERVED_VALUE_NAMES, VALUE_NAME, VALUE_NAME_MESSAGE } from '../values.ts';
 import type { DeploymentValue } from '../values.ts';
+import { describeBuildSecret } from '../compose/compose.ts';
+import type { BuildSecretUse } from '../compose/compose.ts';
 import { prompter } from './prompt.ts';
 import type { CliRuntime } from './runtime.ts';
 import type { Prompter } from './prompt.ts';
@@ -30,11 +32,47 @@ function scan(source: string, pattern: RegExp): string[] {
   return [...names];
 }
 
-/** Variable names a Compose file requires, in order of appearance; ones with a default are optional. */
-export const requiredVariables = (source: string): string[] => scan(source, REFERENCE);
+/**
+ * The names a service lists under `environment` without a value, as `- KEY` or `KEY:`. Compose passes the value of
+ * `KEY` through from the shell; Tug reads it from control instead, so such an entry is a reference like `${KEY}`.
+ * `KEY: ""` and `- KEY=` carry a value (the empty string) and are not references.
+ */
+export function bareEnvironmentKeys(source: string): string[] {
+  let doc: unknown;
+  try {
+    doc = yaml.load(source, { schema: yaml.CORE_SCHEMA.withTags([yaml.mergeTag]) });
+  } catch {
+    return [];
+  }
+  const names = new Set<string>();
+  const services = (doc as { services?: unknown } | null)?.services;
+  if (services && typeof services === 'object')
+    for (const service of Object.values(services)) {
+      const environment = (service as { environment?: unknown } | null)?.environment;
+      if (Array.isArray(environment))
+        for (const entry of environment) {
+          if (typeof entry === 'string' && !entry.includes('=') && VALUE_NAME.test(entry.trim()))
+            names.add(entry.trim());
+        }
+      else if (environment && typeof environment === 'object')
+        for (const [key, value] of Object.entries(environment))
+          if ((value === null || value === undefined) && VALUE_NAME.test(key)) names.add(key);
+    }
+  return [...names];
+}
 
-/** Every variable name a Compose file references, defaults included, in order of appearance. */
-export const referencedVariables = (source: string): string[] => scan(source, ANY_REFERENCE);
+const merged = (first: string[], second: string[]): string[] => [...new Set([...first, ...second])];
+
+/**
+ * Variable names a Compose file requires, in order of appearance: `${NAME}` without a default, then bare `environment`
+ * keys. Ones with a default are optional.
+ */
+export const requiredVariables = (source: string): string[] =>
+  merged(scan(source, REFERENCE), bareEnvironmentKeys(source));
+
+/** Every variable name a Compose file references, defaults and bare `environment` keys included, in order of appearance. */
+export const referencedVariables = (source: string): string[] =>
+  merged(scan(source, ANY_REFERENCE), bareEnvironmentKeys(source));
 
 /** What control holds for a project, as the deploy needs it. */
 export interface ProjectValues {
@@ -125,15 +163,21 @@ export function missingValuesMessage(
   dryRun: boolean,
 ): string {
   const inBackup = backupReferences(source, missing);
+  const bare = bareEnvironmentKeys(source).filter((name) => missing.includes(name));
   const base = `${file} needs values that are not set on control: ${missing.join(', ')}. Tug does not read your shell environment or .env; set each with tug secret set <name> (private) or tug var set <name> (visible), pass --var NAME=value for this deploy only, or import a file with tug secret import .env${
     dryRun ? '' : ' (or run tug deploy in a terminal to be prompted)'
   }`;
-  if (!inBackup.size) return base;
+  const bareHint = bare.length
+    ? [
+        `${bare.join(', ')} ${bare.length === 1 ? 'is' : 'are'} listed under environment without a value, which reads it from control like \${NAME}; to pass an empty string write NAME: "" instead`,
+      ]
+    : [];
+  if (!inBackup.size) return [base, ...bareHint].join('\n');
   const hints = [...inBackup].map(
     ([name, text]) =>
       `${name} is used in an x-tug.backup field. If it is a variable of the container and not a value from control, write $$${name} so the container expands it: ${escapeReference(text, name).trim()}`,
   );
-  return `${base}\n${hints.join('\n')}`;
+  return [base, ...bareHint, ...hints].join('\n');
 }
 
 /**
@@ -190,12 +234,11 @@ export async function ignoredSourceNotes(
   const names = await dotEnvNames(path.dirname(path.resolve(cwd, file)));
   if (names.length) {
     const unset = names.filter((name) => !controlNames.has(name));
+    const count = `${names.length} name${names.length === 1 ? '' : 's'}`;
     notes.push(
-      `Ignored .env next to ${file} (Tug reads values only from control): ${names.length} name${names.length === 1 ? '' : 's'}, ${
-        unset.length
-          ? `${unset.length} not set on control (${unset.slice(0, 6).join(', ')}${unset.length > 6 ? ', ...' : ''}); import with tug secret import .env`
-          : 'all already set on control'
-      }`,
+      unset.length
+        ? `Ignored .env (Tug reads values only from control): ${count}, ${unset.length} not set there; tug secret import .env stores them`
+        : `Ignored .env (Tug reads values only from control): ${count}, all already set there`,
     );
   }
   if (env.COMPOSE_PROFILES)
@@ -203,6 +246,34 @@ export async function ignoredSourceNotes(
       `Ignored COMPOSE_PROFILES=${env.COMPOSE_PROFILES} (Tug does not read your shell); select profiles with tug deploy --profile <name>`,
     );
   return notes;
+}
+
+/** The fix for a declaration whose tug secret is missing, with the path of the file Compose would have read. */
+export function buildSecretFix(use: BuildSecretUse): string {
+  const file = use.ignoredSource?.startsWith('file ') ? use.ignoredSource.slice(5) : undefined;
+  const quoted = file && /\s/.test(file) ? JSON.stringify(file) : file;
+  return `tug secret set ${use.secret}${quoted ? ` --from-file ${quoted}` : ''}`;
+}
+
+/**
+ * What stops a deploy that builds with Compose secrets: a mapped tug secret that is missing (with the exact command
+ * that stores it) or that exists only as a variable. A Compose secret is always a tug secret, never a variable.
+ */
+export function buildSecretProblems(
+  uses: readonly BuildSecretUse[],
+  secrets: ReadonlySet<string>,
+  vars: ReadonlySet<string>,
+): string[] {
+  const problems: string[] = [];
+  for (const use of uses) {
+    if (secrets.has(use.secret)) continue;
+    problems.push(
+      vars.has(use.secret)
+        ? `${describeBuildSecret(use)}: ${use.secret} is a variable, and a Compose secret is always a tug secret. Run tug var remove ${use.secret}, then ${buildSecretFix(use)}`
+        : `${describeBuildSecret(use)}: the secret is not set on control. Run ${buildSecretFix(use)}`,
+    );
+  }
+  return problems;
 }
 
 /** A URL-safe random secret with 192 bits of entropy. */

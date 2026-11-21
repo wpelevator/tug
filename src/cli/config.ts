@@ -5,6 +5,8 @@ import * as yaml from 'js-yaml';
 import { decodeCredential } from '../pki.ts';
 import type { Credential } from '../pki.ts';
 import { errMessage } from '../errors.ts';
+import { resolveProject } from './project.ts';
+import type { ProjectSource } from './project.ts';
 
 export type SettingType = 'string' | 'boolean' | 'list' | 'path';
 export interface Setting {
@@ -17,7 +19,7 @@ export interface Setting {
 
 /** Defaults for options of commands that work on the project (top level of the config file). */
 export const COMMAND_SETTINGS: Record<string, Setting> = {
-  file: { type: 'path', flag: '--file', commands: ['deploy', 'lint'] },
+  file: { type: 'path', flag: '--file', commands: ['deploy', 'lint', 'values'] },
   buildLocal: { type: 'boolean', flag: '--build-local', commands: ['deploy'] },
   profile: { type: 'list', flag: '--profile', commands: ['deploy'] },
   wait: {
@@ -123,7 +125,9 @@ export interface ResolvedCliConfig {
   controlSsh?: string;
   credential?: Credential;
   credentialFile?: string;
+  /** The project commands work on; {@link ProjectSource} says which rule chose it (see `resolveProject`). */
   project: string;
+  projectSource: ProjectSource;
   commandDefaults: SettingValues;
   nodeDefaults: SettingValues;
   nodes: Record<string, SettingValues>;
@@ -177,6 +181,14 @@ export async function resolveCliConfig(
     }
   const requestedControlUrl = options.controlUrl || env.TUG_CONTROL_URL || config.controlUrl;
   const controlUrl = requestedControlUrl || credential?.url || 'https://localhost:8443';
+  const composeFile = config.commandDefaults.file;
+  const { project, source: projectSource } = resolveProject({
+    flag: options.project,
+    env: env.TUG_PROJECT,
+    config: config.project,
+    file: typeof composeFile === 'string' ? composeFile : undefined,
+    cwd,
+  });
   return {
     file,
     fileExists: Boolean(base),
@@ -186,7 +198,8 @@ export async function resolveCliConfig(
     controlSsh: config.controlSsh,
     credential,
     credentialFile,
-    project: options.project || env.TUG_PROJECT || config.project || 'site',
+    project,
+    projectSource,
     commandDefaults: config.commandDefaults,
     nodeDefaults: config.nodeDefaults,
     nodes: config.nodes,
@@ -454,6 +467,10 @@ export async function writeInitConfig(
       ),
     );
     written.push(config.file);
+  } else if (config.projectSource === 'compose-name' || config.projectSource === 'directory') {
+    // The project was derived from the Compose file, so pin it: renaming the directory or the Compose `name:` later
+    // must not silently point commands at another project. Appended, so the file's comments survive.
+    if (await pinProject(config.file, config.project)) written.push(config.file);
   }
   let local: Record<string, unknown> = {};
   try {
@@ -472,6 +489,25 @@ export async function writeInitConfig(
   written.push(config.localFile);
   await gitIgnore(config.localFile, env);
   return written;
+}
+
+/** Adds `project: <name>` to an existing tracked config that has none; false when it could not be read or written as a mapping. */
+async function pinProject(file: string, project: string): Promise<boolean> {
+  const content = await fs.readFile(file, 'utf8');
+  if (path.extname(file) === '.json') {
+    const data = parseText(file, content);
+    if (!isObject(data) || 'project' in data) return false;
+    await fs.writeFile(file, serialize(file, { ...data, project }));
+    return true;
+  }
+  const data = yaml.load(content);
+  if (data !== null && data !== undefined && !isObject(data)) return false;
+  if (data && 'project' in data) return false;
+  await fs.writeFile(
+    file,
+    `${content}${content && !content.endsWith('\n') ? '\n' : ''}${yaml.dump({ project })}`,
+  );
+  return true;
 }
 
 /** Add `file` to the .gitignore next to it when it sits in a git work tree and is not ignored yet. */

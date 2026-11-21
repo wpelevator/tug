@@ -29,6 +29,14 @@ A node's `address` is its only inter-node address. Set it to a private IP on one
 | Behind NAT | Agents can still dial out to control. Cross-node names and remote ingress upstreams work only where the workload network is reachable |
 | Single node | Needs no inter-node network. When only the managed Caddy on the same node reaches an ingress port, tug binds that port to loopback |
 
+To find the private address on a cloud VM, ask the provider's metadata service from the VM. On DigitalOcean the VPC address is:
+
+```sh
+curl -s http://169.254.169.254/metadata/v1/interfaces/private/0/ipv4/address
+```
+
+`tug node add` offers the private addresses it finds and selects the first one; choose `none` on a single node, where nothing else needs to reach it.
+
 **tug does not encrypt node-to-node workload traffic.** Mutual TLS protects connections to control, not connections between containers, published ports or ingress upstreams. Use application-layer TLS or an encrypted network you operate where traffic needs confidentiality or integrity.
 
 Firewall the workload network so only the required peers reach published service ports. Allow ingress nodes to reach their upstream ports and application nodes to reach only the services they consume. Publish ports 80 and 443 on ingress nodes only. Keep databases and other internal services off public interfaces, and use a provider firewall as a second boundary, because Docker's iptables rules can bypass host firewalls such as ufw. An explicit `0.0.0.0` or `[::]` host IP in Compose requests all-interface exposure.

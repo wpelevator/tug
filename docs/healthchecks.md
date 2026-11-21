@@ -1,6 +1,6 @@
 # Health checks and safer deployments
 
-A health check tells tug when a service is ready to serve. Add one to every service.
+A health check tells tug when a service is ready to serve. A service does not need one: without it, tug reports `serving` once the container runs. Add one to a service that rolls (`rollout.strategy: rolling` requires it), to anything behind ingress, and to a service another one waits on with `depends_on`.
 
 <!-- tug-values: DB_ROOT_PASSWORD -->
 ```yaml
@@ -36,7 +36,7 @@ During a deployment the agent checks the container and reports failures to contr
 | --- | --- | --- |
 | `docker` | The container runs and, if the image defines a Docker `HEALTHCHECK`, that it reports healthy. Without one, only that the container runs | Images that already define a meaningful health check |
 | `tcp` | The agent can connect to a port on the container IP. It does not prove a query succeeds | A database or protocol server where an open port is enough |
-| `http` | An HTTP request to the container IP returns 2xx after redirects | A web app with a dedicated readiness endpoint |
+| `http` | An HTTP request to the container IP returns 2xx. A redirect is not followed | A web app with a dedicated readiness endpoint |
 
 | Setting | Default |
 | --- | --- |
@@ -47,6 +47,8 @@ During a deployment the agent checks the container and reports failures to contr
 Increase the interval or retries for a slow-starting app. Field details are in [Compose extensions](compose.md#health).
 
 - **HTTP checks** use the container IP and port, not the public hostname or ingress. Pick an endpoint that returns 2xx without relying on public redirects.
+- **Virtual hosts.** An app that serves several hostnames, such as a WordPress multisite, redirects a request for the container IP. Set `host` to the name it serves, and `expect` to the statuses that mean ready (`expect: [200, 301]`) when a redirect is the normal answer. The agent sends the `Host` header over a plain socket and never follows the redirect.
+- **Deep checks and the first deploy.** A check that reads the database (a `/health` that runs a query) fails on the first deploy, because the database is empty and the app has not been set up. Point the first deploy at a shallow path, or use `expect` to accept the setup page, then tighten it.
 - **What to check.** A process-only endpoint can pass while a database or migration is broken, so decide which dependencies must be ready before traffic is sent.
 - **During a restore.** A check that depends on a service stopped for a restore makes its own service unhealthy for that time. Use a check that does not depend on the writer.
 
