@@ -1,8 +1,8 @@
 # Private control network
 
-Status: proposed, 22 November 2026. Nothing below is built except what [What works today](#what-works-today) describes. Tailscale behavior comes from its documentation and general knowledge as of that date, and the claims marked "verify" need a real-host run before anything ships.
+Status: proposed, 22 November 2026, against `31c0a6c`. Nothing below is built except what [What works today](#what-works-today) describes. Claims marked "verify" need a real-host run.
 
-Can control's mutual TLS port be kept off the public internet by putting control, nodes, operators and CI on a tailnet (Tailscale, Headscale, NetBird or a plain WireGuard network)? The short answer: yes, and most of it works with today's flags, because clients verify control by a name derived from its CA instead of the address they dial. What is missing is a way for `tug control setup` to publish the control port on one address instead of every interface, a `tug doctor` warning when it is published on all of them, and an operator guide. tug should not join, configure or depend on any tailnet itself: the cancelled tug-owned mesh ([M12 in the roadmap](roadmap.md#m12--container-networking-over-the-mesh-cancelled)) showed the cost of owning a tunnel, and a tailnet is just another routed private network to tug.
+Can control's mutual TLS port be kept off the public internet by putting control, nodes, operators and CI on a tailnet (Tailscale, Headscale, NetBird or a plain WireGuard network)? The short answer: yes, and most of it works with today's flags, because clients verify control by a name derived from its CA instead of the address they dial. What is missing is a way for `tug control setup` to publish the control port on one address instead of every interface, a `tug doctor` check that reports when it is published on all of them, and an operator guide. tug should not join, configure or depend on any tailnet itself: the cancelled tug-owned mesh ([M12 in the roadmap](roadmap.md#m12--container-networking-over-the-mesh-cancelled)) showed the cost of owning a tunnel, and to tug a tailnet is one more routed private network.
 
 ## Why
 
@@ -23,10 +23,10 @@ A private network makes a leaked credential useless without network access as we
 | Clients reach control at a tailnet address | `tug control setup <ssh-target> --control-url https://control.tail1234.ts.net:8443` writes that URL into every credential. Any address works, because the CLI and agent verify the derived `control-<hash>.tug` name, not the URL host |
 | Agents dial control over the tailnet | `--agent-control-url https://100.64.0.10:8443` on `node add`, `replace`, `repair`, `migrate`, `upgrade` and `enroll`. Agents only dial out, so nodes need no inbound port |
 | Workload traffic over the tailnet | `tug node add --address 100.101.102.103`, or `tug node address <node> <ip>`. The address picker already lists `100.64.0.0/10` as private, since it is the carrier-grade NAT range tailnets use. This also gives node-to-node encryption, which [Networking](networking.md#bring-your-own-network) says tug does not provide itself |
-| Moving an existing control onto the tailnet | Point clients at the new address with `--control-url` and nodes with `node upgrade --agent-control-url`. No credential is invalidated |
+| Moving an existing control onto the tailnet | Point clients at the new address with `--control-url`, and nodes with `node upgrade --force --all --agent-control-url <url>`. Without `--force`, a node already on the target image is skipped and keeps its old URL. No credential is invalidated |
 | Keeping a narrow binding | `tug control upgrade` replays the existing published bindings including their host IPs ([SEC-16](security-audit.md)), so a hand-made binding survives upgrades |
 
-Agents run on Docker's default bridge network. With Tailscale in its default kernel mode, the host routes the container's masqueraded traffic to `100.x` addresses through `tailscale0`. Tailscale in userspace-networking mode does not route container traffic, so it does not work for agents without extra setup (verify).
+Agents share the host's network namespace (`--network host`), so with Tailscale in its default kernel mode they reach `100.x` addresses through `tailscale0` like any host process. Tailscale in userspace-networking mode creates no `tailscale0` interface and offers only a SOCKS or HTTP proxy, which the agent does not use, so agents need kernel mode (verify). Control itself runs on Docker's default bridge and only accepts connections, so it needs nothing beyond the published port.
 
 ## The gaps
 
@@ -50,8 +50,9 @@ tug control setup root@control.example.com --bind 100.64.0.10 --control-url http
 | --- | --- |
 | Values | IPv4 or IPv6 literals. A hostname is refused, because Docker binds addresses, not names |
 | Preflight | Over SSH, setup checks that each address is on one of the host's interfaces and fails before touching the container when one is not |
-| Default URL | When `--bind` is given without `--control-url`, setup still advertises the SSH target's host, and warns when that host is not one of the bound addresses, since clients would then dial an address nothing listens on |
-| Running setup again | Like `--port`, a missing `--bind` resets to all interfaces, and the existing note about changed settings names the binding change |
+| Default URL | When `--bind` is given without `--control-url`, setup still advertises the SSH target's host, and warns when that host is not one of the bound addresses, since clients would then dial an address nothing listens on. Setup's own readiness check and credential import connect too, so they fail until the operator's machine can reach a bound address. In practice `--bind` needs `--control-url` |
+| Running setup again | Like `--port`, a missing `--bind` resets to all interfaces. The note about changed settings compares only the port today, so it must also compare host IPs, so a rerun that would reopen the port on every interface is named before it happens |
+| Existing installs | `control upgrade` replays bindings but cannot change them. To narrow an existing control, rerun `control setup` with `--bind` and every other original flag (`--port`, `--extra-san`, `--control-url`). Adding `--bind` to `control upgrade` is the simpler path, and is a candidate for the same change |
 | Upgrade | Unchanged: `control upgrade` already replays bindings with their host IPs |
 
 The same flag gives [M15](roadmap.md#m15--flexible-node-roles) its break-glass port bound to loopback or a private address.
@@ -61,13 +62,15 @@ The same flag gives [M15](roadmap.md#m15--flexible-node-roles) its break-glass p
 | Option | How | Trade-off |
 | --- | --- | --- |
 | A. Order Docker after the tailnet | A systemd drop-in `After=tailscaled.service` and `Wants=tailscaled.service` for `docker.service`, which setup could offer to install | Couples Docker's start to the tailnet daemon. A tailnet outage at boot delays every container on the host |
-| B. Bind loopback and forward | `--bind 127.0.0.1`, with `tailscale serve --tcp 8443 tcp://127.0.0.1:8443` forwarding raw TCP from the tailnet address | Loopback always exists, so boot order stops mattering, and TCP passthrough keeps mutual TLS intact. Control then sees every client as `127.0.0.1`, and it depends on a Tailscale-specific feature (verify the flag syntax and that it persists across restarts) |
+| B. Bind loopback and forward | `--bind 127.0.0.1`, with `tailscale serve --tcp 8443 tcp://127.0.0.1:8443` forwarding raw TCP from the tailnet address | Loopback always exists, so boot order stops mattering, and TCP passthrough keeps mutual TLS intact. Control no longer sees the client's tailnet address: connections arrive from Docker's proxy or bridge gateway, not from `127.0.0.1` (verify which). The forward is a second persistent component, it still needs `tailscaled` running, though its config persists in tailscaled's state, and it is Tailscale-specific (verify the flag syntax and persistence) |
 
-Recommendation: document both, and make the guide lead with option B on Tailscale hosts and option A for other tailnets.
+Recommendation: pick after the real-host run. If Docker retries the container once the address appears, `--bind` with the tailnet address plus option A is enough and needs no forwarder. Lead with option B only if Docker does not retry.
 
-### 2. A doctor warning for the control port
+### 2. A doctor check for the control port
 
-Control can inspect its own container through the Docker socket it already mounts. Report its published bindings in control's diagnostics, and have `tug doctor` print a `control.port.public` warning when a binding has no host IP or a non-private one. It is a warning, not a failure, because a public control port is a supported setup. The check reports configuration, not reachability, and says so: a provider firewall may already close the port, and tug cannot see that from inside.
+Control can inspect its own container through the Docker socket it already mounts, sharing the binding parser `control upgrade` uses (`parseControlInspect`). Report its published bindings in control's diagnostics, and have `tug doctor` flag a binding with no host IP or a non-private one. Private means `isPrivateIPv4` for IPv4, and `fc00::/7` (which holds Tailscale's `fd7a:115c:a1e0::/48`), `fe80::/10` and `::1` for IPv6. The check reports configuration, not reachability, and says so: a provider firewall may already close the port, and tug cannot see that from inside.
+
+Every install made before `--bind` exists binds all interfaces, and many sit behind a provider firewall, so a warning would be permanent noise for them. Print it as `info` with a pointer to `--bind`, and keep `warn` for a control port bound explicitly to a public address.
 
 ### 3. An operator guide
 
@@ -78,7 +81,7 @@ A section "Keep control private" in [Control plane](control-plane.md), linked fr
 | Control host | Join the tailnet, then `control setup --bind` with the tailnet address, or loopback plus a forward |
 | Nodes | Join the tailnet before `node add`, and pass `--agent-control-url` and `--address` with tailnet addresses. For `node enroll` from cloud-init, join the tailnet earlier in the same cloud-init |
 | Operators | The machine running the CLI joins the tailnet. `tug setup` and `node add` use SSH, which can also go over the tailnet |
-| CI | A step such as `tailscale/github-action` with an ephemeral, tagged auth key before `tug deploy`, and a tailnet ACL that lets the CI tag reach only control's port |
+| CI | A step such as `tailscale/github-action`, pinned by commit SHA because it handles the tailnet auth key, with an ephemeral, tagged auth key before `tug deploy`, and a tailnet ACL that lets the CI tag reach only control's port |
 | What stays public | Ingress nodes keep ports 80 and 443 public. ACME HTTP-01 validation needs them, and so do visitors |
 | Access rules | Tailnet ACLs allow nodes, operators and CI to reach control's port, and only the ingress nodes to reach upstream ports |
 
@@ -95,4 +98,4 @@ A section "Keep control private" in [Control plane](control-plane.md), linked fr
 
 - Does Docker retry starting a container whose published address appeared after the daemon started, or does it stay exited until the next restart? This decides how much the boot-order caveat matters.
 - Should `control setup` offer `--bind` interactively when it finds a `100.64.0.0/10` address on the host, the way `node add` offers private addresses?
-- Should the audit log record that a connection came through a local forward, since option B hides the client's tailnet address?
+- Does anything in control key off the client IP? Option B replaces the client's tailnet address with a local one, so audit records and any address-based logic would lose it.

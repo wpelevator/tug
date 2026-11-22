@@ -8,7 +8,7 @@ These pages record why tug is built the way it is and what is planned. They are 
 | [Security audit](security-audit.md) | Record | The 10 November 2026 audit, its fixes and trust boundaries |
 | [Real-host evaluation](real-host-evaluation.md) | Record | An operator trial on real hosts and the friction it found |
 | [Ingress design](ingress-design.md) | Partly built | How the managed ingress compares with peers, and the planned per-route options |
-| [Private control network](private-control-network.md) | Proposed | Keeping control's mutual TLS port on a tailnet or other private network: a `--bind` flag, a doctor warning and an operator guide |
+| [Private control network](private-control-network.md) | Proposed | Keeping control's mutual TLS port on a tailnet or other private network: a `--bind` flag, a doctor check and an operator guide |
 | [Observability](observability.md) | Mostly proposed | What exists today and the planned metrics, logs and alerts |
 | [Capabilities](capabilities.md) | Proposed | Delegated, attenuated authority beyond the three roles |
 | [Consoles and agent-built control planes](consoles.md) | Proposed | A controller API and MCP server for prompt-built dashboards |
