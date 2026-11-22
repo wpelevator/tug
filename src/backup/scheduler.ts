@@ -101,6 +101,9 @@ export interface RetentionStatus {
   locked?: boolean;
 }
 
+/** The fix a locked run names: restic removes the stale locks, never one a live restic holds. */
+export const UNLOCK_HINT = 'run tug backup unlock to remove stale locks';
+
 /** What a run records in `backup_runs.metadata_json`. */
 interface RunMeta {
   warnings?: string[];
@@ -741,11 +744,10 @@ export function createBackupService(deps: BackupServiceDeps) {
         );
       return;
     }
-    const error = redact((result as { error?: string }).error ?? 'the backup job failed').slice(
-      0,
-      2000,
-    );
     const cause = (result as { cause?: BackupCause }).cause === 'locked' ? 'locked' : undefined;
+    const error =
+      redact((result as { error?: string }).error ?? 'the backup job failed').slice(0, 1900) +
+      (cause ? ` (${UNLOCK_HINT})` : '');
     advance(db, backupRunLifecycle, run.id, ['queued', 'running'], 'failed', {
       finished_at: at,
       error,
@@ -877,7 +879,7 @@ export function createBackupService(deps: BackupServiceDeps) {
           lastStatus: row.last_status,
           problem:
             base && cause === 'locked' && row.last_status === 'failed'
-              ? `${base}: the repository is locked`
+              ? `${base}: the repository is locked, ${UNLOCK_HINT}`
               : base,
           retention: retentionStatus(
             finished

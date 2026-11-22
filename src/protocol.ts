@@ -223,6 +223,8 @@ export type CommandType =
   | 'backup.run'
   | 'backup.restore'
   | 'backup.list'
+  /** Payload a `BackupJobPayload`: `restic unlock` on the project's repository, which removes only locks that have gone stale. */
+  | 'backup.unlock'
   /** Payload `{ commandId }`: stops that job on the node, whether it is queued or running. */
   | 'backup.cancel';
 
@@ -232,6 +234,7 @@ export const BACKUP_COMMAND_TYPES: readonly CommandType[] = [
   'backup.run',
   'backup.restore',
   'backup.list',
+  'backup.unlock',
 ];
 
 /** `GET /agent/v1/backup/credentials`: environment for the restic helper of one running backup command. */
@@ -261,7 +264,14 @@ export type RetentionMode = 'managed' | 'external';
 export type BackupMissReason = 'node_offline' | 'control_down' | 'deadline';
 
 export type JobPhase =
-  'queued' | 'pulling' | 'checking' | 'dumping' | 'uploading' | 'forgetting' | 'restoring';
+  | 'queued'
+  | 'pulling'
+  | 'checking'
+  | 'dumping'
+  | 'uploading'
+  | 'forgetting'
+  | 'restoring'
+  | 'unlocking';
 
 /** Payload of `backup.check`, `backup.run` and `backup.restore`. Restic credentials are never in a payload. */
 export interface BackupJobPayload {
@@ -310,6 +320,8 @@ export interface BackupJobResult {
   warnings?: string[];
   /** What happened to retention; absent when the run applies none (a safety backup before a restore). */
   retention?: BackupRetentionOutcome;
+  /** `backup.unlock` only: repository locks before and after `restic unlock`. What is left is held by a live restic or is not stale yet. */
+  unlock?: { before: number; after: number };
 }
 
 /** Live jobs in `StatusReport.jobs`, so control can tell "running" from "lost". */

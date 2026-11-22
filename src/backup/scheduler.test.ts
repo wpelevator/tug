@@ -630,10 +630,17 @@ test("a run that failed on restic's lock exit records cause locked, shows the lo
   assert.equal(target.cause, 'locked', 'the target reports the cause of its last failed run');
   assert.deepEqual(
     target.lock,
-    { message: 'backup failed: unable to create lock in backend' },
-    "the lock carries restic's message for display only",
+    {
+      message:
+        'backup failed: unable to create lock in backend (run tug backup unlock to remove stale locks)',
+    },
+    "the lock carries restic's message and the unlock hint, for display only",
   );
-  assert.match(target.problem ?? '', /repository is locked/, 'the problem says why the run failed');
+  assert.match(
+    target.problem ?? '',
+    /repository is locked, run tug backup unlock/,
+    'the problem says why the run failed and names the fix',
+  );
   const failedEvent = f.db.get<{ metadata_json: string }>(
     "SELECT metadata_json FROM events WHERE type='backup.failed'",
   )!;

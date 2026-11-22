@@ -196,6 +196,19 @@ Exit status is the signal to wire into monitoring: `tug backup list --check` exi
 
 While control is down no backup starts, which is the price of one scheduler. Running jobs finish and report when control returns. `tug backup run` takes a backup now, and `tug backup list` shows the catalog, see [CLI](cli.md#backups).
 
+## Unlock a repository
+
+A backup that fails with `the repository is locked` (restic exit code 11) could not take the repository lock. Most often a restic was killed while it held one and its lock is still there. restic gives up on such a lock only after it has gone 30 minutes without a refresh, so later backups wait for it and fail meanwhile. The failed run, `tug backup list` and `tug backup list --check` name the fix:
+
+```sh
+tug backup unlock
+tug backup unlock --control
+```
+
+The first runs `restic unlock` on the project's repository, from the node that runs its backups. The second does it on control's own repository, from control. Both need the admin role, hold the project lock for the duration (the second takes none) and are audited as `backup.unlock`. The answer is `{removed, remaining}`, the locks before and after.
+
+Only stale locks are removed. tug never passes `--remove-all` and never unlocks by itself, because a lock can belong to a prune running on another host, and removing it would let two writers meet. A `remaining` above zero means a restic is running now or its lock has not gone stale yet, so run the command again after 30 minutes. From 4.0 a stopped helper releases its lock first, see [Jobs on a node](#jobs-on-a-node), so a stale lock should be rare.
+
 ## Restore
 
 ```sh

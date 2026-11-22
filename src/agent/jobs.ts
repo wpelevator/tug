@@ -232,7 +232,9 @@ export class JobRunner {
           ? 'backup.check'
           : command.type === 'backup.restore'
             ? 'backup.restore'
-            : 'backup.run',
+            : command.type === 'backup.unlock'
+              ? 'backup.unlock'
+              : 'backup.run',
       );
       this.results.push({ commandId: command.id, state: 'succeeded', result });
     } catch (error) {

@@ -373,6 +373,24 @@ export function registerBackup(rt: CliRuntime, program: Command): void {
       );
     });
   backup
+    .command('unlock')
+    .description(
+      "remove stale restic locks from the project's repository, which is what a run says when it fails with 'the repository is locked'. Only locks that have gone stale are removed (restic's own rule), so a prune running elsewhere keeps its lock; run it again later if locks remain. Admin only",
+    )
+    .option('--control', "unlock control's own backup repository instead of the project's")
+    .action(async (o: { control?: boolean }) => {
+      const project = loadCfg(rt).project;
+      print(
+        rt,
+        await request(
+          rt,
+          'POST',
+          '/api/v1/backups/unlock',
+          o.control ? { control: true } : { project },
+        ),
+      );
+    });
+  backup
     .command('password')
     .description(
       "print the project's repository and its password for offline escrow; anyone holding the password and destination credentials can read the project's backups. With --control it prints control's own repository and password instead",

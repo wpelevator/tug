@@ -151,6 +151,44 @@ test('a restore job fails on a missing repository instead of creating one', asyn
   assert.ok(!ran(docker, 'restic init'), 'a restore never initializes');
 });
 
+test('an unlock job removes only stale locks: plain restic unlock, never --remove-all, and reports the counts', async () => {
+  let listed = 0;
+  const docker = dockerWith((cmd) => {
+    const line = cmd.join(' ');
+    if (line === 'restic list locks --no-lock') {
+      listed++;
+      // Three locks before the unlock; the one a live restic holds remains after.
+      return {
+        code: 0,
+        out: listed === 1 ? 'aaaaaaaa11\nbbbbbbbb22\ncccccccc33\n' : 'cccccccc33\n',
+      };
+    }
+    return { code: 0 };
+  });
+  const result = await finished(docker, 'backup.unlock');
+  assert.equal(result.state, 'succeeded', 'the unlock succeeds');
+  assert.deepEqual(
+    (result.result as { unlock?: unknown }).unlock,
+    { before: 3, after: 1 },
+    'the result carries the lock counts before and after',
+  );
+  assert.ok(ran(docker, 'restic unlock'), 'restic unlock ran');
+  assert.ok(
+    !docker.execOptions.some((e) => e.cmd.includes('--remove-all')),
+    'unlock never passes --remove-all, which would remove the lock of a live prune',
+  );
+  assert.ok(!ran(docker, 'restic init'), 'an unlock never initializes a repository');
+});
+
+test('an unlock job fails on a missing repository instead of creating one', async () => {
+  const docker = dockerWith((cmd) =>
+    cmd.join(' ') === 'restic cat config' ? { code: 10, err: REST_MISSING } : { code: 0 },
+  );
+  const result = await finished(docker, 'backup.unlock');
+  assert.equal(result.state, 'failed', 'there is nothing to unlock');
+  assert.ok(!ran(docker, 'restic init'), 'an unlock never initializes');
+});
+
 test('error text never contains credentials', async () => {
   const docker = dockerWith((cmd) =>
     cmd.join(' ') === 'restic cat config'

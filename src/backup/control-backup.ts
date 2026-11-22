@@ -5,6 +5,7 @@ import { pipeline } from 'node:stream/promises';
 import { redactSecrets } from './destination.ts';
 import {
   RESTIC_LOCK_WAIT,
+  lockCount,
   RESTIC_STOP_GRACE_MS,
   collect,
   ensureImage,
@@ -533,6 +534,41 @@ export async function fetchControlArchive(
         `could not read ${snapshot === 'latest' ? 'the latest' : `snapshot ${snapshot} of the`} control backup: ${summarize(dump.err)}`,
       );
     }
+  });
+}
+
+/**
+ * Runs `restic unlock` on the control repository: only locks that have gone stale are removed, so a control backup that
+ * is writing right now keeps its own. Returns the locks before and after; what is left is live or not stale yet.
+ */
+export async function unlockControlRepository(
+  docker: DockerApi,
+  access: ControlRepositoryAccess,
+): Promise<{ before: number; after: number }> {
+  return withRestic(docker, controlAccess(access), async (exec) => {
+    const probe = await exec(['restic', 'cat', 'config']);
+    const state = classifyRepositoryProbe(probe);
+    if (state === 'missing')
+      throw new ControlBackupError(
+        `no control repository exists at ${controlRepository(access.url)}, so there is nothing to unlock`,
+      );
+    if (state === 'error')
+      throw new ControlBackupError(
+        `cannot read the control repository: ${await explainProbe(exec, probe)}`,
+      );
+    const counts = async (): Promise<number> => {
+      const listed = await exec(['restic', 'list', 'locks', '--no-lock']);
+      if (listed.code !== 0)
+        throw new ControlBackupError(
+          `could not list the control repository locks: ${summarize(listed.err || listed.out)}`,
+        );
+      return lockCount(listed.out);
+    };
+    const before = await counts();
+    const unlocked = await exec(['restic', 'unlock']);
+    if (unlocked.code !== 0)
+      throw new ControlBackupError(`unlock failed: ${summarize(unlocked.err || unlocked.out)}`);
+    return { before, after: await counts() };
   });
 }
 

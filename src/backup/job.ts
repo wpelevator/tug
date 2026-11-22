@@ -183,6 +183,10 @@ export function parseSummary(output: string): Summary {
   return {};
 }
 
+/** Locks in the output of `restic list locks`: one id per line. The structure is read, not the wording. */
+export const lockCount = (output: string): number =>
+  output.split('\n').filter((line) => /^[0-9a-f]{8,64}$/i.test(line.trim())).length;
+
 export interface Collected {
   code: number;
   out: string;
@@ -255,7 +259,7 @@ export async function runBackupJob(
   payload: BackupJobPayload,
   commandId: string,
   ctx: JobContext,
-  kind: 'backup.run' | 'backup.check' | 'backup.restore' = 'backup.run',
+  kind: 'backup.run' | 'backup.check' | 'backup.restore' | 'backup.unlock' = 'backup.run',
 ): Promise<BackupJobResult> {
   const started = Date.now();
   const { docker, credentials } = ctx;
@@ -422,8 +426,11 @@ export async function runBackupJob(
     let repository: 'ok' | 'initialized' | 'missing' = 'ok';
     const probe = await exec(['restic', 'cat', 'config']);
     const state = classifyRepositoryProbe(probe);
-    if (state === 'error' || (state === 'missing' && kind === 'backup.restore'))
-      // A restore needs an existing repository; a wrong password or an unreachable bucket fails every kind of job.
+    if (
+      state === 'error' ||
+      (state === 'missing' && (kind === 'backup.restore' || kind === 'backup.unlock'))
+    )
+      // A restore or an unlock needs an existing repository; a wrong password or an unreachable bucket fails every kind of job.
       throw fail(
         'repository check failed',
         describeProbeFailure(probe, probe.err || probe.out, version),
@@ -445,6 +452,28 @@ export async function runBackupJob(
         resticVersion: version,
         repository,
       };
+
+    if (kind === 'backup.unlock') {
+      phase('unlocking');
+      const counts = async (): Promise<number> => {
+        const listed = await exec(['restic', 'list', 'locks', '--no-lock']);
+        if (listed.code !== 0)
+          throw fail('could not list the repository locks', listed.err, listed.code);
+        return lockCount(listed.out);
+      };
+      const before = await counts();
+      // Plain `unlock`, never `--remove-all`: restic removes only locks that have gone stale, so a prune running
+      // on another host keeps the lock it holds.
+      const unlocked = await exec(['restic', 'unlock']);
+      if (unlocked.code !== 0)
+        throw fail('unlock failed', unlocked.err || unlocked.out, unlocked.code);
+      return {
+        runId: payload.runId,
+        durationMs: Date.now() - started,
+        resticVersion: version,
+        unlock: { before, after: await counts() },
+      };
+    }
 
     if (kind === 'backup.restore') {
       const restore = payload.restore;

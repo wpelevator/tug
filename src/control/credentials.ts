@@ -71,6 +71,7 @@ export const ROUTE_ROLES: Record<string, RouteRole> = {
   'DELETE /api/v1/nodes/:name': 'admin',
   'POST /api/v1/backups/run': 'deploy',
   'POST /api/v1/backups/:id/cancel': 'deploy',
+  'POST /api/v1/backups/unlock': 'admin',
   'GET /api/v1/backups': 'read',
   'POST /api/v1/restores': 'admin',
   'GET /api/v1/restores': 'read',

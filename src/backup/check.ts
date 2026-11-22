@@ -26,11 +26,14 @@ export interface BackupCheckInput {
  * while another node's backup holds a shared one. A run whose retention works clears it, so a recovery turns it green.
  */
 export const RETENTION_STRIKES = 2;
-export function retentionProblem(retention: RetentionInput | null | undefined): string | null {
+export function retentionProblem(
+  retention: RetentionInput | null | undefined,
+  unlock = 'tug backup unlock',
+): string | null {
   if (retention?.state !== 'failed') return null;
   if (!retention.locked && retention.failures < RETENTION_STRIKES) return null;
   const why = retention.locked
-    ? 'the repository is locked'
+    ? `the repository is locked, run ${unlock} to remove stale locks`
     : `it failed in ${retention.failures} runs in a row`;
   return `retention is failing, so old snapshots are not removed (${why})${retention.message ? `: ${retention.message}` : ''}`;
 }
@@ -65,7 +68,10 @@ export function backupCheckProblems(
     problems.unshift(NO_DESTINATION);
   if (options.requireProtection && !options.allowEmpty && !active.length) problems.push(NO_TARGETS);
   if (listing.control?.problem) problems.push(`control: ${listing.control.problem}`);
-  const controlRetention = retentionProblem(listing.control?.retention);
+  const controlRetention = retentionProblem(
+    listing.control?.retention,
+    'tug backup unlock --control',
+  );
   if (controlRetention) problems.push(`control: ${controlRetention}`);
   return problems;
 }

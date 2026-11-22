@@ -127,7 +127,12 @@ import {
   compareCompat,
   majorMinor,
 } from '../protocol.ts';
-import type { BackupCause, BackupJobPayload, BackupRetentionOutcome } from '../protocol.ts';
+import type {
+  BackupCause,
+  BackupJobPayload,
+  BackupJobResult,
+  BackupRetentionOutcome,
+} from '../protocol.ts';
 import type { RetentionStatus } from '../backup/scheduler.ts';
 import {
   isReservedProject,
@@ -146,6 +151,7 @@ import {
   fetchControlArchive,
   listControlSnapshots,
   pushControlArchive,
+  unlockControlRepository,
 } from '../backup/control-backup.ts';
 import { stopResticGracefully } from '../backup/job.ts';
 import { DEFAULT_RESTIC_IMAGE, createBackupService, retentionStatus } from '../backup/scheduler.ts';
@@ -2393,6 +2399,126 @@ export async function createApp(
     if ('error' in result) return res.status(result.status).json({ error: result.error });
     res.json(result);
   });
+  /** The `backup.unlock` commands being waited for; like a check's, their result is never a backup run's. */
+  const unlockCommands = new CheckCommands();
+  const UNLOCK_LIMIT_MS = () => Number(process.env.TUG_UNLOCK_TIMEOUT_MS) || 5 * 60_000;
+  /**
+   * Removes stale restic locks from a project's repository, or with `control: true` from control's own. Plain
+   * `restic unlock`, which removes only locks that have gone stale: tug never unlocks on its own, because a lock may
+   * belong to a prune running on another host. The project is locked while it runs, and the node runs it in the
+   * project's job lane, behind a backup of that project that is running there.
+   */
+  api(
+    'post',
+    '/api/v1/backups/unlock',
+    (req) => (req.body?.control === true ? null : String(req.body?.project || 'site')),
+    async (req, res) => {
+      const destination = backupDestination();
+      if (!destination)
+        return res.status(409).json({
+          error: 'no backup destination is configured; set one with tug backup destination set',
+        });
+      const summary = (counts: { before: number; after: number }) => ({
+        removed: Math.max(0, counts.before - counts.after),
+        remaining: counts.after,
+        ...(counts.after
+          ? {
+              note: 'the remaining locks are held by a restic that is running, or have not gone stale yet: restic removes a lock only after it has gone 30 minutes without a refresh, so run this again later',
+            }
+          : {}),
+      });
+      if (req.body?.control === true) {
+        try {
+          const counts = await unlockControlRepository(docker, {
+            url: destination.url,
+            env: backupEnv(),
+            password: controlRepositoryPassword(masterKey),
+            resticImage: resticImage(),
+            limitMs: controlJobLimitMs(),
+            stallMs: controlStallMs(),
+          });
+          audit(req.actor!, {
+            type: 'backup.unlock',
+            message: `control repository unlocked by ${req.actor!.name}: removed ${summary(counts).removed} lock(s), ${counts.after} remain`,
+            metadata: { control: true, ...summary(counts) },
+          });
+          return res.json({ ok: true, control: true, ...summary(counts) });
+        } catch (e) {
+          return res.status(502).json({ error: errMessage(e) });
+        }
+      }
+      const project = String(req.body?.project || 'site');
+      if (!PROJECT_NAME_PATTERN.test(project) || isReservedProject(project))
+        return res.status(400).json({ error: 'project is required' });
+      if (!db.get('SELECT 1 FROM projects WHERE id=?', project))
+        return res.status(404).json({ error: `project ${project} has not been deployed yet` });
+      backups.sync();
+      // The node that runs the project's backups.
+      const candidates = db
+        .all<Pick<NodeRow, 'id' | 'name' | 'status' | 'disabled_at' | 'last_seen_at'>>(
+          `SELECT DISTINCT n.id,n.name,n.status,n.disabled_at,n.last_seen_at FROM backup_schedules s JOIN nodes n ON n.id=s.node_id WHERE s.project_id=? AND s.enabled=1 ORDER BY n.name`,
+          project,
+        )
+        .filter((node) => statusOf(node) === 'online');
+      if (!candidates.length)
+        return res.status(409).json({
+          error: `no online node runs backups of project ${project}, so none can reach its repository; check tug node list`,
+        });
+      const node = candidates[0];
+      let lock;
+      try {
+        lock = acquireProjectLock(project, 'backup.unlock');
+        const limitMs = UNLOCK_LIMIT_MS();
+        const payload: BackupJobPayload = {
+          runId: id('unl'),
+          project,
+          target: '',
+          type: 'command',
+          repository: projectRepository(destination.url, project),
+          resticImage: resticImage(),
+          node: node.name,
+          // Asked for by an operator, so it goes ahead of scheduled backups in the node's queue.
+          tags: ['tug', `project:${project}`, 'unlock', 'trigger:manual'],
+          limits: { memory: '512m', timeoutSec: Math.max(1, Math.ceil(limitMs / 1000)) },
+        };
+        const commandId = queueCommand(
+          node.id,
+          project,
+          'backup.unlock',
+          payload as unknown as Record<string, unknown>,
+          new Date(Date.now() + limitMs).toISOString(),
+        );
+        const outcome = await unlockCommands.wait(commandId, limitMs, () =>
+          cancelCheckCommand(commandId, node.id, project),
+        );
+        if (outcome === 'timeout')
+          return res.status(504).json({
+            error: `node ${node.name} did not finish within ${Math.round(limitMs / 1000)} s; a backup of this project may be holding its queue`,
+          });
+        if (outcome.state !== 'succeeded')
+          return res.status(502).json({
+            error: redactSecrets(
+              (outcome.result as { error?: string }).error ?? 'the unlock failed',
+              Object.values(backupEnv()),
+            ),
+            node: node.name,
+          });
+        const counts = (outcome.result as BackupJobResult).unlock;
+        if (!counts) return res.status(502).json({ error: 'the node reported no unlock result' });
+        audit(req.actor!, {
+          type: 'backup.unlock',
+          project,
+          message: `repository of ${project} unlocked by ${req.actor!.name}: removed ${summary(counts).removed} lock(s), ${counts.after} remain`,
+          metadata: { node: node.name, ...summary(counts) },
+        });
+        res.json({ ok: true, project, node: node.name, ...summary(counts) });
+      } catch (e) {
+        sendError(res, e);
+      } finally {
+        releaseLock(lock);
+      }
+    },
+  );
   api('post', '/api/v1/backups/:id/cancel', bodyProject, async (req, res) => {
     const result = backups.cancelRun(String(req.body.project || 'site'), String(req.params.id));
     if ('error' in result) return res.status(result.status).json({ error: result.error });
@@ -4571,8 +4697,9 @@ export async function createApp(
       // A restore replaced the database while this push ran; there is nothing left to record it in. A push cancelled
       // because the destination was replaced or removed is not a failure of any destination in use.
       if (restartRequired || push.signal.aborted) return null;
-      const error = errMessage(e);
       const cause = e instanceof ControlBackupError ? e.jobCause : undefined;
+      const error =
+        errMessage(e) + (cause ? ' (run tug backup unlock --control to remove stale locks)' : '');
       db.run(
         'INSERT INTO backups(id,project_id,target,node_id,state,artifact_ref,metadata_json,created_at,completed_at) VALUES(?,?,?,?,?,?,?,?,?)',
         id('cbak'),
@@ -5624,7 +5751,10 @@ export async function createApp(
     for (const cr of report.commandResults) {
       if (!runningHere(cr.commandId)) continue;
       // A destination check's command is not a backup run: its result goes to the check and nothing else.
-      if (!checkCommands.onResult(cr.commandId, cr.state, cr.result))
+      if (
+        !checkCommands.onResult(cr.commandId, cr.state, cr.result) &&
+        !unlockCommands.onResult(cr.commandId, cr.state, cr.result)
+      )
         backups.onResult(cr.commandId, cr.state, cr.result);
       advanceWhere(
         db,
