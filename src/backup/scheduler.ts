@@ -9,6 +9,7 @@ import { backupRunLifecycle, commandLifecycle } from '../db/lifecycles.ts';
 import { isTerminal } from '../db/lifecycle.ts';
 import { backupDestinationQueries } from './destination-store.ts';
 import type { ResolvedBackup } from './config.ts';
+import type { RetentionStatus } from './check.ts';
 import type { Db } from '../db/db.ts';
 import type { BackupRunRow, BackupScheduleRow } from '../db/db.ts';
 import type {
@@ -36,8 +37,8 @@ const MANUAL_DEADLINE_MS = 30 * MINUTE;
 const STALE_REPEAT_MS = 24 * 3600_000;
 const MAX_CATCH_UP_SLOTS = 20_000;
 
-/** A run as `GET /api/v1/backups` lists it: the row without its raw metadata, and the parts of it that are API. */
-export type RunListing = Omit<BackupRunRow, 'metadata_json'> & {
+/** A run as `GET /api/v1/backups` lists it: the row (with its raw `metadata_json`) and the parsed parts of that string. */
+export type RunListing = BackupRunRow & {
   retention: BackupRetentionOutcome | null;
   cause: BackupCause | null;
   warnings: string[];
@@ -84,21 +85,12 @@ export interface TargetStatus {
   problem: string | null;
   /**
    * Retention as of the newest run that applied it, and how many runs in a row failed it. `null` while no run has
-   * applied it yet. `locked` is set when the newest failure was restic's lock exit code.
+   * applied it yet. `locked` is set when the newest failure was restic's lock exit code. Only `restic forget` is
+   * retention: the data it frees is pruned by the weekly maintenance, whose outcome is `verify`.
    */
   retention: RetentionStatus | null;
-  /** Set while the newest finished run found the repository locked (restic exit code 11); `message` is restic's, for display. */
-  lock: { message?: string } | null;
   /** Why the newest finished run failed, when more than its error says. */
   cause: BackupCause | null;
-}
-
-export interface RetentionStatus {
-  state: BackupRetentionOutcome['state'];
-  message?: string;
-  /** Consecutive runs, newest first, whose retention failed; 0 unless `state` is `failed`. */
-  failures: number;
-  locked?: boolean;
 }
 
 /** The fix a locked run names: restic removes the stale locks, never one a live restic holds. */
@@ -829,7 +821,7 @@ export function createBackupService(deps: BackupServiceDeps) {
     return { runs, errors };
   }
 
-  /** The parsed parts of a run's metadata that `GET /api/v1/backups` serves; the raw JSON string is not part of the API. */
+  /** The parts of a run's metadata that `GET /api/v1/backups` serves parsed, beside the raw `metadata_json` string. */
   const runDetail = (metadataJson: string | null) => {
     const meta = parse<RunMeta>(metadataJson, {});
     return {
@@ -858,13 +850,6 @@ export function createBackupService(deps: BackupServiceDeps) {
         const newest = finished[0];
         const newestMeta = newest ? meta(newest) : {};
         const cause = newest?.state === 'failed' ? (newestMeta.cause ?? null) : null;
-        const lockMessage =
-          cause === 'locked'
-            ? newest!.error
-            : newest?.state === 'succeeded' && newestMeta.retention?.locked
-              ? newestMeta.retention.message
-              : undefined;
-        const locked = cause === 'locked' || (newestMeta.retention?.locked ?? false);
         const base = backupProblem(row, clock());
         return {
           project: row.project_id,
@@ -886,7 +871,6 @@ export function createBackupService(deps: BackupServiceDeps) {
               .filter((run) => run.state === 'succeeded')
               .flatMap((run) => meta(run).retention ?? []),
           ),
-          lock: locked ? { ...(lockMessage ? { message: lockMessage } : {}) } : null,
           cause,
         };
       });
@@ -897,9 +881,9 @@ export function createBackupService(deps: BackupServiceDeps) {
     );
     return {
       targets,
-      runs: runs.map(({ metadata_json, ...run }) => ({
+      runs: runs.map((run) => ({
         ...run,
-        ...runDetail(metadata_json),
+        ...runDetail(run.metadata_json),
         ...(run.command_id && ['queued', 'running'].includes(run.state)
           ? jobInfo.get(run.command_id)
           : undefined),

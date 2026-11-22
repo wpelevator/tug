@@ -425,7 +425,7 @@ test('long-wait commands report progress on stderr and retain their results and 
     await t.test(
       'backup list prints retention and lock state, and --check applies the two-strike rule',
       async () => {
-        const listing = (retention: unknown, lock: unknown = null) => ({
+        const listing = (retention: unknown, cause: unknown = null) => ({
           destinationConfigured: true,
           control: null,
           targets: [
@@ -439,7 +439,7 @@ test('long-wait commands report progress on stderr and retain their results and 
               lastStatus: 'succeeded',
               problem: null,
               retention,
-              lock,
+              cause,
             },
           ],
           runs: [],
@@ -457,10 +457,35 @@ test('long-wait commands report progress on stderr and retain their results and 
         assert.match(err.join(''), /PROBLEM service:db: retention is failing/, 'two do');
         assert.equal(last.rt.exitCode, 1, 'two consecutive failures exit nonzero');
         routes = {
-          'GET /api/v1/backups': listing({ state: 'ok', failures: 0 }, { message: 'locked' }),
+          'GET /api/v1/backups': listing({ state: 'ok', failures: 0 }, 'locked'),
         };
         await run('backup', 'list');
-        assert.match(out.join(''), /retention ok.*REPOSITORY LOCKED/s, 'list shows a lock');
+        assert.match(
+          out.join(''),
+          /retention ok.*REPOSITORY LOCKED/s,
+          'list marks a target whose newest run failed on restic lock exit',
+        );
+        routes = {
+          'GET /api/v1/backups': listing({
+            state: 'failed',
+            failures: 1,
+            locked: true,
+            message: 'locked',
+          }),
+        };
+        await run('backup', 'list');
+        assert.match(
+          out.join(''),
+          /retention failed \(1 run, locked\).*REPOSITORY LOCKED/s,
+          'list marks a target whose retention failed on restic lock exit',
+        );
+        routes = { 'GET /api/v1/backups': listing({ state: 'ok', failures: 0 }) };
+        await run('backup', 'list');
+        assert.doesNotMatch(
+          out.join(''),
+          /REPOSITORY LOCKED/,
+          'a target with no lock failure carries no marker',
+        );
         routes = { 'GET /api/v1/backups': listing({ state: 'external', failures: 0 }) };
         await run('backup', 'list', '--check');
         assert.match(out.join(''), /retention external/, 'list shows external retention');

@@ -238,7 +238,6 @@ test("a prune that fails on restic's lock exit is a lock and fails a monitor at 
     await pushControl(s.base);
     const control = (await listing(s.base)).control;
     assert.equal(control.retention.locked, true, 'exit 11 marks the retention failure as locked');
-    assert.notEqual(control.lock, null, 'the listing says the repository is locked');
     assert.match(
       backupCheckProblems({ destinationConfigured: true, targets: [], control })[0],
       /repository is locked/,
@@ -290,7 +289,6 @@ test("a control backup that fails on restic's lock exit records cause locked", a
     assert.equal((await pushControl(s.base)).status, 502, 'the backup fails');
     const control = (await listing(s.base)).control;
     assert.equal(control.cause, 'locked', 'the failure is classified by restic exit code');
-    assert.notEqual(control.lock, null, 'the repository is reported locked');
     const [failed] = await events(s.dbFile, 'backup.failed');
     assert.equal(
       JSON.parse(failed.metadata_json).cause,

@@ -135,7 +135,7 @@ import type {
   BackupJobResult,
   BackupRetentionOutcome,
 } from '../protocol.ts';
-import type { RetentionStatus } from '../backup/scheduler.ts';
+import type { RetentionStatus } from '../backup/check.ts';
 import {
   isReservedProject,
   parseBackupDestination,
@@ -5015,7 +5015,6 @@ export async function createApp(
     scope: 'shared' | 'local';
     repository: string;
     retention: RetentionStatus | null;
-    lock: { message?: string } | null;
     cause: BackupCause | null;
     verify: MaintenanceRecord | null;
   } | null {
@@ -5033,9 +5032,6 @@ export async function createApp(
       : {};
     const retention = retentionStatus(controlRetentionOutcomes(key));
     const cause = last?.state === 'failed' ? (lastMeta.cause ?? null) : null;
-    const locked =
-      cause === 'locked' || (last?.state === 'completed' && lastMeta.retention?.locked);
-    const lockMessage = cause === 'locked' ? lastMeta.error : lastMeta.retention?.message;
     const failure =
       last?.state === 'failed'
         ? `the last control backup failed: ${(JSON.parse(last.metadata_json) as { error?: string }).error ?? 'unknown error'}`
@@ -5057,7 +5053,6 @@ export async function createApp(
       scope: destination.url.startsWith('/') ? 'local' : 'shared',
       repository: controlRepository(destination.url),
       retention,
-      lock: locked ? { ...(lockMessage ? { message: lockMessage } : {}) } : null,
       cause,
       verify: maintenance.record('_control'),
     };

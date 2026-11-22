@@ -258,9 +258,10 @@ export const DEPLOY_HOLD_REASON = 'deploy hold';
 /** Why a backup job failed, when more than its message says; only `locked` exists. */
 export type BackupCause = 'locked';
 /**
- * What happened to retention (`restic forget --prune`) in a run: `ok`, `failed` (the snapshot is safe, the pruning is
- * not), or `external` (the destination is append-only and pruning is the operator's job, so tug did not try).
- * `locked` marks a failure that was restic's lock exit code.
+ * What happened to retention in a run, which is `restic forget` with the target's policy: `ok`, `failed` (the
+ * snapshot is safe, the old ones are not removed), or `external` (the destination is append-only and retention is the
+ * operator's job, so tug did not try). `locked` marks a failure that was restic's lock exit code. The data of
+ * forgotten snapshots is freed by the weekly `restic prune`, which is the maintenance job's (`BackupMaintenanceOutcome`).
  */
 export interface BackupRetentionOutcome {
   state: 'ok' | 'failed' | 'external';
@@ -299,7 +300,7 @@ export interface BackupJobPayload {
   node: string;
   tags: string[];
   retention?: BackupRetention;
-  /** `external`: the destination is append-only, so `forget --prune` is skipped and reported as `retention.state: external`. */
+  /** `external`: the destination is append-only, so `restic forget` is skipped and reported as `retention.state: external`. */
   retentionMode?: 'external';
   /** `backup.maintain` only: prune the repository (skipped when false) and then check it, reading a subset of the data when `subset` is set. */
   maintain?: { prune: boolean; subset?: string };

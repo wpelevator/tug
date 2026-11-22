@@ -69,11 +69,11 @@ With only `--retention` and the URL already in use, the stored credentials are k
 
 With `external`, tug never runs `forget` or `prune`, and each run records `retention: external`. The weekly [repository check](#verify-a-repository) still runs, because it only reads. You then own:
 
-- **Pruning from the storage side**, by whatever your server offers, or by `restic forget --prune` with credentials that may delete (the repository and password come from `tug backup password`).
+- **Retention and pruning from the storage side**, by whatever your server offers, or by `restic forget --prune` with your policy and credentials that may delete (the repository and password come from `tug backup password`).
 - **Safety snapshots.** The snapshot before each in-place restore is tagged `trigger:pre-restore` and is kept by tug's own retention. Keep that tag when you prune: `--keep-tag trigger:pre-restore`.
 - **Partial snapshots.** When a command backup fails after restic stored a partial snapshot, tug forgets it. On an append-only server that cleanup fails, and the failed run's error says so.
 
-Without the setting, an append-only server shows as a retention failure, which is the signal to set it. Two consecutive failed prunes turn `tug backup list --check` red, see [Watch your backups](#watch-your-backups).
+Without the setting, an append-only server refuses the `restic forget` that follows each backup, which shows as a retention failure and is the signal to set it. Two consecutive failed runs turn `tug backup list --check` red, and the weekly prune fails its repository check, see [Watch your backups](#watch-your-backups).
 
 ### Not supported
 
@@ -185,7 +185,7 @@ backup:
 | --- | --- |
 | `backup.completed` | A run succeeded |
 | `backup.failed` | A run failed. A failed scheduled run is retried once after ten minutes. When restic exited with its lock code (11), the event metadata has `cause: "locked"`: the repository is locked by another restic, or by one that was killed |
-| `backup.retention_failed` | The backup succeeded but applying retention (`restic forget`) failed, so old snapshots stay and the repository grows. Raised once, when pruning starts failing (and for control's own backup). The event metadata has `cause: "locked"` for a lock failure |
+| `backup.retention_failed` | The backup succeeded but applying retention (`restic forget`) failed, so old snapshots stay and the repository grows. Raised once, when retention starts failing (and for control's own backup). The event metadata has `cause: "locked"` for a lock failure |
 | `backup.retention_recovered` | Retention worked again after `backup.retention_failed` |
 | `backup.verify_failed` | The weekly or manual `restic check` of a repository, or its weekly prune, failed and the failure counts: restic found a fault, or an overlap (restic's lock exit code, a node that did not answer, a timeout) happened twice in a row. Raised once, when it starts counting, on the project or on `_control`. The event metadata has `failures`, and `cause: "locked"` for a lock exit |
 | `backup.verify_recovered` | A later check passed after `backup.verify_failed` |
@@ -194,7 +194,11 @@ backup:
 | `backup.no_destination` | No destination is configured |
 | `backup.cancelled` | Someone ran `tug backup cancel <run>`. A cancelled backup is a warning and is not retried |
 
-Exit status is the signal to wire into monitoring: `tug backup list --check` exits nonzero when a target is stale, failed or missed, when its retention failed in two runs in a row (or once with a lock failure), when the last repository check or prune failed (see [Verify a repository](#verify-a-repository) for which failures count), when no repository check or prune has finished for 14 days, or when nothing is protected. One failed forget is not a problem: on a project with several nodes a prune takes an exclusive lock on the shared repository while another node's backup holds a shared one, so a single overlap is harmless. Pruning is now a weekly job for that reason, not part of every run. A run whose retention works clears the problem. A destination set to `--retention external` never reports one. Run it from cron or a monitor, and keep running it during a [migration](migration.md#coming-from-an-existing-restic-setup), when the old backup system may be failing without anyone noticing.
+Exit status is the signal to wire into monitoring: `tug backup list --check` exits nonzero when a target is stale, failed or missed; when its retention (the `restic forget` after each backup) failed in two runs in a row, or once with restic's lock exit code; when a repository's weekly prune or check failed in a way that counts (see [Verify a repository](#verify-a-repository)); when no repository check or prune has finished for 14 days; or when nothing is protected. A run whose retention works clears a retention problem, and a passing maintenance clears a repository problem. A destination set to `--retention external` never reports a retention problem. Run it from cron or a monitor, and keep running it during a [migration](migration.md#coming-from-an-existing-restic-setup), when the old backup system may be failing without anyone noticing.
+
+Two records describe how the repository is kept small. Each run records the outcome of its `restic forget` as the target's `retention` (`ok`, `failed` or `external`) and raises `backup.retention_failed` and `backup.retention_recovered` when it changes. A forget removes snapshots but frees no data. The weekly job runs `restic prune` and `restic check` and records them as the repository's `verify` result, with `backup.verify_failed` and `backup.verify_recovered`.
+
+`forget`, `prune` and `check` each take the exclusive repository lock, and `backup` takes a shared one. Tested with restic 0.19.1 against a backup holding its shared lock: `forget`, `prune` and `check` each waited for the lock and exited with code 11, and a second `backup` ran beside it. A node runs one job per project at a time, so a retention lock failure comes from a project whose targets run on several nodes into one repository, from a backup that outlasts the ten minutes `forget` waits (`--retry-lock`), or from a lock a killed restic left behind, which `tug backup unlock` clears once it has gone stale.
 
 While control is down no backup starts, which is the price of one scheduler. Running jobs finish and report when control returns. `tug backup run` takes a backup now, and `tug backup list` shows the catalog, see [CLI](cli.md#backups).
 

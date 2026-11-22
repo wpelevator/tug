@@ -5,6 +5,7 @@ import type { Command } from 'commander';
 import { collectList, loadCfg, print, request } from './context.ts';
 import { out, err } from '../runtime.ts';
 import type { CliRuntime } from '../runtime.ts';
+import type { Leftovers } from '../../backup/restore.ts';
 
 interface RestorePlanView {
   target: string;
@@ -25,23 +26,6 @@ interface RestoreRecord {
   scratch_volume: string | null;
   error: string | null;
   started_at: string | null;
-}
-
-interface Leftovers {
-  scratchVolumes: {
-    restoreId: string;
-    target: string;
-    volume: string;
-    node: string | null;
-    state: string;
-    createdAt: string | null;
-  }[];
-  safetySnapshots: {
-    restoreId: string;
-    target: string;
-    snapshotId: string;
-    createdAt: string | null;
-  }[];
 }
 
 /** The lines `restore list` adds for what restores left behind. */

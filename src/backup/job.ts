@@ -59,7 +59,7 @@ export const RESTIC_STOP_GRACE_MS = 20_000;
 
 /**
  * Stops restic in a helper container so that it releases its lock, then lets the caller remove the container.
- * Removing a container force-kills every process in it, and a SIGKILLed `forget --prune` leaves an exclusive lock that
+ * Removing a container force-kills every process in it, and a SIGKILLed `forget`, `prune` or `check` leaves an exclusive lock that
  * blocks every later backup until it goes stale. restic cleans up on SIGINT, so it is sent that, then SIGTERM, and is
  * given `graceMs` in all to exit; the container is removed afterwards whatever happened, so this never throws.
  */

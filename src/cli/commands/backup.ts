@@ -37,7 +37,7 @@ interface BackupListing {
     /** A local path is for development: it is not protection against losing the host. */
     scope?: 'shared' | 'local';
     retention?: RetentionStatus | null;
-    lock?: { message?: string } | null;
+    cause?: 'locked' | null;
     verify?: VerifyRecord | null;
   } | null;
   targets: {
@@ -50,7 +50,7 @@ interface BackupListing {
     lastStatus: string | null;
     problem: string | null;
     retention?: RetentionStatus | null;
-    lock?: { message?: string } | null;
+    cause?: 'locked' | null;
     /** `off-host`, `verified` or `restore-tested`; null when nothing is off-host. */
     protection?: 'off-host' | 'verified' | 'restore-tested' | null;
   }[];
@@ -59,14 +59,15 @@ interface BackupListing {
 /** `retention ok`, `retention failed (2 runs)`, `retention external` or nothing before a run applied it; with the lock state. */
 export function retentionColumns(item: {
   retention?: RetentionStatus | null;
-  lock?: { message?: string } | null;
+  cause?: 'locked' | null;
 }): string {
   const retention = item.retention
     ? item.retention.state === 'failed'
       ? `\tretention failed (${item.retention.failures} run${item.retention.failures === 1 ? '' : 's'}${item.retention.locked ? ', locked' : ''})`
       : `\tretention ${item.retention.state}`
     : '';
-  return `${retention}${item.lock ? '\tREPOSITORY LOCKED' : ''}`;
+  const locked = item.retention?.locked === true || item.cause === 'locked';
+  return `${retention}${locked ? '\tREPOSITORY LOCKED' : ''}`;
 }
 /** `verify ok (check 2026-11-01, subset 5%)`, `verify FAILED` or nothing before a repository was checked. */
 export function verifyColumn(verify: VerifyRecord | null | undefined): string {
@@ -161,7 +162,7 @@ function reportCheck(rt: CliRuntime, check: DestinationCheck): void {
   else if (check.retention)
     err(
       rt,
-      'retention: managed. tug prunes with restic forget --prune after each backup; an append-only destination refuses that, and a retention failure then shows in tug backup list --check. For an append-only destination run tug backup destination set <url> --retention external. This check does not test delete permission.',
+      'retention: managed. tug runs restic forget after each backup and restic prune once a week; an append-only destination refuses both, and the retention failure then shows in tug backup list --check. For an append-only destination run tug backup destination set <url> --retention external. This check does not test delete permission.',
     );
   err(rt, checkScope(check));
 }
@@ -479,7 +480,7 @@ export function registerBackup(rt: CliRuntime, program: Command): void {
     .addOption(
       new Option(
         '--retention <mode>',
-        'who prunes old snapshots: managed (default; tug runs restic forget --prune after each backup) or external (an append-only destination such as rest-server --append-only: tug never prunes, so you prune from the storage side). Setting only this on the destination already in use keeps its credentials; when omitted, the current mode is kept for the same URL',
+        'who removes old snapshots: managed (default; tug runs restic forget after each backup and restic prune once a week) or external (an append-only destination such as rest-server --append-only: tug never forgets or prunes, so you do it from the storage side). Setting only this on the destination already in use keeps its credentials; when omitted, the current mode is kept for the same URL',
       ).choices(['managed', 'external']),
     )
     .option('--no-check', 'save the destination without checking it')

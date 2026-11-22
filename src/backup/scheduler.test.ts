@@ -536,9 +536,10 @@ test('a run stores its retention outcome as data, and the listing serves parsed 
     'the outcome is stored in the run metadata next to the warnings',
   );
   const listing = f.service.list('site');
-  assert.ok(
-    !('metadata_json' in listing.runs[0]),
-    'the raw metadata string is not part of the API',
+  assert.equal(
+    typeof listing.runs[0].metadata_json,
+    'string',
+    'the raw metadata string stays on the run row, so a client that reads it keeps working',
   );
   assert.deepEqual(
     listing.runs[0].retention,
@@ -628,14 +629,6 @@ test("a run that failed on restic's lock exit records cause locked, shows the lo
   });
   const target = dbTarget(f);
   assert.equal(target.cause, 'locked', 'the target reports the cause of its last failed run');
-  assert.deepEqual(
-    target.lock,
-    {
-      message:
-        'backup failed: unable to create lock in backend (run tug backup unlock to remove stale locks)',
-    },
-    "the lock carries restic's message and the unlock hint, for display only",
-  );
   assert.match(
     target.problem ?? '',
     /repository is locked, run tug backup unlock/,
@@ -651,8 +644,7 @@ test("a run that failed on restic's lock exit records cause locked, shows the lo
   );
   assert.equal(f.events('backup.locked').length, 0, 'no separate locked event exists');
   succeed(f, runAt(f, '2026-11-02T03:00:30Z'), { state: 'ok' });
-  assert.equal(dbTarget(f).lock, null, 'the next successful run clears the lock');
-  assert.equal(dbTarget(f).cause, null, 'and the cause');
+  assert.equal(dbTarget(f).cause, null, 'the next successful run clears the cause');
 });
 
 test("a failure that is not restic's lock exit has no cause and no lock", async () => {
@@ -662,5 +654,4 @@ test("a failure that is not restic's lock exit has no cause and no lock", async 
     error: 'backup failed: no space',
   });
   assert.equal(dbTarget(f).cause, null, 'only the lock exit code makes a cause');
-  assert.equal(dbTarget(f).lock, null, 'and a lock');
 });
