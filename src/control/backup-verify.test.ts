@@ -239,8 +239,14 @@ test('backup verify checks the repository in the background, records it, and rai
     const shown = await listing(s.base);
     assert.equal(shown.verify.subset, '5%', 'the record says what was read');
     assert.equal(shown.verify.trigger, 'manual', 'the record says who asked');
-    assert.equal(shown.targets[0].protection, 'verified', 'a check after the backup verifies it');
+    assert.equal(shown.targets[0].protection, 'verified', 'a passing check verifies the target');
     assert.deepEqual(backupCheckProblems(shown), [], 'a passing check is no problem');
+    await backedUp(s.base, s.dbFile, new Date().toISOString());
+    assert.equal(
+      (await listing(s.base)).targets[0].protection,
+      'verified',
+      'a backup made after the check keeps the level, as daily backups follow a weekly check',
+    );
 
     const db = await openDb(s.dbFile);
     db.run(
@@ -251,6 +257,15 @@ test('backup verify checks the repository in the background, records it, and rai
       (await listing(s.base)).targets[0].protection,
       'restore-tested',
       'a succeeded scratch restore completes the ladder',
+    );
+    db.run(
+      "UPDATE restore_runs SET finished_at=? WHERE id='rst_1'",
+      new Date(Date.now() - 91 * 24 * 3_600_000).toISOString(),
+    );
+    assert.equal(
+      (await listing(s.base)).targets[0].protection,
+      'verified',
+      'a scratch restore older than 90 days no longer counts',
     );
 
     await call(s.base, 'POST', '/api/v1/backup/destination', {
@@ -315,6 +330,91 @@ test('a failing check alerts once, turns --check red, and a later pass clears it
       (await events(s.dbFile, 'backup.verify_recovered')).length,
       1,
       'the recovery is announced once',
+    );
+  } finally {
+    for (const stop of stops) await stop();
+    await s.close();
+  }
+});
+
+const lockedPrune = (payload: BackupJobPayload) => ({
+  state: 'succeeded',
+  result: {
+    runId: payload.runId,
+    durationMs: 1,
+    maintenance: {
+      prune: 'failed',
+      check: 'ok',
+      locked: true,
+      message: 'prune failed: unable to create lock in backend: repository is already locked',
+    },
+  },
+});
+
+test('one locked prune does not fail --check or alert, two in a row do, and a pass recovers', async () => {
+  const s = await server(restic());
+  const stops: (() => Promise<void>)[] = [];
+  try {
+    const agent = await deploy(s.base);
+    await call(s.base, 'POST', '/api/v1/backup/destination', DESTINATION);
+    await backedUp(s.base, s.dbFile);
+    let reply: (payload: BackupJobPayload) => { state: string; result: unknown } = lockedPrune;
+    const node = serveMaintenance(s.base, agent, (payload) => reply(payload));
+    stops.push(node.stop);
+    const verify = async (count: number) => {
+      assert.equal(
+        (await call(s.base, 'POST', '/api/v1/backups/verify', { project: 'site' })).status,
+        202,
+      );
+      await until(() => node.seen.length === count, `${count} maintenance job(s) taken`);
+      await until(
+        async () => (await listing(s.base)).maintenanceRunning === false,
+        'the check to finish',
+      );
+    };
+    await verify(1);
+    const once = await listing(s.base);
+    assert.equal(once.verify.ok, false, 'the failed prune is recorded');
+    assert.equal(once.verify.failures, 1, 'the record counts one failure');
+    assert.deepEqual(
+      backupCheckProblems(once),
+      [],
+      'a prune that overlapped another lock holder does not fail --check the first time',
+    );
+    assert.equal(
+      (await events(s.dbFile, 'backup.verify_failed')).length,
+      0,
+      'no alert for a single lock overlap',
+    );
+    await verify(2);
+    const twice = await listing(s.base);
+    assert.equal(twice.verify.failures, 2, 'the record counts two failures in a row');
+    assert.match(
+      backupCheckProblems(twice).join('\n'),
+      /repository check or prune failed.*2 times in a row/,
+      'the second failure in a row fails --check',
+    );
+    assert.equal(
+      (await events(s.dbFile, 'backup.verify_failed')).length,
+      1,
+      'the failure is announced when it becomes a problem',
+    );
+    reply = passed;
+    await verify(3);
+    const recovered = await listing(s.base);
+    assert.equal(recovered.verify.failures, 0, 'a pass resets the count');
+    assert.deepEqual(backupCheckProblems(recovered), [], 'a pass turns --check green');
+    assert.equal(
+      (await events(s.dbFile, 'backup.verify_recovered')).length,
+      1,
+      'the recovery is announced after a reported failure',
+    );
+    reply = lockedPrune;
+    await verify(4);
+    assert.equal(
+      (await listing(s.base)).verify.failures,
+      1,
+      'a failure after a recovery starts a new streak',
     );
   } finally {
     for (const stop of stops) await stop();

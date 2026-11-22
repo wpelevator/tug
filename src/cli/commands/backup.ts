@@ -2,8 +2,8 @@ import { selectBackups } from './selection.ts';
 import { withProgress } from '../progress.ts';
 import { Option } from 'commander';
 import type { Command } from 'commander';
-import { backupCheckProblems } from '../../backup/check.ts';
-import type { RetentionInput } from '../../backup/check.ts';
+import { backupCheckProblems, verifyFailing } from '../../backup/check.ts';
+import type { RetentionStatus, VerifyRecord } from '../../backup/check.ts';
 import { collectList, loadCfg, print, readEnvValues, request } from './context.ts';
 import { out, err } from '../runtime.ts';
 import type { CliRuntime } from '../runtime.ts';
@@ -24,18 +24,6 @@ interface BackupRunRecord {
   phase?: string;
   waitingFor?: string;
 }
-/** The last weekly maintenance or `backup verify` of a repository. */
-interface VerifyRecord {
-  ok: boolean;
-  startedAt: string;
-  finishedAt: string;
-  prune: 'ok' | 'skipped' | 'failed';
-  check: 'ok' | 'failed';
-  subset?: string;
-  message?: string;
-  error?: string;
-  trigger: 'schedule' | 'manual';
-}
 interface BackupListing {
   destinationConfigured: boolean;
   /** The project repository's last maintenance; null before one ran. */
@@ -48,7 +36,7 @@ interface BackupListing {
     problem: string | null;
     /** A local path is for development: it is not protection against losing the host. */
     scope?: 'shared' | 'local';
-    retention?: RetentionInput | null;
+    retention?: RetentionStatus | null;
     lock?: { message?: string } | null;
     verify?: VerifyRecord | null;
   } | null;
@@ -61,7 +49,7 @@ interface BackupListing {
     lastSuccessAt: string | null;
     lastStatus: string | null;
     problem: string | null;
-    retention?: RetentionInput | null;
+    retention?: RetentionStatus | null;
     lock?: { message?: string } | null;
     /** `off-host`, `verified` or `restore-tested`; null when nothing is off-host. */
     protection?: 'off-host' | 'verified' | 'restore-tested' | null;
@@ -70,7 +58,7 @@ interface BackupListing {
 }
 /** `retention ok`, `retention failed (2 runs)`, `retention external` or nothing before a run applied it; with the lock state. */
 export function retentionColumns(item: {
-  retention?: RetentionInput | null;
+  retention?: RetentionStatus | null;
   lock?: { message?: string } | null;
 }): string {
   const retention = item.retention
@@ -91,7 +79,9 @@ export function verifyColumn(verify: VerifyRecord | null | undefined): string {
   ].filter(Boolean);
   return verify.ok
     ? `\tverify ok (${when}${detail.length ? `, ${detail.join(', ')}` : ''})`
-    : `\tverify FAILED (${when})`;
+    : verifyFailing(verify)
+      ? `\tverify FAILED (${when})`
+      : `\tverify failed (${when}, will retry)`;
 }
 interface DestinationCheck {
   checkId: string;

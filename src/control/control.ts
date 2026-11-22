@@ -165,6 +165,7 @@ import {
   protectionLevel,
 } from '../backup/maintenance.ts';
 import type { MaintenanceRecord } from '../backup/maintenance.ts';
+import { verifyFailing } from '../backup/check.ts';
 import { stopResticGracefully } from '../backup/job.ts';
 import { DEFAULT_RESTIC_IMAGE, createBackupService, retentionStatus } from '../backup/scheduler.ts';
 import { CheckCommands, checkPassed, nodeCheckFromResult } from '../backup/destination-check.ts';
@@ -2592,7 +2593,7 @@ export async function createApp(
     },
   ): Promise<
     | { result: BackupJobResult }
-    | { error: string; status: number; body: { error: string; node?: string } }
+    | { error: string; status: number; cause?: BackupCause; body: { error: string; node?: string } }
   > {
     const destination = backupDestination()!;
     const { limitMs } = options;
@@ -2628,7 +2629,8 @@ export async function createApp(
         (outcome.result as { error?: string }).error ?? `the ${tag} failed`,
         Object.values(backupEnv()),
       );
-      return { error, status: 502, body: { error, node: node.name } };
+      const cause = (outcome.result as { cause?: BackupCause }).cause;
+      return { error, status: 502, ...(cause ? { cause } : {}), body: { error, node: node.name } };
     }
     return { result: outcome.result as BackupJobResult };
   }
@@ -2637,32 +2639,19 @@ export async function createApp(
   const maintenance = maintenanceStore(db);
   const MAINTENANCE_LIMIT_MS = () =>
     Number(process.env.TUG_MAINTENANCE_TIMEOUT_MS) || 6 * 3_600_000;
-  const maintenanceEvent = (
-    project: string,
-    level: 'info' | 'error',
-    type: string,
-    message: string,
-    meta: object,
-    nodeId: string | null,
-    actor?: Actor,
-  ) =>
-    db.run(
-      'INSERT INTO events(id,project_id,deployment_id,node_id,level,type,message,metadata_json,created_at,actor) VALUES(?,?,?,?,?,?,?,?,?,?)',
-      id('evt'),
-      project,
-      null,
-      nodeId,
-      level,
-      type,
-      message,
-      JSON.stringify(meta),
-      now(),
-      actor?.name ?? null,
-    );
+  /** A maintenance job that did not report: `transient` when a retry may well succeed (a timeout, a lock exit). */
+  class MaintenanceFailure extends Error {
+    readonly transient: boolean;
+    constructor(message: string, transient: boolean) {
+      super(message);
+      this.transient = transient;
+    }
+  }
   /**
    * Prunes (when asked) and checks one repository on its node, or control's own from control, and stores what it found.
-   * Only a change is an alert: one `backup.verify_failed` when it starts failing and one `backup.verify_recovered` when
-   * it passes again.
+   * A failure that may be an overlap (restic's lock exit code, a node that did not answer, a timeout) must repeat before
+   * it counts: `backup.verify_failed` is raised, and `backup list --check` fails, on the second in a row, or at once
+   * for any other failure. `backup.verify_recovered` follows a pass after a reported failure.
    */
   async function maintainRepository(
     project: string,
@@ -2679,7 +2668,7 @@ export async function createApp(
     maintaining.add(project);
     const startedAt = now();
     try {
-      let record: MaintenanceRecord;
+      let record: Omit<MaintenanceRecord, 'failures'>;
       try {
         const common = {
           startedAt,
@@ -2709,18 +2698,25 @@ export async function createApp(
               ...(options.subset ? { subset: options.subset } : {}),
             },
           });
-          if ('error' in ran) throw new Error(ran.error);
+          // A timeout (504) is a node that did not answer; a failed job is transient only when restic's lock exit says so.
+          if ('error' in ran)
+            throw new MaintenanceFailure(ran.error, ran.status === 504 || ran.cause === 'locked');
           outcome = ran.result.maintenance;
           if (!outcome) throw new Error('the node reported no maintenance result');
         }
+        const ok = outcome.check === 'ok' && outcome.prune !== 'failed';
         record = {
           ...outcome,
           ...common,
           finishedAt: now(),
-          ok: outcome.check === 'ok' && outcome.prune !== 'failed',
+          ok,
+          ...(!ok && outcome.locked ? { transient: true } : {}),
         };
       } catch (e) {
         const error = errMessage(e);
+        const transient =
+          (e instanceof MaintenanceFailure && e.transient) ||
+          (e instanceof ControlBackupError && e.jobCause === 'locked');
         record = {
           prune: 'skipped',
           check: 'failed',
@@ -2730,11 +2726,14 @@ export async function createApp(
           finishedAt: now(),
           trigger: options.trigger,
           ok: false,
+          ...(transient ? { transient: true } : {}),
           ...(node ? { node: node.name } : {}),
         };
       }
       const before = maintenance.record(project);
-      maintenance.setRecord(project, record);
+      const failures = record.ok ? 0 : (before?.failures ?? 0) + 1;
+      const stored: MaintenanceRecord = { ...record, failures };
+      maintenance.setRecord(project, stored);
       if (options.trigger === 'schedule')
         maintenance.setNextAt(
           project,
@@ -2743,34 +2742,35 @@ export async function createApp(
       const what =
         project === '_control' ? 'the control repository' : `the repository of ${project}`;
       const nodeId = node?.id ?? null;
-      if (!record.ok) {
-        if (before?.ok !== false)
-          maintenanceEvent(
-            project,
+      if (verifyFailing(stored)) {
+        if (!verifyFailing(before))
+          backups.event(
             'error',
             'backup.verify_failed',
-            `checking or pruning ${what} failed: ${record.message ?? 'restic reported an error'}`,
+            project,
+            `checking or pruning ${what} failed${stored.failures > 1 ? ` ${stored.failures} times in a row` : ''}: ${stored.message ?? 'restic reported an error'}`,
             {
-              prune: record.prune,
-              check: record.check,
-              message: record.message,
+              prune: stored.prune,
+              check: stored.check,
+              message: stored.message,
               trigger: options.trigger,
-              ...(record.locked ? { cause: 'locked' } : {}),
+              failures: stored.failures,
+              ...(stored.locked ? { cause: 'locked' } : {}),
             },
             nodeId,
-            options.actor,
+            options.actor?.name,
           );
-      } else if (before?.ok === false)
-        maintenanceEvent(
-          project,
+      } else if (stored.ok && verifyFailing(before))
+        backups.event(
           'info',
           'backup.verify_recovered',
+          project,
           `${what} passes its check again`,
-          { prune: record.prune, check: record.check },
+          { prune: stored.prune, check: stored.check },
           nodeId,
-          options.actor,
+          options.actor?.name,
         );
-      return record;
+      return stored;
     } finally {
       maintaining.delete(project);
     }
@@ -2958,14 +2958,12 @@ export async function createApp(
     const listed = backups.list(project, limit);
     const verify = maintenance.record(project);
     const local = Boolean(destination?.url.startsWith('/'));
-    const scratchTested = (target: string): boolean =>
-      Boolean(
-        db.get(
-          "SELECT 1 FROM restore_runs WHERE project_id=? AND target=? AND mode='scratch' AND state='succeeded' LIMIT 1",
-          project,
-          target,
-        ),
-      );
+    const scratchTestedAt = (target: string): string | null =>
+      db.get<{ finished_at: string | null }>(
+        "SELECT finished_at FROM restore_runs WHERE project_id=? AND target=? AND mode='scratch' AND state='succeeded' ORDER BY finished_at DESC LIMIT 1",
+        project,
+        target,
+      )?.finished_at ?? null;
     res.json({
       project,
       destinationConfigured: Boolean(destination),
@@ -2982,7 +2980,7 @@ export async function createApp(
               healthy: target.enabled && !target.problem,
               lastSuccessAt: target.lastSuccessAt,
               verify,
-              restoreTested: scratchTested(target.target),
+              restoreTestedAt: scratchTestedAt(target.target),
             })
           : null,
       })),

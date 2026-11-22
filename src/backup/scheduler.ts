@@ -973,7 +973,19 @@ export function createBackupService(deps: BackupServiceDeps) {
     return { commandId, nodeId: schedule.node_id };
   }
 
-  return { sync, tick, onHeartbeat, onResult, runNow, list, queueRestore, cancelRun, cancelJob };
+  return {
+    sync,
+    tick,
+    onHeartbeat,
+    onResult,
+    runNow,
+    list,
+    queueRestore,
+    cancelRun,
+    cancelJob,
+    /** Appends an event about a repository or a target; control's maintenance and own backup use it too. */
+    event,
+  };
 }
 
 export type BackupService = ReturnType<typeof createBackupService>;

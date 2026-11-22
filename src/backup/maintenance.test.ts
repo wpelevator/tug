@@ -19,17 +19,21 @@ const record = (over: Partial<MaintenanceRecord> = {}): MaintenanceRecord => ({
   finishedAt: '2026-11-02T00:10:00.000Z',
   trigger: 'schedule',
   ok: true,
+  failures: 0,
   ...over,
 });
+const DAY = 24 * 3_600_000;
+const NOW = Date.parse('2026-11-05T00:00:00.000Z');
 const base = {
   local: false,
   healthy: true,
-  lastSuccessAt: '2026-11-01T03:00:00.000Z',
+  lastSuccessAt: '2026-11-04T03:00:00.000Z',
   verify: null,
-  restoreTested: false,
+  restoreTestedAt: null,
+  now: NOW,
 };
 
-test('protection levels claim no more than ran: off-host, then verified after the latest backup, then restore-tested', () => {
+test('protection levels claim no more than ran: off-host, then verified by a recent passing check, then restore-tested by a recent restore', () => {
   assert.equal(protectionLevel(base), 'off-host', 'a recent success off-host is off-host');
   assert.equal(
     protectionLevel({ ...base, local: true }),
@@ -45,25 +49,50 @@ test('protection levels claim no more than ran: off-host, then verified after th
   assert.equal(
     protectionLevel({ ...base, verify: record() }),
     'verified',
-    'a check that started after the latest backup verifies it',
+    'a passing check from the last few days verifies the target',
   );
   assert.equal(
-    protectionLevel({ ...base, lastSuccessAt: '2026-11-03T03:00:00.000Z', verify: record() }),
-    'off-host',
-    'a backup newer than the check is not covered by it',
+    protectionLevel({ ...base, lastSuccessAt: '2026-11-04T23:00:00.000Z', verify: record() }),
+    'verified',
+    'a backup made after the check keeps the level: a daily backup with a weekly check stays verified',
   );
   assert.equal(
-    protectionLevel({ ...base, verify: record({ check: 'failed', ok: false }) }),
+    protectionLevel({ ...base, verify: record({ check: 'failed', ok: false, failures: 1 }) }),
     'off-host',
     'a failed check verifies nothing',
   );
   assert.equal(
-    protectionLevel({ ...base, verify: record(), restoreTested: true }),
-    'restore-tested',
-    'a verified target with a succeeded scratch restore is restore-tested',
+    protectionLevel({
+      ...base,
+      verify: record({ finishedAt: new Date(NOW - 7 * DAY - 3_600_000).toISOString() }),
+    }),
+    'verified',
+    'a check a week and an hour old still counts: the weekly job may be a little late',
   );
   assert.equal(
-    protectionLevel({ ...base, restoreTested: true }),
+    protectionLevel({
+      ...base,
+      verify: record({ finishedAt: new Date(NOW - 9 * DAY).toISOString() }),
+    }),
+    'off-host',
+    'a check more than about eight days old no longer vouches for the repository',
+  );
+  assert.equal(
+    protectionLevel({ ...base, verify: record(), restoreTestedAt: '2026-10-01T00:00:00.000Z' }),
+    'restore-tested',
+    'a verified target with a scratch restore inside 90 days is restore-tested',
+  );
+  assert.equal(
+    protectionLevel({
+      ...base,
+      verify: record(),
+      restoreTestedAt: new Date(NOW - 91 * DAY).toISOString(),
+    }),
+    'verified',
+    'a scratch restore older than 90 days no longer counts',
+  );
+  assert.equal(
+    protectionLevel({ ...base, restoreTestedAt: '2026-11-01T00:00:00.000Z' }),
     'off-host',
     'a restore test without a verifying check does not skip a level',
   );
@@ -115,17 +144,24 @@ test('a failed repository check turns --check red until a later check passes', (
     verify,
     ...(control !== undefined ? { control: { problem: null, verify: control } } : {}),
   });
-  assert.deepEqual(backupCheckProblems(listing(record())), [], 'a passing check is no problem');
-  assert.deepEqual(backupCheckProblems(listing(null)), [], 'no check yet is no problem');
-  const failed = record({ ok: false, check: 'failed', message: 'check failed: bad pack' });
-  const [problem] = backupCheckProblems(listing(failed));
+  const problemsAt = (input: ReturnType<typeof listing>) =>
+    backupCheckProblems(input, { now: NOW });
+  assert.deepEqual(problemsAt(listing(record())), [], 'a passing check is no problem');
+  assert.deepEqual(problemsAt(listing(null)), [], 'no check yet is no problem');
+  const failed = record({
+    ok: false,
+    check: 'failed',
+    failures: 1,
+    message: 'check failed: bad pack',
+  });
+  const [problem] = problemsAt(listing(failed));
   assert.match(problem, /repository check or prune failed.*bad pack/, 'the failure is named');
   assert.match(
-    backupCheckProblems(listing(record(), failed))[0],
+    problemsAt(listing(record(), failed))[0],
     /^control: /,
     "control's own repository is judged too",
   );
-  assert.equal(verifyProblem(record()), null, 'a passing record has no problem');
+  assert.equal(verifyProblem(record(), NOW), null, 'a passing record has no problem');
 });
 
 test('backup list prints the last repository check', () => {
@@ -136,5 +172,14 @@ test('backup list prints the last repository check', () => {
     /verify ok \(2026-11-02, subset 5%, manual\)/,
     'a manual subset check says so',
   );
-  assert.match(verifyColumn(record({ ok: false })), /verify FAILED/, 'a failure is loud');
+  assert.match(
+    verifyColumn(record({ ok: false, failures: 1 })),
+    /verify FAILED/,
+    'a failure is loud',
+  );
+  assert.match(
+    verifyColumn(record({ ok: false, failures: 1, transient: true })),
+    /verify failed .*will retry/,
+    'a first lock or timeout failure says it will be retried',
+  );
 });

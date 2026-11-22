@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { Db } from '../db/db.ts';
-import type { BackupMaintenanceOutcome } from '../protocol.ts';
+import type { VerifyRecord } from './check.ts';
 
 /** How often a repository is pruned and checked. */
 export const MAINTENANCE_INTERVAL_MS = 7 * 24 * 3_600_000;
@@ -13,16 +13,7 @@ export const VERIFY_KEY = 'backup_verify:';
 export const MAINTENANCE_NEXT_KEY = 'backup_maintenance_next:';
 
 /** What the last maintenance of a repository found. It belongs to the destination and is dropped with it. */
-export interface MaintenanceRecord extends BackupMaintenanceOutcome {
-  startedAt: string;
-  finishedAt: string;
-  trigger: 'schedule' | 'manual';
-  node?: string;
-  /** True when both the prune (if it ran) and the check passed. */
-  ok: boolean;
-  /** A job that failed before it could report (the node was away, restic stalled). */
-  error?: string;
-}
+export type MaintenanceRecord = VerifyRecord;
 
 /**
  * Maintenance results live in `meta`, one row per repository, so they need no table: an older control still opens the
@@ -84,11 +75,18 @@ export function firstDueAt(repository: string, now: number): number {
 
 export type ProtectionLevel = 'off-host' | 'verified' | 'restore-tested';
 
+/** A check this recent still vouches for the repository: the weekly interval plus a day for a retry and a long check. */
+export const VERIFIED_WINDOW_MS = MAINTENANCE_INTERVAL_MS + 24 * 3_600_000;
+/** A scratch restore this recent still shows the backup can be restored. */
+export const RESTORE_TESTED_WINDOW_MS = 90 * 24 * 3_600_000;
+
 /**
  * The strictest claim a target can make, never more than what ran:
  * - `off-host`: the destination is not a local path and the target has a recent success;
- * - `verified`: a `restic check` of the repository finished after the target's latest successful backup;
- * - `restore-tested`: also, a scratch restore of the target has succeeded (not tied to the newest snapshot).
+ * - `verified`: also, the repository's last `restic check` passed and finished within `VERIFIED_WINDOW_MS`. The check
+ *   covers the repository as it was when it ran, so a backup made since keeps the level: a daily backup with a weekly
+ *   check would otherwise be verified for under a day in seven;
+ * - `restore-tested`: also, a scratch restore of the target succeeded within `RESTORE_TESTED_WINDOW_MS`.
  * Null when the target has nothing off-host: no recent success, or a destination on the same host.
  */
 export function protectionLevel(input: {
@@ -97,14 +95,20 @@ export function protectionLevel(input: {
   healthy: boolean;
   lastSuccessAt: string | null;
   verify: MaintenanceRecord | null;
-  restoreTested: boolean;
+  /** When the newest successful scratch restore of the target finished. */
+  restoreTestedAt: string | null;
+  now?: number;
 }): ProtectionLevel | null {
   if (input.local || !input.healthy || !input.lastSuccessAt) return null;
+  const at = input.now ?? Date.now();
+  const within = (when: string | null | undefined, window: number): boolean => {
+    const time = when ? Date.parse(when) : NaN;
+    return !Number.isNaN(time) && at - time <= window;
+  };
   const verified =
-    input.verify?.check === 'ok' &&
-    Date.parse(input.verify.startedAt) >= Date.parse(input.lastSuccessAt);
-  if (verified && input.restoreTested) return 'restore-tested';
-  return verified ? 'verified' : 'off-host';
+    input.verify?.check === 'ok' && within(input.verify.finishedAt, VERIFIED_WINDOW_MS);
+  if (!verified) return 'off-host';
+  return within(input.restoreTestedAt, RESTORE_TESTED_WINDOW_MS) ? 'restore-tested' : 'verified';
 }
 
 /** The `--read-data-subset` forms restic accepts: `n/t`, a percentage or a size such as `500M`. */

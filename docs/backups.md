@@ -187,14 +187,14 @@ backup:
 | `backup.failed` | A run failed. A failed scheduled run is retried once after ten minutes. When restic exited with its lock code (11), the event metadata has `cause: "locked"`: the repository is locked by another restic, or by one that was killed |
 | `backup.retention_failed` | The backup succeeded but applying retention (`restic forget`) failed, so old snapshots stay and the repository grows. Raised once, when pruning starts failing (and for control's own backup). The event metadata has `cause: "locked"` for a lock failure |
 | `backup.retention_recovered` | Retention worked again after `backup.retention_failed` |
-| `backup.verify_failed` | The weekly or manual `restic check` of a repository (or its prune) failed. Raised once, when it starts failing, on the project or on `_control` |
+| `backup.verify_failed` | The weekly or manual `restic check` of a repository, or its weekly prune, failed and the failure counts: restic found a fault, or an overlap (restic's lock exit code, a node that did not answer, a timeout) happened twice in a row. Raised once, when it starts counting, on the project or on `_control`. The event metadata has `failures`, and `cause: "locked"` for a lock exit |
 | `backup.verify_recovered` | A later check passed after `backup.verify_failed` |
 | `backup.missed` | The node did not pick it up before its deadline (`node_offline`), or control was not running at the slot. A week of downtime gives one missed event and one catch-up run per target, not a burst |
 | `backup.stale` | A target has no success for two periods. Raised once a day, which catches a destination key that quietly stopped working |
 | `backup.no_destination` | No destination is configured |
 | `backup.cancelled` | Someone ran `tug backup cancel <run>`. A cancelled backup is a warning and is not retried |
 
-Exit status is the signal to wire into monitoring: `tug backup list --check` exits nonzero when a target is stale, failed or missed, when its retention failed in two runs in a row (or once with a lock failure), when the last repository check or prune failed, or when nothing is protected. One failed forget is not a problem: on a project with several nodes a prune takes an exclusive lock on the shared repository while another node's backup holds a shared one, so a single overlap is harmless. Pruning is now a weekly job for that reason, not part of every run. A run whose retention works clears the problem. A destination set to `--retention external` never reports one. Run it from cron or a monitor, and keep running it during a [migration](migration.md#coming-from-an-existing-restic-setup), when the old backup system may be failing without anyone noticing.
+Exit status is the signal to wire into monitoring: `tug backup list --check` exits nonzero when a target is stale, failed or missed, when its retention failed in two runs in a row (or once with a lock failure), when the last repository check or prune failed (see [Verify a repository](#verify-a-repository) for which failures count), when no repository check or prune has finished for 14 days, or when nothing is protected. One failed forget is not a problem: on a project with several nodes a prune takes an exclusive lock on the shared repository while another node's backup holds a shared one, so a single overlap is harmless. Pruning is now a weekly job for that reason, not part of every run. A run whose retention works clears the problem. A destination set to `--retention external` never reports one. Run it from cron or a monitor, and keep running it during a [migration](migration.md#coming-from-an-existing-restic-setup), when the old backup system may be failing without anyone noticing.
 
 While control is down no backup starts, which is the price of one scheduler. Running jobs finish and report when control returns. `tug backup run` takes a backup now, and `tug backup list` shows the catalog, see [CLI](cli.md#backups).
 
@@ -205,7 +205,8 @@ A backup that completes says only that restic wrote it. Once a week per reposito
 1. Control picks one repository at a time, from `backup_schedules` of projects that have a successful backup. The first time a repository is seen it is scheduled at a point inside the next week, chosen from its name, so projects on one destination are not pruned together.
 2. It queues `backup.maintain` on the node that runs the project's backups, which runs `restic prune` and then `restic check`. The check runs even when the prune failed. A destination set to `--retention external` is never pruned, only checked.
 3. Control's own repository is checked weekly from control (without a prune, because control's nightly backup already prunes it).
-4. The outcome is stored per repository: prune and check results, the node, when it ran and restic's message. It is shown by `tug backup list`, raises `backup.verify_failed` once when it starts failing and `backup.verify_recovered` when it passes again, and turns `tug backup list --check` red until a later run passes. A failed run is tried again after six hours, a passing one after a week. Replacing the destination clears the records.
+4. The outcome is stored per repository: prune and check results, the node, when it ran, restic's message and the number of failed runs in a row. It is shown by `tug backup list`. A failed run is tried again after six hours, a passing one after a week. Replacing the destination clears the records.
+5. A failure that may be an overlap needs a second one in a row to count: restic's lock exit code (another node's backup holds a lock that a prune or check needs exclusively), a node that did not answer, or a timeout. Anything else, such as restic reporting damage in the repository, counts at once. A failure that counts raises `backup.verify_failed` once and turns `tug backup list --check` red; a pass resets the count, raises `backup.verify_recovered` if a failure had counted, and turns the check green. `tug backup list --check` also fails when a repository has had no finished check or prune for 14 days, which is what a project with no online node looks like, because the weekly job skips it without an error.
 
 ```sh
 tug backup verify
@@ -223,8 +224,8 @@ tug backup verify --control
 | --- | --- |
 | (none) | The destination is a local path, or the target has no recent success |
 | `off-host` | The destination is not a local path and the target has a recent success |
-| `verified` | A repository check finished successfully after the target's latest successful backup. A newer backup drops the target back to `off-host` until the next check |
-| `restore-tested` | `verified`, and a scratch restore of the target has succeeded at some time. It is not tied to the newest snapshot: a restore drill proves that restoring works, not that every snapshot restores, see [Restore drill](#restore-drill) |
+| `verified` | `off-host`, and the repository's last `restic check` passed and finished no more than eight days ago (the weekly interval plus a day). A backup made since the check keeps the level: the check vouches for the repository, and the weekly cadence keeps it recent |
+| `restore-tested` | `verified`, and a scratch restore of the target succeeded within the last 90 days. It is not tied to the newest snapshot: a restore drill proves that restoring works, not that every snapshot restores, see [Restore drill](#restore-drill) |
 
 The levels are in `GET /api/v1/backups` as `protection` on each target, with the repository's last check as `verify` and `maintenanceRunning`.
 
