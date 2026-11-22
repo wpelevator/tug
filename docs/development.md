@@ -150,6 +150,18 @@ It starts a throwaway control on this machine whose certificate names `10.0.2.2`
 
 `--block-docker-seconds N` makes `download.docker.com` unreachable until N seconds after early boot, to exercise the bootstrap's retries. The bootstrap reaches its first Docker download some 8 to 20 seconds into boot, because it first runs `apt-get update`. A short block (40) recovers after a few retries, and a block longer than the retry window plus that delay (for example 900) fails with `tug-bootstrap: failed during: adding the Docker apt repository`.
 
+### A disposable VM for hand-driven drills
+
+`tools/scripts/qemu-drill-vm.js` boots one Ubuntu arm64 VM that stays up, for drills that drive the CLI by hand (restore and upgrade drills, see [Real-host evaluation](real-host-evaluation.md)). `start` takes `--image`, `--work`, and optionally `--name`, `--ssh-port` (default 2222), `--forward <host>:<guest>,…` (for example `18443:8443` for control's mTLS port), `--memory` (4096), `--cpus` (2) and `--disk` (20G). It allows root login with a fresh key and writes `ssh` and `scp` shims into `<work>/bin`. With that directory first on `PATH`, `tug setup root@127.0.0.1 …` reaches the VM without touching `~/.ssh`, and the guest reaches this machine at `10.0.2.2`. `stop --work <dir>` kills the VM and leaves its disk.
+
+```bash
+node tools/scripts/qemu-drill-vm.js start --image ~/images/ubuntu-24.04-server-cloudimg-arm64.img --work ~/tug-vm1 --forward 18443:8443
+PATH=~/tug-vm1/bin:$PATH node src/cli.ts setup root@127.0.0.1 --install-docker --build-local-image --control-url https://127.0.0.1:18443 -y
+node tools/scripts/qemu-drill-vm.js stop --work ~/tug-vm1
+```
+
+Run `--build-local-image` from the checkout, because the build needs the Dockerfile in the current directory.
+
 ## Running the agent outside Docker
 
 Run the agent in a container, as the installers do (`--network host`, the Docker socket mounted). An agent started as a plain host process, for example `node src/main.ts agent` on macOS, can create containers but cannot reach their IP addresses, so every TCP or HTTP health check times out and the deploy fails with a message such as `tcp timeout 172.21.0.2:3306` that does not mention where the agent runs. On Docker Desktop the Docker daemon lives in a VM, so container addresses are only reachable from inside it. When the agent is not in a container, a failed TCP or HTTP health check says so in its error and points at `docker run`; `doctor` does not check it separately.
