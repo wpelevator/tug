@@ -44,7 +44,7 @@ A positional argument names the primary target: the SSH host for `node add`, the
 - **Project scope.** `--project` applies to project-scoped commands. `status` and node commands are control-wide.
 - **Control URLs** must be `https://`.
 - **Credentials are never arguments**, because arguments show up in process listings and shell history. Use `TUG_CREDENTIAL`, `TUG_CREDENTIAL_FILE` or `tug init`. `secret set --value` has the same exposure, so omit it to read the value from stdin.
-- **List flags.** `deploy --move`, `restore run --writers`, `credential create --project`, `node add|replace|repair|register|enroll --label`, `control setup --extra-san` and `backup destination set --env` take a comma-separated list, a repeated flag, or both: `--move db,web` equals `--move db --move web`. Values are names and cannot contain a comma.
+- **List flags.** `deploy --move`, `deploy --hold`, `restore run --writers`, `credential create --project`, `node add|replace|repair|register|enroll --label`, `control setup --extra-san` and `backup destination set --env` take a comma-separated list, a repeated flag, or both: `--move db,web` equals `--move db --move web`. Values are names and cannot contain a comma.
 
 ### Output and exit codes
 
@@ -300,12 +300,14 @@ By default it deploys the first of `compose.yaml`, `compose.yml`, `docker-compos
 | `--var <NAME=value>` | Value for this deploy only. Repeatable. A value may contain commas | none |
 | `--profile <name>` | Enable a Compose profile. Repeatable or comma-separated | none |
 | `--move <service>` | Acknowledge that a service with data placed on another node starts empty there. Repeatable or comma-separated | Such a deploy is refused |
+| `--hold <service>` | Publish with this service stopped, so it cannot start before its data is in place. Repeatable or comma-separated | Every service starts. The hold is recorded as `deploy hold`, persists across later deploys and ends with `tug hold release` |
 | `--dry-run` | Resolve every value, print each name with its source (secrets as `•••`) and each Compose secret a build uses with its mapping, ask control to check the file against other projects (a host port another project already publishes on the node, see [Checks against other projects](compose.md#checks-against-other-projects)) and stop before building or uploading. Never prompts or stores | off |
 | `--no-wait` | Return once desired state exists | wait |
 | `--timeout <seconds>` | Wait limit | `300` |
 
 - **Build input.** Services with `build:` upload the current directory for a remote build. Published-image-only apps upload no context. Control rejects a built service with no build input.
 - **Summary.** One line, `site git-ab12: deployment dep_1 succeeded, 3 services`. The default label `git-<Compose hash>` covers the Compose file and not the build context, secrets or variables, so two deployments can carry one label. When control's recent deployments of the project include another with the same label, the line ends with `(same label as dep_0; tell them apart by deployment id)`. A rollback deployment, whose label `rollback-git-ab12-<ms>` embeds the one it replaced, counts as the same label. `tug status` shows `[dep_1]` after the label in the same case. `--json` prints the full result with the desired state and the `values` record of where each `${NAME}` came from.
+- **Held services.** `--hold` means stopped, not unchanged: a held service is stopped on its node, and a held service that other services depend on stays down until released. Holds persist, so a later `tug deploy` does not start it. A `deploy` credential can release a `deploy hold` (`tug hold release web`), so CI can place and lift its own hold; a hold from `--move` or any other cause needs an admin.
 - **Moved data.** After `--move`, the services that write to the moved one are held until you run `tug restore run` or `tug hold release`.
 - **Interruption.** If the wait is interrupted (control unreachable, timeout), the error names the deployment and `tug deploy cancel [id]`. A deploy refused because another is still rolling out names that one the same way.
 - **Project name.** With no `--project`, `TUG_PROJECT` or `project:` in `tug.yml`, the project is the file's `name:`, or the name of its directory. `deploy` warns when the file's `name:` differs from the project that was chosen another way, because secrets, backups and restores are scoped to the project.
@@ -341,7 +343,7 @@ These use the resolved project. Live operations (`exec`, `run`, `inspect`, `logs
 | `tug ps` | `--node <name>`, `--json` | Lists the project's containers on one node: service (or `job:<name>`), state, status, image with a shortened digest, ports, container name. Without `--node` the project must resolve to one eligible connected node |
 | `tug restart [service]` | `--timeout <seconds>` (default `60`) | Restarts a service on every node that runs it and waits |
 | `tug scale [service] [replicas]` | `--replicas <n>` | Changes how many matching nodes run a service, without a new deployment. Spreads by count over nodes with the service's `placement.labels` (all nodes without labels), staying within `placement.nodes` when there are no labels. `global` services run on every matching node. The next `deploy` re-resolves placement from the Compose file |
-| `tug hold release [service...]` | `--select` | Starts services that `deploy --move` held, without restoring them. All when none is named. A restore releases its own holds |
+| `tug hold release [service...]` | `--select` | Starts services a deploy held, without restoring them: the ones `deploy --hold` stopped, and the writers `deploy --move` stopped. All when none is named. A `deploy` credential releases only `deploy hold` holds (all of them when none is named, and a named move hold is refused); a move hold needs an admin. A restore releases its own holds |
 | `tug image prune` | `--keep <n>` (default `5`), `--dry-run` | Admin. Deletes build archives on control that rollback no longer needs: all but the newest `n` distinct builds per project, the current deployment and any version a node reports. Rolling back to a pruned deployment is refused. Control prunes after every successful deploy (`TUG_IMAGE_KEEP`, default 5) |
 | `tug volume list` | | Lists recorded volumes |
 | `tug volume remove [name]` | `--delete-data` | Removes a volume record. `--delete-data` also removes the Docker volume on its node. See [Volumes](compose.md#volumes) |

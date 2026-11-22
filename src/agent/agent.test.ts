@@ -836,6 +836,36 @@ test('restore.remove removes a scratch volume only when its labels name that res
   );
 });
 
+test('a service without x-tug.health is never probed and a running container does not stay failed', async () => {
+  const probes: string[] = [];
+  const control = fakeControl(() => ({ secrets: {}, versions: {} }));
+  const ctx = await makeCtx({
+    http: control.http,
+    hostProbe: async (url) => {
+      probes.push(url);
+      return 500;
+    },
+  });
+  const noHealth: ComposeFile = {
+    services: { app: { image: 'wordpress', 'x-tug': { placement: { nodes: ['n1'] } } } },
+  };
+  const status = await reconcile(desired(noHealth), ctx);
+  assert.deepEqual(probes, [], 'no readiness probe runs without x-tug.health');
+  assert.notEqual(
+    status.health,
+    'failed',
+    'a running container without a health check is not failed',
+  );
+  assert.equal(fake(ctx).running().length, 1, 'the service is running');
+  assert.equal(
+    control.events.filter((e) => e.type === 'service.failed').length,
+    0,
+    'nothing is reported as failed',
+  );
+  const again = await reconcile(desired(noHealth), { ...ctx });
+  assert.notEqual(again.health, 'failed', 'a later poll does not turn it failed either');
+});
+
 test('volume deletion refuses a colliding volume owned by another project', async () => {
   const ctx = await makeCtx();
   const docker = fake(ctx);

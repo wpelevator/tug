@@ -90,7 +90,7 @@ export const ROUTE_ROLES: Record<string, RouteRole> = {
   'GET /api/v1/control/backups': 'admin',
   'GET /api/v1/control/backups/:id/download': 'admin',
   'POST /api/v1/images/prune': 'admin',
-  'POST /api/v1/holds/release': 'admin',
+  'POST /api/v1/holds/release': 'deploy',
   'POST /api/v1/control/restore': 'admin',
   'GET /api/v1/diagnostics': 'admin',
   'POST /api/v1/diagnostics/nodes': 'admin',

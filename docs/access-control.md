@@ -199,7 +199,7 @@ The project column says how a scoped credential's allowed projects are checked: 
 | `GET /api/v1/control/backups` | `admin` | Control-wide; the control backups on the host and the snapshots stored in the destination |
 | `GET /api/v1/control/backups/:id/download` | `admin` | Control-wide; streams the archive of a backup made by `control backup` |
 | `POST /api/v1/control/restore` | `admin` | Control-wide; JSON naming a server path or a destination, or an `application/gzip` body (`confirm=1` or `verify=1` in the query) for a local archive |
-| `POST /api/v1/holds/release` | `admin` | Body `project`; drops the holds a deploy placed for a move |
+| `POST /api/v1/holds/release` | `deploy` | Body `project` and optional `services`; drops holds a deploy placed. A credential below `admin` releases only holds whose reason is `deploy hold` (placed by `tug deploy --hold`), and is refused with `403` when it names another; with no `services` it releases just the `deploy hold` ones. Move holds need `admin` |
 | `POST /api/v1/images/prune` | `admin` | Control-wide; deletes build archives older than the kept deployments |
 | `GET /api/v1/diagnostics` | `admin` | Control-wide |
 | `POST /api/v1/diagnostics/nodes` | `admin` | Control-wide |

@@ -169,6 +169,12 @@ export function registerDeploy(rt: CliRuntime, program: Command): void {
       collectList,
       [],
     )
+    .option(
+      '--hold <service>',
+      'publish with this service stopped, so it cannot start before its data is in place (an app against an empty database shows its installer); it stays stopped across later deploys until you run `tug hold release <service>` (repeat or comma-separate for several)',
+      collectList,
+      [],
+    )
     .action(
       async (
         o: CommonOpts &
@@ -180,6 +186,7 @@ export function registerDeploy(rt: CliRuntime, program: Command): void {
             composeCli?: boolean;
             json?: boolean;
             move: string[];
+            hold: string[];
             var?: string[];
             profile: string[];
             dryRun?: boolean;
@@ -197,6 +204,7 @@ export function registerDeploy(rt: CliRuntime, program: Command): void {
               ['--version', o.version],
               ['--var', o.var?.length],
               ['--move', o.move.length],
+              ['--hold', o.hold.length],
             ]
               .filter(([, given]) => given)
               .map(([flag]) => flag);
@@ -288,7 +296,10 @@ export function registerDeploy(rt: CliRuntime, program: Command): void {
             if (!referenced.has(name))
               err(rt, `warning: --var ${name} is not referenced in ${o.file}; it is ignored`);
           err(rt, `Values: ${summarizeValues(values)}`);
-          const movePayload = o.move.length ? { moves: o.move } : {};
+          const movePayload = {
+            ...(o.move.length ? { moves: o.move } : {}),
+            ...(o.hold.length ? { holds: o.hold } : {}),
+          };
           const declared = composeNameSync(resolvePath(rt, o.file));
           if (declared && declared !== project)
             err(

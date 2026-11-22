@@ -41,8 +41,8 @@ Do these in order. Nothing before the stop changes the running site.
 7. **Dry run.** `tug deploy --dry-run` lists every value with its source and fails naming whatever is missing.
 8. **Stop the old stack, without removing it.** `docker compose stop` keeps its containers and volumes, so starting it again is the way back. Take a last dump or copy of the data first.
 9. **Set up ingress** for the hostname, see [Ingress and HTTPS](ingress.md), and lower its DNS TTL a day ahead if you can.
-10. **Deploy.** `tug deploy`. Stateful services start with empty volumes.
-11. **Import the data** (next section), then check the app.
+10. **Deploy with the app held.** `tug deploy --hold wordpress` (name the services that use the data, here the app and not the database). Stateful services start with empty volumes, and an app that started against an empty database would show its installer, or write fresh rows. A held service is stopped, not left as it was.
+11. **Import the data** (next section), then `tug hold release wordpress` and check the app.
 12. **Back up.** `tug backup run`, then `tug backup list --check`. A first backup that passes is the point at which the old volumes can be retired.
 13. **Keep the old volumes** for at least one backup cycle. Remove them with `docker volume rm` once a restore has been rehearsed.
 
@@ -58,6 +58,8 @@ tug exec -i wordpress -- tar -C /var/www/html/wp-content -xf - < uploads.tar
 ```
 
 The first command dumps the database from the old stack, the second loads it into tug, and the last two do the same for a directory. Run the dump after the old stack has stopped writing, or the copy can miss recent rows. Start the old database container alone (`docker compose start db`) when `stop` has already stopped it.
+
+The database is imported while the app is held. The uploads import runs inside the app container, so release the hold between the two: import the dump, run `tug hold release wordpress`, then import the uploads. The app then starts against the imported database. Holds persist across deploys, so a redeploy in the middle does not start it early; a CI credential with the `deploy` role can release a hold it placed.
 
 ## Roll back
 

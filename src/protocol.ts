@@ -252,6 +252,9 @@ export interface BackupCredentialsResponse {
 
 /** restic's exit code when it cannot lock the repository (0.17 and newer). Lock failures are classified by this code, never by wording. */
 export const RESTIC_EXIT_LOCKED = 11;
+
+/** The reason of a hold placed by `tug deploy --hold`; a credential that may deploy may release it, see `POST /api/v1/holds/release`. */
+export const DEPLOY_HOLD_REASON = 'deploy hold';
 /** Why a backup job failed, when more than its message says; only `locked` exists. */
 export type BackupCause = 'locked';
 /**

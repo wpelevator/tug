@@ -121,6 +121,7 @@ import {
   LIVE_MAX_SESSIONS,
   LIVE_START_TIMEOUT_MS,
   BACKUP_COMMAND_TYPES,
+  DEPLOY_HOLD_REASON,
   CLIENT_VERSION_HEADER,
   SKEW_CLIENT_NEWER,
   STREAM_FEATURES,
@@ -4132,6 +4133,17 @@ export async function createApp(
           `a secret cannot be used in ${misplaced.join('; ')}: secrets are substituted only in environment, command, entrypoint and healthcheck.test. Use tug var set for a value that is not a secret`,
         );
       const deploymentValues = checkedDeploymentValues(project, body.values);
+      // `tug deploy --hold`: services the operator wants published stopped, such as an app that must not start
+      // before its database is imported. They stay stopped across later deploys until `tug hold release`.
+      const requestedHolds: string[] = Array.isArray(body.holds)
+        ? [...new Set<string>(body.holds.map(String))]
+        : [];
+      const unknownHolds = requestedHolds.filter((name) => !compose.services?.[name]);
+      if (unknownHolds.length)
+        throw httpError(
+          400,
+          `--hold names ${unknownHolds.join(', ')}, which ${unknownHolds.length === 1 ? 'is' : 'are'} not in the Compose file's services (${Object.keys(compose.services ?? {}).join(', ')})`,
+        );
       const acknowledgedMoves: string[] = Array.isArray(body.moves) ? body.moves.map(String) : [];
       const unacknowledged = movedServices(project, compose).filter(
         (name) => !acknowledgedMoves.includes(name),
@@ -4449,6 +4461,16 @@ export async function createApp(
                 null,
                 ts,
               );
+          for (const held of requestedHolds)
+            db.run(
+              `INSERT INTO service_holds(project_id,service,reason,restore_id,created_at) VALUES(?,?,?,?,?)
+               ON CONFLICT(project_id,service) DO NOTHING`,
+              project,
+              held,
+              DEPLOY_HOLD_REASON,
+              null,
+              ts,
+            );
           for (const [volumeName, volumeSpec] of Object.entries(compose.volumes || {})) {
             const lp = volumeSpec?.['x-tug'] || {};
             const nodeName = lp.placement?.nodes?.[0] || null;
@@ -4749,9 +4771,24 @@ export async function createApp(
         'SELECT service FROM service_holds WHERE project_id=? AND restore_id IS NULL',
         project,
       );
-      const released = rows
+      const heldNow = db.all<{ service: string; reason: string }>(
+        'SELECT service,reason FROM service_holds WHERE project_id=? AND restore_id IS NULL',
+        project,
+      );
+      const reasons = new Map(heldNow.map((row) => [row.service, row.reason]));
+      const admin = req.actor!.role === 'admin';
+      const wanted = rows
         .map((row) => row.service)
         .filter((service) => !services.length || services.includes(service));
+      // A credential that can place a hold by deploying can release it again; every other hold stays with an admin.
+      const refused = admin
+        ? []
+        : wanted.filter((service) => reasons.get(service) !== DEPLOY_HOLD_REASON);
+      if (refused.length && services.length)
+        return res.status(403).json({
+          error: `${refused.join(', ')} ${refused.length === 1 ? 'is' : 'are'} held for another reason than ${DEPLOY_HOLD_REASON}, which only an admin credential can release`,
+        });
+      const released = wanted.filter((service) => !refused.includes(service));
       for (const service of released)
         db.run(
           'DELETE FROM service_holds WHERE project_id=? AND service=? AND restore_id IS NULL',
