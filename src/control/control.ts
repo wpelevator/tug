@@ -37,7 +37,8 @@ import { createWriterQueue, WRITER_OVERDUE_AFTER_MS } from './writer-queue.ts';
 import type tls from 'node:tls';
 import * as tar from 'tar';
 import { openDb, openSnapshotDb } from '../db/db.ts';
-import type { Db } from '../db/db.ts';
+import type { Db, RestoreRunRow } from '../db/db.ts';
+import { parseAge } from '../duration.ts';
 import { isUniqueViolation } from '../db/driver.ts';
 import { lockQueries } from '../db/locks.ts';
 import { backupDestinationQueries } from '../backup/destination-store.ts';
@@ -2400,8 +2401,147 @@ export async function createApp(
         20,
         req.query.state === 'interrupted',
       ),
+      leftovers: restores.leftovers(String(req.query.project || 'site')),
     }),
   );
+  /**
+   * Forgets tug's safety snapshots in one `backup.forget` job and drops them from their restores. An append-only
+   * destination refuses deletes, so it is refused here with the reason, before anything is queued. The caller holds the
+   * project lock.
+   */
+  async function forgetSafety(
+    project: string,
+    snapshots: { restoreId: string; snapshotId: string }[],
+  ): Promise<{ error: string; status: number } | { forgotten: string[] }> {
+    if (destinationQueries.retention() === 'external')
+      return {
+        status: 409,
+        error:
+          'the destination is append-only (retention external), which refuses deletes, so tug cannot forget a safety snapshot; remove it from the storage side with restic forget, with credentials that may delete (the repository and password come from tug backup password)',
+      };
+    const picked = pickBackupNode(project);
+    if ('error' in picked) return picked;
+    const ran = await runOnNode(picked.node, project, 'backup.forget', 'forget', {
+      limitMs: UNLOCK_LIMIT_MS(),
+      forget: { snapshotIds: snapshots.map((snapshot) => snapshot.snapshotId) },
+    });
+    if ('error' in ran) return { error: ran.error, status: ran.status };
+    for (const snapshot of snapshots) restores.cleared(snapshot.restoreId, 'safety');
+    return { forgotten: ran.result.forgotten ?? [] };
+  }
+  const restoreProject = (req: { params: { id?: string } }): string | null =>
+    db.get<{ project_id: string }>(
+      'SELECT project_id FROM restore_runs WHERE id=?',
+      String(req.params.id),
+    )?.project_id ?? null;
+  /**
+   * Removes what a finished restore left: the scratch volume of a scratch restore (on its node) and the safety snapshot
+   * of an in-place one. A restore that failed or is interrupted keeps its safety snapshot, because it is the only copy
+   * of what the data was.
+   */
+  api('post', '/api/v1/restores/:id/remove', restoreProject, async (req, res) => {
+    const restore = db.get<RestoreRunRow>(
+      'SELECT * FROM restore_runs WHERE id=?',
+      String(req.params.id),
+    );
+    if (!restore) return res.status(404).json({ error: 'restore not found' });
+    const project = restore.project_id;
+    const left = restores.leftovers(project);
+    const scratch = left.scratchVolumes.find((item) => item.restoreId === restore.id);
+    const safety = left.safetySnapshots.find((item) => item.restoreId === restore.id);
+    if (!scratch && !safety)
+      return res.status(409).json({
+        error: `restore ${restore.id} (${restore.state}) has nothing to remove: a scratch volume is removable once the restore succeeded or failed, and a safety snapshot once it succeeded or was released`,
+      });
+    let lock;
+    try {
+      lock = acquireProjectLock(project, 'restore.remove');
+      const removed: Record<string, unknown> = {};
+      if (safety) {
+        const forgotten = await forgetSafety(project, [safety]);
+        if ('error' in forgotten)
+          return res.status(forgotten.status).json({ error: forgotten.error });
+        removed.safetySnapshot = safety.snapshotId;
+      }
+      if (scratch) {
+        if (!restore.node_id)
+          return res
+            .status(409)
+            .json({ error: 'the restore has no node, so its volume is unknown' });
+        const commandId = queueCommand(restore.node_id, project, 'restore.remove', {
+          project,
+          restoreId: restore.id,
+          volume: scratch.volume,
+        });
+        const outcome = await unlockCommands.wait(commandId, UNLOCK_LIMIT_MS(), () => {});
+        if (outcome === 'timeout')
+          return res.status(504).json({
+            error: `node ${scratch.node ?? restore.node_id} did not remove volume ${scratch.volume} in time; check tug node list and run it again`,
+          });
+        if (outcome.state !== 'succeeded')
+          return res.status(502).json({
+            error:
+              (outcome.result as { error?: string }).error ??
+              'the node could not remove the volume',
+          });
+        restores.cleared(restore.id, 'scratch');
+        removed.scratchVolume = scratch.volume;
+      }
+      audit(req.actor!, {
+        type: 'restore.removed',
+        project,
+        message: `leftovers of restore ${restore.id} removed by ${req.actor!.name}`,
+        metadata: { restoreId: restore.id, ...removed },
+      });
+      res.json({ ok: true, restoreId: restore.id, removed });
+    } catch (e) {
+      sendError(res, e);
+    } finally {
+      releaseLock(lock);
+    }
+  });
+  /** Forgets the safety snapshots of restores that finished more than `olderThan` ago (`30d`, `12h`, `2w`). */
+  api('post', '/api/v1/restores/expire-safety', bodyProject, async (req, res) => {
+    const project = String(req.body?.project || 'site');
+    const age = parseAge(req.body?.olderThan);
+    if (age === null)
+      return res
+        .status(400)
+        .json({ error: 'olderThan is required, as an age such as 30d, 12h, 90m or 2w' });
+    const cutoff = Date.now() - age;
+    const expired = restores
+      .leftovers(project)
+      .safetySnapshots.filter((item) => item.createdAt && Date.parse(item.createdAt) < cutoff);
+    if (!expired.length) return res.json({ ok: true, project, expired: [] });
+    let lock;
+    try {
+      lock = acquireProjectLock(project, 'restore.expire-safety');
+      const forgotten = await forgetSafety(project, expired);
+      if ('error' in forgotten)
+        return res.status(forgotten.status).json({ error: forgotten.error });
+      audit(req.actor!, {
+        type: 'restore.safety_expired',
+        project,
+        message: `${expired.length} safety snapshot(s) older than ${req.body.olderThan} forgotten by ${req.actor!.name}`,
+        metadata: {
+          olderThan: req.body.olderThan,
+          restores: expired.map((item) => item.restoreId),
+        },
+      });
+      res.json({
+        ok: true,
+        project,
+        expired: expired.map((item) => ({
+          restoreId: item.restoreId,
+          snapshotId: item.snapshotId,
+        })),
+      });
+    } catch (e) {
+      sendError(res, e);
+    } finally {
+      releaseLock(lock);
+    }
+  });
   api('post', '/api/v1/restores/:id/release', null, async (req, res) => {
     const result = restores.releaseInterrupted(String(req.params.id));
     if ('error' in result) return res.status(result.status).json({ error: result.error });
@@ -2441,12 +2581,13 @@ export async function createApp(
   async function runOnNode(
     node: NodeLike,
     project: string,
-    type: 'backup.unlock' | 'backup.maintain',
+    type: 'backup.unlock' | 'backup.maintain' | 'backup.forget',
     tag: string,
     options: {
       limitMs: number;
       trigger?: 'manual' | 'schedule';
       maintain?: BackupJobPayload['maintain'];
+      forget?: BackupJobPayload['forget'];
     },
   ): Promise<
     | { result: BackupJobResult }
@@ -2465,6 +2606,7 @@ export async function createApp(
       tags: ['tug', `project:${project}`, tag, `trigger:${options.trigger ?? 'manual'}`],
       limits: { memory: '512m', timeoutSec: Math.max(1, Math.ceil(limitMs / 1000)) },
       ...(options.maintain ? { maintain: options.maintain } : {}),
+      ...(options.forget ? { forget: options.forget } : {}),
     };
     const commandId = queueCommand(
       node.id,

@@ -283,6 +283,25 @@ A backup you have not restored is a hope. Start with an isolated restore that ch
 3. **Restore the database into a throwaway container.** Use the project repository and its escrowed password to read the snapshot with `restic dump <snapshot> wordpress.sql` into a separate database container. Verify known data without connecting the test container to production services, mail or scheduled jobs. This manual end-to-end drill has not been validated on a fresh host.
 4. **Write down how long it took.** That is your real recovery time.
 
+## Clean up after restores
+
+A restore leaves things behind on purpose. A scratch restore keeps its volume so you can look at the files, and every in-place restore keeps the safety snapshot taken first (tagged `trigger:pre-restore`, exempt from retention) so you can undo it. They accumulate until you remove them:
+
+```sh
+tug restore list
+tug restore remove rst_ab12cd34
+tug restore remove --expire-safety 30d
+```
+
+`restore list` prints the recent restores, then one line per scratch volume still on its node and per safety snapshot still in the repository. `restore remove <id>` removes what that restore left: the scratch volume (an agent command on the restore's node, which refuses a volume whose labels do not name that project and restore) or the safety snapshot (a `backup.forget` job that forgets exactly that snapshot, never a regular backup or another project's). `--expire-safety <age>` (`90m`, `12h`, `30d`, `2w`) forgets the safety snapshots of every restore that finished longer ago than that, in one job. Both need the admin role, take the project lock, and are audited as `restore.removed` and `restore.safety_expired`.
+
+Rules that keep it safe:
+
+- A safety snapshot is removable only once its restore `succeeded` or was `released`. While a restore failed or is interrupted, the snapshot is the copy of what the data was, so it is not listed.
+- A scratch volume is removable once its restore succeeded or failed.
+- A forget frees the snapshot, and the space comes back with the next weekly prune, see [Verify a repository](#verify-a-repository).
+- On an append-only destination (`--retention external`) deleting a snapshot is refused with the reason before any job is queued, because the server refuses deletes. Forget it from the storage side, with credentials that may delete. A scratch volume is not in the repository and can still be removed.
+
 ## Recover a site on a replacement node
 
 This is a manual procedure, not automatic failover. It was exercised with the published 0.9.0 release in the [real-host drill](real-host-evaluation.md#recovery-drill-with-the-published-090-release-2-november-2026) and again with S3-compatible backups and named volumes on the 1.0.0 candidate ([drill](real-host-evaluation.md#recovery-drill)). The original host was simulated as unavailable while control and the backup destination stayed available. Restore control first if it is also lost.
@@ -358,7 +377,7 @@ A node runs backup and restore jobs in lanes: a restore and its safety backup fi
 | Consistency | Live volumes are crash-consistent, not application-consistent. Use a command backup for anything with its own consistency |
 | One node per volume | A volume is backed up from the node that holds it. A volume mounted from a file server with `driver_opts` is read through that node's mount, so back up the file server's own disk where you can |
 | Rejected destinations | `sftp:` and `rclone:` URLs, see [Not supported](#not-supported) |
-| Leftovers | A scratch restore leaves its volume (`tug_r<project-length>_<project>_<id>`) behind, and the safety snapshot of every in-place restore is kept for ever. No command lists or removes either. Remove scratch volumes with `docker volume rm` on the node, and safety snapshots with `restic forget` using the repository from `tug backup password` |
+| Leftovers | A scratch restore leaves its volume (`tug_r<project-length>_<project>_<id>`) behind, and the safety snapshot of every in-place restore stays in the repository until you remove it. `tug restore list` shows both and `tug restore remove` clears them, see [Clean up after restores](#clean-up-after-restores) |
 | Helper memory | The restic helper defaults to 512 MB, half of a 1 GB host. Lower it with `memory` under `x-tug.backup`. Larger repositories need more, so test the limit against your data |
 | `tug exec` | Cancelling it does not stop the remote process |
 

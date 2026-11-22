@@ -9,3 +9,12 @@ export function parseDuration(value: string | number, fallback = 2000): number {
 export const isDuration = (value: unknown): boolean =>
   (typeof value === 'number' && Number.isFinite(value) && value >= 0) ||
   (typeof value === 'string' && /^\d+(ms|s|m)?$/.test(value));
+
+/** Parses an age such as `90m`, `12h`, `30d` or `2w` to milliseconds; null when it is not one. */
+export function parseAge(value: unknown): number | null {
+  const match = String(value ?? '')
+    .trim()
+    .match(/^(\d+)([mhdw])$/);
+  if (!match || Number(match[1]) < 1) return null;
+  return Number(match[1]) * { m: 60_000, h: 3_600_000, d: 86_400_000, w: 604_800_000 }[match[2]]!;
+}

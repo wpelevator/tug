@@ -103,3 +103,60 @@ test(
     }
   },
 );
+
+test(
+  'a forget job removes a safety snapshot of the project and never a regular backup, a safety snapshot of another project, or a stale id',
+  { skip: !dockerUp, timeout: 300_000 },
+  async () => {
+    const engine = new DockerEngine();
+    const repo = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-forget-'));
+    try {
+      assert.equal(restic(repo, 'init').status, 0, 'the repository is created');
+      const take = (tags: string[]) => {
+        const run = restic(
+          repo,
+          'backup',
+          '--host',
+          'node1',
+          '--json',
+          ...tags.flatMap((tag) => ['--tag', tag]),
+          '/etc/hostname',
+        );
+        assert.equal(run.status, 0, run.stderr);
+        const summary = run.stdout
+          .split('\n')
+          .filter(Boolean)
+          .map((line) => JSON.parse(line))
+          .find((line) => line.message_type === 'summary');
+        return summary.snapshot_id as string;
+      };
+      const safety = take(['project:maint', 'trigger:pre-restore']);
+      const regular = take(['project:maint', 'trigger:schedule']);
+      const other = take(['project:other', 'trigger:pre-restore']);
+      const job = await runBackupJob(
+        {
+          ...payload(repo, undefined),
+          forget: { snapshotIds: [safety, regular, other, 'deadbeef'] },
+        },
+        'cmd_f1',
+        { docker: engine, credentials: { env: { RESTIC_PASSWORD: 'pw' } } },
+        'backup.forget',
+      );
+      assert.deepEqual(
+        job.forgotten,
+        [safety.slice(0, 8)],
+        'only the project safety snapshot is forgotten',
+      );
+      const left = (JSON.parse(restic(repo, 'snapshots', '--json').stdout) as { id: string }[]).map(
+        (snapshot) => snapshot.id.slice(0, 8),
+      );
+      assert.deepEqual(
+        left.sort(),
+        [regular.slice(0, 8), other.slice(0, 8)].sort(),
+        'a regular backup and another project safety snapshot are untouched',
+      );
+    } finally {
+      await fs.rm(repo, { recursive: true, force: true });
+    }
+  },
+);

@@ -167,6 +167,8 @@ The project column says how a scoped credential's allowed projects are checked: 
 | `GET /api/v1/commands/:id` | `deploy` | Command's project; commands without a project (diagnostics) need `admin` |
 | `POST /api/v1/backups/run` | `deploy` | Body `project` |
 | `POST /api/v1/backups/:id/cancel` | `deploy` | Body `project`; stops a queued or running backup |
+| `POST /api/v1/restores/:id/remove` | `admin` | Removes the scratch volume or the safety snapshot a restore left, see [Clean up after restores](backups.md#clean-up-after-restores) |
+| `POST /api/v1/restores/expire-safety` | `admin` | Body `project` and `olderThan`; forgets the safety snapshots of restores older than that |
 | `POST /api/v1/backups/unlock` | `admin` | Body `project`, or `control: true` for control's own repository; removes stale restic locks, see [Unlock a repository](backups.md#unlock-a-repository) |
 | `POST /api/v1/backups/verify` | `admin` | Body `project`, or `control: true`, and optional `readDataSubset`; checks the repository in the background, see [Verify a repository](backups.md#verify-a-repository) |
 | `GET /api/v1/backups` | `read` | Query `project` |

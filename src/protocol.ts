@@ -227,6 +227,10 @@ export type CommandType =
   | 'backup.unlock'
   /** Payload a `BackupJobPayload` with `maintain`: a weekly `prune` and `restic check` of the project's repository. */
   | 'backup.maintain'
+  /** Payload a `BackupJobPayload` with `forget`: `restic forget` of tug's own safety snapshots. */
+  | 'backup.forget'
+  /** Payload `{project, restoreId, volume}`: removes the scratch volume of a finished scratch restore. */
+  | 'restore.remove'
   /** Payload `{ commandId }`: stops that job on the node, whether it is queued or running. */
   | 'backup.cancel';
 
@@ -238,6 +242,7 @@ export const BACKUP_COMMAND_TYPES: readonly CommandType[] = [
   'backup.list',
   'backup.unlock',
   'backup.maintain',
+  'backup.forget',
 ];
 
 /** `GET /agent/v1/backup/credentials`: environment for the restic helper of one running backup command. */
@@ -295,6 +300,8 @@ export interface BackupJobPayload {
   retentionMode?: 'external';
   /** `backup.maintain` only: prune the repository (skipped when false) and then check it, reading a subset of the data when `subset` is set. */
   maintain?: { prune: boolean; subset?: string };
+  /** `backup.forget` only: the safety snapshots (tagged `trigger:pre-restore`) of the project to forget. */
+  forget?: { snapshotIds: string[] };
   /** Command targets: what to run in the service's container, and how to name and check its output. */
   command?: {
     service: string;
@@ -336,6 +343,8 @@ export interface BackupJobResult {
   warnings?: string[];
   /** What happened to retention; absent when the run applies none (a safety backup before a restore). */
   retention?: BackupRetentionOutcome;
+  /** `backup.forget` only: the snapshots that were forgotten; a requested one that is not there is already gone. */
+  forgotten?: string[];
   /** `backup.maintain` only: what the prune and the check found. `locked` marks a failure that was restic's lock exit. */
   maintenance?: BackupMaintenanceOutcome;
   /** `backup.unlock` only: repository locks before and after `restic unlock`. What is left is held by a live restic or is not stale yet. */
@@ -399,6 +408,7 @@ export type CommandResultPayload =
   | { project: string; service: string; restarted: true }
   | { stdout: string; stderr: string }
   | { project: string; volume: string; deleted: true }
+  | { project: string; restoreId: string; volume: string; removed: boolean }
   | BackupJobResult
   | { found: boolean }
   | { error: string; cause?: BackupCause };

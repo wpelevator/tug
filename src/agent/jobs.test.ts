@@ -251,6 +251,65 @@ test('a maintenance job fails on a missing repository instead of creating one', 
   assert.ok(!ran(docker, 'restic init'), 'maintenance never initializes');
 });
 
+test('a forget job forgets only the safety snapshots restic lists for the project, and a missing one is already gone', async () => {
+  const listings: string[] = [];
+  const docker = dockerWith((cmd) => {
+    const line = cmd.join(' ');
+    if (cmd[1] === 'snapshots') {
+      listings.push(line);
+      return {
+        code: 0,
+        out: JSON.stringify([{ id: 'aaaaaaaa11112222', short_id: 'aaaaaaaa' }]),
+      };
+    }
+    return { code: 0 };
+  });
+  const { jobs } = await runner(docker);
+  await jobs.start(
+    command(
+      'cmd_1',
+      payload({ forget: { snapshotIds: ['aaaaaaaa11112222', 'ffffffff99998888'] } }),
+      'backup.forget',
+    ),
+  );
+  await settle(jobs, 1);
+  const [result] = jobs.pending();
+  assert.equal(result.state, 'succeeded', 'the job succeeds');
+  assert.deepEqual(
+    (result.result as { forgotten?: string[] }).forgotten,
+    ['aaaaaaaa'],
+    'the snapshot restic lists is forgotten',
+  );
+  assert.match(
+    listings[0],
+    /--tag project:site,trigger:pre-restore/,
+    "restic is asked for exactly this project's safety snapshots (AND, not OR)",
+  );
+  const forget = docker.execOptions
+    .map((e) => e.cmd.join(' '))
+    .find((c) => c.startsWith('restic forget'))!;
+  assert.match(
+    forget,
+    /^restic forget aaaaaaaa11112222 --retry-lock/,
+    'only the listed id is forgotten',
+  );
+  assert.ok(!forget.includes('ffffffff'), 'an id restic does not list is never passed to forget');
+  assert.ok(!forget.includes('--prune'), 'a forget never prunes: the weekly maintenance does');
+});
+
+test('a forget job whose snapshots are all gone runs no forget', async () => {
+  const docker = dockerWith((cmd) =>
+    cmd[1] === 'snapshots' ? { code: 0, out: '[]' } : { code: 0 },
+  );
+  const { jobs } = await runner(docker);
+  await jobs.start(
+    command('cmd_1', payload({ forget: { snapshotIds: ['aaaaaaaa11112222'] } }), 'backup.forget'),
+  );
+  await settle(jobs, 1);
+  assert.equal(jobs.pending()[0].state, 'succeeded', 'an already removed snapshot is not an error');
+  assert.ok(!docker.execOptions.some((e) => e.cmd[1] === 'forget'), 'restic forget did not run');
+});
+
 test('error text never contains credentials', async () => {
   const docker = dockerWith((cmd) =>
     cmd.join(' ') === 'restic cat config'

@@ -249,7 +249,7 @@ The test layers, the metrics milestones are held to and the backlog of mocked te
 - [ ] M11 restore drill
 - [x] M11 `backup destination check` (and `destination set` checks by default); SFTP and rclone destinations are rejected for now because the helper has no SSH keys or rclone configuration
 - [x] M11 `restore` waits for the restored writers to be serving again (five minutes, then it finishes with a warning)
-- [ ] M11 list and remove scratch-restore volumes, and expire safety snapshots (they accumulate for ever and only `restic forget` removes them)
+- [x] M11 list and remove scratch-restore volumes, and expire safety snapshots: `tug restore list`, `restore remove` and `--expire-safety` ([Clean up after restores](backups.md#clean-up-after-restores))
 - [x] M11 `backup list --check`: exit nonzero when any target is stale, failed or missed, as an interim for cron and monitors until webhooks (M8) exist
 - [x] M11 `backup list --check` also fails when nothing is protected: no destination, or no enabled targets unless `--allow-empty` (2.0.0)
 - [ ] M11 `backup list` shows each target's protection level: local only, off-host, verified, restore-tested

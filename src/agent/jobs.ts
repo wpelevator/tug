@@ -236,7 +236,9 @@ export class JobRunner {
               ? 'backup.unlock'
               : command.type === 'backup.maintain'
                 ? 'backup.maintain'
-                : 'backup.run',
+                : command.type === 'backup.forget'
+                  ? 'backup.forget'
+                  : 'backup.run',
       );
       this.results.push({ commandId: command.id, state: 'succeeded', result });
     } catch (error) {

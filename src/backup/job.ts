@@ -265,7 +265,8 @@ export async function runBackupJob(
     | 'backup.check'
     | 'backup.restore'
     | 'backup.unlock'
-    | 'backup.maintain' = 'backup.run',
+    | 'backup.maintain'
+    | 'backup.forget' = 'backup.run',
 ): Promise<BackupJobResult> {
   const started = Date.now();
   const { docker, credentials } = ctx;
@@ -435,7 +436,10 @@ export async function runBackupJob(
     if (
       state === 'error' ||
       (state === 'missing' &&
-        (kind === 'backup.restore' || kind === 'backup.unlock' || kind === 'backup.maintain'))
+        (kind === 'backup.restore' ||
+          kind === 'backup.unlock' ||
+          kind === 'backup.maintain' ||
+          kind === 'backup.forget'))
     )
       // A restore or an unlock needs an existing repository; a wrong password or an unreachable bucket fails every kind of job.
       throw fail(
@@ -459,6 +463,51 @@ export async function runBackupJob(
         resticVersion: version,
         repository,
       };
+
+    if (kind === 'backup.forget') {
+      const wanted = payload.forget?.snapshotIds ?? [];
+      if (!wanted.length) throw new JobError('the forget job names no snapshot');
+      phase('forgetting');
+      // Only this project's safety snapshots may go: ask restic for exactly those and intersect, so an id of a
+      // regular backup, or of another project, is never forgotten, and one that is already gone is not an error.
+      const listed = await exec([
+        'restic',
+        'snapshots',
+        '--json',
+        '--tag',
+        `project:${payload.project},trigger:pre-restore`,
+      ]);
+      if (listed.code !== 0)
+        throw fail('could not list the safety snapshots', listed.err, listed.code);
+      let snapshots: { id: string; short_id?: string }[] = [];
+      try {
+        snapshots = JSON.parse(listed.out || '[]');
+      } catch {
+        throw new JobError('restic returned an unreadable snapshot list');
+      }
+      const matched = snapshots.filter((snapshot) =>
+        wanted.some(
+          (id) =>
+            snapshot.id.startsWith(id) || snapshot.short_id === id || id.startsWith(snapshot.id),
+        ),
+      );
+      if (matched.length) {
+        const forget = await exec([
+          'restic',
+          'forget',
+          ...matched.map((snapshot) => snapshot.id),
+          '--retry-lock',
+          RESTIC_LOCK_WAIT,
+        ]);
+        if (forget.code !== 0) throw fail('forget failed', forget.err || forget.out, forget.code);
+      }
+      return {
+        runId: payload.runId,
+        durationMs: Date.now() - started,
+        resticVersion: version,
+        forgotten: matched.map((snapshot) => snapshot.short_id ?? snapshot.id.slice(0, 8)),
+      };
+    }
 
     if (kind === 'backup.maintain') {
       phase('maintaining');

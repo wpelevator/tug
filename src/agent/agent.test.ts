@@ -795,6 +795,47 @@ test('executeCommand tolerates a missing volume, reports failing diagnostics, re
   });
 });
 
+test('restore.remove removes a scratch volume only when its labels name that restore and project', async () => {
+  const ctx = await makeCtx();
+  const docker = fake(ctx);
+  const name = 'tug_r4_proj_r123';
+  const remove = (restoreId: string, project = 'proj') =>
+    executeCommand(
+      {
+        id: 'c1',
+        type: 'restore.remove',
+        payload_json: JSON.stringify({ project, restoreId, volume: name }),
+      },
+      ctx,
+    );
+  docker.volumes.set(name, {
+    Name: name,
+    Labels: { 'tug.project': 'proj', 'tug.restore': 'r123' },
+  });
+  const wrong = await remove('r999');
+  assert.equal(wrong.state, 'failed', 'a volume of another restore is refused');
+  assert.match(
+    String((wrong.result as { error?: string }).error),
+    /does not belong to restore r999/,
+  );
+  assert.ok(docker.volumes.has(name), 'the refused volume is untouched');
+  assert.equal(
+    (await remove('r123', 'other')).state,
+    'failed',
+    'a volume of another project is refused',
+  );
+  const ok = await remove('r123');
+  assert.equal(ok.state, 'succeeded', "the restore's own scratch volume is removed");
+  assert.ok(!docker.volumes.has(name), 'the volume is gone');
+  const again = await remove('r123');
+  assert.equal(again.state, 'succeeded', 'removing a volume that is already gone succeeds');
+  assert.equal(
+    (again.result as { removed?: boolean }).removed,
+    false,
+    'and says nothing was removed',
+  );
+});
+
 test('volume deletion refuses a colliding volume owned by another project', async () => {
   const ctx = await makeCtx();
   const docker = fake(ctx);

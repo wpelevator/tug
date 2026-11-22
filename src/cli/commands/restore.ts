@@ -27,6 +27,38 @@ interface RestoreRecord {
   started_at: string | null;
 }
 
+interface Leftovers {
+  scratchVolumes: {
+    restoreId: string;
+    target: string;
+    volume: string;
+    node: string | null;
+    state: string;
+    createdAt: string | null;
+  }[];
+  safetySnapshots: {
+    restoreId: string;
+    target: string;
+    snapshotId: string;
+    createdAt: string | null;
+  }[];
+}
+
+/** The lines `restore list` adds for what restores left behind. */
+export function leftoverLines(left: Leftovers | undefined): string[] {
+  if (!left) return [];
+  return [
+    ...left.scratchVolumes.map(
+      (v) =>
+        `scratch volume\t${v.volume}\t${v.node ?? '-'}\t${v.target}\trestore ${v.restoreId} (${v.state})\tremove with tug restore remove ${v.restoreId}`,
+    ),
+    ...left.safetySnapshots.map(
+      (v) =>
+        `safety snapshot\t${v.snapshotId.slice(0, 8)}\t-\t${v.target}\trestore ${v.restoreId}\tremove with tug restore remove ${v.restoreId}`,
+    ),
+  ];
+}
+
 export function registerRestore(rt: CliRuntime, program: Command): void {
   const restore = program
     .command('restore')
@@ -175,18 +207,43 @@ export function registerRestore(rt: CliRuntime, program: Command): void {
     .description('show recent restores and their state')
     .action(async (o: { json?: boolean }) => {
       const project = loadCfg(rt).project;
-      const { restores } = await request<{ restores: RestoreRecord[] }>(
-        rt,
-        'GET',
-        `/api/v1/restores?project=${encodeURIComponent(project)}`,
-      );
-      if (o.json) return print(rt, { restores });
+      const { restores, leftovers } = await request<{
+        restores: RestoreRecord[];
+        leftovers?: Leftovers;
+      }>(rt, 'GET', `/api/v1/restores?project=${encodeURIComponent(project)}`);
+      if (o.json) return print(rt, { restores, leftovers });
       if (!restores.length) out(rt, 'no restores');
       for (const r of restores)
         out(
           rt,
           `${r.started_at}\t${r.id}\t${r.target}\t${r.mode}\t${r.state}\t${r.snapshot_id.slice(0, 8)}${r.error ? `\t${r.error}` : ''}`,
         );
+      for (const line of leftoverLines(leftovers)) out(rt, line);
+    });
+  restore
+    .command('remove [id]')
+    .description(
+      'remove what a restore left behind: the scratch volume of a scratch restore, or the safety snapshot of an in-place one (both are listed by `tug restore list`). With --expire-safety <age> it instead forgets every safety snapshot of restores older than that, such as 30d. Admin only; a safety snapshot cannot be removed from an append-only destination (retention external), which refuses deletes',
+    )
+    .option(
+      '--expire-safety <age>',
+      'forget the safety snapshots of restores older than this age: 90m, 12h, 30d or 2w',
+    )
+    .action(async (id: string | undefined, o: { expireSafety?: string }) => {
+      const project = loadCfg(rt).project;
+      if (o.expireSafety !== undefined) {
+        if (id) throw new Error('--expire-safety takes an age, not a restore id');
+        return print(
+          rt,
+          await request(rt, 'POST', '/api/v1/restores/expire-safety', {
+            project,
+            olderThan: o.expireSafety,
+          }),
+        );
+      }
+      if (!id)
+        throw new Error('name a restore from tug restore list, or pass --expire-safety <age>');
+      print(rt, await request(rt, 'POST', `/api/v1/restores/${encodeURIComponent(id)}/remove`, {}));
     });
   restore
     .command('resume [id]')
