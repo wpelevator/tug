@@ -102,7 +102,7 @@ test('a run job initializes a repository restic reports as missing with exit 10,
     ['an S3 key that does not exist', S3_NO_KEY],
   ] as const) {
     const docker = dockerWith((cmd) =>
-      cmd.join(' ') === 'restic cat config' ? { code: 10, err } : { code: 0 },
+      cmd.join(' ') === 'restic cat config --no-lock' ? { code: 10, err } : { code: 0 },
     );
     const result = await finished(docker, 'backup.run');
     assert.ok(
@@ -115,7 +115,7 @@ test('a run job initializes a repository restic reports as missing with exit 10,
 
 test('a check job only reports a missing repository and never initializes it', async () => {
   const docker = dockerWith((cmd) =>
-    cmd.join(' ') === 'restic cat config' ? { code: 10, err: REST_MISSING } : { code: 0 },
+    cmd.join(' ') === 'restic cat config --no-lock' ? { code: 10, err: REST_MISSING } : { code: 0 },
   );
   const result = await finished(docker, 'backup.check');
   assert.equal(result.state, 'succeeded', 'a missing repository is not a failed check');
@@ -133,7 +133,7 @@ test('a missing bucket (exit 1) and a wrong password (exit 12) fail a run job wi
     ['a wrong password', 12, 'Fatal: wrong password or no key found', /wrong repository password/],
   ] as const) {
     const docker = dockerWith((cmd) =>
-      cmd.join(' ') === 'restic cat config' ? { code, err } : { code: 0 },
+      cmd.join(' ') === 'restic cat config --no-lock' ? { code, err } : { code: 0 },
     );
     const result = await finished(docker, 'backup.run');
     assert.equal(result.state, 'failed', `${what} fails the job`);
@@ -144,7 +144,7 @@ test('a missing bucket (exit 1) and a wrong password (exit 12) fail a run job wi
 
 test('a restore job fails on a missing repository instead of creating one', async () => {
   const docker = dockerWith((cmd) =>
-    cmd.join(' ') === 'restic cat config' ? { code: 10, err: REST_MISSING } : { code: 0 },
+    cmd.join(' ') === 'restic cat config --no-lock' ? { code: 10, err: REST_MISSING } : { code: 0 },
   );
   const result = await finished(docker, 'backup.restore');
   assert.equal(result.state, 'failed', 'there is nothing to restore from');
@@ -182,7 +182,7 @@ test('an unlock job removes only stale locks: plain restic unlock, never --remov
 
 test('an unlock job fails on a missing repository instead of creating one', async () => {
   const docker = dockerWith((cmd) =>
-    cmd.join(' ') === 'restic cat config' ? { code: 10, err: REST_MISSING } : { code: 0 },
+    cmd.join(' ') === 'restic cat config --no-lock' ? { code: 10, err: REST_MISSING } : { code: 0 },
   );
   const result = await finished(docker, 'backup.unlock');
   assert.equal(result.state, 'failed', 'there is nothing to unlock');
@@ -244,7 +244,7 @@ test('a failed prune does not stop the check, and a failed check or a lock exit 
 
 test('a maintenance job fails on a missing repository instead of creating one', async () => {
   const docker = dockerWith((cmd) =>
-    cmd.join(' ') === 'restic cat config' ? { code: 10, err: REST_MISSING } : { code: 0 },
+    cmd.join(' ') === 'restic cat config --no-lock' ? { code: 10, err: REST_MISSING } : { code: 0 },
   );
   const result = await finished(docker, 'backup.maintain');
   assert.equal(result.state, 'failed', 'there is nothing to check');
@@ -312,7 +312,7 @@ test('a forget job whose snapshots are all gone runs no forget', async () => {
 
 test('error text never contains credentials', async () => {
   const docker = dockerWith((cmd) =>
-    cmd.join(' ') === 'restic cat config'
+    cmd.join(' ') === 'restic cat config --no-lock'
       ? {
           code: 1,
           err: 'Fatal: backend rejected key sekret-value-1 with password repo-password-xyz',
@@ -369,7 +369,7 @@ test('results survive a restart until acknowledged, and a job interrupted by a r
 
 test('jobs beyond the concurrency limit wait queued and are reported as such', async () => {
   const docker = dockerWith((cmd) =>
-    cmd.join(' ') === 'restic cat config' ? undefined : { code: 0 },
+    cmd.join(' ') === 'restic cat config --no-lock' ? undefined : { code: 0 },
   );
   const { jobs } = await runner(docker, 1);
   await jobs.start(command('cmd_a', payload({ runId: 'bkr_a' })));
@@ -701,7 +701,7 @@ test('a failing command, missing output or a missing completion marker never lea
     assert.equal(result.state, 'failed', `${JSON.stringify(outcome)} should fail the job`);
     assert.match(JSON.stringify(result.result), message);
     assert.ok(
-      docker.execOptions.some((o) => o.cmd.join(' ') === 'restic forget snap1234'),
+      docker.execOptions.some((o) => o.cmd.join(' ') === 'restic forget snap1234 --retry-lock 10m'),
       'the snapshot restic already wrote is forgotten',
     );
   }

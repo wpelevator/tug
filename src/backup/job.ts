@@ -1,6 +1,7 @@
 import { Transform } from 'node:stream';
 import { redactSecrets } from './destination.ts';
 import { classifyRepositoryProbe, describeProbeFailure } from './repository-probe.ts';
+import { summarizeRetentionFailure } from './restic-output.ts';
 import {
   LABEL_JOB,
   LABEL_PROJECT,
@@ -425,13 +426,17 @@ export async function runBackupJob(
     const execPlain = async (cmd: string[]): Promise<Collected> =>
       untilAborted(docker.execStart(restic, { cmd }).then(collect));
     const restoreWithWatchdog = (args: string[]): Promise<Collected> =>
-      exec(['restic', 'restore', '--json', ...args]);
+      exec(['restic', 'restore', '--json', ...args, '--retry-lock', RESTIC_LOCK_WAIT]);
 
     const version = (await exec(['restic', 'version'])).out.match(/restic (\d+\.\d+\.\d+)/)?.[1];
 
     phase('checking');
     let repository: 'ok' | 'initialized' | 'missing' = 'ok';
-    const probe = await exec(['restic', 'cat', 'config']);
+    // `--no-lock`: the probe only reads the config file and must not be refused by a lock. An exclusive one, even a
+    // stale one that `backup.unlock` is about to remove, would make `cat config` fail and the unlock unreachable, and
+    // the probe has no `--retry-lock`, so a backup that meets a short-lived prune would fail in seconds instead of
+    // waiting. The commands that need the lock take it with `--retry-lock` below.
+    const probe = await exec(['restic', 'cat', 'config', '--no-lock']);
     const state = classifyRepositoryProbe(probe);
     if (
       state === 'error' ||
@@ -476,6 +481,8 @@ export async function runBackupJob(
         '--json',
         '--tag',
         `project:${payload.project},trigger:pre-restore`,
+        '--retry-lock',
+        RESTIC_LOCK_WAIT,
       ]);
       if (listed.code !== 0)
         throw fail('could not list the safety snapshots', listed.err, listed.code);
@@ -515,9 +522,7 @@ export async function runBackupJob(
       let message: string | undefined;
       let locked = false;
       const note = (what: string, result: { code: number; out: string; err: string }): void => {
-        message ??= `${what} failed: ${redact(result.err || result.out)
-          .trim()
-          .slice(-300)}`;
+        message ??= `${what} failed: ${summarizeRetentionFailure(redact(result.err || result.out))}`;
         locked ||= result.code === RESTIC_EXIT_LOCKED;
       };
       let prune: 'ok' | 'skipped' | 'failed' = 'skipped';
@@ -576,7 +581,14 @@ export async function runBackupJob(
       if (!restore) throw new JobError('the restore job names no snapshot');
       phase('restoring');
       // Only snapshots this target produced may be restored into it.
-      const listed = await exec(['restic', 'snapshots', restore.snapshotId, '--json']);
+      const listed = await exec([
+        'restic',
+        'snapshots',
+        restore.snapshotId,
+        '--json',
+        '--retry-lock',
+        RESTIC_LOCK_WAIT,
+      ]);
       const snapshot = (() => {
         try {
           return (JSON.parse(listed.out) as { tags?: string[] }[])[0];
@@ -608,7 +620,7 @@ export async function runBackupJob(
         ).find((container) => container.State === 'running');
         if (!running) throw new JobError(`service ${service} is not running on this node`);
         const dump = await startRestic({
-          cmd: ['restic', 'dump', restore.snapshotId, filename],
+          cmd: ['restic', 'dump', restore.snapshotId, filename, '--retry-lock', RESTIC_LOCK_WAIT],
         });
         const loader = await docker.execStart(running.Id, { cmd: restoreArgv, stdin: true });
         const reading = collect(dump);
@@ -735,7 +747,13 @@ export async function runBackupJob(
         // restic snapshots whatever it received, so a failed or cut-short stream must not stay in the catalog.
         let note = '';
         if (summary.snapshotId) {
-          const forget = await exec(['restic', 'forget', summary.snapshotId]);
+          const forget = await exec([
+            'restic',
+            'forget',
+            summary.snapshotId,
+            '--retry-lock',
+            RESTIC_LOCK_WAIT,
+          ]);
           if (forget.code !== 0) note = ' (the partial snapshot could not be forgotten)';
         }
         throw fail(
@@ -770,9 +788,7 @@ export async function runBackupJob(
         if (forget.code === 0) retention = { state: 'ok' };
         else
           failed(
-            redact(forget.err || forget.out)
-              .trim()
-              .slice(-300),
+            summarizeRetentionFailure(redact(forget.err || forget.out)),
             forget.code === RESTIC_EXIT_LOCKED,
           );
       } catch (error) {

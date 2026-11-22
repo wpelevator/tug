@@ -136,6 +136,21 @@ test(
         true,
         'an append-only refusal is not a lock failure',
       );
+      const message = second.retention?.message ?? '';
+      assert.match(
+        message,
+        /403 Forbidden/,
+        `the message keeps the line restic prints for the refused delete (got: ${message})`,
+      );
+      assert.ok(
+        !/runtime\.|main\.init|\/restic\/cmd/.test(message),
+        `the message carries no Go stack frames (got: ${message})`,
+      );
+      assert.match(
+        message,
+        /tug backup destination set --retention external/,
+        'the message names the fix for an append-only destination',
+      );
       assert.match(
         second.warnings?.[0] ?? '',
         /retention failed/,

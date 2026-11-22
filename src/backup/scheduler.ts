@@ -789,6 +789,45 @@ export function createBackupService(deps: BackupServiceDeps) {
     return undefined;
   }
 
+  /**
+   * Called when the destination's retention is set to `external`: tug no longer prunes there, so a retention failure
+   * recorded by earlier runs no longer describes anything. The newest run of each failing target is rewritten as
+   * `external`, which ends the failing streak at once (`tug backup list --check` returns to 0 without waiting for
+   * the next backup), and one `backup.retention_recovered` event is recorded per target that was failing. Returns the
+   * number of targets cleared.
+   */
+  function clearRetentionFailures(actor?: string): number {
+    let cleared = 0;
+    for (const schedule of db.all<BackupScheduleRow>('SELECT * FROM backup_schedules')) {
+      const newest = db
+        .all<BackupRunRow>(
+          `SELECT * FROM backup_runs WHERE schedule_id=? AND state='succeeded' AND metadata_json IS NOT NULL
+           ORDER BY COALESCE(finished_at,queued_at) DESC LIMIT 30`,
+          schedule.id,
+        )
+        .find((run) => parse<RunMeta>(run.metadata_json, {}).retention);
+      if (!newest) continue;
+      const meta = parse<RunMeta>(newest.metadata_json, {});
+      if (meta.retention?.state !== 'failed') continue;
+      db.run(
+        'UPDATE backup_runs SET metadata_json=? WHERE id=?',
+        JSON.stringify({ ...meta, retention: { state: 'external' } } satisfies RunMeta),
+        newest.id,
+      );
+      event(
+        'info',
+        'backup.retention_recovered',
+        schedule.project_id,
+        `retention of ${schedule.target} no longer applies: the destination's retention is external, so tug does not prune it`,
+        { target: schedule.target, retention: 'external' },
+        nodeName(schedule.node_id),
+        actor,
+      );
+      cleared++;
+    }
+    return cleared;
+  }
+
   /** Queues manual backups of the named targets, or every target of the project when none are named. */
   function runNow(
     project: string,
@@ -967,6 +1006,7 @@ export function createBackupService(deps: BackupServiceDeps) {
     queueRestore,
     cancelRun,
     cancelJob,
+    clearRetentionFailures,
     /** Appends an event about a repository or a target; control's maintenance and own backup use it too. */
     event,
   };

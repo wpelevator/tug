@@ -3035,6 +3035,7 @@ export async function createApp(
           return res.status(400).json({ error: errMessage(e) });
         }
         destinationQueries.setRetention(mode);
+        if (mode === 'external') clearRetentionFailures(req.actor!.name);
         audit(req.actor!, {
           type: 'backup.destination_set',
           message: `backup destination retention set to ${mode} by ${req.actor!.name}`,
@@ -3071,6 +3072,7 @@ export async function createApp(
       ts,
       retention,
     );
+    if (retention === 'external') clearRetentionFailures(req.actor!.name);
     audit(req.actor!, {
       type: 'backup.destination_set',
       message: `backup destination set to ${parsed.url} by ${req.actor!.name}`,
@@ -5022,6 +5024,48 @@ export async function createApp(
           return [];
         }
       });
+  /**
+   * Setting the destination's retention to `external` ends a retention failure that control's own backup recorded:
+   * the newest completed control backup of the destination that carries a retention outcome is rewritten as
+   * `external` and one `backup.retention_recovered` event is recorded, so `tug backup list --check` is green at once.
+   * Returns whether a failure was cleared.
+   */
+  function clearControlRetentionFailure(): boolean {
+    const destination = backupDestination();
+    if (!destination) return false;
+    const rows = db.all<{ id: string; metadata_json: string }>(
+      "SELECT id,metadata_json FROM backups WHERE project_id='_control' AND target='control-destination' AND state='completed' AND json_extract(metadata_json,'$.destination')=? ORDER BY created_at DESC LIMIT 30",
+      destinationKey(destination.url),
+    );
+    for (const row of rows) {
+      let meta: { retention?: BackupRetentionOutcome } & Record<string, unknown>;
+      try {
+        meta = JSON.parse(row.metadata_json);
+      } catch {
+        continue;
+      }
+      if (!meta.retention) continue;
+      if (meta.retention.state !== 'failed') return false;
+      db.run(
+        'UPDATE backups SET metadata_json=? WHERE id=?',
+        JSON.stringify({ ...meta, retention: { state: 'external' } }),
+        row.id,
+      );
+      controlEvent(
+        'info',
+        'backup.retention_recovered',
+        "retention of the control backups no longer applies: the destination's retention is external, so tug does not prune it",
+        { retention: 'external' },
+      );
+      return true;
+    }
+    return false;
+  }
+  /** Ends every recorded retention failure, the projects' and control's, once the destination's retention is `external`. */
+  function clearRetentionFailures(actor: string): void {
+    backups.clearRetentionFailures(actor);
+    clearControlRetentionFailure();
+  }
   /** What `tug backup list` shows about control's own backup in the current destination; null while there is none. */
   function controlDestinationStatus(): {
     lastSuccessAt: string | null;

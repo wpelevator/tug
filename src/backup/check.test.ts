@@ -130,14 +130,30 @@ test('one retention failure is not a problem, two in a row are, and a recovery c
   assert.deepEqual(check({ state: 'ok', failures: 0 }), [], 'a prune that works again is green');
 });
 
-test("a retention failure that was restic's lock exit fails the check at once", () => {
-  assert.match(
+test("a retention failure that was restic's lock exit waits for its second strike like any overlap", () => {
+  assert.deepEqual(
     backupCheckProblems({
       destinationConfigured: true,
       targets: [withRetention({ state: 'failed', failures: 1, locked: true })],
+    }),
+    [],
+    'one lock failure is an overlap with another node, not a problem yet',
+  );
+  assert.match(
+    backupCheckProblems({
+      destinationConfigured: true,
+      targets: [withRetention({ state: 'failed', failures: 2, locked: true })],
     })[0],
-    /retention is failing.*repository is locked/,
-    'a lock failure is not an overlap to wait out',
+    /retention is failing.*repository is locked, run tug backup unlock/,
+    'a second lock failure in a row fails the check and names the unlock command',
+  );
+  assert.match(
+    backupCheckProblems({
+      destinationConfigured: true,
+      targets: [withRetention({ state: 'failed', failures: 2, message: 'denied' })],
+    })[0],
+    /failed in 2 runs in a row/,
+    'a real non-lock retention failure still fails at the second strike',
   );
 });
 

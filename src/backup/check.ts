@@ -91,9 +91,10 @@ export function verifyProblem(
 }
 
 /**
- * Retention failures that must fail a monitor: two in a row, or one that was a lock failure. A single failure is
- * often only an overlap: on a project with several nodes a prune takes an exclusive lock on the shared repository
- * while another node's backup holds a shared one. A run whose retention works clears it, so a recovery turns it green.
+ * Retention failures that must fail a monitor: two in a row, whatever the cause. A single failure is often only an
+ * overlap: on a project with several nodes a prune takes an exclusive lock on the shared repository while another
+ * node's backup holds a shared one, and restic's lock exit code is exactly that overlap, so a lock failure waits for
+ * its second strike like any other. A run whose retention works clears it, so a recovery turns it green.
  */
 export const RETENTION_STRIKES = 2;
 export function retentionProblem(
@@ -101,7 +102,7 @@ export function retentionProblem(
   unlock = 'tug backup unlock',
 ): string | null {
   if (retention?.state !== 'failed') return null;
-  if (!retention.locked && retention.failures < RETENTION_STRIKES) return null;
+  if (retention.failures < RETENTION_STRIKES) return null;
   const why = retention.locked
     ? `the repository is locked, run ${unlock} to remove stale locks`
     : `it failed in ${retention.failures} runs in a row`;

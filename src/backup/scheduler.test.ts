@@ -600,6 +600,47 @@ test('retention events fire on transition only, once on the way down and once on
   );
 });
 
+test('clearing retention failures turns failing targets external at once and announces each recovery once', async () => {
+  const f = await fixture();
+  f.service.tick(at('2026-11-01T00:00:00Z'));
+  succeed(f, runAt(f, '2026-11-01T03:00:30Z'), { state: 'failed', message: 'denied' });
+  succeed(f, runAt(f, '2026-11-02T03:00:30Z'), { state: 'failed', message: 'denied' });
+  assert.equal(dbTarget(f).retention?.failures, 2, 'the failing streak is recorded');
+  assert.equal(f.service.clearRetentionFailures('alice'), 1, 'one failing target is cleared');
+  assert.deepEqual(
+    dbTarget(f).retention,
+    { state: 'external', failures: 0 },
+    'the target is external with no failing streak, so --check is green without a new backup',
+  );
+  assert.equal(
+    f.events('backup.retention_recovered').length,
+    1,
+    'the recovery is announced once for the target that was failing',
+  );
+  assert.equal(
+    f.service.clearRetentionFailures('alice'),
+    0,
+    'a second call finds nothing failing and announces nothing',
+  );
+  assert.equal(f.events('backup.retention_recovered').length, 1, 'no second recovery event');
+  succeed(f, runAt(f, '2026-11-03T03:00:30Z'), { state: 'external' });
+  assert.equal(
+    f.events('backup.retention_recovered').length,
+    1,
+    'the next backup on the external destination raises no event of its own',
+  );
+});
+
+test('clearing retention failures leaves healthy and never-pruned targets alone', async () => {
+  const f = await fixture();
+  f.service.tick(at('2026-11-01T00:00:00Z'));
+  assert.equal(f.service.clearRetentionFailures(), 0, 'a target that never applied retention');
+  succeed(f, runAt(f, '2026-11-01T03:00:30Z'), { state: 'ok' });
+  assert.equal(f.service.clearRetentionFailures(), 0, 'a target whose retention works');
+  assert.deepEqual(dbTarget(f).retention, { state: 'ok', failures: 0 }, 'it stays ok');
+  assert.equal(f.events('backup.retention_recovered').length, 0, 'nothing is announced');
+});
+
 test('an external destination skips pruning in the job payload and never raises retention events', async () => {
   const f = await fixture();
   f.db.run("INSERT INTO meta(key,value) VALUES('backup_destination_retention','external')");

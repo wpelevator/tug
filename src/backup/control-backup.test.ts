@@ -6,7 +6,9 @@ import path from 'node:path';
 import {
   controlRepository,
   controlRepositoryPassword,
+  checkControlRepository,
   checkRepository,
+  unlockControlRepository,
   fetchControlArchive,
   listControlSnapshots,
   pushControlArchive,
@@ -69,7 +71,7 @@ test('a push creates a missing repository, streams the archive into restic and r
   await fs.writeFile(archive, 'archive-bytes');
   const docker = dockerWith((cmd) => {
     const line = cmd.join(' ');
-    if (line === 'restic cat config') return { code: 10, err: NEVER_CREATED };
+    if (line === 'restic cat config --no-lock') return { code: 10, err: NEVER_CREATED };
     if (line.startsWith('restic backup'))
       return { code: 0, out: '{"message_type":"summary","snapshot_id":"abc123def456"}\n' };
     return { code: 0 };
@@ -105,7 +107,7 @@ test('a push fails and never initializes when the credentials or the store are w
   const archive = path.join(dir, 'a.tar.gz');
   await fs.writeFile(archive, 'x');
   const docker = dockerWith((cmd) =>
-    cmd.join(' ') === 'restic cat config'
+    cmd.join(' ') === 'restic cat config --no-lock'
       ? { code: 1, err: 'wrong password or no key found for sekret-value-1' }
       : { code: 0 },
   );
@@ -400,7 +402,9 @@ test('listing reads the snapshots from the destination, newest first, flat or gr
   const filtered = dockerWith(() => ({ code: 0, out: '[]' }));
   await listControlSnapshots(filtered, S3);
   assert.ok(
-    execs(filtered).some((line) => line === 'restic snapshots --json --host control --tag control'),
+    execs(filtered).some(
+      (line) => line === 'restic snapshots --json --host control --tag control --retry-lock 10m',
+    ),
     'only control snapshots are listed, whatever else the repository holds',
   );
 });
@@ -450,7 +454,8 @@ test('a named snapshot is restored only when control stored it, and the id is va
     );
     assert.ok(
       execs(docker).some(
-        (line) => line === `restic snapshots ${id} --json --host control --tag control`,
+        (line) =>
+          line === `restic snapshots ${id} --json --host control --tag control --retry-lock 10m`,
       ),
       'the snapshot is first checked to be a control backup',
     );
@@ -901,6 +906,96 @@ test("a push reports retention as data: ok, failed with restic's lock exit marke
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
+});
+
+test('a control retention failure keeps the 403 line without the stack and names external retention', async () => {
+  const dir = await scratch();
+  const archive = path.join(dir, 'a.tar.gz');
+  await fs.writeFile(archive, 'x');
+  try {
+    const result = await pushControlArchive(
+      dockerWith((cmd) =>
+        cmd[1] === 'forget'
+          ? {
+              code: 1,
+              err: [
+                'Remove(<snapshot/202d03c576>) failed: unexpected HTTP response (403): 403 Forbidden',
+                'failed to remove one or more snapshots',
+                'main.init',
+                '\t/restic/cmd/restic/cmd_forget.go:67',
+                'runtime.main',
+                '\t/usr/local/go/src/runtime/proc.go:258',
+                'runtime.goexit',
+                '\t/usr/local/go/src/runtime/asm_arm64.s:1447',
+              ].join('\n'),
+            }
+          : { code: 0 },
+      ),
+      S3,
+      archive,
+    );
+    const message = result.retention.message ?? '';
+    assert.match(message, /403 Forbidden/, 'the line that explains the refusal is kept');
+    assert.ok(!/runtime\.|main\.init/.test(message), 'the stack frames are dropped');
+    assert.match(
+      message,
+      /tug backup destination set --retention external/,
+      'the message says what to do about an append-only destination',
+    );
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('every control operation that fails on a lock at the repository probe throws an error with cause locked', async () => {
+  const locked = dockerWith;
+  const refused = () =>
+    locked((cmd) =>
+      cmd[1] === 'cat' ? { code: 11, err: 'unable to create lock in backend' } : { code: 0 },
+    );
+  const dir = await scratch();
+  const archive = path.join(dir, 'a.tar.gz');
+  await fs.writeFile(archive, 'x');
+  const isLocked = (error: Error & { jobCause?: string }) => error.jobCause === 'locked';
+  try {
+    await assert.rejects(
+      () => pushControlArchive(refused(), S3, archive),
+      isLocked,
+      'a push refused at the probe is classified locked, not left without a cause',
+    );
+    await assert.rejects(
+      () => unlockControlRepository(refused(), S3),
+      isLocked,
+      'an unlock refused at the probe is classified locked',
+    );
+    await assert.rejects(
+      () => checkControlRepository(refused(), S3),
+      isLocked,
+      'a check refused at the probe is classified locked',
+    );
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('the control unlock probes without a lock, so an exclusive stale lock cannot block the unlock', async () => {
+  let listed = 0;
+  const docker = dockerWith((cmd) => {
+    const line = cmd.join(' ');
+    if (line === 'restic list locks --no-lock')
+      return { code: 0, out: ++listed === 1 ? 'aaaaaaaa11\n' : '' };
+    // restic refuses every command that takes a lock while an exclusive lock exists.
+    if (cmd[0] === 'restic' && !cmd.includes('--no-lock') && cmd[1] !== 'unlock')
+      return { code: 11, err: 'repository is already locked exclusively' };
+    return { code: 0 };
+  });
+  const result = await unlockControlRepository(docker, S3);
+  assert.deepEqual(result, { before: 1, after: 0 }, 'the stale exclusive lock is removed');
+  assert.ok(execs(docker).includes('restic unlock'), 'plain restic unlock ran');
+  assert.ok(
+    !execs(docker).some((line) => line.includes('--remove-all')),
+    'unlock never removes a live lock',
+  );
 });
 
 test("a push that fails on restic's lock exit throws an error with cause locked", async () => {

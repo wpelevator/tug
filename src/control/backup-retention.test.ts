@@ -290,17 +290,24 @@ test("control's own backup reports retention, alerts once on a failing prune and
   }
 });
 
-test("a prune that fails on restic's lock exit is a lock and fails a monitor at once", async () => {
+test("a prune that fails on restic's lock exit is a lock and fails a monitor at the second failure in a row", async () => {
   const s = await server(resticDocker(() => ({ code: 11, err: 'repository is already locked' })));
   try {
     await call(s.base, 'POST', '/api/v1/backup/destination', DESTINATION);
     await pushControl(s.base);
-    const control = (await listing(s.base)).control;
+    let control = (await listing(s.base)).control;
     assert.equal(control.retention.locked, true, 'exit 11 marks the retention failure as locked');
+    assert.deepEqual(
+      backupCheckProblems({ destinationConfigured: true, targets: [], control }),
+      [],
+      'one lock failure is an overlap that a monitor does not report yet',
+    );
+    await pushControl(s.base);
+    control = (await listing(s.base)).control;
     assert.match(
       backupCheckProblems({ destinationConfigured: true, targets: [], control })[0],
-      /repository is locked/,
-      'one lock failure is enough to fail a monitor',
+      /repository is locked, run tug backup unlock --control/,
+      'the second lock failure in a row fails a monitor',
     );
   } finally {
     await s.close();
@@ -332,6 +339,120 @@ test('an external destination skips the prune for control and reports retention 
       'an append-only destination is healthy for a monitor',
     );
     assert.equal((await events(s.dbFile, 'backup.retention_failed')).length, 0, 'no alert');
+  } finally {
+    await s.close();
+  }
+});
+
+test("switching to external retention ends control's retention failure at once, with one recovery event and a green check", async () => {
+  const s = await server(
+    resticDocker(() => ({ code: 1, err: 'Remove(<snapshot/ab>) failed: 403 Forbidden' })),
+  );
+  try {
+    await call(s.base, 'POST', '/api/v1/backup/destination', DESTINATION);
+    await pushControl(s.base);
+    await pushControl(s.base);
+    let control = (await listing(s.base)).control;
+    assert.match(
+      backupCheckProblems({ destinationConfigured: true, targets: [], control })[0],
+      /^control: retention is failing/,
+      'two failed prunes fail the check before the switch',
+    );
+    const switched = await call(s.base, 'POST', '/api/v1/backup/destination', {
+      url: DESTINATION.url,
+      retention: 'external',
+    });
+    assert.equal(switched.status, 200, 'the mode is switched');
+    control = (await listing(s.base)).control;
+    assert.deepEqual(
+      control.retention,
+      { state: 'external', failures: 0 },
+      'the old failures are gone without waiting for the next backup',
+    );
+    assert.deepEqual(
+      backupCheckProblems({ destinationConfigured: true, targets: [], control }),
+      [],
+      'the check is green right after the switch',
+    );
+    assert.equal(
+      (await events(s.dbFile, 'backup.retention_recovered')).length,
+      1,
+      'the recovery is announced once',
+    );
+    await call(s.base, 'POST', '/api/v1/backup/destination', {
+      url: DESTINATION.url,
+      retention: 'external',
+    });
+    await call(s.base, 'POST', '/api/v1/backup/destination', DESTINATION);
+    assert.equal(
+      (await events(s.dbFile, 'backup.retention_recovered')).length,
+      1,
+      'setting external again, or rotating the credentials, announces nothing more',
+    );
+  } finally {
+    await s.close();
+  }
+});
+
+test('setting the destination again with --retention external clears a failed retention the same way', async () => {
+  const s = await server(resticDocker(() => ({ code: 1, err: 'denied' })));
+  try {
+    await call(s.base, 'POST', '/api/v1/backup/destination', DESTINATION);
+    await pushControl(s.base);
+    await pushControl(s.base);
+    await call(s.base, 'POST', '/api/v1/backup/destination', {
+      ...DESTINATION,
+      retention: 'external',
+    });
+    const control = (await listing(s.base)).control;
+    assert.equal(
+      control.retention.state,
+      'external',
+      'a full set with external retention also ends the failing streak',
+    );
+    assert.equal(
+      (await events(s.dbFile, 'backup.retention_recovered')).length,
+      1,
+      'and announces the recovery once',
+    );
+  } finally {
+    await s.close();
+  }
+});
+
+test('a control backup refused by a lock at the repository probe is classified locked with the control unlock hint', async () => {
+  const docker = new FakeDocker();
+  docker.addImage('restic/restic:0.17.3');
+  // Whatever step restic refuses, exit code 11 is the lock: here the probe itself.
+  docker.execResponder = (cmd) =>
+    cmd[1] === 'cat'
+      ? {
+          code: 11,
+          err: 'unable to create lock in backend: repository is already locked exclusively',
+        }
+      : { code: 0 };
+  const s = await server(docker);
+  try {
+    await call(s.base, 'POST', '/api/v1/backup/destination', DESTINATION);
+    assert.equal((await pushControl(s.base)).status, 502, 'the backup fails');
+    const control = (await listing(s.base)).control;
+    assert.equal(control.cause, 'locked', 'a locked control repository is classified by exit code');
+    assert.match(
+      control.problem,
+      /tug backup unlock --control/,
+      'the problem line names the command that clears a control lock',
+    );
+    assert.match(
+      backupCheckProblems({ destinationConfigured: true, targets: [], control })[0],
+      /control: .*tug backup unlock --control/,
+      '--check reports the lock with its remedy',
+    );
+    const [failed] = await events(s.dbFile, 'backup.failed');
+    assert.equal(
+      JSON.parse(failed.metadata_json).cause,
+      'locked',
+      'backup.failed carries cause locked',
+    );
   } finally {
     await s.close();
   }
