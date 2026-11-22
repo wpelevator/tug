@@ -3,10 +3,21 @@ import { createReadStream, createWriteStream } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { pipeline } from 'node:stream/promises';
 import { redactSecrets } from './destination.ts';
-import { collect, ensureImage, parseSummary } from './job.ts';
+import {
+  RESTIC_LOCK_WAIT,
+  lockCount,
+  RESTIC_STOP_GRACE_MS,
+  collect,
+  ensureImage,
+  parseSummary,
+  stopResticGracefully,
+} from './job.ts';
 import { classifyRepositoryProbe, describeProbeFailure } from './repository-probe.ts';
+import { summarizeRetentionFailure } from './restic-output.ts';
 import type { Collected } from './job.ts';
+import { RESTIC_EXIT_LOCKED } from '../protocol.ts';
 import type { AttachedProcess, DockerApi } from '../docker-api.ts';
+import type { BackupCause, BackupMaintenanceOutcome, BackupRetentionOutcome } from '../protocol.ts';
 
 /** Name of the stdin stream restic stores the archive under; `restic dump` reads it back by this path. */
 export const CONTROL_ARCHIVE_NAME = 'control.tar.gz';
@@ -60,6 +71,8 @@ export interface ControlRepositoryAccess {
   limitMs?: number;
   /** A restic command that only prints backend retry notices for this long is failed; defaults to {@link CONTROL_STALL_MS}. */
   stallMs?: number;
+  /** How long restic gets to exit after SIGINT before the helper is removed; defaults to `RESTIC_STOP_GRACE_MS`. */
+  stopGraceMs?: number;
   /** Cancels the job (a client that went away); the helper is removed either way. */
   signal?: AbortSignal;
 }
@@ -78,7 +91,14 @@ export function controlRepositoryPassword(masterKey: string): string {
   return createHmac('sha256', masterKey).update('tug-control').digest('hex');
 }
 
-export class ControlBackupError extends Error {}
+/** A failed control backup. `jobCause` is `locked` when restic exited with its lock code (see `RESTIC_EXIT_LOCKED`). */
+export class ControlBackupError extends Error {
+  readonly jobCause?: BackupCause;
+  constructor(message: string, options?: ErrorOptions & { exitCode?: number }) {
+    super(message, options);
+    if (options?.exitCode === RESTIC_EXIT_LOCKED) this.jobCause = 'locked';
+  }
+}
 
 const isPipeBreak = (error: unknown): boolean =>
   ['EPIPE', 'ERR_STREAM_PREMATURE_CLOSE', 'ERR_STREAM_DESTROYED', 'ECONNRESET'].includes(
@@ -122,6 +142,7 @@ interface ResticAccess {
   resticImage: string;
   limitMs?: number;
   stallMs?: number;
+  stopGraceMs?: number;
   signal?: AbortSignal;
 }
 
@@ -146,16 +167,26 @@ async function withRestic<T>(
   const limit = access.limitMs ?? CONTROL_JOB_LIMIT_MS;
   let container: string | undefined;
   let finished = false;
+  /** restic processes started and not yet closed: a helper removed while one runs would SIGKILL it with its lock held. */
+  let running = 0;
+  let interrupted = false;
+  const track = (proc: AttachedProcess): AttachedProcess => {
+    running++;
+    proc.once('close', () => running--);
+    return proc;
+  };
   // One limit covers the image pull, the helper and every restic command.
   let timer: NodeJS.Timeout | undefined;
   const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(
-      () =>
-        reject(new ControlBackupError(`restic did not finish within ${Math.round(limit / 1000)}s`)),
-      limit,
-    );
+    timer = setTimeout(() => {
+      interrupted = true;
+      reject(new ControlBackupError(`restic did not finish within ${Math.round(limit / 1000)}s`));
+    }, limit);
     // Not unref'd: while a job is pending its limit is what ends it, and the timer is cleared as soon as it finishes.
-    const cancel = () => reject(new ControlBackupError('the control backup was cancelled'));
+    const cancel = () => {
+      interrupted = true;
+      reject(new ControlBackupError('the control backup was cancelled'));
+    };
     if (access.signal?.aborted) cancel();
     else access.signal?.addEventListener('abort', cancel, { once: true });
   });
@@ -221,6 +252,7 @@ async function withRestic<T>(
         interval = setInterval(
           () => {
             if (!retrying || Date.now() - lastProgress < stallMs) return;
+            interrupted = true;
             reject(
               new ControlBackupError(
                 `restic made no progress for ${Math.round(stallMs / 1000)}s: ${redact(summarize(tail))}`,
@@ -234,7 +266,7 @@ async function withRestic<T>(
       return { stalled, stop: () => clearInterval(interval) };
     };
     const exec: Exec = async (cmd) => {
-      const proc = await Promise.race([docker.execStart(id, { cmd }), timeout]);
+      const proc = track(await Promise.race([docker.execStart(id, { cmd }), timeout]));
       const watch = watchStall(proc);
       try {
         return finish(await Promise.race([collect(proc), timeout, watch.stalled]));
@@ -251,7 +283,7 @@ async function withRestic<T>(
         },
         () => undefined,
       );
-      const proc = await Promise.race([starting, timeout]);
+      const proc = track(await Promise.race([starting, timeout]));
       // A read sends stdout to the file; collect() still keeps a bounded copy, which is ignored.
       const done = collect(proc);
       const moved =
@@ -286,11 +318,22 @@ async function withRestic<T>(
     finished = true;
     clearTimeout(timer);
     // Bounded, so a Docker daemon that hangs here cannot wedge the job (and with it every later control backup).
-    if (container)
+    if (container) {
+      const name = container;
+      let removeTimer: NodeJS.Timeout | undefined;
       await Promise.race([
-        docker.removeContainer(container).catch(() => undefined),
-        new Promise((resolve) => setTimeout(resolve, REMOVE_LIMIT_MS).unref()),
-      ]);
+        (async () => {
+          // A restic still running (timeout, cancel, stall) releases its repository lock before the helper is removed.
+          if (running > 0 || interrupted)
+            await stopResticGracefully(docker, name, access.stopGraceMs ?? RESTIC_STOP_GRACE_MS);
+          await docker.removeContainer(name).catch(() => undefined);
+        })(),
+        new Promise((resolve) => {
+          // Not unref'd: it must end a hung daemon call even when nothing else keeps the process alive.
+          removeTimer = setTimeout(resolve, REMOVE_LIMIT_MS + RESTIC_STOP_GRACE_MS);
+        }),
+      ]).finally(() => clearTimeout(removeTimer));
+    }
   }
 }
 
@@ -299,6 +342,8 @@ export interface ControlPush {
   repository: 'ok' | 'initialized';
   /** Retention could not run; the backup itself succeeded. */
   warning?: string;
+  /** What happened to retention: `external` when the destination is append-only and tug did not prune. */
+  retention: BackupRetentionOutcome;
 }
 
 /** Stores the archive file as a new snapshot in the `_control` repository, creating it when it does not exist yet. */
@@ -306,19 +351,24 @@ export async function pushControlArchive(
   docker: DockerApi,
   access: ControlRepositoryAccess,
   archivePath: string,
-  options: { tags?: string[] } = {},
+  options: { tags?: string[]; retentionMode?: 'external' } = {},
 ): Promise<ControlPush> {
   return withRestic(docker, controlAccess(access), async (exec, run) => {
     let repository: ControlPush['repository'] = 'ok';
-    const probe = await exec(['restic', 'cat', 'config']);
+    const probe = await exec(['restic', 'cat', 'config', '--no-lock']);
     const state = classifyRepositoryProbe(probe);
     if (state !== 'ok') {
       // Only a missing repository (restic exit code 10) is created; a wrong password or an unreachable bucket must fail the backup.
       if (state === 'error')
-        throw new ControlBackupError(`repository check failed: ${await explainProbe(exec, probe)}`);
+        throw new ControlBackupError(
+          `repository check failed: ${await explainProbe(exec, probe)}`,
+          { exitCode: probe.code },
+        );
       const init = await exec(['restic', 'init']);
       if (init.code !== 0)
-        throw new ControlBackupError(`repository init failed: ${summarize(init.err || init.out)}`);
+        throw new ControlBackupError(`repository init failed: ${summarize(init.err || init.out)}`, {
+          exitCode: init.code,
+        });
       repository = 'initialized';
     }
     const backup = await run(
@@ -335,13 +385,19 @@ export async function pushControlArchive(
         CONTROL_TAG,
         ...(options.tags ?? []).flatMap((tag) => ['--tag', tag]),
         '--retry-lock',
-        '10m',
+        RESTIC_LOCK_WAIT,
       ],
       archivePath,
       'write',
     );
     if (backup.code !== 0)
-      throw new ControlBackupError(`backup failed: ${summarize(backup.err || backup.out)}`);
+      throw new ControlBackupError(`backup failed: ${summarize(backup.err || backup.out)}`, {
+        exitCode: backup.code,
+      });
+    const snapshotId = parseSummary(backup.out).snapshotId;
+    // An append-only destination is pruned from the storage side: tug does not try and fail.
+    if (options.retentionMode === 'external')
+      return { snapshotId, repository, retention: { state: 'external' } };
     const forget = await exec([
       'restic',
       'forget',
@@ -354,14 +410,19 @@ export async function pushControlArchive(
       ...RETENTION,
       '--prune',
       '--retry-lock',
-      '10m',
+      RESTIC_LOCK_WAIT,
     ]);
+    if (forget.code === 0) return { snapshotId, repository, retention: { state: 'ok' } };
+    const message = summarizeRetentionFailure(forget.err || forget.out);
     return {
-      snapshotId: parseSummary(backup.out).snapshotId,
+      snapshotId,
       repository,
-      ...(forget.code === 0
-        ? {}
-        : { warning: `retention failed: ${summarize(forget.err || forget.out)}` }),
+      warning: `retention failed: ${message}`,
+      retention: {
+        state: 'failed',
+        message,
+        ...(forget.code === RESTIC_EXIT_LOCKED ? { locked: true } : {}),
+      },
     };
   });
 }
@@ -424,14 +485,22 @@ export async function listControlSnapshots(
   access: ControlRepositoryAccess,
 ): Promise<{ state: 'ok' | 'missing'; snapshots: ControlSnapshot[] }> {
   return withRestic(docker, controlAccess(access), async (exec) => {
-    const probe = await exec(['restic', 'cat', 'config']);
+    const probe = await exec(['restic', 'cat', 'config', '--no-lock']);
     const state = classifyRepositoryProbe(probe);
     if (state === 'missing') return { state: 'missing' as const, snapshots: [] };
     if (state === 'error')
       throw new ControlBackupError(
         `cannot read the control repository (wrong control password or credentials, or an unreachable store): ${await explainProbe(exec, probe)}`,
+        { exitCode: probe.code },
       );
-    const listed = await exec(['restic', 'snapshots', '--json', ...SNAPSHOT_FILTER]);
+    const listed = await exec([
+      'restic',
+      'snapshots',
+      '--json',
+      ...SNAPSHOT_FILTER,
+      '--retry-lock',
+      RESTIC_LOCK_WAIT,
+    ]);
     if (listed.code !== 0)
       throw new ControlBackupError(
         `could not list the control backups: ${summarize(listed.err || listed.out)}`,
@@ -452,24 +521,41 @@ export async function fetchControlArchive(
       'the snapshot must be an id from `tug control backup list` (8 to 64 hex digits)',
     );
   await withRestic(docker, controlAccess(access), async (exec, run) => {
-    const probe = await exec(['restic', 'cat', 'config']);
+    const probe = await exec(['restic', 'cat', 'config', '--no-lock']);
     const state = classifyRepositoryProbe(probe);
     if (state !== 'ok')
       throw new ControlBackupError(
         state === 'missing'
           ? `no control backup was found at ${controlRepository(access.url)}`
           : `cannot read the control repository (wrong control password or credentials, or an unreachable store): ${await explainProbe(exec, probe)}`,
+        { exitCode: probe.code },
       );
     if (snapshot !== 'latest') {
       // Only snapshots control itself stored may be restored into control, whatever else the repository holds.
-      const listed = await exec(['restic', 'snapshots', snapshot, '--json', ...SNAPSHOT_FILTER]);
+      const listed = await exec([
+        'restic',
+        'snapshots',
+        snapshot,
+        '--json',
+        ...SNAPSHOT_FILTER,
+        '--retry-lock',
+        RESTIC_LOCK_WAIT,
+      ]);
       if (listed.code !== 0 || !parseSnapshots(listed.out).length)
         throw new ControlBackupError(
           `snapshot ${snapshot} is not a control backup in ${controlRepository(access.url)}; see \`tug control backup list\``,
         );
     }
     const dump = await run(
-      ['restic', 'dump', snapshot, `/${CONTROL_ARCHIVE_NAME}`, ...SNAPSHOT_FILTER],
+      [
+        'restic',
+        'dump',
+        snapshot,
+        `/${CONTROL_ARCHIVE_NAME}`,
+        ...SNAPSHOT_FILTER,
+        '--retry-lock',
+        RESTIC_LOCK_WAIT,
+      ],
       destination,
       'read',
     );
@@ -479,6 +565,85 @@ export async function fetchControlArchive(
         `could not read ${snapshot === 'latest' ? 'the latest' : `snapshot ${snapshot} of the`} control backup: ${summarize(dump.err)}`,
       );
     }
+  });
+}
+
+/**
+ * Runs `restic unlock` on the control repository: only locks that have gone stale are removed, so a control backup that
+ * is writing right now keeps its own. Returns the locks before and after; what is left is live or not stale yet.
+ */
+export async function unlockControlRepository(
+  docker: DockerApi,
+  access: ControlRepositoryAccess,
+): Promise<{ before: number; after: number }> {
+  return withRestic(docker, controlAccess(access), async (exec) => {
+    const probe = await exec(['restic', 'cat', 'config', '--no-lock']);
+    const state = classifyRepositoryProbe(probe);
+    if (state === 'missing')
+      throw new ControlBackupError(
+        `no control repository exists at ${controlRepository(access.url)}, so there is nothing to unlock`,
+      );
+    if (state === 'error')
+      throw new ControlBackupError(
+        `cannot read the control repository: ${await explainProbe(exec, probe)}`,
+        { exitCode: probe.code },
+      );
+    const counts = async (): Promise<number> => {
+      const listed = await exec(['restic', 'list', 'locks', '--no-lock']);
+      if (listed.code !== 0)
+        throw new ControlBackupError(
+          `could not list the control repository locks: ${summarize(listed.err || listed.out)}`,
+        );
+      return lockCount(listed.out);
+    };
+    const before = await counts();
+    const unlocked = await exec(['restic', 'unlock']);
+    if (unlocked.code !== 0)
+      throw new ControlBackupError(`unlock failed: ${summarize(unlocked.err || unlocked.out)}`, {
+        exitCode: unlocked.code,
+      });
+    return { before, after: await counts() };
+  });
+}
+
+/**
+ * Runs `restic check` on the control repository, reading a subset of the data when `subset` is set. control's own backup
+ * prunes after each push, so there is nothing to prune here. Returns restic's verdict; the check failing is a result, not
+ * an error, so the caller can record it.
+ */
+export async function checkControlRepository(
+  docker: DockerApi,
+  access: ControlRepositoryAccess,
+  subset?: string,
+): Promise<BackupMaintenanceOutcome> {
+  return withRestic(docker, controlAccess(access), async (exec) => {
+    const probe = await exec(['restic', 'cat', 'config', '--no-lock']);
+    const state = classifyRepositoryProbe(probe);
+    if (state === 'missing')
+      throw new ControlBackupError(
+        `no control repository exists at ${controlRepository(access.url)}, so there is nothing to check`,
+      );
+    if (state === 'error')
+      throw new ControlBackupError(
+        `cannot read the control repository: ${await explainProbe(exec, probe)}`,
+        { exitCode: probe.code },
+      );
+    const checked = await exec([
+      'restic',
+      'check',
+      ...(subset ? [`--read-data-subset=${subset}`] : []),
+      '--retry-lock',
+      RESTIC_LOCK_WAIT,
+    ]);
+    return {
+      prune: 'skipped',
+      check: checked.code === 0 ? 'ok' : 'failed',
+      ...(checked.code === 0
+        ? {}
+        : { message: `check failed: ${summarize(checked.err || checked.out)}` }),
+      ...(checked.code === RESTIC_EXIT_LOCKED ? { locked: true } : {}),
+      ...(subset ? { subset } : {}),
+    };
   });
 }
 
@@ -499,7 +664,7 @@ export async function checkRepository(
 ): Promise<RepositoryCheck> {
   try {
     return await withRestic(docker, access, async (exec) => {
-      const probe = await exec(['restic', 'cat', 'config']);
+      const probe = await exec(['restic', 'cat', 'config', '--no-lock']);
       const state = classifyRepositoryProbe(probe);
       if (state === 'ok') return { state: 'ok' as const };
       if (state === 'error')

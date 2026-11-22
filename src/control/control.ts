@@ -37,7 +37,8 @@ import { createWriterQueue, WRITER_OVERDUE_AFTER_MS } from './writer-queue.ts';
 import type tls from 'node:tls';
 import * as tar from 'tar';
 import { openDb, openSnapshotDb } from '../db/db.ts';
-import type { Db } from '../db/db.ts';
+import type { Db, RestoreRunRow } from '../db/db.ts';
+import { parseAge } from '../duration.ts';
 import { isUniqueViolation } from '../db/driver.ts';
 import { lockQueries } from '../db/locks.ts';
 import { backupDestinationQueries } from '../backup/destination-store.ts';
@@ -120,6 +121,7 @@ import {
   LIVE_MAX_SESSIONS,
   LIVE_START_TIMEOUT_MS,
   BACKUP_COMMAND_TYPES,
+  DEPLOY_HOLD_REASON,
   CLIENT_VERSION_HEADER,
   SKEW_CLIENT_NEWER,
   STREAM_FEATURES,
@@ -127,10 +129,18 @@ import {
   compareCompat,
   majorMinor,
 } from '../protocol.ts';
-import type { BackupJobPayload } from '../protocol.ts';
+import type {
+  BackupCause,
+  BackupJobPayload,
+  BackupJobResult,
+  BackupRetentionOutcome,
+} from '../protocol.ts';
+import type { RetentionStatus } from '../backup/check.ts';
 import {
   isReservedProject,
+  normalizeDestinationUrl,
   parseBackupDestination,
+  parseRetentionMode,
   projectRepository,
   repositoryPassword,
   redactSecrets,
@@ -139,12 +149,26 @@ import {
   CONTROL_SNAPSHOT_ID,
   controlRepository,
   controlRepositoryPassword,
+  ControlBackupError,
   checkRepository,
   fetchControlArchive,
   listControlSnapshots,
   pushControlArchive,
+  unlockControlRepository,
+  checkControlRepository,
 } from '../backup/control-backup.ts';
-import { DEFAULT_RESTIC_IMAGE, createBackupService } from '../backup/scheduler.ts';
+import {
+  MAINTENANCE_INTERVAL_MS,
+  MAINTENANCE_RETRY_MS,
+  firstDueAt,
+  maintenanceStore,
+  parseSubset,
+  protectionLevel,
+} from '../backup/maintenance.ts';
+import type { MaintenanceRecord } from '../backup/maintenance.ts';
+import { verifyFailing } from '../backup/check.ts';
+import { stopResticGracefully } from '../backup/job.ts';
+import { DEFAULT_RESTIC_IMAGE, createBackupService, retentionStatus } from '../backup/scheduler.ts';
 import { CheckCommands, checkPassed, nodeCheckFromResult } from '../backup/destination-check.ts';
 import type { DestinationCheckResult, NodeCheck } from '../backup/destination-check.ts';
 import {
@@ -2291,12 +2315,15 @@ export async function createApp(
   const backupTickMs = Number(process.env.TUG_BACKUP_TICK_MS) || 30_000;
   /** Assigned with the control backup code below; control's own nightly backup into the destination. */
   let controlDestinationTick: () => void = () => {};
+  /** Assigned with the repository maintenance code; the weekly prune and check. */
+  let maintenanceTick: () => void = () => {};
   const backupTimer: NodeJS.Timeout = setInterval(() => {
     // A restore closes the database for good (control restarts to use the restored one): nothing left to schedule.
     if (restartRequired) return void clearInterval(backupTimer);
     try {
       backups.tick();
       controlDestinationTick();
+      maintenanceTick();
       restores.advance();
     } catch (e) {
       log.failure('backup scheduler failed', e, {}, 'error');
@@ -2370,15 +2397,157 @@ export async function createApp(
     if ('error' in started) return res.status(started.status).json({ error: started.error });
     res.json({ confirmed: true, plan, ...started });
   });
-  api('get', '/api/v1/restores', queryProject, async (req, res) =>
+  api('get', '/api/v1/restores', queryProject, async (req, res) => {
+    const project = String(req.query.project || 'site');
+    const interrupted = req.query.state === 'interrupted';
     res.json({
-      restores: restores.list(
-        String(req.query.project || 'site'),
-        20,
-        req.query.state === 'interrupted',
-      ),
-    }),
-  );
+      restores: restores.list(project, 20, interrupted),
+      // What restores left behind belongs to the listing of one named project; a selection of interrupted restores has no use for it.
+      ...(req.query.project && !interrupted ? { leftovers: restores.leftovers(project) } : {}),
+    });
+  });
+  /**
+   * Forgets tug's safety snapshots in one `backup.forget` job and drops them from their restores. An append-only
+   * destination refuses deletes, so it is refused here with the reason, before anything is queued. The caller holds the
+   * project lock.
+   */
+  async function forgetSafety(
+    project: string,
+    snapshots: { restoreId: string; snapshotId: string }[],
+  ): Promise<{ error: string; status: number } | { forgotten: string[] }> {
+    if (destinationQueries.retention() === 'external')
+      return {
+        status: 409,
+        error:
+          'the destination is append-only (retention external), which refuses deletes, so tug cannot forget a safety snapshot; remove it from the storage side with restic forget, with credentials that may delete (the repository and password come from tug backup password)',
+      };
+    const picked = pickBackupNode(project);
+    if ('error' in picked) return picked;
+    const ran = await runOnNode(picked.node, project, 'backup.forget', 'forget', {
+      limitMs: UNLOCK_LIMIT_MS(),
+      forget: { snapshotIds: snapshots.map((snapshot) => snapshot.snapshotId) },
+    });
+    if ('error' in ran) return { error: ran.error, status: ran.status };
+    for (const snapshot of snapshots) restores.cleared(snapshot.restoreId, 'safety');
+    return { forgotten: ran.result.forgotten ?? [] };
+  }
+  const restoreProject = (req: { params: { id?: string } }): string | null =>
+    db.get<{ project_id: string }>(
+      'SELECT project_id FROM restore_runs WHERE id=?',
+      String(req.params.id),
+    )?.project_id ?? null;
+  /**
+   * Removes what a finished restore left: the scratch volume of a scratch restore (on its node) and the safety snapshot
+   * of an in-place one. A restore that failed or is interrupted keeps its safety snapshot, because it is the only copy
+   * of what the data was.
+   */
+  api('post', '/api/v1/restores/:id/remove', restoreProject, async (req, res) => {
+    const restore = db.get<RestoreRunRow>(
+      'SELECT * FROM restore_runs WHERE id=?',
+      String(req.params.id),
+    );
+    if (!restore) return res.status(404).json({ error: 'restore not found' });
+    const project = restore.project_id;
+    const left = restores.leftovers(project);
+    const scratch = left.scratchVolumes.find((item) => item.restoreId === restore.id);
+    const safety = left.safetySnapshots.find((item) => item.restoreId === restore.id);
+    if (!scratch && !safety)
+      return res.status(409).json({
+        error: `restore ${restore.id} (${restore.state}) has nothing to remove: a scratch volume is removable once the restore succeeded or failed, and a safety snapshot once it succeeded or was released`,
+      });
+    let lock;
+    try {
+      lock = acquireProjectLock(project, 'restore.remove');
+      // A restore leaves one or the other: a scratch restore a volume, an in-place one its safety snapshot.
+      let removed: { safetySnapshot: string } | { scratchVolume: string };
+      if (safety) {
+        const forgotten = await forgetSafety(project, [safety]);
+        if ('error' in forgotten)
+          return res.status(forgotten.status).json({ error: forgotten.error });
+        removed = { safetySnapshot: safety.snapshotId };
+      } else {
+        // `scratch` is set: the guard above returned when both were missing.
+        const volume = scratch!;
+        if (!restore.node_id)
+          return res
+            .status(409)
+            .json({ error: 'the restore has no node, so its volume is unknown' });
+        const commandId = queueCommand(restore.node_id, project, 'restore.remove', {
+          project,
+          restoreId: restore.id,
+          volume: volume.volume,
+        });
+        const outcome = await jobCommands.wait(commandId, UNLOCK_LIMIT_MS(), () =>
+          cancelCheckCommand(commandId, restore.node_id!, project),
+        );
+        if (outcome === 'timeout')
+          return res.status(504).json({
+            error: `node ${volume.node ?? restore.node_id} did not remove volume ${volume.volume} in time; check tug node list and run it again`,
+          });
+        if (outcome.state !== 'succeeded')
+          return res.status(502).json({
+            error:
+              (outcome.result as { error?: string }).error ??
+              'the node could not remove the volume',
+          });
+        restores.cleared(restore.id, 'scratch');
+        removed = { scratchVolume: volume.volume };
+      }
+      audit(req.actor!, {
+        type: 'restore.removed',
+        project,
+        message: `leftovers of restore ${restore.id} removed by ${req.actor!.name}`,
+        metadata: { restoreId: restore.id, ...removed },
+      });
+      res.json({ ok: true, restoreId: restore.id, removed });
+    } catch (e) {
+      sendError(res, e);
+    } finally {
+      releaseLock(lock);
+    }
+  });
+  /** Forgets the safety snapshots of restores that finished more than `olderThan` ago (`30d`, `12h`, `2w`). */
+  api('post', '/api/v1/restores/expire-safety', bodyProject, async (req, res) => {
+    const project = String(req.body?.project || 'site');
+    const age = parseAge(req.body?.olderThan);
+    if (age === null)
+      return res
+        .status(400)
+        .json({ error: 'olderThan is required, as an age such as 30d, 12h, 90m or 2w' });
+    const cutoff = Date.now() - age;
+    const expired = restores
+      .leftovers(project)
+      .safetySnapshots.filter((item) => item.createdAt && Date.parse(item.createdAt) < cutoff);
+    if (!expired.length) return res.json({ ok: true, project, expired: [] });
+    let lock;
+    try {
+      lock = acquireProjectLock(project, 'restore.expire-safety');
+      const forgotten = await forgetSafety(project, expired);
+      if ('error' in forgotten)
+        return res.status(forgotten.status).json({ error: forgotten.error });
+      audit(req.actor!, {
+        type: 'restore.safety_expired',
+        project,
+        message: `${expired.length} safety snapshot(s) older than ${req.body.olderThan} forgotten by ${req.actor!.name}`,
+        metadata: {
+          olderThan: req.body.olderThan,
+          restores: expired.map((item) => item.restoreId),
+        },
+      });
+      res.json({
+        ok: true,
+        project,
+        expired: expired.map((item) => ({
+          restoreId: item.restoreId,
+          snapshotId: item.snapshotId,
+        })),
+      });
+    } catch (e) {
+      sendError(res, e);
+    } finally {
+      releaseLock(lock);
+    }
+  });
   api('post', '/api/v1/restores/:id/release', null, async (req, res) => {
     const result = restores.releaseInterrupted(String(req.params.id));
     if ('error' in result) return res.status(result.status).json({ error: result.error });
@@ -2389,6 +2558,398 @@ export async function createApp(
     if ('error' in result) return res.status(result.status).json({ error: result.error });
     res.json(result);
   });
+  type NodeLike = Pick<NodeRow, 'id' | 'name'>;
+  /** The node that runs the project's backups, so it can reach the project's repository; or why none can. */
+  function pickBackupNode(project: string): { node: NodeLike } | { error: string; status: number } {
+    if (!PROJECT_NAME_PATTERN.test(project) || isReservedProject(project))
+      return { error: 'project is required', status: 400 };
+    if (!db.get('SELECT 1 FROM projects WHERE id=?', project))
+      return { error: `project ${project} has not been deployed yet`, status: 404 };
+    backups.sync();
+    const candidates = db
+      .all<Pick<NodeRow, 'id' | 'name' | 'status' | 'disabled_at' | 'last_seen_at'>>(
+        `SELECT DISTINCT n.id,n.name,n.status,n.disabled_at,n.last_seen_at FROM backup_schedules s JOIN nodes n ON n.id=s.node_id WHERE s.project_id=? AND s.enabled=1 ORDER BY n.name`,
+        project,
+      )
+      .filter((node) => statusOf(node) === 'online');
+    if (!candidates.length)
+      return {
+        error: `no online node runs backups of project ${project}, so none can reach its repository; check tug node list`,
+        status: 409,
+      };
+    return { node: candidates[0] };
+  }
+  /**
+   * Queues a repository job (`backup.unlock`, `backup.maintain`) for a project on a node and waits for it. The node
+   * runs it in the project's job lane, behind a backup of that project that is running there. An operator's job goes
+   * ahead of scheduled backups in the node's queue.
+   */
+  async function runOnNode(
+    node: NodeLike,
+    project: string,
+    type: 'backup.unlock' | 'backup.maintain' | 'backup.forget',
+    tag: string,
+    options: {
+      limitMs: number;
+      trigger?: 'manual' | 'schedule';
+      maintain?: BackupJobPayload['maintain'];
+      forget?: BackupJobPayload['forget'];
+    },
+  ): Promise<
+    | { result: BackupJobResult }
+    | { error: string; status: number; cause?: BackupCause; body: { error: string; node?: string } }
+  > {
+    const destination = backupDestination()!;
+    const { limitMs } = options;
+    const payload: BackupJobPayload = {
+      runId: id(tag.slice(0, 3)),
+      project,
+      target: '',
+      type: 'command',
+      repository: projectRepository(destination.url, project),
+      resticImage: resticImage(),
+      node: node.name,
+      tags: ['tug', `project:${project}`, tag, `trigger:${options.trigger ?? 'manual'}`],
+      limits: { memory: '512m', timeoutSec: Math.max(1, Math.ceil(limitMs / 1000)) },
+      ...(options.maintain ? { maintain: options.maintain } : {}),
+      ...(options.forget ? { forget: options.forget } : {}),
+    };
+    const commandId = queueCommand(
+      node.id,
+      project,
+      type,
+      payload as unknown as Record<string, unknown>,
+      new Date(Date.now() + limitMs).toISOString(),
+    );
+    const outcome = await jobCommands.wait(commandId, limitMs, () =>
+      cancelCheckCommand(commandId, node.id, project),
+    );
+    if (outcome === 'timeout') {
+      const error = `node ${node.name} did not finish within ${Math.round(limitMs / 1000)} s; a backup of this project may be holding its queue`;
+      return { error, status: 504, body: { error } };
+    }
+    if (outcome.state !== 'succeeded') {
+      const error = redactSecrets(
+        (outcome.result as { error?: string }).error ?? `the ${tag} failed`,
+        Object.values(backupEnv()),
+      );
+      const cause = (outcome.result as { cause?: BackupCause }).cause;
+      return { error, status: 502, ...(cause ? { cause } : {}), body: { error, node: node.name } };
+    }
+    return { result: outcome.result as BackupJobResult };
+  }
+  /** Repositories (a project, or `_control`) being maintained now. */
+  const maintaining = new Set<string>();
+  const maintenance = maintenanceStore(db);
+  const MAINTENANCE_LIMIT_MS = () =>
+    Number(process.env.TUG_MAINTENANCE_TIMEOUT_MS) || 6 * 3_600_000;
+  /** A maintenance job that did not report: `transient` when a retry may well succeed (a timeout, a lock exit). */
+  class MaintenanceFailure extends Error {
+    readonly transient: boolean;
+    constructor(message: string, transient: boolean) {
+      super(message);
+      this.transient = transient;
+    }
+  }
+  /**
+   * Prunes (when asked) and checks one repository on its node, or control's own from control, and stores what it found.
+   * A failure that may be an overlap (restic's lock exit code, a node that did not answer, a timeout) must repeat before
+   * it counts: `backup.verify_failed` is raised, and `backup list --check` fails, on the second in a row, or at once
+   * for any other failure. `backup.verify_recovered` follows a pass after a reported failure.
+   */
+  async function maintainRepository(
+    project: string,
+    node: NodeLike | undefined,
+    options: {
+      prune: boolean;
+      subset?: string;
+      trigger: 'manual' | 'schedule';
+      actor?: Actor;
+    },
+  ): Promise<MaintenanceRecord> {
+    const destination = backupDestination();
+    if (!destination) throw new Error('no backup destination is configured');
+    maintaining.add(project);
+    const startedAt = now();
+    try {
+      let record: Omit<MaintenanceRecord, 'failures'>;
+      try {
+        const common = {
+          startedAt,
+          trigger: options.trigger,
+          ...(node ? { node: node.name } : {}),
+        };
+        let outcome;
+        if (project === '_control')
+          outcome = await checkControlRepository(
+            docker,
+            {
+              url: destination.url,
+              env: backupEnv(),
+              password: controlRepositoryPassword(masterKey),
+              resticImage: resticImage(),
+              limitMs: MAINTENANCE_LIMIT_MS(),
+              stallMs: controlStallMs(),
+            },
+            options.subset,
+          );
+        else {
+          const ran = await runOnNode(node!, project, 'backup.maintain', 'maintain', {
+            limitMs: MAINTENANCE_LIMIT_MS(),
+            trigger: options.trigger,
+            maintain: {
+              prune: options.prune,
+              ...(options.subset ? { subset: options.subset } : {}),
+            },
+          });
+          // A timeout (504) is a node that did not answer; a failed job is transient only when restic's lock exit says so.
+          if ('error' in ran)
+            throw new MaintenanceFailure(ran.error, ran.status === 504 || ran.cause === 'locked');
+          outcome = ran.result.maintenance;
+          if (!outcome) throw new Error('the node reported no maintenance result');
+        }
+        const ok = outcome.check === 'ok' && outcome.prune !== 'failed';
+        record = {
+          ...outcome,
+          ...common,
+          finishedAt: now(),
+          ok,
+          ...(!ok && outcome.locked ? { transient: true } : {}),
+        };
+      } catch (e) {
+        const error = errMessage(e);
+        const transient =
+          (e instanceof MaintenanceFailure && e.transient) ||
+          (e instanceof ControlBackupError && e.jobCause === 'locked');
+        record = {
+          prune: 'skipped',
+          check: 'failed',
+          message: error,
+          error,
+          startedAt,
+          finishedAt: now(),
+          trigger: options.trigger,
+          ok: false,
+          ...(transient ? { transient: true } : {}),
+          ...(node ? { node: node.name } : {}),
+        };
+      }
+      const before = maintenance.record(project);
+      const failures = record.ok ? 0 : (before?.failures ?? 0) + 1;
+      const stored: MaintenanceRecord = { ...record, failures };
+      maintenance.setRecord(project, stored);
+      if (options.trigger === 'schedule')
+        maintenance.setNextAt(
+          project,
+          Date.now() + (record.ok ? MAINTENANCE_INTERVAL_MS : MAINTENANCE_RETRY_MS),
+        );
+      const what =
+        project === '_control' ? 'the control repository' : `the repository of ${project}`;
+      const nodeId = node?.id ?? null;
+      if (verifyFailing(stored)) {
+        if (!verifyFailing(before))
+          backups.event(
+            'error',
+            'backup.verify_failed',
+            project,
+            `checking or pruning ${what} failed${stored.failures > 1 ? ` ${stored.failures} times in a row` : ''}: ${stored.message ?? 'restic reported an error'}`,
+            {
+              prune: stored.prune,
+              check: stored.check,
+              message: stored.message,
+              trigger: options.trigger,
+              failures: stored.failures,
+              ...(stored.locked ? { cause: 'locked' } : {}),
+            },
+            nodeId,
+            options.actor?.name,
+          );
+      } else if (stored.ok && verifyFailing(before))
+        backups.event(
+          'info',
+          'backup.verify_recovered',
+          project,
+          `${what} passes its check again`,
+          { prune: stored.prune, check: stored.check },
+          nodeId,
+          options.actor?.name,
+        );
+      return stored;
+    } finally {
+      maintaining.delete(project);
+    }
+  }
+  /**
+   * Once a week per repository: prune it and check it. One at a time, so the destination is not read by every project
+   * at once, and the first run of a repository is spread over its first week by its name.
+   */
+  maintenanceTick = () => {
+    const destination = backupDestination();
+    if (!destination || restartRequired || maintaining.size) return;
+    const at = Date.now();
+    const external = destinationQueries.retention() === 'external';
+    const due = (repository: string): boolean => {
+      const next = maintenance.nextAt(repository);
+      if (next === null) {
+        maintenance.setNextAt(repository, firstDueAt(repository, at));
+        return false;
+      }
+      return next <= at;
+    };
+    const projects = db
+      .all<{ project_id: string }>(
+        'SELECT DISTINCT project_id FROM backup_schedules WHERE enabled=1 AND last_success_at IS NOT NULL ORDER BY project_id',
+      )
+      .map((row) => row.project_id);
+    for (const project of projects) {
+      if (!due(project)) continue;
+      const picked = pickBackupNode(project);
+      if ('error' in picked) continue;
+      void maintainRepository(project, picked.node, {
+        prune: !external,
+        trigger: 'schedule',
+      }).catch((e) => log.failure('repository maintenance failed', e, { project }, 'error'));
+      return;
+    }
+    // control's own repository: checked weekly like the rest (its nightly backup prunes it already).
+    const key = destinationKey(destination.url);
+    if (!controlPush && lastControlDestination(key, true) && due('_control'))
+      void maintainRepository('_control', undefined, { prune: false, trigger: 'schedule' }).catch(
+        (e) => log.failure('control repository check failed', e, {}, 'error'),
+      );
+  };
+  /** The `backup.unlock`, `backup.maintain`, `backup.forget` and `restore.remove` commands being waited for; like a check's, their result is never a backup run's. */
+  const jobCommands = new CheckCommands();
+  const UNLOCK_LIMIT_MS = () => Number(process.env.TUG_UNLOCK_TIMEOUT_MS) || 5 * 60_000;
+  /**
+   * Removes stale restic locks from a project's repository, or with `control: true` from control's own. Plain
+   * `restic unlock`, which removes only locks that have gone stale: tug never unlocks on its own, because a lock may
+   * belong to a prune running on another host. The project is not locked: restic's own stale-lock rule is what makes
+   * unlocking safe, and the project lock would only block deploys. The node runs it in the project's job lane, behind a
+   * backup of that project that is running there.
+   */
+  api(
+    'post',
+    '/api/v1/backups/unlock',
+    (req) => (req.body?.control === true ? null : String(req.body?.project || 'site')),
+    async (req, res) => {
+      const destination = backupDestination();
+      if (!destination)
+        return res.status(409).json({
+          error: 'no backup destination is configured; set one with tug backup destination set',
+        });
+      const summary = (counts: { before: number; after: number }) => ({
+        removed: Math.max(0, counts.before - counts.after),
+        remaining: counts.after,
+        ...(counts.after
+          ? {
+              note: 'the remaining locks are held by a restic that is running, or have not gone stale yet: restic removes a lock only after it has gone 30 minutes without a refresh, so run this again later',
+            }
+          : {}),
+      });
+      if (req.body?.control === true) {
+        try {
+          const counts = await unlockControlRepository(docker, {
+            url: destination.url,
+            env: backupEnv(),
+            password: controlRepositoryPassword(masterKey),
+            resticImage: resticImage(),
+            limitMs: controlJobLimitMs(),
+            stallMs: controlStallMs(),
+          });
+          audit(req.actor!, {
+            type: 'backup.unlock',
+            message: `control repository unlocked by ${req.actor!.name}: removed ${summary(counts).removed} lock(s), ${counts.after} remain`,
+            metadata: { control: true, ...summary(counts) },
+          });
+          return res.json({ ok: true, control: true, ...summary(counts) });
+        } catch (e) {
+          return res.status(502).json({ error: errMessage(e) });
+        }
+      }
+      const project = String(req.body?.project || 'site');
+      const picked = pickBackupNode(project);
+      if ('error' in picked) return res.status(picked.status).json({ error: picked.error });
+      try {
+        const outcome = await runOnNode(picked.node, project, 'backup.unlock', 'unlock', {
+          limitMs: UNLOCK_LIMIT_MS(),
+        });
+        if ('error' in outcome) return res.status(outcome.status).json(outcome.body);
+        const counts = outcome.result.unlock;
+        if (!counts) return res.status(502).json({ error: 'the node reported no unlock result' });
+        audit(req.actor!, {
+          type: 'backup.unlock',
+          project,
+          message: `repository of ${project} unlocked by ${req.actor!.name}: removed ${summary(counts).removed} lock(s), ${counts.after} remain`,
+          metadata: { node: picked.node.name, ...summary(counts) },
+        });
+        res.json({ ok: true, project, node: picked.node.name, ...summary(counts) });
+      } catch (e) {
+        sendError(res, e);
+      }
+    },
+  );
+  /**
+   * Prunes the repository (when asked) and runs `restic check` on it, now. Answers 202 at once: a check that reads data
+   * can take hours, and the project lock is not held, because a restic that needs the repository exclusively waits for
+   * the others' locks itself. The outcome is stored (`tug backup list` shows it), raises `backup.verify_failed` when
+   * it fails, and is what the `verified` protection level rests on.
+   */
+  api(
+    'post',
+    '/api/v1/backups/verify',
+    (req) => (req.body?.control === true ? null : String(req.body?.project || 'site')),
+    async (req, res) => {
+      const destination = backupDestination();
+      if (!destination)
+        return res.status(409).json({
+          error: 'no backup destination is configured; set one with tug backup destination set',
+        });
+      let subset: string | undefined;
+      try {
+        subset = parseSubset(req.body?.readDataSubset);
+      } catch (e) {
+        return res.status(400).json({ error: errMessage(e) });
+      }
+      const control = req.body?.control === true;
+      const project = control ? '_control' : String(req.body?.project || 'site');
+      let node: NodeLike | undefined;
+      if (!control) {
+        const picked = pickBackupNode(project);
+        if ('error' in picked) return res.status(picked.status).json({ error: picked.error });
+        node = picked.node;
+      }
+      if (maintaining.has(project))
+        return res.status(409).json({
+          error: control
+            ? 'control repository maintenance is already running'
+            : `maintenance of project ${project} is already running`,
+        });
+      void maintainRepository(project, node, {
+        // A manual verify never prunes: that is the weekly job's, or the storage side's on an append-only server.
+        prune: false,
+        subset,
+        trigger: 'manual',
+        actor: req.actor!,
+      }).catch((e) => log.failure('backup verify failed', e, { project }, 'error'));
+      audit(req.actor!, {
+        type: 'backup.verify',
+        ...(control ? {} : { project }),
+        message: `repository check of ${control ? 'control' : project} started by ${req.actor!.name}`,
+        metadata: {
+          ...(control ? { control: true } : { node: node!.name }),
+          ...(subset ? { readDataSubset: subset } : {}),
+        },
+      });
+      res.status(202).json({
+        ok: true,
+        started: true,
+        ...(control ? { control: true } : { project, node: node!.name }),
+        ...(subset ? { readDataSubset: subset } : {}),
+        note: 'the result appears in tug backup list when the check finishes',
+      });
+    },
+  );
   api('post', '/api/v1/backups/:id/cancel', bodyProject, async (req, res) => {
     const result = backups.cancelRun(String(req.body.project || 'site'), String(req.params.id));
     if ('error' in result) return res.status(result.status).json({ error: result.error });
@@ -2403,12 +2964,36 @@ export async function createApp(
     backups.sync();
     const project = String(req.query.project || 'site');
     const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 500);
+    const destination = backupDestination();
+    const listed = backups.list(project, limit);
+    const verify = maintenance.record(project);
+    const local = Boolean(destination?.url.startsWith('/'));
+    const scratchTestedAt = (target: string): string | null =>
+      db.get<{ finished_at: string | null }>(
+        "SELECT finished_at FROM restore_runs WHERE project_id=? AND target=? AND mode='scratch' AND state='succeeded' ORDER BY finished_at DESC LIMIT 1",
+        project,
+        target,
+      )?.finished_at ?? null;
     res.json({
       project,
-      destinationConfigured: Boolean(backupDestination()),
+      destinationConfigured: Boolean(destination),
       // Failure text names the bucket, so a credential limited to some projects does not get control-wide detail.
       control: req.actor!.projects === null ? controlDestinationStatus() : null,
-      ...backups.list(project, limit),
+      verify: destination ? verify : null,
+      maintenanceRunning: maintaining.has(project),
+      ...listed,
+      targets: listed.targets.map((target) => ({
+        ...target,
+        protection: destination
+          ? protectionLevel({
+              local,
+              healthy: target.enabled && !target.problem,
+              lastSuccessAt: target.lastSuccessAt,
+              verify,
+              restoreTestedAt: scratchTestedAt(target.target),
+            })
+          : null,
+      })),
     });
   });
   api('get', '/api/v1/backup/destination', null, async (_req, res) => {
@@ -2419,6 +3004,7 @@ export async function createApp(
             configured: true,
             url: row.url,
             envNames: JSON.parse(row.env_names_json),
+            retention: destinationQueries.retention(),
             checkedAt: row.checked_at,
             checkResult: row.check_result_json ? JSON.parse(row.check_result_json) : null,
             updatedAt: row.updated_at,
@@ -2427,12 +3013,52 @@ export async function createApp(
     );
   });
   api('post', '/api/v1/backup/destination', null, async (req, res) => {
+    const current = backupDestination();
+    // A `retention` with no `env` changes only the mode of the destination in use and keeps its credentials. With no
+    // `url` that is the whole request; a `url` must then name the destination in use, never replace it.
+    if (req.body?.env === undefined && req.body?.retention !== undefined) {
+      const given = normalizeDestinationUrl(req.body.url) || undefined;
+      if (given === undefined || current) {
+        if (!current)
+          return res.status(409).json({
+            error:
+              'no backup destination is configured; set one with tug backup destination set <url>',
+          });
+        if (given !== undefined && given !== current.url)
+          return res.status(400).json({
+            error: `the destination in use is ${current.url}, not ${given}; --retention alone changes its mode. To move to ${given}, set it first (with its credentials, if it needs any) and then set the mode`,
+          });
+        let mode;
+        try {
+          mode = parseRetentionMode(req.body.retention)!;
+        } catch (e) {
+          return res.status(400).json({ error: errMessage(e) });
+        }
+        destinationQueries.setRetention(mode);
+        if (mode === 'external') clearRetentionFailures(req.actor!.name);
+        audit(req.actor!, {
+          type: 'backup.destination_set',
+          message: `backup destination retention set to ${mode} by ${req.actor!.name}`,
+          metadata: { url: current.url, retention: mode },
+        });
+        return res.json({
+          ok: true,
+          url: current.url,
+          envNames: JSON.parse(current.env_names_json),
+          retention: mode,
+        });
+      }
+    }
     let parsed;
     try {
       parsed = parseBackupDestination(req.body);
     } catch (e) {
       return res.status(400).json({ error: errMessage(e) });
     }
+    // The mode is kept when the same destination is set again (rotating a key must not turn pruning back on).
+    const retention =
+      parsed.retention ??
+      (current?.url === parsed.url ? destinationQueries.retention() : 'managed');
     const ts = now();
     abortRunningCheck();
     abortControlPush();
@@ -2444,13 +3070,15 @@ export async function createApp(
         encryptedValue: encrypt(value, masterKey),
       })),
       ts,
+      retention,
     );
+    if (retention === 'external') clearRetentionFailures(req.actor!.name);
     audit(req.actor!, {
       type: 'backup.destination_set',
       message: `backup destination set to ${parsed.url} by ${req.actor!.name}`,
-      metadata: { url: parsed.url, envNames: Object.keys(parsed.env).sort() },
+      metadata: { url: parsed.url, envNames: Object.keys(parsed.env).sort(), retention },
     });
-    res.json({ ok: true, url: parsed.url, envNames: Object.keys(parsed.env).sort() });
+    res.json({ ok: true, url: parsed.url, envNames: Object.keys(parsed.env).sort(), retention });
   });
   api('delete', '/api/v1/backup/destination', null, async (req, res) => {
     abortRunningCheck();
@@ -2548,6 +3176,7 @@ export async function createApp(
       startedAt: now(),
       from: 'control',
       url: destinationUrl,
+      retention: destinationQueries.retention(),
       repositories: [],
       nodes: [],
     };
@@ -3523,6 +4152,17 @@ export async function createApp(
           `a secret cannot be used in ${misplaced.join('; ')}: secrets are substituted only in environment, command, entrypoint and healthcheck.test. Use tug var set for a value that is not a secret`,
         );
       const deploymentValues = checkedDeploymentValues(project, body.values);
+      // `tug deploy --hold`: services the operator wants published stopped, such as an app that must not start
+      // before its database is imported. They stay stopped across later deploys until `tug hold release`.
+      const requestedHolds: string[] = Array.isArray(body.holds)
+        ? [...new Set<string>(body.holds.map(String))]
+        : [];
+      const unknownHolds = requestedHolds.filter((name) => !compose.services?.[name]);
+      if (unknownHolds.length)
+        throw httpError(
+          400,
+          `--hold names ${unknownHolds.join(', ')}, which ${unknownHolds.length === 1 ? 'is' : 'are'} not in the Compose file's services (${Object.keys(compose.services ?? {}).join(', ')})`,
+        );
       const acknowledgedMoves: string[] = Array.isArray(body.moves) ? body.moves.map(String) : [];
       const unacknowledged = movedServices(project, compose).filter(
         (name) => !acknowledgedMoves.includes(name),
@@ -3840,6 +4480,16 @@ export async function createApp(
                 null,
                 ts,
               );
+          for (const held of requestedHolds)
+            db.run(
+              `INSERT INTO service_holds(project_id,service,reason,restore_id,created_at) VALUES(?,?,?,?,?)
+               ON CONFLICT(project_id,service) DO NOTHING`,
+              project,
+              held,
+              DEPLOY_HOLD_REASON,
+              null,
+              ts,
+            );
           for (const [volumeName, volumeSpec] of Object.entries(compose.volumes || {})) {
             const lp = volumeSpec?.['x-tug'] || {};
             const nodeName = lp.placement?.nodes?.[0] || null;
@@ -4136,13 +4786,24 @@ export async function createApp(
         ? req.body.services.map(String)
         : [];
       // Only holds a deploy placed for a move; a restore's holds are dropped by `restore release`.
-      const rows = db.all<{ service: string }>(
-        'SELECT service FROM service_holds WHERE project_id=? AND restore_id IS NULL',
+      const held = db.all<{ service: string; reason: string }>(
+        'SELECT service,reason FROM service_holds WHERE project_id=? AND restore_id IS NULL',
         project,
       );
-      const released = rows
+      const reasons = new Map(held.map((row) => [row.service, row.reason]));
+      const admin = req.actor!.role === 'admin';
+      const wanted = held
         .map((row) => row.service)
         .filter((service) => !services.length || services.includes(service));
+      // A credential that can place a hold by deploying can release it again; every other hold stays with an admin.
+      const refused = admin
+        ? []
+        : wanted.filter((service) => reasons.get(service) !== DEPLOY_HOLD_REASON);
+      if (refused.length && services.length)
+        return res.status(403).json({
+          error: `${refused.join(', ')} ${refused.length === 1 ? 'is' : 'are'} held for another reason than ${DEPLOY_HOLD_REASON}, which only an admin credential can release`,
+        });
+      const released = wanted.filter((service) => !refused.includes(service));
       for (const service of released)
         db.run(
           'DELETE FROM service_holds WHERE project_id=? AND service=? AND restore_id IS NULL',
@@ -4208,8 +4869,11 @@ export async function createApp(
     }
     for (const helper of await docker
       .listContainers({ label: ['tug.job=control-backup'] })
-      .catch(() => []))
+      .catch(() => [])) {
+      // A restic left running by the previous process may hold the repository lock; it is stopped before removal.
+      if (helper.State === 'running') await stopResticGracefully(docker, helper.Id);
       await docker.removeContainer(helper.Id).catch(() => undefined);
+    }
   }
   /** Writes a consistent control archive into the control backup directory; the caller records it and decides how long it stays. */
   async function createControlArchive(
@@ -4342,6 +5006,66 @@ export async function createApp(
       `SELECT state,created_at,metadata_json FROM backups WHERE project_id='_control' AND target='control-destination' AND json_extract(metadata_json,'$.destination')=?${onlyCompleted ? " AND state='completed'" : ''} ORDER BY created_at DESC LIMIT 1`,
       key,
     );
+  /** Retention outcomes of control's completed backups in a destination, newest first. */
+  const controlRetentionOutcomes = (key: string, limit = 30): BackupRetentionOutcome[] =>
+    db
+      .all<{ metadata_json: string }>(
+        "SELECT metadata_json FROM backups WHERE project_id='_control' AND target='control-destination' AND state='completed' AND json_extract(metadata_json,'$.destination')=? ORDER BY created_at DESC LIMIT ?",
+        key,
+        limit,
+      )
+      .flatMap((row) => {
+        try {
+          return (
+            (JSON.parse(row.metadata_json) as { retention?: BackupRetentionOutcome }).retention ??
+            []
+          );
+        } catch {
+          return [];
+        }
+      });
+  /**
+   * Setting the destination's retention to `external` ends a retention failure that control's own backup recorded:
+   * the newest completed control backup of the destination that carries a retention outcome is rewritten as
+   * `external` and one `backup.retention_recovered` event is recorded, so `tug backup list --check` is green at once.
+   * Returns whether a failure was cleared.
+   */
+  function clearControlRetentionFailure(): boolean {
+    const destination = backupDestination();
+    if (!destination) return false;
+    const rows = db.all<{ id: string; metadata_json: string }>(
+      "SELECT id,metadata_json FROM backups WHERE project_id='_control' AND target='control-destination' AND state='completed' AND json_extract(metadata_json,'$.destination')=? ORDER BY created_at DESC LIMIT 30",
+      destinationKey(destination.url),
+    );
+    for (const row of rows) {
+      let meta: { retention?: BackupRetentionOutcome } & Record<string, unknown>;
+      try {
+        meta = JSON.parse(row.metadata_json);
+      } catch {
+        continue;
+      }
+      if (!meta.retention) continue;
+      if (meta.retention.state !== 'failed') return false;
+      db.run(
+        'UPDATE backups SET metadata_json=? WHERE id=?',
+        JSON.stringify({ ...meta, retention: { state: 'external' } }),
+        row.id,
+      );
+      controlEvent(
+        'info',
+        'backup.retention_recovered',
+        "retention of the control backups no longer applies: the destination's retention is external, so tug does not prune it",
+        { retention: 'external' },
+      );
+      return true;
+    }
+    return false;
+  }
+  /** Ends every recorded retention failure, the projects' and control's, once the destination's retention is `external`. */
+  function clearRetentionFailures(actor: string): void {
+    backups.clearRetentionFailures(actor);
+    clearControlRetentionFailure();
+  }
   /** What `tug backup list` shows about control's own backup in the current destination; null while there is none. */
   function controlDestinationStatus(): {
     lastSuccessAt: string | null;
@@ -4349,12 +5073,24 @@ export async function createApp(
     problem: string | null;
     scope: 'shared' | 'local';
     repository: string;
+    retention: RetentionStatus | null;
+    cause: BackupCause | null;
+    verify: MaintenanceRecord | null;
   } | null {
     const destination = backupDestination();
     if (!destination) return null;
     const key = destinationKey(destination.url);
     const ok = lastControlDestination(key, true);
     const last = lastControlDestination(key, false);
+    const lastMeta = last
+      ? (JSON.parse(last.metadata_json) as {
+          error?: string;
+          cause?: BackupCause;
+          retention?: BackupRetentionOutcome;
+        })
+      : {};
+    const retention = retentionStatus(controlRetentionOutcomes(key));
+    const cause = last?.state === 'failed' ? (lastMeta.cause ?? null) : null;
     const failure =
       last?.state === 'failed'
         ? `the last control backup failed: ${(JSON.parse(last.metadata_json) as { error?: string }).error ?? 'unknown error'}`
@@ -4375,6 +5111,9 @@ export async function createApp(
       // A local path is for development: it does not survive losing the host, so it is never shown as off-host.
       scope: destination.url.startsWith('/') ? 'local' : 'shared',
       repository: controlRepository(destination.url),
+      retention,
+      cause,
+      verify: maintenance.record('_control'),
     };
   }
   /**
@@ -4428,10 +5167,17 @@ export async function createApp(
           signal: push.signal,
         },
         archive.artifactRef,
-        // What the snapshot holds, visible when choosing one: no images and, always, no workload data.
-        { tags: ['images:none', `tug:${ownVersion}`, `trigger:${trigger}`] },
+        {
+          // What the snapshot holds, visible when choosing one: no images and, always, no workload data.
+          tags: ['images:none', `tug:${ownVersion}`, `trigger:${trigger}`],
+          ...(destinationQueries.retention() === 'external'
+            ? { retentionMode: 'external' as const }
+            : {}),
+        },
       );
       if (restartRequired) return null;
+      // Read before this backup is recorded: the state to compare with is the one the backup before it left.
+      const before = controlRetentionOutcomes(key, 1)[0];
       const meta = {
         type: 'control',
         destination: key,
@@ -4457,6 +5203,24 @@ export async function createApp(
         'control backup stored in the backup destination',
         meta,
       );
+      // Only a change is an event: one alert when pruning starts failing, one when it works again.
+      if (pushed.retention.state === 'failed' && before?.state !== 'failed')
+        controlEvent(
+          'error',
+          'backup.retention_failed',
+          `retention of the control backups failed, so old snapshots are not being removed: ${pushed.retention.message ?? 'restic reported an error'}`,
+          {
+            message: pushed.retention.message,
+            ...(pushed.retention.locked ? { cause: 'locked' } : {}),
+          },
+        );
+      else if (pushed.retention.state === 'ok' && before?.state === 'failed')
+        controlEvent(
+          'info',
+          'backup.retention_recovered',
+          'retention of the control backups works again',
+          {},
+        );
       return {
         ok: true,
         stored: 'destination',
@@ -4470,7 +5234,9 @@ export async function createApp(
       // A restore replaced the database while this push ran; there is nothing left to record it in. A push cancelled
       // because the destination was replaced or removed is not a failure of any destination in use.
       if (restartRequired || push.signal.aborted) return null;
-      const error = errMessage(e);
+      const cause = e instanceof ControlBackupError ? e.jobCause : undefined;
+      const error =
+        errMessage(e) + (cause ? ' (run tug backup unlock --control to remove stale locks)' : '');
       db.run(
         'INSERT INTO backups(id,project_id,target,node_id,state,artifact_ref,metadata_json,created_at,completed_at) VALUES(?,?,?,?,?,?,?,?,?)',
         id('cbak'),
@@ -4479,11 +5245,14 @@ export async function createApp(
         null,
         'failed',
         null,
-        JSON.stringify({ type: 'control', destination: key, error }),
+        JSON.stringify({ type: 'control', destination: key, error, ...(cause ? { cause } : {}) }),
         startedAt,
         now(),
       );
-      controlEvent('error', 'backup.failed', `control backup failed: ${error}`, { error });
+      controlEvent('error', 'backup.failed', `control backup failed: ${error}`, {
+        error,
+        ...(cause ? { cause } : {}),
+      });
       return { ok: false, stored: 'destination', error };
     } finally {
       if (archive) await fs.rm(archive.artifactRef, { force: true });
@@ -5519,7 +6288,10 @@ export async function createApp(
     for (const cr of report.commandResults) {
       if (!runningHere(cr.commandId)) continue;
       // A destination check's command is not a backup run: its result goes to the check and nothing else.
-      if (!checkCommands.onResult(cr.commandId, cr.state, cr.result))
+      if (
+        !checkCommands.onResult(cr.commandId, cr.state, cr.result) &&
+        !jobCommands.onResult(cr.commandId, cr.state, cr.result)
+      )
         backups.onResult(cr.commandId, cr.state, cr.result);
       advanceWhere(
         db,

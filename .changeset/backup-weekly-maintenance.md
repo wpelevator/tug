@@ -1,0 +1,5 @@
+---
+'@wpelevator/tug': minor
+---
+
+Repositories are now pruned and checked once a week instead of pruning after every backup. Control queues a new `backup.maintain` job per project (and checks its own repository), which runs `restic prune` and `restic check`, never prunes an append-only destination, and spreads first runs over a week. A failure that counts turns `tug backup list --check` red and raises `backup.verify_failed`: restic finding a fault counts at once, a lock overlap, an unresponsive node or a timeout on the second failure in a row. `tug backup list --check` also fails when a repository has had no finished check or prune for 14 days. New `tug backup verify [--read-data-subset <subset>] [--control]` checks a repository now, and `tug backup list` shows a protection level per target: `off-host`, `verified` (the repository's last check passed within eight days) or `restore-tested` (a scratch restore succeeded within 90 days). Upgrade nodes before control relies on it: an older agent does not know `backup.maintain`.

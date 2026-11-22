@@ -1019,6 +1019,33 @@ export async function executeCommand(
       result: await collectLogs(ctx.docker, CADDY_CONTAINER, Number(payload.tail || 200)),
     };
   }
+  if (command.type === 'restore.remove') {
+    const { project, volume } = payload;
+    const restoreId = String((payload as { restoreId?: string }).restoreId ?? '');
+    // Only the scratch volume this restore created: the name alone is not proof, so its labels must match.
+    const existing = volume ? await ctx.docker.inspectVolume(volume) : null;
+    if (
+      existing &&
+      (existing.Labels?.['tug.project'] !== project ||
+        existing.Labels?.['tug.restore'] !== restoreId)
+    )
+      return {
+        commandId: command.id,
+        state: 'failed',
+        result: {
+          error: `volume ${volume} does not belong to restore ${restoreId} of project ${project}, so it was not removed`,
+        },
+      };
+    if (existing)
+      await ctx.docker.removeVolume(volume).catch((e) => {
+        if (!isNotFound(e)) throw e;
+      });
+    return {
+      commandId: command.id,
+      state: 'succeeded',
+      result: { project, restoreId, volume, removed: Boolean(existing) },
+    };
+  }
   if (command.type === 'volume.delete') {
     const { project, volume } = payload;
     // Volumes are never removed by reconciliation; this explicit command is the only way one goes away.
@@ -1581,7 +1608,12 @@ async function applyWork(ctx: AgentContext, work: PolledWork): Promise<ProjectSt
   }
   let ingress: IngressStatus | undefined;
   if (ctx.apply) {
-    const ingressCtx = { docker: ctx.docker, stateDir: ctx.stateDir, caddyImage: ctx.caddyImage };
+    const ingressCtx = {
+      docker: ctx.docker,
+      stateDir: ctx.stateDir,
+      caddyImage: ctx.caddyImage,
+      startGraceMs: 2000,
+    };
     if (work.ingress) {
       ingress = await reconcileIngress(ingressCtx, work.ingress);
       if (ingress.state === 'serving') {

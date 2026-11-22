@@ -72,6 +72,7 @@ test('every flag that takes several values accepts a comma-separated list', () =
     [
       '--env',
       '--extra-san',
+      '--hold',
       '--label',
       '--move',
       '--profile',

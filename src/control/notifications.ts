@@ -76,6 +76,12 @@ const TRANSITION_MESSAGES: Record<string, string> = {
   'backup.failed': 'A backup failed. Check the target and backup destination, then retry it.',
   'backup.missed': 'A scheduled backup was missed. Check the schedule and backup destination.',
   'backup.stale': 'A backup is taking longer than expected. Check the target node and backup job.',
+  'backup.retention_failed':
+    'Backup retention failed, so old snapshots are not being removed. Check the backup destination and its repository lock, or set it to external retention if it is append-only.',
+  'backup.retention_recovered': 'Backup retention works again.',
+  'backup.verify_failed':
+    'A repository check or prune failed. Run tug backup verify, and restore a recent backup to a scratch volume to confirm it is readable.',
+  'backup.verify_recovered': 'The backup repository check passes again.',
   'backup.completed': 'A backup completed. Confirm the latest recovery point is available.',
   'backup.no_destination': 'A backup was skipped because no destination is configured.',
   'restore.failed':

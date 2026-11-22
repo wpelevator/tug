@@ -441,6 +441,36 @@ test('first reconcile creates the Caddy container with persistent volumes, loads
   assert.ok(docker.archives[0].bytes > 0, 'the staged Caddyfile and certs travel as a tar archive');
 });
 
+test('a Caddy that exits or loops right after it starts is reported failed with the ports hint, and retried on the next tick', async () => {
+  for (const startsAs of ['exited', 'restarting'] as const) {
+    const docker = new FakeDocker();
+    docker.startsAs = startsAs;
+    docker.logOutput.set(CADDY_CONTAINER, 'listen tcp :80: bind: address already in use');
+    const stateDir = await stateDirFor();
+    const ctx = { docker, stateDir };
+    const status = await reconcileIngress(ctx, work('a.example.com {\n}\n'));
+    assert.equal(status.state, 'failed', `a Caddy that is ${startsAs} has not bound its ports`);
+    assert.match(
+      status.error ?? '',
+      /ports 80 and 443 of this host/,
+      `${startsAs}: the error names the ports to check`,
+    );
+    assert.match(status.error ?? '', /address already in use/, 'the log tail is shown');
+    const again = await reconcileIngress(ctx, work('a.example.com {\n}\n'));
+    assert.equal(
+      again.state,
+      'failed',
+      `${startsAs}: the failure is not remembered as applied, so the next tick tries and reports again`,
+    );
+  }
+  const healthy = new FakeDocker();
+  const ok = await reconcileIngress(
+    { docker: healthy, stateDir: await stateDirFor() },
+    work('v1\n'),
+  );
+  assert.equal(ok.state, 'serving', 'a Caddy that stays up is serving');
+});
+
 test('unchanged config is a no-op and changed config reloads gracefully without restarting', async () => {
   const docker = new FakeDocker();
   const stateDir = await stateDirFor();

@@ -13,6 +13,7 @@ import { createLocalBuildSnapshot, createSourceArchive, prepareLocalImages } fro
 import { execCli } from '../../tests/cli-inprocess.ts';
 import {
   controlPortCheck,
+  ingressPortCheck,
   dockerPlatform,
   dockerRunSnippet,
   enrollmentCloudInit,
@@ -501,6 +502,54 @@ test('the control port check passes for a free port or the control container, an
     'a port held by anything else still fails the preflight',
   );
   await fs.rm(dir, { recursive: true, force: true });
+});
+
+test('the ingress port check passes for a free port, tug Caddy or the control container, and fails for another web server', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-ingresscheck-'));
+  const bin = path.join(dir, 'bin');
+  await fs.mkdir(bin);
+  const stub = async (name: string, body: string) =>
+    fs.writeFile(path.join(bin, name), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+  const run = async (listening: boolean, owner: 'nobody' | 'caddy' | 'control') => {
+    await stub(
+      'ss',
+      listening ? 'echo "LISTEN 0 4096 0.0.0.0:443 0.0.0.0:*"' : 'echo "State Recv-Q Send-Q Local"',
+    );
+    // docker ps answers only for the container that owns the port, so the filters decide what is exempt.
+    await stub(
+      'docker',
+      `case "$*" in
+  *'name=^/tug-caddy$'*) ${owner === 'caddy' ? 'echo abc123' : 'true'} ;;
+  *'publish=443'*) ${owner === 'control' ? 'echo def456' : 'true'} ;;
+  *) true ;;
+esac`,
+    );
+    try {
+      await exec('sh', ['-c', ingressPortCheck(443)], {
+        env: { PATH: `${bin}${path.delimiter}/usr/bin${path.delimiter}/bin` },
+      });
+      return 0;
+    } catch (e) {
+      return (e as { code: number }).code;
+    }
+  };
+  try {
+    assert.equal(await run(false, 'nobody'), 0, 'a free port passes');
+    assert.equal(
+      await run(true, 'caddy'),
+      0,
+      "a port held by tug's own Caddy passes, so adding the node again upgrades in place",
+    );
+    assert.equal(await run(true, 'control'), 0, 'a port published by the control container passes');
+    assert.notEqual(
+      await run(true, 'nobody'),
+      0,
+      'a port held by another web server fails the preflight, before the agent is installed',
+    );
+    assert.throws(() => ingressPortCheck(0), /port must be/, 'a bad port is refused');
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
 });
 
 test('the agent docker run always shares the host network without extra capabilities', () => {

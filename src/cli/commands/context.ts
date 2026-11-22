@@ -257,15 +257,22 @@ async function noCredentialMessage(c: Config): Promise<string> {
 }
 
 /** The pinned mTLS transport for the resolved credential; an address override only changes the connect target. */
-export async function transportFor(rt: CliRuntime, c: Config, guard: SkewGuard) {
+export async function transportFor(
+  rt: CliRuntime,
+  c: Config,
+  guard: SkewGuard,
+  options: { headersTimeoutMs?: number } = {},
+) {
   markWorkStarted(rt);
   if (!c.credential) throw new Error(await noCredentialMessage(c));
   if (guard === 'probe') await preflightVersion(rt, c);
-  return createTransport(c.credential, c.controlUrl, rt.version);
+  return createTransport(c.credential, c.controlUrl, rt.version, options);
 }
 /** A control read bound to one run; the shape `loadDeployValues` and `loadExistingNames` take, so tests can fake it. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type ControlGet = <T = any>(method: string, route: string) => Promise<T>;
+const formatWait = (ms: number): string =>
+  ms >= 120_000 ? `${Math.round(ms / 60_000)} minutes` : `${Math.round(ms / 1000)} seconds`;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export async function request<T = any>(
   rt: CliRuntime,
@@ -273,6 +280,11 @@ export async function request<T = any>(
   route: string,
   body?: unknown,
   multipart = false,
+  /**
+   * For a route that answers only when long work is done: `waitMs` replaces the client's 300 s wait for the answer, and
+   * when even that passes, `stillRunning` says what may still be going on and where to see the outcome.
+   */
+  wait?: { waitMs: number; stillRunning: string },
 ): Promise<T> {
   markWorkStarted(rt);
   const c = loadCfg(rt);
@@ -284,7 +296,12 @@ export async function request<T = any>(
   // BEFORE it is sent, against the version route, because the harm of new-CLI-old-control semantics is already done
   // once the old control received the mutation.
   const firstRead = unseen && method === 'GET';
-  const transport = await transportFor(rt, c, unseen && method !== 'GET' ? 'probe' : 'stamp');
+  const transport = await transportFor(
+    rt,
+    c,
+    unseen && method !== 'GET' ? 'probe' : 'stamp',
+    wait ? { headersTimeoutMs: wait.waitMs } : {},
+  );
   const headers: Record<string, string> = {};
   if (!multipart) headers['content-type'] = 'application/json';
   try {
@@ -300,6 +317,14 @@ export async function request<T = any>(
       if (mismatch)
         throw new Error(
           `${method} ${route}: could not reach control at ${transport.base}: ${describeCaMismatch(c.credential!, transport.base)} (${mismatch})`,
+          { cause: error },
+        );
+      if (
+        wait &&
+        (error as { cause?: { code?: string } })?.cause?.code === 'UND_ERR_HEADERS_TIMEOUT'
+      )
+        throw new Error(
+          `${method} ${route}: control did not answer within ${formatWait(wait.waitMs)}; ${wait.stillRunning}`,
           { cause: error },
         );
       throw new Error(

@@ -238,6 +238,13 @@ const SAMPLES: Record<string, { path: string; body?: unknown }> = {
     path: '/api/v1/backups/bkr_x/cancel',
     body: { project: 'site' },
   },
+  'POST /api/v1/backups/unlock': { path: '/api/v1/backups/unlock', body: { project: 'site' } },
+  'POST /api/v1/backups/verify': { path: '/api/v1/backups/verify', body: { project: 'site' } },
+  'POST /api/v1/restores/:id/remove': { path: '/api/v1/restores/rst_none/remove', body: {} },
+  'POST /api/v1/restores/expire-safety': {
+    path: '/api/v1/restores/expire-safety',
+    body: { project: 'site', olderThan: '30d' },
+  },
   'GET /api/v1/backups': { path: '/api/v1/backups' },
   'POST /api/v1/restores': { path: '/api/v1/restores', body: { project: 'site', target: 'x:y' } },
   'GET /api/v1/restores': { path: '/api/v1/restores' },

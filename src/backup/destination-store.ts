@@ -1,6 +1,14 @@
 import type { BackupDestinationRow, Db } from '../db/db.ts';
 import { BACKUP_SECRET_PROJECT } from './destination.ts';
 import { immediateTransaction } from '../db/transaction.ts';
+import type { RetentionMode } from '../protocol.ts';
+import { maintenanceStore } from './maintenance.ts';
+
+/**
+ * Who removes old snapshots from the destination lives in `meta` next to the destination row, not in a column: one
+ * setting needs no migration. `external` is stored; `managed` is the absence of the row.
+ */
+const RETENTION_KEY = 'backup_destination_retention';
 
 interface DestinationSecret {
   id: string;
@@ -12,8 +20,26 @@ interface DestinationSecret {
 export function backupDestinationQueries(db: Db) {
   const find = () =>
     db.get<BackupDestinationRow>("SELECT * FROM backup_destination WHERE id='default'");
+  const retention = (): RetentionMode =>
+    db.get<{ value: string }>('SELECT value FROM meta WHERE key=?', RETENTION_KEY)?.value ===
+    'external'
+      ? 'external'
+      : 'managed';
+  const setRetention = (mode: RetentionMode): void => {
+    if (mode === 'external')
+      db.run(
+        'INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+        RETENTION_KEY,
+        mode,
+      );
+    else db.run('DELETE FROM meta WHERE key=?', RETENTION_KEY);
+  };
   return {
     find,
+    /** Who prunes the destination: tug (`managed`) or the storage side (`external`, an append-only server). */
+    retention,
+    /** Changes only the retention mode; the destination, its credentials and its check result stay. */
+    setRetention: (mode: RetentionMode): void => immediateTransaction(db, () => setRetention(mode)),
     secret(name: string): string | undefined {
       return db.get<{ encrypted_value: string }>(
         'SELECT encrypted_value FROM secrets WHERE project_id=? AND name=?',
@@ -21,8 +47,16 @@ export function backupDestinationQueries(db: Db) {
         name,
       )?.encrypted_value;
     },
-    replace(url: string, secrets: DestinationSecret[], at: string): void {
+    replace(
+      url: string,
+      secrets: DestinationSecret[],
+      at: string,
+      mode: RetentionMode = 'managed',
+    ): void {
       immediateTransaction(db, () => {
+        // The maintenance results describe the repositories of the destination being left.
+        if (find()?.url !== url) maintenanceStore(db).clear();
+        setRetention(mode);
         db.run('DELETE FROM secrets WHERE project_id=?', BACKUP_SECRET_PROJECT);
         for (const secret of secrets)
           db.run(
@@ -95,6 +129,8 @@ export function backupDestinationQueries(db: Db) {
     remove(): boolean {
       return immediateTransaction(db, () => {
         db.run('DELETE FROM secrets WHERE project_id=?', BACKUP_SECRET_PROJECT);
+        setRetention('managed');
+        maintenanceStore(db).clear();
         return db.run("DELETE FROM backup_destination WHERE id='default'").changes > 0;
       });
     },

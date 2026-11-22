@@ -5,7 +5,16 @@ import os from 'node:os';
 import path from 'node:path';
 import type { PassThrough } from 'node:stream';
 import { JobRunner, defaultJobConcurrency, laneOf } from './jobs.ts';
-import { backupArgs, forgetArgs, memoryBytes, parseSummary, runBackupJob } from '../backup/job.ts';
+import {
+  RESTIC_LOCK_WAIT_MS,
+  RESTIC_STALL_MS,
+  backupArgs,
+  forgetArgs,
+  memoryBytes,
+  parseSummary,
+  removeStaleJobContainers,
+  runBackupJob,
+} from '../backup/job.ts';
 import { FakeDocker } from '../../tests/fake-docker.ts';
 import { JOB_CANCELLED } from '../protocol.ts';
 import type { BackupJobPayload, Command } from '../protocol.ts';
@@ -93,7 +102,7 @@ test('a run job initializes a repository restic reports as missing with exit 10,
     ['an S3 key that does not exist', S3_NO_KEY],
   ] as const) {
     const docker = dockerWith((cmd) =>
-      cmd.join(' ') === 'restic cat config' ? { code: 10, err } : { code: 0 },
+      cmd.join(' ') === 'restic cat config --no-lock' ? { code: 10, err } : { code: 0 },
     );
     const result = await finished(docker, 'backup.run');
     assert.ok(
@@ -106,7 +115,7 @@ test('a run job initializes a repository restic reports as missing with exit 10,
 
 test('a check job only reports a missing repository and never initializes it', async () => {
   const docker = dockerWith((cmd) =>
-    cmd.join(' ') === 'restic cat config' ? { code: 10, err: REST_MISSING } : { code: 0 },
+    cmd.join(' ') === 'restic cat config --no-lock' ? { code: 10, err: REST_MISSING } : { code: 0 },
   );
   const result = await finished(docker, 'backup.check');
   assert.equal(result.state, 'succeeded', 'a missing repository is not a failed check');
@@ -124,7 +133,7 @@ test('a missing bucket (exit 1) and a wrong password (exit 12) fail a run job wi
     ['a wrong password', 12, 'Fatal: wrong password or no key found', /wrong repository password/],
   ] as const) {
     const docker = dockerWith((cmd) =>
-      cmd.join(' ') === 'restic cat config' ? { code, err } : { code: 0 },
+      cmd.join(' ') === 'restic cat config --no-lock' ? { code, err } : { code: 0 },
     );
     const result = await finished(docker, 'backup.run');
     assert.equal(result.state, 'failed', `${what} fails the job`);
@@ -135,16 +144,175 @@ test('a missing bucket (exit 1) and a wrong password (exit 12) fail a run job wi
 
 test('a restore job fails on a missing repository instead of creating one', async () => {
   const docker = dockerWith((cmd) =>
-    cmd.join(' ') === 'restic cat config' ? { code: 10, err: REST_MISSING } : { code: 0 },
+    cmd.join(' ') === 'restic cat config --no-lock' ? { code: 10, err: REST_MISSING } : { code: 0 },
   );
   const result = await finished(docker, 'backup.restore');
   assert.equal(result.state, 'failed', 'there is nothing to restore from');
   assert.ok(!ran(docker, 'restic init'), 'a restore never initializes');
 });
 
+test('an unlock job removes only stale locks: plain restic unlock, never --remove-all, and reports the counts', async () => {
+  let listed = 0;
+  const docker = dockerWith((cmd) => {
+    const line = cmd.join(' ');
+    if (line === 'restic list locks --no-lock') {
+      listed++;
+      // Three locks before the unlock; the one a live restic holds remains after.
+      return {
+        code: 0,
+        out: listed === 1 ? 'aaaaaaaa11\nbbbbbbbb22\ncccccccc33\n' : 'cccccccc33\n',
+      };
+    }
+    return { code: 0 };
+  });
+  const result = await finished(docker, 'backup.unlock');
+  assert.equal(result.state, 'succeeded', 'the unlock succeeds');
+  assert.deepEqual(
+    (result.result as { unlock?: unknown }).unlock,
+    { before: 3, after: 1 },
+    'the result carries the lock counts before and after',
+  );
+  assert.ok(ran(docker, 'restic unlock'), 'restic unlock ran');
+  assert.ok(
+    !docker.execOptions.some((e) => e.cmd.includes('--remove-all')),
+    'unlock never passes --remove-all, which would remove the lock of a live prune',
+  );
+  assert.ok(!ran(docker, 'restic init'), 'an unlock never initializes a repository');
+});
+
+test('an unlock job fails on a missing repository instead of creating one', async () => {
+  const docker = dockerWith((cmd) =>
+    cmd.join(' ') === 'restic cat config --no-lock' ? { code: 10, err: REST_MISSING } : { code: 0 },
+  );
+  const result = await finished(docker, 'backup.unlock');
+  assert.equal(result.state, 'failed', 'there is nothing to unlock');
+  assert.ok(!ran(docker, 'restic init'), 'an unlock never initializes');
+});
+
+const maintained = async (
+  maintain: BackupJobPayload['maintain'],
+  responder: FakeDocker['execResponder'],
+) => {
+  const docker = dockerWith(responder);
+  const { jobs } = await runner(docker);
+  await jobs.start(command('cmd_1', payload({ maintain }), 'backup.maintain'));
+  await settle(jobs, 1);
+  return { docker, result: jobs.pending()[0] };
+};
+
+test('a maintenance job prunes, then checks, and reports both; a subset is passed to the check', async () => {
+  const { docker, result } = await maintained({ prune: true, subset: '5%' }, () => ({ code: 0 }));
+  assert.equal(result.state, 'succeeded', 'the job succeeds');
+  assert.deepEqual(
+    (result.result as { maintenance?: unknown }).maintenance,
+    { prune: 'ok', check: 'ok', subset: '5%' },
+    'prune and check outcomes are structured',
+  );
+  const lines = docker.execOptions.map((e) => e.cmd.join(' '));
+  const prune = lines.findIndex((line) => line.startsWith('restic prune'));
+  const check = lines.findIndex((line) => line.startsWith('restic check'));
+  assert.ok(prune >= 0 && check > prune, 'the prune runs before the check');
+  assert.match(lines[check], /--read-data-subset=5%/, 'the check reads the requested subset');
+  assert.match(lines[prune], /--retry-lock 10m/, 'the prune waits for the repository lock');
+});
+
+test('a maintenance job without prune only checks, so an append-only destination is never asked to delete', async () => {
+  const { docker, result } = await maintained({ prune: false }, () => ({ code: 0 }));
+  assert.deepEqual(
+    (result.result as { maintenance?: unknown }).maintenance,
+    { prune: 'skipped', check: 'ok' },
+    'the prune is reported as skipped',
+  );
+  assert.ok(!docker.execOptions.some((e) => e.cmd[1] === 'prune'), 'restic prune did not run');
+});
+
+test('a failed prune does not stop the check, and a failed check or a lock exit is reported as data', async () => {
+  const { result } = await maintained({ prune: true }, (cmd) =>
+    cmd[1] === 'prune'
+      ? { code: 11, err: 'unable to create lock in backend' }
+      : cmd[1] === 'check'
+        ? { code: 1, err: 'error: pack abc: ciphertext verification failed' }
+        : { code: 0 },
+  );
+  assert.equal(result.state, 'succeeded', 'a failing repository is a result, not a failed job');
+  const outcome = (result.result as { maintenance?: Record<string, unknown> }).maintenance!;
+  assert.equal(outcome.prune, 'failed', 'the prune failure is recorded');
+  assert.equal(outcome.check, 'failed', 'the check still ran and failed');
+  assert.equal(outcome.locked, true, "restic's lock exit code, not its wording, marks it locked");
+  assert.match(String(outcome.message), /prune failed/, 'the first failure is the message');
+});
+
+test('a maintenance job fails on a missing repository instead of creating one', async () => {
+  const docker = dockerWith((cmd) =>
+    cmd.join(' ') === 'restic cat config --no-lock' ? { code: 10, err: REST_MISSING } : { code: 0 },
+  );
+  const result = await finished(docker, 'backup.maintain');
+  assert.equal(result.state, 'failed', 'there is nothing to check');
+  assert.ok(!ran(docker, 'restic init'), 'maintenance never initializes');
+});
+
+test('a forget job forgets only the safety snapshots restic lists for the project, and a missing one is already gone', async () => {
+  const listings: string[] = [];
+  const docker = dockerWith((cmd) => {
+    const line = cmd.join(' ');
+    if (cmd[1] === 'snapshots') {
+      listings.push(line);
+      return {
+        code: 0,
+        out: JSON.stringify([{ id: 'aaaaaaaa11112222', short_id: 'aaaaaaaa' }]),
+      };
+    }
+    return { code: 0 };
+  });
+  const { jobs } = await runner(docker);
+  await jobs.start(
+    command(
+      'cmd_1',
+      payload({ forget: { snapshotIds: ['aaaaaaaa11112222', 'ffffffff99998888'] } }),
+      'backup.forget',
+    ),
+  );
+  await settle(jobs, 1);
+  const [result] = jobs.pending();
+  assert.equal(result.state, 'succeeded', 'the job succeeds');
+  assert.deepEqual(
+    (result.result as { forgotten?: string[] }).forgotten,
+    ['aaaaaaaa'],
+    'the snapshot restic lists is forgotten',
+  );
+  assert.match(
+    listings[0],
+    /--tag project:site,trigger:pre-restore/,
+    "restic is asked for exactly this project's safety snapshots (AND, not OR)",
+  );
+  const forget = docker.execOptions
+    .map((e) => e.cmd.join(' '))
+    .find((c) => c.startsWith('restic forget'))!;
+  assert.match(
+    forget,
+    /^restic forget aaaaaaaa11112222 --retry-lock/,
+    'only the listed id is forgotten',
+  );
+  assert.ok(!forget.includes('ffffffff'), 'an id restic does not list is never passed to forget');
+  assert.ok(!forget.includes('--prune'), 'a forget never prunes: the weekly maintenance does');
+});
+
+test('a forget job whose snapshots are all gone runs no forget', async () => {
+  const docker = dockerWith((cmd) =>
+    cmd[1] === 'snapshots' ? { code: 0, out: '[]' } : { code: 0 },
+  );
+  const { jobs } = await runner(docker);
+  await jobs.start(
+    command('cmd_1', payload({ forget: { snapshotIds: ['aaaaaaaa11112222'] } }), 'backup.forget'),
+  );
+  await settle(jobs, 1);
+  assert.equal(jobs.pending()[0].state, 'succeeded', 'an already removed snapshot is not an error');
+  assert.ok(!docker.execOptions.some((e) => e.cmd[1] === 'forget'), 'restic forget did not run');
+});
+
 test('error text never contains credentials', async () => {
   const docker = dockerWith((cmd) =>
-    cmd.join(' ') === 'restic cat config'
+    cmd.join(' ') === 'restic cat config --no-lock'
       ? {
           code: 1,
           err: 'Fatal: backend rejected key sekret-value-1 with password repo-password-xyz',
@@ -201,7 +369,7 @@ test('results survive a restart until acknowledged, and a job interrupted by a r
 
 test('jobs beyond the concurrency limit wait queued and are reported as such', async () => {
   const docker = dockerWith((cmd) =>
-    cmd.join(' ') === 'restic cat config' ? undefined : { code: 0 },
+    cmd.join(' ') === 'restic cat config --no-lock' ? undefined : { code: 0 },
   );
   const { jobs } = await runner(docker, 1);
   await jobs.start(command('cmd_a', payload({ runId: 'bkr_a' })));
@@ -221,7 +389,11 @@ test('restic arguments carry the node as host, tags, retention and the stdin nam
   assert.match(backup, /--tag run:bkr_1/);
   const forget = forgetArgs(p, p.retention!).join(' ');
   assert.match(forget, /--tag target:service:db --host app1 --group-by host/);
-  assert.match(forget, /--keep-daily 7 --keep-weekly 4 --prune/);
+  assert.match(forget, /--keep-daily 7 --keep-weekly 4 --retry-lock/);
+  assert.ok(
+    !forget.includes('--prune'),
+    'a per-run forget never prunes: the exclusive lock is taken once a week by backup.maintain',
+  );
   assert.match(
     forget,
     /--keep-tag trigger:pre-restore/,
@@ -529,7 +701,7 @@ test('a failing command, missing output or a missing completion marker never lea
     assert.equal(result.state, 'failed', `${JSON.stringify(outcome)} should fail the job`);
     assert.match(JSON.stringify(result.result), message);
     assert.ok(
-      docker.execOptions.some((o) => o.cmd.join(' ') === 'restic forget snap1234'),
+      docker.execOptions.some((o) => o.cmd.join(' ') === 'restic forget snap1234 --retry-lock 10m'),
       'the snapshot restic already wrote is forgotten',
     );
   }
@@ -733,5 +905,247 @@ test('a prune that stalls after the snapshot was taken is a warning, not a faile
     result.warnings?.join(' ') ?? '',
     /retention failed: restic made no progress/,
     'the stalled prune is a warning',
+  );
+});
+
+const stopsRestic = (call: string) =>
+  call.startsWith('exec-start') && call.includes('pkill -INT -x restic');
+const hangingRestore = () =>
+  dockerWith((cmd) => {
+    if (cmd[0] === 'restic' && cmd[1] === 'snapshots') return { code: 0, out: SNAPSHOT_LISTING };
+    if (cmd[0] === 'restic' && cmd[1] === 'restore') return undefined;
+    return { code: 0 };
+  });
+
+test('the stall limit is longer than the repository lock wait, so waiting for a lock is not reported as a stall', () => {
+  assert.ok(
+    RESTIC_STALL_MS > RESTIC_LOCK_WAIT_MS,
+    'a job that waits out --retry-lock must not be failed as stalled first',
+  );
+  const args = [...forgetArgs(payload(), { daily: 7 }), ...backupArgs(payload())];
+  assert.equal(
+    args.filter((arg) => arg === '10m').length,
+    2,
+    'backup and forget wait the lock wait the stall limit was sized against',
+  );
+});
+
+test('an aborted job interrupts restic so it releases its lock before the helper is removed', async () => {
+  const docker = hangingRestore();
+  docker.volumes.set('tug_v4_site_uploads', {
+    Name: 'tug_v4_site_uploads',
+    Labels: { 'tug.project': 'site', 'tug.volume': 'uploads' },
+  });
+  const controller = new AbortController();
+  const running = runBackupJob(
+    volumeRestore('scratch'),
+    'cmd',
+    { docker, credentials, signal: controller.signal, stopGraceMs: 1000 },
+    'backup.restore',
+  );
+  setTimeout(() => controller.abort(new Error('cancelled by test')), 50);
+  await assert.rejects(running, /cancelled by test/, 'the abort ends the job');
+  const stop = docker.calls.findIndex(stopsRestic);
+  const remove = docker.calls.findIndex((call) => call.startsWith('rm tug-job-rst_abc123-restic'));
+  assert.ok(stop >= 0, 'restic is sent SIGINT (pkill -INT) in the helper');
+  assert.ok(remove > stop, 'the helper is removed only after restic was told to stop');
+});
+
+test('a restic that stalls is interrupted before its helper is removed', async () => {
+  const docker = hangingRestore();
+  docker.volumes.set('tug_v4_site_uploads', {
+    Name: 'tug_v4_site_uploads',
+    Labels: { 'tug.project': 'site', 'tug.volume': 'uploads' },
+  });
+  await assert.rejects(
+    runBackupJob(
+      volumeRestore('scratch'),
+      'cmd',
+      { docker, credentials, stallMs: 80, stopGraceMs: 1000 },
+      'backup.restore',
+    ),
+    /made no progress/,
+    'the stall fails the job',
+  );
+  assert.ok(docker.calls.some(stopsRestic), 'the stalled restic gets SIGINT, not a forced removal');
+});
+
+test('a job whose restic commands all finished removes its helper without sending any signal', async () => {
+  const docker = dockerWith(() => ({ code: 0 }));
+  const { jobs } = await runner(docker);
+  await jobs.start(command('cmd_1', payload()));
+  await settle(jobs, 1);
+  assert.ok(!docker.calls.some(stopsRestic), 'no restic is running, so none is interrupted');
+});
+
+test('leftover helpers of a previous agent are stopped gracefully when running and removed either way', async () => {
+  const docker = dockerWith(() => ({ code: 0 }));
+  const live = await docker.createContainer('tug-job-a-restic', {
+    Image: 'restic/restic:0.19.1',
+    Labels: { 'tug.job': 'a' },
+  });
+  await docker.startContainer(live);
+  await docker.createContainer('tug-job-b-restic', {
+    Image: 'restic/restic:0.19.1',
+    Labels: { 'tug.job': 'b' },
+  });
+  docker.calls.length = 0;
+  assert.equal(await removeStaleJobContainers(docker, 1000), 2, 'both leftovers are counted');
+  assert.equal(
+    docker.calls.filter(stopsRestic).length,
+    1,
+    'only the running helper may hold a lock, so only it is signalled',
+  );
+  assert.ok(
+    docker.calls.findIndex(stopsRestic) <
+      docker.calls.findIndex((c) => c === 'rm tug-job-a-restic'),
+    'the running helper is removed after the signal',
+  );
+  assert.deepEqual(docker.names(), [], 'every leftover is removed');
+});
+
+/** A volume backup with retention, whose restic commands the test scripts by subcommand. */
+async function retentionRun(
+  scripted: (cmd: string[]) => { code: number; out?: string; err?: string } | undefined,
+  overrides: Partial<BackupJobPayload> = {},
+) {
+  const docker = dockerWith((cmd) => {
+    if (cmd[0] === 'restic' && cmd[1] === 'backup') return { code: 0, out: SUMMARY };
+    return scripted(cmd) ?? { code: 0 };
+  });
+  docker.volumes.set('tug_v4_site_uploads', {
+    Name: 'tug_v4_site_uploads',
+    Labels: { 'tug.project': 'site', 'tug.volume': 'uploads' },
+  });
+  const result = await runBackupJob(
+    payload({
+      type: 'volume',
+      target: 'volume:uploads',
+      volume: { name: 'uploads', dockerVolume: 'tug_v4_site_uploads' },
+      retention: { daily: 7 },
+      ...overrides,
+    }),
+    'cmd',
+    { docker, credentials },
+    'backup.run',
+  );
+  return { docker, result };
+}
+const ranForget = (docker: FakeDocker) => docker.execOptions.some((e) => e.cmd[1] === 'forget');
+
+test('a successful prune is reported as retention ok', async () => {
+  const { result } = await retentionRun(() => ({ code: 0 }));
+  assert.deepEqual(result.retention, { state: 'ok' }, 'the run reports that retention worked');
+  assert.equal(result.warnings, undefined, 'a working prune adds no warning');
+});
+
+test('a failed prune is retention failed with a redacted message, and the backup still succeeds', async () => {
+  const { result } = await retentionRun((cmd) =>
+    cmd[1] === 'forget' ? { code: 1, err: 'Fatal: access denied for sekret-value-1' } : undefined,
+  );
+  assert.equal(result.snapshotId, 'snap1234', 'the snapshot is kept');
+  assert.equal(result.retention?.state, 'failed', 'the prune failure is structured data');
+  assert.ok(
+    !result.retention?.message?.includes('sekret-value-1'),
+    'the stored message never carries a credential',
+  );
+  assert.equal(result.retention?.locked, undefined, 'a plain failure is not a lock');
+  assert.match(result.warnings?.[0] ?? '', /^retention failed:/, 'the existing warning stays');
+});
+
+test("a prune that exits with restic's lock code is classified locked, whatever restic printed", async () => {
+  const { result } = await retentionRun((cmd) =>
+    cmd[1] === 'forget' ? { code: 11, err: 'some wording a future restic changed' } : undefined,
+  );
+  assert.equal(result.retention?.state, 'failed', 'the prune failed');
+  assert.equal(result.retention?.locked, true, 'exit code 11 marks it locked');
+  const plain = await retentionRun((cmd) =>
+    cmd[1] === 'forget'
+      ? { code: 1, err: 'unable to create lock in backend: repository is already locked' }
+      : undefined,
+  );
+  assert.equal(
+    plain.result.retention?.locked,
+    undefined,
+    'wording that sounds like a lock is not a lock without the exit code',
+  );
+});
+
+test('an external destination skips forget --prune and reports retention external', async () => {
+  const { docker, result } = await retentionRun(
+    (cmd) => (cmd[1] === 'forget' ? { code: 1, err: 'append-only' } : undefined),
+    {
+      retention: undefined,
+      retentionMode: 'external',
+    },
+  );
+  assert.ok(!ranForget(docker), 'forget is never run against an append-only destination');
+  assert.deepEqual(result.retention, { state: 'external' }, 'the run says pruning is external');
+  assert.equal(result.warnings, undefined, 'an external destination is not a warning');
+});
+
+test('a run without a retention policy (a safety backup before a restore) reports no retention', async () => {
+  const { docker, result } = await retentionRun(() => undefined, { retention: undefined });
+  assert.ok(!ranForget(docker), 'no policy, no forget');
+  assert.equal(
+    result.retention,
+    undefined,
+    'nothing is reported, so it cannot reset a failing streak',
+  );
+});
+
+test("a backup that exits with restic's lock code fails with cause locked, and the node reports it", async () => {
+  const docker = dockerWith((cmd) =>
+    cmd[0] === 'restic' && cmd[1] === 'backup'
+      ? { code: 11, err: 'unable to create lock in backend' }
+      : { code: 0 },
+  );
+  docker.volumes.set('tug_v4_site_uploads', {
+    Name: 'tug_v4_site_uploads',
+    Labels: { 'tug.project': 'site', 'tug.volume': 'uploads' },
+  });
+  const { jobs } = await runner(docker);
+  await jobs.start(
+    command(
+      'cmd_lock',
+      payload({
+        type: 'volume',
+        target: 'volume:uploads',
+        volume: { name: 'uploads', dockerVolume: 'tug_v4_site_uploads' },
+      }),
+      'backup.run',
+    ),
+  );
+  await settle(jobs, 1);
+  const [result] = jobs.pending();
+  assert.equal(result.state, 'failed', 'a locked backup is a failed run');
+  assert.equal(
+    (result.result as { cause?: string }).cause,
+    'locked',
+    'the failed result carries cause locked',
+  );
+  const other = dockerWith((cmd) =>
+    cmd[0] === 'restic' && cmd[1] === 'backup'
+      ? { code: 1, err: 'repository is already locked' }
+      : { code: 0 },
+  );
+  other.volumes = docker.volumes;
+  const second = await runner(other);
+  await second.jobs.start(
+    command(
+      'cmd_plain',
+      payload({
+        type: 'volume',
+        target: 'volume:uploads',
+        volume: { name: 'uploads', dockerVolume: 'tug_v4_site_uploads' },
+      }),
+      'backup.run',
+    ),
+  );
+  await settle(second.jobs, 1);
+  assert.equal(
+    (second.jobs.pending()[0].result as { cause?: string }).cause,
+    undefined,
+    'a failure with lock-like wording but another exit code has no cause',
   );
 });

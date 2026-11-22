@@ -9,11 +9,14 @@ import { backupRunLifecycle, commandLifecycle } from '../db/lifecycles.ts';
 import { isTerminal } from '../db/lifecycle.ts';
 import { backupDestinationQueries } from './destination-store.ts';
 import type { ResolvedBackup } from './config.ts';
+import type { RetentionStatus } from './check.ts';
 import type { Db } from '../db/db.ts';
 import type { BackupRunRow, BackupScheduleRow } from '../db/db.ts';
 import type {
+  BackupCause,
   BackupJobPayload,
   BackupJobResult,
+  BackupRetentionOutcome,
   CommandResultPayload,
   CommandType,
   DesiredState,
@@ -33,6 +36,13 @@ const MAX_DEADLINE_MS = 6 * 3600_000;
 const MANUAL_DEADLINE_MS = 30 * MINUTE;
 const STALE_REPEAT_MS = 24 * 3600_000;
 const MAX_CATCH_UP_SLOTS = 20_000;
+
+/** A run as `GET /api/v1/backups` lists it: the row (with its raw `metadata_json`) and the parsed parts of that string. */
+export type RunListing = BackupRunRow & {
+  retention: BackupRetentionOutcome | null;
+  cause: BackupCause | null;
+  warnings: string[];
+};
 
 export type RunTrigger = 'schedule' | 'manual' | 'pre-restore' | 'catch-up' | 'retry';
 
@@ -73,6 +83,42 @@ export interface TargetStatus {
   lastStatus: string | null;
   /** Why this target needs attention (stale, last run failed or missed), or null when it is healthy. */
   problem: string | null;
+  /**
+   * Retention as of the newest run that applied it, and how many runs in a row failed it. `null` while no run has
+   * applied it yet. `locked` is set when the newest failure was restic's lock exit code. Only `restic forget` is
+   * retention: the data it frees is pruned by the weekly maintenance, whose outcome is `verify`.
+   */
+  retention: RetentionStatus | null;
+  /** Why the newest finished run failed, when more than its error says. */
+  cause: BackupCause | null;
+}
+
+/** The fix a locked run names: restic removes the stale locks, never one a live restic holds. */
+export const UNLOCK_HINT = 'run tug backup unlock to remove stale locks';
+
+/** What a run records in `backup_runs.metadata_json`. */
+interface RunMeta {
+  warnings?: string[];
+  retention?: BackupRetentionOutcome;
+  cause?: BackupCause;
+}
+
+/** Retention of consecutive runs, newest first, as `list` reports it: the newest outcome and the length of its failing streak. */
+export function retentionStatus(outcomes: BackupRetentionOutcome[]): RetentionStatus | null {
+  const [newest] = outcomes;
+  if (!newest) return null;
+  let failures = 0;
+  if (newest.state === 'failed')
+    for (const outcome of outcomes) {
+      if (outcome.state !== 'failed') break;
+      failures++;
+    }
+  return {
+    state: newest.state,
+    ...(newest.message ? { message: newest.message } : {}),
+    failures,
+    ...(newest.locked ? { locked: true } : {}),
+  };
 }
 
 /** A target that has not succeeded for two periods is stale, even when every run failed alike. */
@@ -276,7 +322,11 @@ export function createBackupService(deps: BackupServiceDeps) {
       // A safety backup taken before a restore must not prune: it is newer than the snapshot about to be restored, so
       // `--keep-daily` would forget that snapshot (the latest of an earlier run the same day) before the restore reads it.
       // The next scheduled backup applies retention again.
-      ...(trigger === 'pre-restore' ? {} : { retention: config.retention }),
+      ...(trigger === 'pre-restore'
+        ? {}
+        : destinationQueries.retention() === 'external'
+          ? { retentionMode: 'external' as const }
+          : { retention: config.retention }),
       limits: { memory: config.memory ?? DEFAULT_MEMORY, timeoutSec: config.timeoutSec },
     };
     if (config.kind === 'service') {
@@ -620,6 +670,12 @@ export function createBackupService(deps: BackupServiceDeps) {
     jobInfo.delete(commandId);
     if (state === 'succeeded') {
       const r = result as BackupJobResult;
+      const retention: BackupRetentionOutcome | undefined = r.retention && {
+        ...r.retention,
+        ...(r.retention.message ? { message: redact(r.retention.message).slice(0, 500) } : {}),
+      };
+      // Read before this run is recorded: the state to compare with is the one the run before it left.
+      const before = retention ? previousRetention(run) : undefined;
       advance(db, backupRunLifecycle, run.id, ['queued', 'running'], 'succeeded', {
         finished_at: at,
         snapshot_id: r.snapshotId ?? null,
@@ -627,7 +683,10 @@ export function createBackupService(deps: BackupServiceDeps) {
         added_bytes: r.addedBytes ?? null,
         duration_ms: r.durationMs ?? null,
         restic_version: r.resticVersion ?? null,
-        metadata_json: JSON.stringify({ warnings: r.warnings ?? [] }),
+        metadata_json: JSON.stringify({
+          warnings: r.warnings ?? [],
+          ...(retention ? { retention } : {}),
+        } satisfies RunMeta),
       });
       noteOutcome(run, 'succeeded', at, true);
       db.run('UPDATE backup_schedules SET stale_notified_at=NULL WHERE id=?', run.schedule_id);
@@ -644,19 +703,47 @@ export function createBackupService(deps: BackupServiceDeps) {
           totalBytes: r.totalBytes,
           durationMs: r.durationMs,
           warnings: r.warnings,
+          retention: retention?.state,
         },
         nodeName(run.node_id),
         run.actor ?? undefined,
       );
+      // Only a change is an event, so a prune that keeps failing alerts once and one that recovers says so once.
+      if (retention?.state === 'failed' && before?.state !== 'failed')
+        event(
+          'error',
+          'backup.retention_failed',
+          run.project_id,
+          `retention of ${run.target} failed, so old snapshots are not being removed: ${retention.message ?? 'restic reported an error'}`,
+          {
+            runId: run.id,
+            target: run.target,
+            message: retention.message,
+            ...(retention.locked ? { cause: 'locked' } : {}),
+          },
+          nodeName(run.node_id),
+          run.actor ?? undefined,
+        );
+      else if (retention?.state === 'ok' && before?.state === 'failed')
+        event(
+          'info',
+          'backup.retention_recovered',
+          run.project_id,
+          `retention of ${run.target} works again`,
+          { runId: run.id, target: run.target },
+          nodeName(run.node_id),
+          run.actor ?? undefined,
+        );
       return;
     }
-    const error = redact((result as { error?: string }).error ?? 'the backup job failed').slice(
-      0,
-      2000,
-    );
+    const cause = (result as { cause?: BackupCause }).cause === 'locked' ? 'locked' : undefined;
+    const error =
+      redact((result as { error?: string }).error ?? 'the backup job failed').slice(0, 1900) +
+      (cause ? ` (${UNLOCK_HINT})` : '');
     advance(db, backupRunLifecycle, run.id, ['queued', 'running'], 'failed', {
       finished_at: at,
       error,
+      ...(cause ? { metadata_json: JSON.stringify({ cause } satisfies RunMeta) } : {}),
     });
     noteOutcome(run, 'failed', at, false);
     if (error === JOB_CANCELLED) {
@@ -680,10 +767,65 @@ export function createBackupService(deps: BackupServiceDeps) {
         runId: run.id,
         target: run.target,
         error,
+        ...(cause ? { cause } : {}),
       },
       nodeName(run.node_id),
       run.actor ?? undefined,
     );
+  }
+
+  /** The retention outcome of the newest earlier successful run of the same target that applied retention. */
+  function previousRetention(run: BackupRunRow): BackupRetentionOutcome | undefined {
+    if (!run.schedule_id) return undefined;
+    for (const row of db.all<Pick<BackupRunRow, 'metadata_json'>>(
+      `SELECT metadata_json FROM backup_runs WHERE schedule_id=? AND id<>? AND state='succeeded' AND metadata_json IS NOT NULL
+       ORDER BY COALESCE(finished_at,queued_at) DESC LIMIT 20`,
+      run.schedule_id,
+      run.id,
+    )) {
+      const retention = parse<RunMeta>(row.metadata_json, {}).retention;
+      if (retention) return retention;
+    }
+    return undefined;
+  }
+
+  /**
+   * Called when the destination's retention is set to `external`: tug no longer prunes there, so a retention failure
+   * recorded by earlier runs no longer describes anything. The newest run of each failing target is rewritten as
+   * `external`, which ends the failing streak at once (`tug backup list --check` returns to 0 without waiting for
+   * the next backup), and one `backup.retention_recovered` event is recorded per target that was failing. Returns the
+   * number of targets cleared.
+   */
+  function clearRetentionFailures(actor?: string): number {
+    let cleared = 0;
+    for (const schedule of db.all<BackupScheduleRow>('SELECT * FROM backup_schedules')) {
+      const newest = db
+        .all<BackupRunRow>(
+          `SELECT * FROM backup_runs WHERE schedule_id=? AND state='succeeded' AND metadata_json IS NOT NULL
+           ORDER BY COALESCE(finished_at,queued_at) DESC LIMIT 30`,
+          schedule.id,
+        )
+        .find((run) => parse<RunMeta>(run.metadata_json, {}).retention);
+      if (!newest) continue;
+      const meta = parse<RunMeta>(newest.metadata_json, {});
+      if (meta.retention?.state !== 'failed') continue;
+      db.run(
+        'UPDATE backup_runs SET metadata_json=? WHERE id=?',
+        JSON.stringify({ ...meta, retention: { state: 'external' } } satisfies RunMeta),
+        newest.id,
+      );
+      event(
+        'info',
+        'backup.retention_recovered',
+        schedule.project_id,
+        `retention of ${schedule.target} no longer applies: the destination's retention is external, so tug does not prune it`,
+        { target: schedule.target, retention: 'external' },
+        nodeName(schedule.node_id),
+        actor,
+      );
+      cleared++;
+    }
+    return cleared;
   }
 
   /** Queues manual backups of the named targets, or every target of the project when none are named. */
@@ -718,28 +860,59 @@ export function createBackupService(deps: BackupServiceDeps) {
     return { runs, errors };
   }
 
+  /** The parts of a run's metadata that `GET /api/v1/backups` serves parsed, beside the raw `metadata_json` string. */
+  const runDetail = (metadataJson: string | null) => {
+    const meta = parse<RunMeta>(metadataJson, {});
+    return {
+      retention: meta.retention ?? null,
+      cause: meta.cause ?? null,
+      warnings: meta.warnings ?? [],
+    };
+  };
+
   function list(
     project: string,
     limit = 50,
-  ): { targets: TargetStatus[]; runs: (BackupRunRow & JobInfo)[] } {
+  ): { targets: TargetStatus[]; runs: (RunListing & JobInfo)[] } {
     const targets = db
       .all<BackupScheduleRow>(
         'SELECT * FROM backup_schedules WHERE project_id=? ORDER BY target',
         project,
       )
-      .map((row) => ({
-        project: row.project_id,
-        target: row.target,
-        node: nodeName(row.node_id),
-        type: row.type,
-        schedule: row.schedule,
-        enabled: row.enabled === 1,
-        nextRunAt: row.next_run_at,
-        lastRunAt: row.last_run_at,
-        lastSuccessAt: row.last_success_at,
-        lastStatus: row.last_status,
-        problem: backupProblem(row, clock()),
-      }));
+      .map((row): TargetStatus => {
+        const finished = db.all<BackupRunRow>(
+          `SELECT * FROM backup_runs WHERE schedule_id=? AND state IN ('succeeded','failed')
+           ORDER BY COALESCE(finished_at,queued_at) DESC LIMIT 30`,
+          row.id,
+        );
+        const meta = (run: BackupRunRow) => parse<RunMeta>(run.metadata_json, {});
+        const newest = finished[0];
+        const newestMeta = newest ? meta(newest) : {};
+        const cause = newest?.state === 'failed' ? (newestMeta.cause ?? null) : null;
+        const base = backupProblem(row, clock());
+        return {
+          project: row.project_id,
+          target: row.target,
+          node: nodeName(row.node_id),
+          type: row.type,
+          schedule: row.schedule,
+          enabled: row.enabled === 1,
+          nextRunAt: row.next_run_at,
+          lastRunAt: row.last_run_at,
+          lastSuccessAt: row.last_success_at,
+          lastStatus: row.last_status,
+          problem:
+            base && cause === 'locked' && row.last_status === 'failed'
+              ? `${base}: the repository is locked, ${UNLOCK_HINT}`
+              : base,
+          retention: retentionStatus(
+            finished
+              .filter((run) => run.state === 'succeeded')
+              .flatMap((run) => meta(run).retention ?? []),
+          ),
+          cause,
+        };
+      });
     const runs = db.all<BackupRunRow>(
       'SELECT * FROM backup_runs WHERE project_id=? ORDER BY COALESCE(finished_at,queued_at) DESC LIMIT ?',
       project,
@@ -749,6 +922,7 @@ export function createBackupService(deps: BackupServiceDeps) {
       targets,
       runs: runs.map((run) => ({
         ...run,
+        ...runDetail(run.metadata_json),
         ...(run.command_id && ['queued', 'running'].includes(run.state)
           ? jobInfo.get(run.command_id)
           : undefined),
@@ -822,7 +996,20 @@ export function createBackupService(deps: BackupServiceDeps) {
     return { commandId, nodeId: schedule.node_id };
   }
 
-  return { sync, tick, onHeartbeat, onResult, runNow, list, queueRestore, cancelRun, cancelJob };
+  return {
+    sync,
+    tick,
+    onHeartbeat,
+    onResult,
+    runNow,
+    list,
+    queueRestore,
+    cancelRun,
+    cancelJob,
+    clearRetentionFailures,
+    /** Appends an event about a repository or a target; control's maintenance and own backup use it too. */
+    event,
+  };
 }
 
 export type BackupService = ReturnType<typeof createBackupService>;

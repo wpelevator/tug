@@ -223,6 +223,14 @@ export type CommandType =
   | 'backup.run'
   | 'backup.restore'
   | 'backup.list'
+  /** Payload a `BackupJobPayload`: `restic unlock` on the project's repository, which removes only locks that have gone stale. */
+  | 'backup.unlock'
+  /** Payload a `BackupJobPayload` with `maintain`: a weekly `prune` and `restic check` of the project's repository. */
+  | 'backup.maintain'
+  /** Payload a `BackupJobPayload` with `forget`: `restic forget` of tug's own safety snapshots. */
+  | 'backup.forget'
+  /** Payload `{project, restoreId, volume}`: removes the scratch volume of a finished scratch restore. */
+  | 'restore.remove'
   /** Payload `{ commandId }`: stops that job on the node, whether it is queued or running. */
   | 'backup.cancel';
 
@@ -232,6 +240,9 @@ export const BACKUP_COMMAND_TYPES: readonly CommandType[] = [
   'backup.run',
   'backup.restore',
   'backup.list',
+  'backup.unlock',
+  'backup.maintain',
+  'backup.forget',
 ];
 
 /** `GET /agent/v1/backup/credentials`: environment for the restic helper of one running backup command. */
@@ -239,11 +250,47 @@ export interface BackupCredentialsResponse {
   env: Record<string, string>;
 }
 
+/** restic's exit code when it cannot lock the repository (0.17 and newer). Lock failures are classified by this code, never by wording. */
+export const RESTIC_EXIT_LOCKED = 11;
+/**
+ * How long the CLI waits for `POST /api/v1/control/backups/run` to answer: control's 30 minute limit on one control
+ * backup (`CONTROL_JOB_LIMIT_MS`, which includes the 10 minute `--retry-lock` wait) plus five minutes of slack. The
+ * request answers only when the backup is done, so undici's default 300 s wait would end it while control still works.
+ */
+export const CONTROL_BACKUP_WAIT_MS = 35 * 60_000;
+
+/** The reason of a hold placed by `tug deploy --hold`; a credential that may deploy may release it, see `POST /api/v1/holds/release`. */
+export const DEPLOY_HOLD_REASON = 'deploy hold';
+/** Why a backup job failed, when more than its message says; only `locked` exists. */
+export type BackupCause = 'locked';
+/**
+ * What happened to retention in a run, which is `restic forget` with the target's policy: `ok`, `failed` (the
+ * snapshot is safe, the old ones are not removed), or `external` (the destination is append-only and retention is the
+ * operator's job, so tug did not try). `locked` marks a failure that was restic's lock exit code. The data of
+ * forgotten snapshots is freed by the weekly `restic prune`, which is the maintenance job's (`BackupMaintenanceOutcome`).
+ */
+export interface BackupRetentionOutcome {
+  state: 'ok' | 'failed' | 'external';
+  /** Redacted restic message when `state` is `failed`. */
+  message?: string;
+  locked?: boolean;
+}
+/** Who prunes the destination: tug (`managed`, the default) or the storage side (`external`, for append-only servers). */
+export type RetentionMode = 'managed' | 'external';
+
 /** Why a command may be refused or a run marked missed; recorded on the run. */
 export type BackupMissReason = 'node_offline' | 'control_down' | 'deadline';
 
 export type JobPhase =
-  'queued' | 'pulling' | 'checking' | 'dumping' | 'uploading' | 'forgetting' | 'restoring';
+  | 'queued'
+  | 'pulling'
+  | 'checking'
+  | 'dumping'
+  | 'uploading'
+  | 'forgetting'
+  | 'restoring'
+  | 'unlocking'
+  | 'maintaining';
 
 /** Payload of `backup.check`, `backup.run` and `backup.restore`. Restic credentials are never in a payload. */
 export interface BackupJobPayload {
@@ -259,6 +306,12 @@ export interface BackupJobPayload {
   node: string;
   tags: string[];
   retention?: BackupRetention;
+  /** `external`: the destination is append-only, so `restic forget` is skipped and reported as `retention.state: external`. */
+  retentionMode?: 'external';
+  /** `backup.maintain` only: prune the repository (skipped when false) and then check it, reading a subset of the data when `subset` is set. */
+  maintain?: { prune: boolean; subset?: string };
+  /** `backup.forget` only: the safety snapshots (tagged `trigger:pre-restore`) of the project to forget. */
+  forget?: { snapshotIds: string[] };
   /** Command targets: what to run in the service's container, and how to name and check its output. */
   command?: {
     service: string;
@@ -278,6 +331,16 @@ export interface BackupJobPayload {
   restore?: { snapshotId: string; mode: 'in-place' | 'scratch'; scratchVolume?: string };
 }
 
+/** The result of one maintenance job: prune (when asked for) and `restic check`. */
+export interface BackupMaintenanceOutcome {
+  prune: 'ok' | 'skipped' | 'failed';
+  check: 'ok' | 'failed';
+  /** restic's closing words for whichever step failed. */
+  message?: string;
+  locked?: boolean;
+  subset?: string;
+}
+
 export interface BackupJobResult {
   runId: string;
   snapshotId?: string;
@@ -288,6 +351,14 @@ export interface BackupJobResult {
   /** Repository state: `missing` only from the read-only `backup.check`; `backup.run` initializes instead. */
   repository?: 'ok' | 'initialized' | 'missing';
   warnings?: string[];
+  /** What happened to retention; absent when the run applies none (a safety backup before a restore). */
+  retention?: BackupRetentionOutcome;
+  /** `backup.forget` only: the snapshots that were forgotten; a requested one that is not there is already gone. */
+  forgotten?: string[];
+  /** `backup.maintain` only: what the prune and the check found. `locked` marks a failure that was restic's lock exit. */
+  maintenance?: BackupMaintenanceOutcome;
+  /** `backup.unlock` only: repository locks before and after `restic unlock`. What is left is held by a live restic or is not stale yet. */
+  unlock?: { before: number; after: number };
 }
 
 /** Live jobs in `StatusReport.jobs`, so control can tell "running" from "lost". */
@@ -347,9 +418,10 @@ export type CommandResultPayload =
   | { project: string; service: string; restarted: true }
   | { stdout: string; stderr: string }
   | { project: string; volume: string; deleted: true }
+  | { project: string; restoreId: string; volume: string; removed: boolean }
   | BackupJobResult
   | { found: boolean }
-  | { error: string };
+  | { error: string; cause?: BackupCause };
 
 export interface CommandResult {
   commandId: string;

@@ -36,7 +36,7 @@
     "test:integration:network": "bash tools/scripts/integration-network-test.sh",
     "test:integration:agent": "node --test 'tests/integration/**/*.test.ts'",
     "test:integration:ingress": "node --test tests/integration/ingress-resilience.test.ts",
-    "test:integration:backups": "node --test tests/integration/backup-job.test.ts tests/integration/run-job.test.ts",
+    "test:integration:backups": "node --test tests/integration/backup-job.test.ts tests/integration/run-job.test.ts tests/integration/restic-stop.test.ts tests/integration/retention-lock.test.ts tests/integration/restic-unlock.test.ts tests/integration/restic-maintain.test.ts",
     "test:smoke:dist": "npm run build && CLI_ENTRY=dist/cli.js node --test src/cli/templates.process.test.ts",
     "changeset": "changeset",
     "version-packages": "changeset version && npm install --package-lock-only --ignore-scripts",

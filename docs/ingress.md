@@ -31,6 +31,8 @@ services:
 
 `tug node ingress edge1` marks a node as an ingress node, and `--disable` removes the role. The `ingress` keys are in [Compose extensions](compose.md#ingress).
 
+Caddy runs host-networked and binds ports 80 and 443 itself. `tug node add --ingress` checks both ports over SSH before it installs anything and stops when another process holds one; a port held by tug's own Caddy or by the control container (which may publish 443 on a host that is also an ingress node) is fine. On an existing node, a Caddy that exits on start or restarts in a loop is reported as the node's ingress failure, with the tail of its log and a hint to find the process that holds the ports (`ss -ltnp`). tug decides this from the container state, never from log wording.
+
 | Rule | Behavior |
 | --- | --- |
 | One project per host | A deploy or rollback is refused with `409` if another project's current deployment already routes the host (case-insensitive) |

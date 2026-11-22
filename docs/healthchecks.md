@@ -28,7 +28,7 @@ services:
 
 Set `DB_ROOT_PASSWORD` with `tug secret set DB_ROOT_PASSWORD` before deploying. The nginx service here does not use the database, and the [WordPress example](https://github.com/wpelevator/tug/blob/main/examples/wordpress/README.md) shows an app that does.
 
-During a deployment the agent checks the container and reports failures to control. Ingress uses serving endpoints, and a rolling deployment waits for a healthy replacement before switching traffic. Without `x-tug.health`, tug runs no readiness probe for that service, and a running container alone does not prove the app is ready.
+During a deployment the agent checks the container and reports failures to control. Ingress uses serving endpoints, and a rolling deployment waits for a healthy replacement before switching traffic. Without `x-tug.health`, tug runs no readiness probe for that service, and a running container alone does not prove the app is ready. Such a service is never probed and is not reported failed while its container runs; only an image `HEALTHCHECK` that a `depends_on: condition: service_healthy` waits for is consulted. To keep an app from starting before its data is imported, hold it with [`tug deploy --hold`](cli.md#tug-deploy).
 
 ## Choose a check
 

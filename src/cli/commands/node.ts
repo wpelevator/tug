@@ -140,6 +140,9 @@ async function installNodeIdentity(
     progress.stage(`Checking host ${name}`);
     await preflightRemote(rt, sshTarget, {
       controlUrl: connectUrl ?? cfg.credential?.url,
+      // An ingress node's Caddy binds 80 and 443 itself: find out now, before the agent is installed, not from a
+      // Caddy that exits on start.
+      ingressPorts: o.ingress ? [80, 443] : [],
       progress,
     });
     const requestedImage = resolveImage(o.image, o.buildLocalImage, rt.version);

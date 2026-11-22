@@ -629,7 +629,92 @@ export function createRestoreService(deps: RestoreDeps) {
     return 'error' in stopped ? stopped : { ok: true, state: restore.state };
   }
 
-  return { plan, start, advance, releaseInterrupted, resume, cancel, holds, list };
+  /** What restores leave behind: scratch volumes still on a node and safety snapshots still in the repository. */
+  function leftovers(project: string): Leftovers {
+    const scratchVolumes = db
+      .all<{
+        id: string;
+        target: string;
+        state: string;
+        scratch_volume: string;
+        node: string | null;
+        at: string | null;
+      }>(
+        `SELECT r.id,r.target,r.state,r.scratch_volume,n.name AS node,COALESCE(r.finished_at,r.started_at) AS at
+         FROM restore_runs r LEFT JOIN nodes n ON n.id=r.node_id
+         WHERE r.project_id=? AND r.mode='scratch' AND r.scratch_volume IS NOT NULL AND r.state IN ('succeeded','failed')
+         ORDER BY at DESC,r.id`,
+        project,
+      )
+      .map((row) => ({
+        restoreId: row.id,
+        target: row.target,
+        volume: row.scratch_volume,
+        node: row.node,
+        state: row.state,
+        createdAt: row.at,
+      }));
+    // Only a restore that finished (or was released) frees its safety snapshot: while it failed or is interrupted the
+    // snapshot is the copy of what the data was.
+    const safetySnapshots = db
+      .all<{ id: string; target: string; run_id: string; snapshot_id: string; at: string | null }>(
+        `SELECT r.id,r.target,b.id AS run_id,b.snapshot_id,COALESCE(r.finished_at,r.started_at) AS at
+         FROM restore_runs r JOIN backup_runs b ON b.id=r.safety_run_id
+         WHERE r.project_id=? AND r.mode='in-place' AND r.state IN ('succeeded','released')
+           AND b.state='succeeded' AND b.snapshot_id IS NOT NULL
+         ORDER BY at DESC,r.id`,
+        project,
+      )
+      .map((row) => ({
+        restoreId: row.id,
+        target: row.target,
+        runId: row.run_id,
+        snapshotId: row.snapshot_id,
+        createdAt: row.at,
+      }));
+    return { scratchVolumes, safetySnapshots };
+  }
+
+  /** The scratch volume or safety snapshot of a restore is gone: forget it, keeping the restore's own record. */
+  function cleared(restoreId: string, what: 'scratch' | 'safety'): void {
+    db.run(
+      what === 'scratch'
+        ? 'UPDATE restore_runs SET scratch_volume=NULL WHERE id=?'
+        : 'UPDATE restore_runs SET safety_run_id=NULL WHERE id=?',
+      restoreId,
+    );
+  }
+
+  return {
+    plan,
+    start,
+    advance,
+    releaseInterrupted,
+    resume,
+    cancel,
+    holds,
+    list,
+    leftovers,
+    cleared,
+  };
+}
+
+export interface Leftovers {
+  scratchVolumes: {
+    restoreId: string;
+    target: string;
+    volume: string;
+    node: string | null;
+    state: string;
+    createdAt: string | null;
+  }[];
+  safetySnapshots: {
+    restoreId: string;
+    target: string;
+    runId: string;
+    snapshotId: string;
+    createdAt: string | null;
+  }[];
 }
 
 export type RestoreService = ReturnType<typeof createRestoreService>;

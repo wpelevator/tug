@@ -26,6 +26,7 @@ import { defaultImage, resolveImage } from '../../images/image.ts';
 import { decodeCredential, fingerprintPem, writeFileDurable } from '../../pki.ts';
 import { loadTemplate } from '../load-template.ts';
 import { errMessage } from '../../errors.ts';
+import { CONTROL_BACKUP_WAIT_MS } from '../../protocol.ts';
 import {
   collectList,
   download,
@@ -650,6 +651,12 @@ export function registerControl(rt: CliRuntime, program: Command): void {
     )
     .action(
       async (o: { images: boolean; local?: boolean; download?: boolean; output?: string }) => {
+        // The request answers when the backup is done, and a locked repository is waited on for ten minutes first.
+        const wait = {
+          waitMs: Number(rt.env.TUG_CONTROL_BACKUP_WAIT_MS) || CONTROL_BACKUP_WAIT_MS,
+          stillRunning:
+            'the backup may still be running, or waiting for the repository lock, on control. Its outcome is in `tug backup list` (the control line), or `tug events --project _control`',
+        };
         const archive = Boolean(o.local || o.download || o.output);
         if (!archive) {
           // Only an archive has build images, so --no-images must not quietly turn this into one.
@@ -660,7 +667,14 @@ export function registerControl(rt: CliRuntime, program: Command): void {
             async () =>
               print(
                 rt,
-                await request(rt, 'POST', '/api/v1/control/backups/run', { toDestination: true }),
+                await request(
+                  rt,
+                  'POST',
+                  '/api/v1/control/backups/run',
+                  { toDestination: true },
+                  false,
+                  wait,
+                ),
               ),
           );
         }
@@ -673,7 +687,7 @@ export function registerControl(rt: CliRuntime, program: Command): void {
             artifactRef: string;
             state: string;
             images: boolean;
-          }>(rt, 'POST', '/api/v1/control/backups/run', { images: o.images });
+          }>(rt, 'POST', '/api/v1/control/backups/run', { images: o.images }, false, wait);
           if (!o.download && !o.output) return print(rt, result);
           const file = resolvePath(rt, o.output ?? `tug-control-backup-${result.backupId}.tar.gz`);
           progress.stage(`Downloading the archive to ${file}`);

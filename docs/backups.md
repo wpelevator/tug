@@ -57,6 +57,24 @@ tug backup destination set rest:http://backup.internal:8000/tug --env RESTIC_RES
 
 Plain HTTP is acceptable only on a private network or VPN that the control host and every node share. Use `rest:https://` anywhere else. A server started with `--no-auth` needs no `--env`.
 
+### Append-only destinations
+
+A server that refuses deletes, such as `rest-server --append-only`, protects snapshots from a compromised node, and it also refuses the `restic forget` that tug runs after each backup and the weekly `restic prune`. Tell tug that retention is yours:
+
+```sh
+tug backup destination set rest:http://backup.internal:8000/tug --retention external
+```
+
+`tug backup destination set --retention external` with no URL changes only the mode of the destination in use and keeps its credentials, as does the same URL without `--env`; a different URL without `--env` is refused instead of replacing the destination. The mode belongs to the destination, so it applies to every project and to control's own backup, and setting the same URL again keeps it. `--retention managed` turns pruning back on, and a different URL starts managed. `tug backup destination show` and `destination check` print the mode. The check does not test whether the credentials can delete.
+
+With `external`, tug never runs `forget` or `prune`, and each run records `retention: external`. Setting `external` also ends a retention failure that was already recorded, for every project and for control's own backup: the target reports `external` at once, `tug backup list --check` returns to 0 without waiting for the next backup, and one `backup.retention_recovered` event is recorded for each target (and control) that was failing. The weekly [repository check](#verify-a-repository) still runs, because it only reads. You then own:
+
+- **Retention and pruning from the storage side**, by whatever your server offers, or by `restic forget --prune` with your policy and credentials that may delete (the repository and password come from `tug backup password`).
+- **Safety snapshots.** The snapshot before each in-place restore is tagged `trigger:pre-restore` and is kept by tug's own retention. Keep that tag when you prune: `--keep-tag trigger:pre-restore`.
+- **Partial snapshots.** When a command backup fails after restic stored a partial snapshot, tug forgets it. On an append-only server that cleanup fails, and the failed run's error says so.
+
+Without the setting, an append-only server refuses the `restic forget` that follows each backup, which shows as a retention failure and is the signal to set it. Two consecutive failed runs turn `tug backup list --check` red, and the weekly prune fails its repository check, see [Watch your backups](#watch-your-backups).
+
 ### Not supported
 
 `sftp:` is rejected because tug cannot give the restic helper container SSH keys or a `known_hosts` file. Run a rest-server and reach it over a private network or VPN, or use S3. `rclone:` is rejected because the helper image does not configure rclone.
@@ -114,7 +132,7 @@ Control's scheduler ticks every 30 seconds (`TUG_BACKUP_TICK_MS`). At each slot 
 | --- | --- |
 | Service | Runs your `command` through an exec in the running container and streams its output into `restic backup --stdin`, so no staging disk is needed. The command sees the container's environment, including its secrets, so read passwords from the environment (`$MARIADB_ROOT_PASSWORD`) and they never appear in tug's configuration, payloads or events. A command that fails, writes nothing or lacks the `verify` text is never kept: the partial snapshot is forgotten and the run fails. The service must be running on the node |
 | Volume | Mounted read-only into the restic container and archived, with your `exclude` patterns. A volume that does not exist on the node fails the run instead of backing up an empty one |
-| Retention | Runs after each successful backup (`restic forget --prune` per node and target). Snapshots tagged `trigger:pre-restore` are kept regardless |
+| Retention | `restic forget` runs after each successful backup, per node and target, and drops the snapshots the policy no longer keeps. Their data is freed by the weekly prune, see [Verify a repository](#verify-a-repository). Snapshots tagged `trigger:pre-restore` are kept regardless |
 
 Restic runs in a helper container with a memory limit, labelled `tug.job` and removed when it finishes. An agent that restarts mid-job removes leftovers and reports the job failed. The image comes from `TUG_RESTIC_IMAGE` on control (default `restic/restic:0.19.1`, and a digest reference is recommended), which nodes pull outbound like any published image. Before mounting a managed volume, backup and restore check its project and volume ownership labels, and a scratch restore checks its scratch volume's project and restore labels. A conflicting or unlabelled volume is refused.
 
@@ -166,15 +184,67 @@ backup:
 | Event | Meaning |
 | --- | --- |
 | `backup.completed` | A run succeeded |
-| `backup.failed` | A run failed. A failed scheduled run is retried once after ten minutes |
+| `backup.failed` | A run failed. A failed scheduled run is retried once after ten minutes. When restic exited with its lock code (11), the event metadata has `cause: "locked"`: the repository is locked by another restic, or by one that was killed |
+| `backup.retention_failed` | The backup succeeded but applying retention (`restic forget`) failed, so old snapshots stay and the repository grows. Raised once, when retention starts failing (and for control's own backup). The event metadata has `cause: "locked"` for a lock failure |
+| `backup.retention_recovered` | Retention worked again after `backup.retention_failed` |
+| `backup.verify_failed` | The weekly or manual `restic check` of a repository, or its weekly prune, failed and the failure counts: restic found a fault, or an overlap (restic's lock exit code, a node that did not answer, a timeout) happened twice in a row. Raised once, when it starts counting, on the project or on `_control`. The event metadata has `failures`, and `cause: "locked"` for a lock exit |
+| `backup.verify_recovered` | A later check passed after `backup.verify_failed` |
 | `backup.missed` | The node did not pick it up before its deadline (`node_offline`), or control was not running at the slot. A week of downtime gives one missed event and one catch-up run per target, not a burst |
 | `backup.stale` | A target has no success for two periods. Raised once a day, which catches a destination key that quietly stopped working |
 | `backup.no_destination` | No destination is configured |
 | `backup.cancelled` | Someone ran `tug backup cancel <run>`. A cancelled backup is a warning and is not retried |
 
-Exit status is the signal to wire into monitoring: `tug backup list --check` exits nonzero when a target is stale, failed or missed, or when nothing is protected. Run it from cron or a monitor, and keep running it during a [migration](migration.md#coming-from-an-existing-restic-setup), when the old backup system may be failing without anyone noticing.
+Exit status is the signal to wire into monitoring: `tug backup list --check` exits nonzero when a target is stale, failed or missed; when its retention (the `restic forget` after each backup) failed in two runs in a row, whatever the cause (restic's lock exit code counts as an overlap and needs the second run like any other); when a repository's weekly prune or check failed in a way that counts (see [Verify a repository](#verify-a-repository)); when no repository check or prune has finished for 14 days; or when nothing is protected. A run whose retention works clears a retention problem, and a passing maintenance clears a repository problem. A destination set to `--retention external` never reports a retention problem. Run it from cron or a monitor, and keep running it during a [migration](migration.md#coming-from-an-existing-restic-setup), when the old backup system may be failing without anyone noticing.
+
+Two records describe how the repository is kept small. Each run records the outcome of its `restic forget` as the target's `retention` (`ok`, `failed` or `external`) and raises `backup.retention_failed` and `backup.retention_recovered` when it changes. A forget removes snapshots but frees no data. The weekly job runs `restic prune` and `restic check` and records them as the repository's `verify` result, with `backup.verify_failed` and `backup.verify_recovered`.
+
+`forget`, `prune` and `check` each take the exclusive repository lock, and `backup` takes a shared one. Tested with restic 0.19.1 against a backup holding its shared lock: `forget`, `prune` and `check` each waited for the lock and exited with code 11, and a second `backup` ran beside it. A node runs one job per project at a time, so a retention lock failure comes from a project whose targets run on several nodes into one repository, from a backup that outlasts the ten minutes `forget` waits (`--retry-lock`), or from a lock a killed restic left behind, which `tug backup unlock` clears once it has gone stale. A retention failure on restic's lock exit code is an overlap like any other, so it needs a second failure in a row before `--check` reports it. When restic's `forget` is refused because the destination is append-only (an HTTP 403, `append-only` or a permission error), the stored message is restic's own refusal line plus the hint to run `tug backup destination set --retention external`; the Go stack that restic prints after it is dropped.
 
 While control is down no backup starts, which is the price of one scheduler. Running jobs finish and report when control returns. `tug backup run` takes a backup now, and `tug backup list` shows the catalog, see [CLI](cli.md#backups).
+
+## Verify a repository
+
+A backup that completes says only that restic wrote it. Once a week per repository, control checks that the repository is readable, and it frees the space of forgotten snapshots:
+
+1. Control picks one repository at a time, from `backup_schedules` of projects that have a successful backup. The first time a repository is seen it is scheduled at a point inside the next week, chosen from its name, so projects on one destination are not pruned together.
+2. It queues `backup.maintain` on the node that runs the project's backups, which runs `restic prune` and then `restic check`. The check runs even when the prune failed. A destination set to `--retention external` is never pruned, only checked.
+3. Control's own repository is checked weekly from control (without a prune, because control's nightly backup already prunes it).
+4. The outcome is stored per repository: prune and check results, the node, when it ran, restic's message and the number of failed runs in a row. It is shown by `tug backup list`. A failed run is tried again after six hours, a passing one after a week. Replacing the destination clears the records.
+5. A failure that may be an overlap needs a second one in a row to count: restic's lock exit code (another node's backup holds a lock that a prune or check needs exclusively), a node that did not answer, or a timeout. Anything else, such as restic reporting damage in the repository, counts at once. A failure that counts raises `backup.verify_failed` once and turns `tug backup list --check` red; a pass resets the count, raises `backup.verify_recovered` if a failure had counted, and turns the check green. `tug backup list --check` also fails when a repository has had no finished check or prune for 14 days, which is what a project with no online node looks like, because the weekly job skips it without an error.
+
+```sh
+tug backup verify
+tug backup verify --read-data-subset 5%
+tug backup verify --control
+```
+
+`verify` runs the check now, in the background, and never prunes. `restic check` alone reads the repository's structure. `--read-data-subset` (a fraction such as `1/10`, a percentage or a size) also downloads that part of the stored data and verifies it, which catches bit rot at the price of bandwidth from the destination. It needs the admin role and is audited as `backup.verify`. A repository that has no snapshot yet cannot be checked and is skipped until its first backup succeeds. `TUG_MAINTENANCE_TIMEOUT_MS` (default six hours) bounds one job.
+
+### Protection levels
+
+`tug backup list` shows one level for each target, and never more than what has run:
+
+| Level | Meaning |
+| --- | --- |
+| (none) | The destination is a local path, or the target has no recent success |
+| `off-host` | The destination is not a local path and the target has a recent success |
+| `verified` | `off-host`, and the repository's last `restic check` passed and finished no more than eight days ago (the weekly interval plus a day). A backup made since the check keeps the level: the check vouches for the repository, and the weekly cadence keeps it recent |
+| `restore-tested` | `verified`, and a scratch restore of the target succeeded within the last 90 days. It is not tied to the newest snapshot: a restore drill proves that restoring works, not that every snapshot restores, see [Restore drill](#restore-drill) |
+
+The levels are in `GET /api/v1/backups` as `protection` on each target, with the repository's last check as `verify` and `maintenanceRunning`.
+
+## Unlock a repository
+
+A backup that fails with `the repository is locked` (restic exit code 11) could not take the repository lock. Most often a restic was killed while it held one and its lock is still there. restic gives up on such a lock only after it has gone 30 minutes without a refresh, so later backups wait for it and fail meanwhile. The failed run, `tug backup list` and `tug backup list --check` name the fix:
+
+```sh
+tug backup unlock
+tug backup unlock --control
+```
+
+The first runs `restic unlock` on the project's repository, from the node that runs its backups. The second does it on control's own repository, from control. Both need the admin role and are audited as `backup.unlock`. Neither takes the project lock, so a deploy is not held up: restic removes only locks that have gone stale, and that rule is what makes unlocking safe. The answer is `{removed, remaining}`, the locks before and after.
+
+The unlock job opens the repository without taking a lock, so it works against an exclusive lock, such as the one a `forget --prune` or `prune` that was killed leaves behind: restic refuses every command that takes a lock while such a lock exists, even a stale one, and only `restic unlock` removes it. Only stale locks are removed. tug never passes `--remove-all` and never unlocks by itself, because a lock can belong to a prune running on another host, and removing it would let two writers meet. A `remaining` above zero means a restic is running now or its lock has not gone stale yet, so run the command again after 30 minutes. From 4.0 a stopped helper releases its lock first, see [Jobs on a node](#jobs-on-a-node), so a stale lock should be rare.
 
 ## Restore
 
@@ -202,7 +272,7 @@ Restores are as generic as backups:
 | 3. Safety backup | Backs up the current data, tagged `trigger:pre-restore`, exempt from retention and not applying retention itself. Skip it with `--no-safety-backup`. If it fails, nothing has changed: the writers start again and the lock drops |
 | 4. Restore | Restores, then starts the writers and unlocks. A volume is first restored into a hidden directory inside itself (`.tug-restore-<id>`) and every file is read and verified. Only then is the live content replaced, so an unreadable repository leaves the volume as it was. This needs free space in the volume for a second copy of the snapshot |
 
-- **Stalls.** A restore whose restic command makes no progress for ten minutes ends as `interrupted` with the reason, and the writers stay stopped.
+- **Stalls.** A restore whose restic command makes no progress for fifteen minutes ends as `interrupted` with the reason, and the writers stay stopped.
 - **Failures.** If the restore fails, the writers stay stopped and the project stays locked, because a half-restored database serving traffic is worse than an outage. `tug restore resume <id>` tries again, and `tug restore release <id>` starts the services anyway.
 - **Same-target snapshots only.** A snapshot can be restored only into the target that produced it (its `project:` and `target:` tags are checked). tug does not restore a snapshot into a different project.
 - **Scheduled backups** of a target are skipped while it is being restored.
@@ -217,6 +287,25 @@ A backup you have not restored is a hope. Start with an isolated restore that ch
 2. **Restore files into a scratch volume.** `tug restore run wp-content --scratch --confirm` reads the latest snapshot into a new volume and touches nothing live. List it with `docker run --rm -v <volume>:/data alpine ls /data` on the node, then remove it with `docker volume rm <volume>`.
 3. **Restore the database into a throwaway container.** Use the project repository and its escrowed password to read the snapshot with `restic dump <snapshot> wordpress.sql` into a separate database container. Verify known data without connecting the test container to production services, mail or scheduled jobs. This manual end-to-end drill has not been validated on a fresh host.
 4. **Write down how long it took.** That is your real recovery time.
+
+## Clean up after restores
+
+A restore leaves things behind on purpose. A scratch restore keeps its volume so you can look at the files, and every in-place restore keeps the safety snapshot taken first (tagged `trigger:pre-restore`, exempt from retention) so you can undo it. They accumulate until you remove them:
+
+```sh
+tug restore list
+tug restore remove rst_ab12cd34
+tug restore remove --expire-safety 30d
+```
+
+`restore list` prints the recent restores, then one line per scratch volume still on its node and per safety snapshot still in the repository. `restore remove <id>` removes what that restore left: the scratch volume (an agent command on the restore's node, which refuses a volume whose labels do not name that project and restore) or the safety snapshot (a `backup.forget` job that forgets exactly that snapshot, never a regular backup or another project's). `--expire-safety <age>` (`90m`, `12h`, `30d`, `2w`) forgets the safety snapshots of every restore that finished longer ago than that, in one job. Both need the admin role, take the project lock, and are audited as `restore.removed` and `restore.safety_expired`.
+
+Rules that keep it safe:
+
+- A safety snapshot is removable only once its restore `succeeded` or was `released`. While a restore failed or is interrupted, the snapshot is the copy of what the data was, so it is not listed.
+- A scratch volume is removable once its restore succeeded or failed.
+- A forget frees the snapshot, and the space comes back with the next weekly prune, see [Verify a repository](#verify-a-repository).
+- On an append-only destination (`--retention external`) deleting a snapshot is refused with the reason before any job is queued, because the server refuses deletes. Forget it from the storage side, with credentials that may delete. A scratch volume is not in the repository and can still be removed.
 
 ## Recover a site on a replacement node
 
@@ -250,6 +339,8 @@ Create the bucket first. A repository is initialized only when restic exits with
 
 `tug backup list` shows a `control` line with the last success in the destination now in use. Switching destination starts a first backup there and reports it as unprotected until that backup completes. A local-path destination (for development) is labelled `local path only: not off-host`. `tug backup list --check` fails when the last control backup failed, when none succeeded for twice the interval (two days by default), or when a destination has had no completed backup an hour after it was set. `tug events --project _control` shows `backup.completed` and `backup.failed`.
 
+`tug control backup` answers when the backup is done, so against a locked control repository it waits for the lock first (`--retry-lock 10m`). The CLI waits up to 35 minutes for the answer, which is control's 30 minute limit on one control backup plus slack (`TUG_CONTROL_BACKUP_WAIT_MS` changes it, in milliseconds). If control still has not answered, the command exits 1 with `control did not answer within 35 minutes; the backup may still be running, or waiting for the repository lock, on control`. The backup keeps running on control, and its outcome is the `control` line of `tug backup list` (`cause: "locked"` with the `tug backup unlock --control` hint when the lock never cleared) or `tug events --project _control`.
+
 **The control password.** The control repository has its own password, derived from the master key like each project's. Nodes receive only the passwords of the projects they run, so a node that holds the destination credentials can delete or overwrite control snapshots but cannot read or forge one. The master key is inside the archive, so keep the derived password off the server. `tug backup password --control` prints it with the repository. It is the one value to escrow, with the destination credentials you already keep: it opens `_control`, and the restored archive brings back the master key from which every project password derives again. It never changes while the installation keeps its master key. Enable bucket versioning if you want snapshots to survive a compromised node, and test object lock with restic before relying on it, because control prunes old snapshots.
 
 **Test your setup** before you need it:
@@ -280,20 +371,21 @@ A node runs backup and restore jobs in lanes: a restore and its safety backup fi
 - **One job per project.** A node never runs two jobs of one project at once, because they contend for the project's repository lock.
 - **Concurrency.** It runs two at a time only on a host with 3 GiB or more of memory, since each restic helper reserves 512 MB by default. Set `TUG_BACKUP_CONCURRENCY` on the agent to change that.
 - **Queue.** `tug backup list` shows a job waiting for a slot as `queued behind <run>`, with the run id in its last column.
-- **Stall limit.** Every restic command fails when it makes no progress for ten minutes, so a damaged repository or an unreachable store cannot hold a slot for the whole job limit. A prune that stalls after the snapshot was taken is a warning on the run, not a failed backup.
+- **Waiting for a lock.** The repository probe that starts every job reads the config without a lock (`--no-lock`), so a lock never fails a job before it starts. Every restic command that does take the repository lock (`backup`, `forget`, `prune`, `check`, and the `snapshots`, `dump` and `restore` of a restore) waits up to ten minutes for it (`--retry-lock 10m`) and exits with code 11 when the lock is still held after that. `restic unlock` and `list locks` do not wait: the first removes locks and the second reads without one.
+- **Stall limit.** Every restic command fails when it makes no progress for fifteen minutes, which is longer than the ten minutes it waits for a repository lock (`--retry-lock`), so waiting for a lock is not reported as a stall, while a damaged repository or an unreachable store still cannot hold a slot for the whole job limit. A prune that stalls after the snapshot was taken is a warning on the run, not a failed backup.
 - **Cancel.** `tug backup cancel <run>` stops a queued or running backup. `tug restore cancel <id>` stops a restore that is waiting on its safety backup (nothing has changed) or restoring (it is interrupted and its services stay stopped until `resume` or `release`). An agent older than control ignores a cancel.
+- **Stopping restic.** When a job is cancelled, times out or stalls, and when an agent or control restarts with a helper left over, tug sends restic SIGINT and gives it 20 seconds to exit before removing the helper container. A restic killed in the middle of a prune would leave its exclusive lock in the repository and block every later backup until the lock went stale.
 
 ## Known limits
 
 | Limit | Detail |
 | --- | --- |
-| Best-effort notification | A failed night produces a `backup.failed` or `backup.stale` event and a [configured webhook](observability.md#alerting). Delivery may be lost across control outages or shutdown. Run `tug backup list --check` from cron or a monitor. It exits nonzero when a target is stale, failed or missed, and when nothing is protected (pass `--allow-empty` for a project without data) |
+| Best-effort notification | A failed night produces a `backup.failed` or `backup.stale` event and a [configured webhook](observability.md#alerting). Delivery may be lost across control outages or shutdown. Run `tug backup list --check` from cron or a monitor. It exits nonzero when a target is stale, failed or missed, when its retention keeps failing, and when nothing is protected (pass `--allow-empty` for a project without data) |
 | Control down | No backup starts. Running jobs finish and report when control returns, and a long gap yields one missed event and one catch-up run per target |
 | Consistency | Live volumes are crash-consistent, not application-consistent. Use a command backup for anything with its own consistency |
 | One node per volume | A volume is backed up from the node that holds it. A volume mounted from a file server with `driver_opts` is read through that node's mount, so back up the file server's own disk where you can |
-| Not built | Repository maintenance (`restic check`, a read-verify of the data) |
 | Rejected destinations | `sftp:` and `rclone:` URLs, see [Not supported](#not-supported) |
-| Leftovers | A scratch restore leaves its volume (`tug_r<project-length>_<project>_<id>`) behind, and the safety snapshot of every in-place restore is kept for ever. No command lists or removes either. Remove scratch volumes with `docker volume rm` on the node, and safety snapshots with `restic forget` using the repository from `tug backup password` |
+| Leftovers | A scratch restore leaves its volume (`tug_r<project-length>_<project>_<id>`) behind, and the safety snapshot of every in-place restore stays in the repository until you remove it. `tug restore list` shows both and `tug restore remove` clears them, see [Clean up after restores](#clean-up-after-restores) |
 | Helper memory | The restic helper defaults to 512 MB, half of a 1 GB host. Lower it with `memory` under `x-tug.backup`. Larger repositories need more, so test the limit against your data |
 | `tug exec` | Cancelling it does not stop the remote process |
 

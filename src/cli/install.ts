@@ -59,6 +59,20 @@ ss -ltn | awk '{print $4}' | grep -qE '[.:]${port}$' || exit 0
 `;
 }
 
+/**
+ * A TCP port an ingress node needs is free, or is held by tug itself: its own Caddy (host networking, so it is found by
+ * name) or the control container, which may publish 443 on a host that is both. Anything else, usually another web
+ * server, would make Caddy exit on start.
+ */
+export function ingressPortCheck(port: number): string {
+  if (!Number.isInteger(port) || port < 1 || port > 65535)
+    throw new Error('port must be an integer from 1 to 65535');
+  return `command -v ss >/dev/null 2>&1 || exit 0
+ss -ltn | awk '{print $4}' | grep -qE '[.:]${port}$' || exit 0
+[ -n "$(docker ps -q --filter 'name=^/tug-caddy$' 2>/dev/null)" ] || [ -n "$(docker ps -q --filter 'name=^/${CONTROL_CONTAINER}$' --filter 'publish=${port}' 2>/dev/null)" ]
+`;
+}
+
 /** The host of an SSH target: `host`, `user@host`, `ssh://user@host:2222` or bracketed IPv6. */
 export function sshHost(sshTarget: string): string {
   let host = sshTarget

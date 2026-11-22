@@ -7,11 +7,13 @@ import type { CliRuntime } from '../runtime.ts';
 export function registerHold(rt: CliRuntime, program: Command): void {
   const hold = program
     .command('hold')
-    .description('services a deploy stopped because their data moved to another node');
+    .description(
+      'services a deploy stopped: a service held by `tug deploy --hold`, or one that writes to a service whose data moved to another node',
+    );
   hold
     .command('release [services...]')
     .description(
-      'start the services that `tug deploy --move` held, without restoring (all of them when none is named); a restore releases its own holds',
+      'start services a deploy held, without restoring (all of them when none is named): the ones `tug deploy --hold` stopped, and the writers `--move` stopped. A credential that may deploy releases only `deploy hold` holds; a move hold needs an admin. A restore releases its own holds',
     )
     .option('--select', 'choose one or more move holds instead of releasing all')
     .action(async (services: string[], o: CommonOpts & { select?: boolean }) => {

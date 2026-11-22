@@ -102,8 +102,8 @@ test(
       const restores = JSON.parse(await cli('restore', 'list', '--json'));
       assert.deepEqual(
         restores,
-        { restores: [] },
-        'restore list --json prints the list, not "no restores"',
+        { restores: [], leftovers: { scratchVolumes: [], safetySnapshots: [] } },
+        'restore list --json prints the list and its leftovers, not "no restores"',
       );
       const backups = JSON.parse(await cli('backup', 'list', '--json'));
       assert.ok(

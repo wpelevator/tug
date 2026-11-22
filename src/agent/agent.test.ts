@@ -795,6 +795,77 @@ test('executeCommand tolerates a missing volume, reports failing diagnostics, re
   });
 });
 
+test('restore.remove removes a scratch volume only when its labels name that restore and project', async () => {
+  const ctx = await makeCtx();
+  const docker = fake(ctx);
+  const name = 'tug_r4_proj_r123';
+  const remove = (restoreId: string, project = 'proj') =>
+    executeCommand(
+      {
+        id: 'c1',
+        type: 'restore.remove',
+        payload_json: JSON.stringify({ project, restoreId, volume: name }),
+      },
+      ctx,
+    );
+  docker.volumes.set(name, {
+    Name: name,
+    Labels: { 'tug.project': 'proj', 'tug.restore': 'r123' },
+  });
+  const wrong = await remove('r999');
+  assert.equal(wrong.state, 'failed', 'a volume of another restore is refused');
+  assert.match(
+    String((wrong.result as { error?: string }).error),
+    /does not belong to restore r999/,
+  );
+  assert.ok(docker.volumes.has(name), 'the refused volume is untouched');
+  assert.equal(
+    (await remove('r123', 'other')).state,
+    'failed',
+    'a volume of another project is refused',
+  );
+  const ok = await remove('r123');
+  assert.equal(ok.state, 'succeeded', "the restore's own scratch volume is removed");
+  assert.ok(!docker.volumes.has(name), 'the volume is gone');
+  const again = await remove('r123');
+  assert.equal(again.state, 'succeeded', 'removing a volume that is already gone succeeds');
+  assert.equal(
+    (again.result as { removed?: boolean }).removed,
+    false,
+    'and says nothing was removed',
+  );
+});
+
+test('a service without x-tug.health is never probed and a running container does not stay failed', async () => {
+  const probes: string[] = [];
+  const control = fakeControl(() => ({ secrets: {}, versions: {} }));
+  const ctx = await makeCtx({
+    http: control.http,
+    hostProbe: async (url) => {
+      probes.push(url);
+      return 500;
+    },
+  });
+  const noHealth: ComposeFile = {
+    services: { app: { image: 'wordpress', 'x-tug': { placement: { nodes: ['n1'] } } } },
+  };
+  const status = await reconcile(desired(noHealth), ctx);
+  assert.deepEqual(probes, [], 'no readiness probe runs without x-tug.health');
+  assert.notEqual(
+    status.health,
+    'failed',
+    'a running container without a health check is not failed',
+  );
+  assert.equal(fake(ctx).running().length, 1, 'the service is running');
+  assert.equal(
+    control.events.filter((e) => e.type === 'service.failed').length,
+    0,
+    'nothing is reported as failed',
+  );
+  const again = await reconcile(desired(noHealth), { ...ctx });
+  assert.notEqual(again.health, 'failed', 'a later poll does not turn it failed either');
+});
+
 test('volume deletion refuses a colliding volume owned by another project', async () => {
   const ctx = await makeCtx();
   const docker = fake(ctx);

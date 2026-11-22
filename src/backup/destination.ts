@@ -1,4 +1,5 @@
 import { createHmac } from 'node:crypto';
+import type { RetentionMode } from '../protocol.ts';
 
 /** Reserved secrets-table project holding the backup destination's credentials. */
 export const BACKUP_SECRET_PROJECT = '_backup';
@@ -17,6 +18,8 @@ export interface BackupDestinationInput {
   url: string;
   /** Variable name to value; stored encrypted and never returned. */
   env: Record<string, string>;
+  /** Who prunes the destination; absent when the request did not say, so the caller decides what to keep. */
+  retention?: RetentionMode;
 }
 
 export const isBackupProject = (project: string): boolean => project === BACKUP_SECRET_PROJECT;
@@ -24,10 +27,24 @@ export const isBackupProject = (project: string): boolean => project === BACKUP_
 /** A name starting with `_` is reserved for control's own records and is never a deployable project. */
 export const isReservedProject = (project: string): boolean => project.startsWith('_');
 
+/** `managed`, `external` or undefined when absent; anything else is an error naming the choices. */
+export function parseRetentionMode(value: unknown): RetentionMode | undefined {
+  if (value === undefined) return undefined;
+  if (value === 'managed' || value === 'external') return value;
+  throw new Error(
+    'retention must be "managed" (tug prunes old snapshots) or "external" (an append-only destination pruned from the storage side)',
+  );
+}
+
+/** A destination URL as stored: trimmed, without trailing slashes; empty when it is not a string. */
+export function normalizeDestinationUrl(value: unknown): string {
+  return typeof value === 'string' ? value.trim().replace(/\/+$/, '') : '';
+}
+
 /** Throws an `Error` naming the first problem with a destination, or returns it normalized. */
 export function parseBackupDestination(input: unknown): BackupDestinationInput {
   const body = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>;
-  const url = typeof body.url === 'string' ? body.url.trim().replace(/\/+$/, '') : '';
+  const url = normalizeDestinationUrl(body.url);
   if (!url)
     throw new Error('url is required, such as s3:https://s3.example.com/bucket/tug-backups');
   if (/\s/.test(url)) throw new Error('url must not contain whitespace');
@@ -52,6 +69,7 @@ export function parseBackupDestination(input: unknown): BackupDestinationInput {
     throw new Error(
       's3 urls look like s3:https://host/bucket[/prefix] and must name a bucket; AWS S3 uses s3:https://s3.amazonaws.com/bucket',
     );
+  const retention = parseRetentionMode(body.retention);
   const rawEnv =
     body.env && typeof body.env === 'object' ? (body.env as Record<string, unknown>) : {};
   const names = Object.keys(rawEnv);
@@ -70,7 +88,7 @@ export function parseBackupDestination(input: unknown): BackupDestinationInput {
   }
   const missing = (REQUIRED_ENV[scheme] ?? []).filter((name) => !(name in env));
   if (missing.length) throw new Error(`${scheme} destinations need ${missing.join(' and ')}`);
-  return { url, env };
+  return { url, env, ...(retention ? { retention } : {}) };
 }
 
 /** The restic repository of one project: every node of the project shares it, other projects never do. */

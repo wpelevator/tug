@@ -15,8 +15,13 @@ export function createTransport(
   credential: Credential,
   connectUrl?: string,
   clientVersion: string = packageVersion(),
+  /** `headersTimeoutMs` is how long a request may wait for the response headers; undici's default is 300 s. */
+  options: { headersTimeoutMs?: number } = {},
 ) {
-  const dispatcher = new Agent({ connect: clientTlsOptions(credential) as never });
+  const dispatcher = new Agent({
+    connect: clientTlsOptions(credential) as never,
+    ...(options.headersTimeoutMs ? { headersTimeout: options.headersTimeoutMs } : {}),
+  });
   const base = new URL(connectUrl ?? credential.url).origin;
   const http: HttpClient = (url, init) => {
     // Every request declares the calling process's version, so the control can refuse one that is newer than it is

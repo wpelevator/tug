@@ -53,6 +53,8 @@ export interface ContainerInspect {
   State?: {
     Status?: string;
     Running?: boolean;
+    /** True while Docker is waiting to restart a container that keeps exiting. */
+    Restarting?: boolean;
     ExitCode?: number;
     Health?: { Status?: string };
   };
