@@ -1,7 +1,7 @@
 // Turns the desired state for one node into Engine API container definitions. Pure: no Docker, no
 // filesystem. The config hash decides whether a running container already matches its definition.
 import crypto from 'node:crypto';
-import { bindPorts, crossNodeHosts } from './compose/compose.ts';
+import { bindPorts, crossNodeHosts, isRolling } from './compose/compose.ts';
 import { sentinelNames, substituteSentinels } from './compose/normalize.ts';
 import { composeDurationMs, sizeBytes } from './compose/units.ts';
 import type { CreateContainerBody } from './docker-api.ts';
@@ -303,7 +303,17 @@ export function containerSpecs(
     );
     const hash = crypto
       .createHash('sha256')
-      .update(JSON.stringify({ definition: { ...definition, Image: identity }, versions }))
+      .update(
+        JSON.stringify({
+          definition: { ...definition, Image: identity },
+          versions,
+          // A rolling service's readiness check is part of its revision: changing it starts a candidate that must pass
+          // the new check while the old revision keeps serving, instead of probing the live revision with it.
+          ...(isRolling(src) && desired.services[service]?.health
+            ? { health: desired.services[service].health }
+            : {}),
+        }),
+      )
       .digest('hex')
       .slice(0, 16);
     const body = walkStrings(definition, (s) => substituteSentinels(s, secrets));

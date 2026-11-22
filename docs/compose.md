@@ -203,7 +203,7 @@ services:
 | `strategy` | `recreate` or `rolling` | `recreate` |
 | `drain` | How long the previous revision keeps running after takeover. Same durations as health checks (`500ms`, `30s`, `1m`, or milliseconds) | `30s` |
 
-With `rolling`, the agent starts the new revision next to the old one, health-checks it, and only then lets the ingress switch. The old revision is removed once `drain` has passed. If the new revision never becomes healthy it is removed, the old one keeps serving, and the node reports `failed` for that deployment (see [Automatic rollback](#automatic-rollback)). A rolling service whose rendered definition and secrets did not change is left alone, and nothing else on the node restarts.
+With `rolling`, the agent starts the new revision next to the old one, health-checks it, and only then lets the ingress switch. The old revision is removed once `drain` has passed. If the new revision never becomes healthy it is removed, the old one keeps serving, and the node reports `failed` for that deployment (see [Automatic rollback](#automatic-rollback)). A rolling service whose rendered definition, secrets and `x-tug.health` did not change is left alone, and nothing else on the node restarts. Changing the health check alone starts a candidate that must pass the new check, so a check the app fails is rejected while the old revision keeps serving.
 
 **Requirements.** Deploy rejects a rolling service without `x-tug.ingress` (the edge switches traffic), without `x-tug.health` (a revision takes over only once healthy), or without exactly one entry in `ports` (the ingress port).
 
