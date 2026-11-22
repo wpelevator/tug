@@ -1,5 +1,16 @@
 # @wpelevator/tug
 
+## 4.1.0
+
+### Minor Changes
+
+- 6e2eb4c: A rolling revision now takes traffic only after the ingress nodes that route to it can open a connection to its published port, so a firewall between edge and app node rejects the candidate while the old revision keeps serving instead of leaving ingress with an unreachable upstream. A live revision that fails its health check later stays routed as `degraded` when it is the service's last endpoint, instead of being withdrawn into a certain 503. `tug status` and `tug tui` show `degraded`. Control and agents of different versions keep working: an older agent or control skips the check.
+
+### Patch Changes
+
+- df030db: A changed `x-tug.health` on a rolling service now starts a candidate revision that must pass the new check while the old one keeps serving. Before, only the live revision was probed with the new check, so a check it failed withdrew the only upstream and ingress answered 503.
+- 6e2eb4c: Document what a rolling rollout covers: it switches one service, so a recreated service behind it, such as PHP-FPM behind a rolling nginx, can answer errors while it restarts. Add the one-image recipe for PHP sites, and retitle the rolling milestone in the roadmap.
+
 ## 4.0.0
 
 ### Major Changes
