@@ -8,7 +8,10 @@ import { DockerEngine } from '../../src/docker-api.ts';
 import { collect, stopResticGracefully } from '../../src/backup/job.ts';
 import { until } from '../wait.ts';
 
+import { ensureResticImage, lockFiles, removeAsRoot } from './restic-support.ts';
 const RESTIC = process.env.TUG_RESTIC_IMAGE || 'restic/restic:0.19.1';
+
+ensureResticImage(RESTIC);
 const dockerUp = spawnSync('docker', ['version'], { stdio: 'ignore' }).status === 0;
 const cli = (...args: string[]) => spawnSync('docker', args, { encoding: 'utf8' });
 
@@ -27,7 +30,7 @@ async function holdingBackup(repo: string, name: string, engine: DockerEngine) {
   assert.equal(init.code, 0, `the repository should be created: ${init.err}`);
   const proc = await engine.execStart(id, { cmd: ['sh', '-c', 'yes | restic backup --stdin'] });
   const done = collect(proc);
-  const locks = async () => (await fs.readdir(path.join(repo, 'locks')).catch(() => [])).length;
+  const locks = async () => lockFiles(repo);
   await until(async () => (await locks()) > 0, 'restic to take its repository lock');
   return { id, done, locks };
 }
@@ -67,7 +70,7 @@ test(
       await engine.removeContainer(stop.id);
     } finally {
       cli('rm', '-f', 'tug-stop-forced', 'tug-stop-graceful');
-      await fs.rm(dir, { recursive: true, force: true });
+      await removeAsRoot(dir);
     }
   },
 );

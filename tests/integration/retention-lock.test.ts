@@ -10,7 +10,10 @@ import { RESTIC_EXIT_LOCKED } from '../../src/protocol.ts';
 import { until } from '../wait.ts';
 import type { BackupJobPayload } from '../../src/protocol.ts';
 
+import { ensureResticImage, lockFiles, removeAsRoot } from './restic-support.ts';
 const RESTIC = process.env.TUG_RESTIC_IMAGE || 'restic/restic:0.19.1';
+
+ensureResticImage(RESTIC);
 const REST_SERVER = process.env.TUG_REST_SERVER_IMAGE || 'restic/rest-server:0.14.0';
 const dockerUp = spawnSync('docker', ['version'], { stdio: 'ignore' }).status === 0;
 const docker = (...args: string[]) => spawnSync('docker', args, { encoding: 'utf8' });
@@ -160,7 +163,7 @@ test(
     } finally {
       docker('rm', '-f', server);
       docker('volume', 'rm', '-f', 'tug_v7_retlock_data');
-      await fs.rm(dir, { recursive: true, force: true });
+      await removeAsRoot(dir);
     }
   },
 );
@@ -194,10 +197,7 @@ test(
         await engine.execStart(id, { cmd: ['sh', '-c', 'yes | restic backup --stdin'] }),
       );
       holder.catch(() => undefined);
-      await until(
-        async () => (await fs.readdir(path.join(repo, 'locks')).catch(() => [])).length > 0,
-        'the lock',
-      );
+      await until(async () => lockFiles(repo) > 0, 'the lock');
       const blocked = await engine.execRun(id, [
         'restic',
         'forget',
@@ -214,7 +214,7 @@ test(
       );
     } finally {
       docker('rm', '-f', name);
-      await fs.rm(dir, { recursive: true, force: true });
+      await removeAsRoot(dir);
     }
   },
 );

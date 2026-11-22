@@ -319,6 +319,7 @@ async function withRestic<T>(
     // Bounded, so a Docker daemon that hangs here cannot wedge the job (and with it every later control backup).
     if (container) {
       const name = container;
+      let removeTimer: NodeJS.Timeout | undefined;
       await Promise.race([
         (async () => {
           // A restic still running (timeout, cancel, stall) releases its repository lock before the helper is removed.
@@ -326,10 +327,11 @@ async function withRestic<T>(
             await stopResticGracefully(docker, name, access.stopGraceMs ?? RESTIC_STOP_GRACE_MS);
           await docker.removeContainer(name).catch(() => undefined);
         })(),
-        new Promise((resolve) =>
-          setTimeout(resolve, REMOVE_LIMIT_MS + RESTIC_STOP_GRACE_MS).unref(),
-        ),
-      ]);
+        new Promise((resolve) => {
+          // Not unref'd: it must end a hung daemon call even when nothing else keeps the process alive.
+          removeTimer = setTimeout(resolve, REMOVE_LIMIT_MS + RESTIC_STOP_GRACE_MS);
+        }),
+      ]).finally(() => clearTimeout(removeTimer));
     }
   }
 }

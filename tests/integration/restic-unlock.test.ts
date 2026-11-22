@@ -8,7 +8,10 @@ import { DockerEngine } from '../../src/docker-api.ts';
 import { collect, lockCount } from '../../src/backup/job.ts';
 import { until } from '../wait.ts';
 
+import { ensureResticImage, lockFiles, removeAsRoot } from './restic-support.ts';
 const RESTIC = process.env.TUG_RESTIC_IMAGE || 'restic/restic:0.19.1';
+
+ensureResticImage(RESTIC);
 const dockerUp = spawnSync('docker', ['version'], { stdio: 'ignore' }).status === 0;
 const cli = (...args: string[]) => spawnSync('docker', args, { encoding: 'utf8' });
 
@@ -20,7 +23,7 @@ test(
     const repo = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-unlock-'));
     const name = 'tug-unlock-it';
     cli('rm', '-f', name);
-    const locks = async () => (await fs.readdir(path.join(repo, 'locks')).catch(() => [])).length;
+    const locks = async () => lockFiles(repo);
     try {
       const id = await engine.createContainer(name, {
         Image: RESTIC,
@@ -62,7 +65,7 @@ test(
       await engine.removeContainer(id);
     } finally {
       cli('rm', '-f', name);
-      await fs.rm(repo, { recursive: true, force: true });
+      await removeAsRoot(repo);
     }
   },
 );

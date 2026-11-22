@@ -79,8 +79,8 @@ export async function stopResticGracefully(
     await Promise.race([
       docker.execStart(container, { cmd: ['sh', '-c', script] }).then(collect),
       new Promise((resolve) => {
+        // Not unref'd: it is the only thing that ends a hung exec, and it is cleared as soon as the race settles.
         timer = setTimeout(resolve, graceMs + 5000);
-        timer.unref();
       }),
     ]);
   } catch {

@@ -8,7 +8,10 @@ import { DockerEngine } from '../../src/docker-api.ts';
 import { runBackupJob } from '../../src/backup/job.ts';
 import type { BackupJobPayload } from '../../src/protocol.ts';
 
+import { ensureResticImage, openUp, removeAsRoot } from './restic-support.ts';
 const RESTIC = process.env.TUG_RESTIC_IMAGE || 'restic/restic:0.19.1';
+
+ensureResticImage(RESTIC);
 const dockerUp = spawnSync('docker', ['version'], { stdio: 'ignore' }).status === 0;
 const restic = (repo: string, ...args: string[]) =>
   spawnSync(
@@ -59,6 +62,7 @@ test(
       assert.equal(ids.length, 2, 'two snapshots exist');
       // Forgetting alone leaves the data in the packs, as a per-run forget now does.
       assert.equal(restic(repo, 'forget', ids[1].id).status, 0, 'a snapshot is forgotten');
+      openUp(repo); // restic wrote the packs as root; this test reads and damages them
       const dataBefore = (await fs.readdir(path.join(repo, 'data'))).length;
 
       const ok = await runBackupJob(
@@ -99,7 +103,7 @@ test(
       assert.equal(bad.maintenance?.prune, 'skipped', 'a check-only run does not prune');
       assert.ok(bad.maintenance?.message, 'restic says what it found');
     } finally {
-      await fs.rm(repo, { recursive: true, force: true });
+      await removeAsRoot(repo);
     }
   },
 );
@@ -156,7 +160,7 @@ test(
         'a regular backup and another project safety snapshot are untouched',
       );
     } finally {
-      await fs.rm(repo, { recursive: true, force: true });
+      await removeAsRoot(repo);
     }
   },
 );
