@@ -252,6 +252,12 @@ export interface BackupCredentialsResponse {
 
 /** restic's exit code when it cannot lock the repository (0.17 and newer). Lock failures are classified by this code, never by wording. */
 export const RESTIC_EXIT_LOCKED = 11;
+/**
+ * How long the CLI waits for `POST /api/v1/control/backups/run` to answer: control's 30 minute limit on one control
+ * backup (`CONTROL_JOB_LIMIT_MS`, which includes the 10 minute `--retry-lock` wait) plus five minutes of slack. The
+ * request answers only when the backup is done, so undici's default 300 s wait would end it while control still works.
+ */
+export const CONTROL_BACKUP_WAIT_MS = 35 * 60_000;
 
 /** The reason of a hold placed by `tug deploy --hold`; a credential that may deploy may release it, see `POST /api/v1/holds/release`. */
 export const DEPLOY_HOLD_REASON = 'deploy hold';

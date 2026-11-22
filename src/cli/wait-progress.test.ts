@@ -29,6 +29,8 @@ test('long-wait commands report progress on stderr and retain their results and 
     'https://localhost:8443',
   );
   let routes: Record<string, unknown> = {};
+  // Routes that read the request and never answer, like control waiting on a repository lock.
+  const hang = new Set<string>();
   const requested: string[] = [];
   const bodies: Record<string, unknown> = {};
   const urls: string[] = [];
@@ -53,6 +55,7 @@ test('long-wait commands report progress on stderr and retain their results and 
       } catch {
         delete bodies[route];
       }
+      if (hang.has(route)) return;
       const body = routes[route];
       res.writeHead(body === undefined ? 500 : 200, { 'content-type': 'application/json' });
       res.end(
@@ -621,6 +624,54 @@ test('long-wait commands report progress on stderr and retain their results and 
       },
     );
     await t.test(
+      'control backup explains a client timeout instead of printing the transport error',
+      async () => {
+        const savedEnv = session.env;
+        session.env = { ...savedEnv, TUG_CONTROL_BACKUP_WAIT_MS: '400' };
+        hang.add('POST /api/v1/control/backups/run');
+        try {
+          for (const args of [[], ['--local']]) {
+            const started = Date.now();
+            await assert.rejects(
+              run('control', 'backup', ...args),
+              (error: Error) => {
+                assert.match(
+                  error.message,
+                  /control did not answer within \d+ seconds; the backup may still be running, or waiting for the repository lock, on control\. Its outcome is in `tug backup list`/,
+                  'a timed-out control backup says it may still be running and where its outcome shows',
+                );
+                assert.doesNotMatch(
+                  error.message,
+                  /UND_ERR_HEADERS_TIMEOUT|could not reach control/,
+                  'the raw undici error and the unreachable-control wording are not shown',
+                );
+                return true;
+              },
+              `control backup ${args.join(' ')} fails with the explained timeout`,
+            );
+            assert.ok(
+              Date.now() - started >= 350,
+              'the CLI waits for the configured time instead of giving up early',
+            );
+          }
+        } finally {
+          hang.clear();
+          session.env = savedEnv;
+        }
+      },
+    );
+    await t.test(
+      'control backup waits longer than the 30 minute control job limit and the transport default',
+      async () => {
+        const { CONTROL_BACKUP_WAIT_MS } = await import('../protocol.ts');
+        const { CONTROL_JOB_LIMIT_MS } = await import('../backup/control-backup.ts');
+        assert.ok(
+          CONTROL_BACKUP_WAIT_MS >= CONTROL_JOB_LIMIT_MS + 5 * 60_000,
+          "the CLI must outwait control's longest control backup (lock wait included) with slack",
+        );
+      },
+    );
+    await t.test(
       'control restore --from-destination sends the login and rejects mixed targets',
       async () => {
         routes = { 'POST /api/v1/control/restore': { restartRequired: true } };
@@ -939,7 +990,9 @@ test('long-wait commands report progress on stderr and retain their results and 
       },
     );
   } finally {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+    const closed = new Promise<void>((resolve) => server.close(() => resolve()));
+    server.closeAllConnections();
+    await closed;
     await fs.rm(dir, { recursive: true, force: true });
   }
 });
