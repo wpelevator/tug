@@ -1,6 +1,7 @@
 import { isPort } from '../node-address.ts';
 import type {
   CommandResult,
+  EdgeProbeResult,
   IngressHostTls,
   IngressStatus,
   JobStatus,
@@ -65,6 +66,9 @@ function serviceState(value: unknown, path: string): ServiceState {
     }),
     ...(value.rolloutError !== undefined && {
       rolloutError: text(value.rolloutError, `${path}.rolloutError`),
+    }),
+    ...(value.degraded !== undefined && {
+      degraded: text(value.degraded, `${path}.degraded`)!.slice(0, 500),
     }),
     ...(value.unstable !== undefined && { unstable: text(value.unstable, `${path}.unstable`) }),
   };
@@ -146,6 +150,28 @@ function ingressStatus(value: unknown): IngressStatus {
       tls: list(value.tls, 'ingress.tls')
         .slice(0, MAX_INGRESS_CERTS)
         .map((c, i) => ingressHostTls(c, `ingress.tls[${i}]`)),
+    }),
+    ...(value.edgeProbe === true && { edgeProbe: true }),
+    ...(value.probeResults !== undefined && {
+      probeResults: list(value.probeResults, 'ingress.probeResults').map((r, i) =>
+        probeResult(r, `ingress.probeResults[${i}]`),
+      ),
+    }),
+  };
+}
+
+function probeResult(value: unknown, path: string): EdgeProbeResult {
+  if (!isObject(value)) throw new StatusReportError(`${path} must be an object`);
+  if (typeof value.ok !== 'boolean') throw new StatusReportError(`${path}.ok must be a boolean`);
+  const error = text(value.error, `${path}.error`, true);
+  return {
+    id: text(value.id, `${path}.id`)!.slice(0, 300),
+    ok: value.ok,
+    ...(error !== undefined && {
+      error: [...error]
+        .map((ch) => (ch.charCodeAt(0) < 32 || ch.charCodeAt(0) === 127 ? ' ' : ch))
+        .join('')
+        .slice(0, 300),
     }),
   };
 }

@@ -179,3 +179,45 @@ test('control characters in reported certificate text are replaced', () => {
     'escape and newline characters must not reach terminals through doctor or tug ingress tls',
   );
 });
+
+test('edge probe fields are kept, bounded and stripped of control characters', () => {
+  const report = parseStatusReport({
+    node: 'edge',
+    projects: [
+      project({ serviceStates: { web: { rolloutState: 'serving', degraded: 'http 503' } } }),
+    ],
+    commandResults: [],
+    ingress: {
+      state: 'serving',
+      configHash: 'h',
+      routes: 1,
+      edgeProbe: true,
+      probeResults: [{ id: 'edge-1', ok: false, error: `bad\u001b[31m ${'x'.repeat(400)}` }],
+    },
+  });
+  assert.equal(report.ingress?.edgeProbe, true, 'the probe capability survives parsing');
+  assert.equal(
+    report.projects[0].serviceStates?.web.degraded,
+    'http 503',
+    'the degraded reason survives parsing',
+  );
+  const error = report.ingress?.probeResults?.[0].error ?? '';
+  assert.ok(!error.includes('\u001b'), 'terminal escapes in a probe error are removed');
+  assert.equal(error.length, 300, 'a probe error is cut to 300 characters');
+  assert.throws(
+    () =>
+      parseStatusReport({
+        node: 'edge',
+        projects: [],
+        commandResults: [],
+        ingress: {
+          state: 'serving',
+          configHash: 'h',
+          routes: 0,
+          probeResults: [{ id: 'a', ok: 'yes' }],
+        },
+      }),
+    StatusReportError,
+    'a probe result without a boolean outcome is refused',
+  );
+});

@@ -173,6 +173,7 @@ function serviceStateLines(serviceStates: object): string[] {
         rolloutState?: unknown;
         rolloutError?: unknown;
         unstable?: unknown;
+        degraded?: unknown;
       };
       if (typeof item.rolloutState !== 'string') return [];
       const error =
@@ -180,6 +181,9 @@ function serviceStateLines(serviceStates: object): string[] {
       // A service that does not stay up is not serving, whatever the last rollout reached.
       if (typeof item.unstable === 'string' && item.unstable)
         return [`    ${name}: unstable — ${item.unstable}`];
+      // Still routed, because nothing else can take its traffic, but failing its probe.
+      if (typeof item.degraded === 'string' && item.degraded)
+        return [`    ${name}: degraded — ${item.degraded}`];
       return [`    ${name}: ${item.rolloutState}${error}`];
     });
 }

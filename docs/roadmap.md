@@ -73,7 +73,7 @@ Typed `src/protocol.ts` control↔agent contract and injectable agent runners. S
 
 Health-aware cross-node service names (hosts-file `extra_hosts` entries, not DNS) are on by default with a `TUG_SERVICE_NAMES=false` opt-out, and the managed Caddy ingress provides optional `x-tug.ingress` routes, automatic TLS and HTTP round-robin balancing across serving endpoints. Cross-node names themselves do not balance traffic. Names and upstreams resolve to each node's `address` on the operator's private network; service names need published host ports. tug owns no overlay or workload-traffic encryption. See [Networking](networking.md). Stable rolling-service name/port and avoiding client recreation on endpoint changes remain in [Later](#later--only-if-needed).
 
-### M3 — Zero-downtime rolling deploys + automatic rollback (done)
+### M3 — Rolling deploys of ingress-fronted services + automatic rollback (done)
 
 Rolling rollouts for ingress-fronted services (start the new revision on its own host port, health-check it, switch the Caddy upstream, drain the old one), `x-tug.rollout` options and opt-in `x-tug.rollback: auto`. See [Architecture](architecture.md#rolling-rollouts-and-automatic-rollback) and [Compose extensions](compose.md#rolling-rollouts). The numbers it is held to are in [Testing](testing.md#metrics). Rolling services have no stable cross-node name and port; see [Later](#later--only-if-needed).
 

@@ -79,6 +79,25 @@ test('readable status keeps usable information when a node report is malformed',
   assert.match(output, /Report details unavailable/, 'the missing details must be reported');
 });
 
+test('a service that is routed but fails its probe is listed as degraded with the reason', () => {
+  const degraded: StatusResponse = {
+    ...status,
+    statuses: [
+      {
+        ...status.statuses[0],
+        status_json: JSON.stringify({
+          serviceStates: { web: { rolloutState: 'serving', degraded: 'web: http 503' } },
+        }),
+      },
+    ],
+  };
+  assert.match(
+    formatStatus(degraded),
+    /web: degraded — web: http 503/,
+    'a service kept routed as the last endpoint must not read as plainly serving',
+  );
+});
+
 test('a service Docker keeps restarting is listed as unstable, not serving', () => {
   const crashing: StatusResponse = {
     ...status,

@@ -69,6 +69,37 @@ test('a reported port that is not a valid port number never becomes an endpoint 
   );
 });
 
+test('a degraded endpoint is routed only while no ready endpoint exists', () => {
+  const nodes = [node('app1'), node('app22')];
+  const degraded = (n: string): ReportedStatus => {
+    const status = serving(n, 'blog', 'web');
+    status.status.serviceStates!.web.degraded = 'http 503';
+    return status;
+  };
+  const both = resolveServiceEndpoints(
+    [state()],
+    nodes,
+    [degraded('app1'), serving('app22', 'blog', 'web')],
+    STALE_BEFORE,
+  );
+  assert.deepEqual(
+    both.blog.web.map((e) => e.node),
+    ['app22'],
+    'a degraded node is withdrawn while another node can take its traffic',
+  );
+  const last = resolveServiceEndpoints(
+    [state()],
+    nodes,
+    [degraded('app1'), degraded('app22')],
+    STALE_BEFORE,
+  );
+  assert.deepEqual(
+    last.blog.web.map((e) => e.node),
+    ['app1', 'app22'],
+    'with no ready endpoint left the degraded ones stay routed, since a 503 would be certain',
+  );
+});
+
 test('endpoints list only fresh nodes whose copy of the service reports serving', () => {
   const nodes = [node('app1'), node('app22'), node('dbnode')];
   const all = resolveServiceEndpoints(

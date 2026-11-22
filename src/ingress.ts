@@ -63,6 +63,7 @@ export function resolveServiceEndpoints(
   for (const state of states) {
     for (const [service, spec] of Object.entries(state.services)) {
       const endpoints: ServiceEndpoint[] = [];
+      const degraded: ServiceEndpoint[] = [];
       for (const nodeName of spec.placement?.nodes || []) {
         const node = byName.get(nodeName);
         const address = node?.address;
@@ -75,16 +76,16 @@ export function resolveServiceEndpoints(
         // belongs to Caddy's loopback management endpoints is never an upstream, so that endpoint is withdrawn.
         const reportedPort = serviceState.port;
         if (isPort(reportedPort) && !isRolloutPort(reportedPort)) continue;
-        endpoints.push({
+        (serviceState.degraded ? degraded : endpoints).push({
           node: nodeName,
           address,
           ...(isPort(reportedPort) ? { port: reportedPort } : {}),
         });
       }
-      if (endpoints.length)
-        (out[state.project] ||= {})[service] = endpoints.sort((a, b) =>
-          a.node.localeCompare(b.node),
-        );
+      // A degraded endpoint (running, failing its probe) is withdrawn only while a ready one can take its traffic.
+      const routed = endpoints.length ? endpoints : degraded;
+      if (routed.length)
+        (out[state.project] ||= {})[service] = routed.sort((a, b) => a.node.localeCompare(b.node));
     }
   }
   return out;
