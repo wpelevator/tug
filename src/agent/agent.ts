@@ -1608,7 +1608,12 @@ async function applyWork(ctx: AgentContext, work: PolledWork): Promise<ProjectSt
   }
   let ingress: IngressStatus | undefined;
   if (ctx.apply) {
-    const ingressCtx = { docker: ctx.docker, stateDir: ctx.stateDir, caddyImage: ctx.caddyImage };
+    const ingressCtx = {
+      docker: ctx.docker,
+      stateDir: ctx.stateDir,
+      caddyImage: ctx.caddyImage,
+      startGraceMs: 2000,
+    };
     if (work.ingress) {
       ingress = await reconcileIngress(ingressCtx, work.ingress);
       if (ingress.state === 'serving') {

@@ -55,6 +55,68 @@ test('lintComposeFile passes a well-written file and reports its path', async ()
   }
 });
 
+test('lint warns about database and backup-target volumes that are not marked persistent, and a decision silences it', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-lint-'));
+  try {
+    const compose = (db: string, uploads: string, image = 'mariadb:11.4') => `
+services:
+  db:
+    image: ${image}
+    volumes:
+      - db-data:/var/lib/mysql
+  cache:
+    image: nginx:1.27
+    volumes:
+      - scratch:/tmp
+volumes:
+  db-data:${db}
+  uploads:${uploads}
+  scratch:
+`;
+    const persistent = '\n    x-tug:\n      persistent: true';
+    const disposable = '\n    x-tug:\n      persistent: false';
+    const backup = '\n    x-tug:\n      backup:\n        schedule: "0 3 * * *"';
+    const backupPersistent =
+      '\n    x-tug:\n      persistent: true\n      backup:\n        schedule: "0 3 * * *"';
+    const lint = async (text: string) =>
+      lintComposeFile(await writeFile(dir, 'compose.yml', text), process.cwd());
+
+    const unmarked = await lint(compose('', backup));
+    assert.deepEqual(
+      unmarked.errors,
+      [],
+      'a warning is not an error, so deploy still accepts the file',
+    );
+    assert.deepEqual(
+      (unmarked.warnings ?? []).map((w) => w.split(' but ')[0]).sort(),
+      ['volumes.db-data backs the database service db', 'volumes.uploads is a backup target'],
+      'a database volume and a backup target are named, a plain cache volume is not',
+    );
+    assert.deepEqual(
+      (await lint(compose(persistent, backupPersistent))).warnings,
+      [],
+      'persistent: true silences every warning',
+    );
+    assert.deepEqual(
+      (await lint(compose(disposable, ''))).warnings,
+      [],
+      'an explicit persistent: false is a decision and is not warned about',
+    );
+    assert.equal(
+      (await lint(compose('', '', 'ghcr.io/acme/postgres:16'))).warnings?.length,
+      1,
+      'a database image under a registry prefix is recognised',
+    );
+    assert.deepEqual(
+      (await lint(compose('', '', 'nginx:1.27'))).warnings,
+      [],
+      'a volume of a non-database service is not warned about',
+    );
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('lint reports one finding per missed rule, naming the service or volume', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-lint-'));
   try {

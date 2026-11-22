@@ -25,7 +25,7 @@ import type {
   ServiceEndpoints,
 } from './protocol.ts';
 import * as tar from 'tar';
-import { isNotFound } from './docker-api.ts';
+import { collectLogs, isNotFound } from './docker-api.ts';
 import type { DockerApi } from './docker-api.ts';
 
 export const CADDY_CONTAINER = 'tug-caddy';
@@ -425,6 +425,27 @@ export interface IngressContext {
   docker: DockerApi;
   stateDir: string;
   caddyImage?: string;
+  /** How long to wait after starting Caddy before checking that it stayed up; the agent sets it, tests leave it. */
+  startGraceMs?: number;
+}
+
+/**
+ * Why Caddy is not staying up, or null when it is. Caddy listens on 80 and 443 of the host (host networking), so a
+ * host that already serves them makes it exit on start, and Docker's restart policy then loops it: the container is
+ * "running" for a moment each time, so only the restarting or exited state tells. The state decides, not the log
+ * wording; the log tail is only shown to the operator.
+ */
+async function caddyFailure(ctx: IngressContext, wait: boolean): Promise<string | null> {
+  if (wait && ctx.startGraceMs)
+    await new Promise((resolve) => setTimeout(resolve, ctx.startGraceMs));
+  const state = (await ctx.docker.inspectContainer(CADDY_CONTAINER).catch(() => null))?.State;
+  if (!state) return null;
+  const restarting = state.Restarting === true || state.Status === 'restarting';
+  if (!restarting && state.Running) return null;
+  const tail = await collectLogs(ctx.docker, CADDY_CONTAINER, 20)
+    .then((logs) => (logs.stderr || logs.stdout).trim().split('\n').slice(-4).join(' | '))
+    .catch(() => '');
+  return `Caddy ${restarting ? 'keeps restarting' : `exited with code ${state.ExitCode ?? '?'}`}${tail ? `: ${tail}` : ''}. It listens on ports 80 and 443 of this host, so check that no other web server holds them (ss -ltnp)`;
 }
 
 async function writeStage(dir: string, work: IngressWork): Promise<void> {
@@ -487,6 +508,11 @@ export async function reconcileIngress(
     (s) => s.trim(),
     () => '',
   );
+  // A Caddy that is restarting in a loop reports "running" between crashes: say why instead of serving.
+  if (running) {
+    const crash = await caddyFailure(ctx, false);
+    if (crash) return { state: 'failed', configHash, routes, error: crash.slice(-1000) };
+  }
   if (running && appliedHash === configHash) return { state: 'serving', configHash, routes };
 
   await writeStage(stage, work);
@@ -526,6 +552,11 @@ export async function reconcileIngress(
             .catch(() => {});
         throw e;
       }
+    }
+    // A Caddy that was just created or started and then exits has not bound its ports.
+    if (running !== true) {
+      const crash = await caddyFailure(ctx, true);
+      if (crash) throw new Error(crash);
     }
   } catch (e) {
     await fs.rm(stage, { recursive: true, force: true });

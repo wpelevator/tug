@@ -5,7 +5,12 @@ import path from 'node:path';
 import { saveImageArchive } from '../../images/artifacts.ts';
 import { assertImagePublished } from '../../images/image.ts';
 import { AGENT_VOLUME } from '../migrate.ts';
-import { controlPortCheck, localImageBuildArgs, shellQuote as sh } from '../install.ts';
+import {
+  controlPortCheck,
+  ingressPortCheck,
+  localImageBuildArgs,
+  shellQuote as sh,
+} from '../install.ts';
 import { LIST_ADDRESSES_COMMAND, parseAddressCandidates, sortCandidates } from '../onboarding.ts';
 import type { AddressCandidate } from '../onboarding.ts';
 import { runStep, sshHostKeyHint, STAGE_MARKER } from '../process.ts';
@@ -19,11 +24,14 @@ export async function preflightRemote(
   {
     controlUrl,
     ports = [],
+    ingressPorts = [],
     minDiskMb = 1024,
     progress,
   }: {
     controlUrl?: string;
     ports?: number[];
+    /** Ports an ingress node's Caddy binds (80 and 443): free, or held by tug's own Caddy or control. */
+    ingressPorts?: number[];
     minDiskMb?: number;
     progress?: StepProgress;
   } = {},
@@ -45,6 +53,13 @@ export async function preflightRemote(
       `port.${port}.free`,
       controlPortCheck(port),
       `Port ${port} is already in use on the target host by something other than the Tug control container; stop the conflicting service or choose another port.`,
+    ]);
+  }
+  for (const port of ingressPorts) {
+    checks.push([
+      `ingress.port.${port}.free`,
+      ingressPortCheck(port),
+      `Port ${port} is already in use on the target host by something other than tug's Caddy or control, and an ingress node needs ports 80 and 443. Stop the web server holding it (see \`ss -ltnp\`), or add the node without --ingress.`,
     ]);
   }
   if (controlUrl)

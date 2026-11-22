@@ -233,7 +233,7 @@ Details and recipes are in [Nodes](nodes.md). Options below are the ones that ch
 | --- | --- |
 | `--name <node>` | `node add` only. Node name. Defaults to the first DNS label of the SSH host (`app1` for `root@app1.example.com`). With an IP, a terminal asks (default: the host's `hostname -s`) and a script must pass it |
 | `--address <ip>` | Private address for inter-node traffic. A terminal lists the host's global IPv4 addresses, private first, and never defaults to a public one |
-| `--ingress` | `node add` only. Give the node the ingress role. A terminal asks otherwise |
+| `--ingress` | `node add` only. Give the node the ingress role. A terminal asks otherwise. The preflight refuses a host where something other than tug already listens on port 80 or 443, because Caddy would exit on start |
 | `--install-docker` | Install Docker when missing |
 | `--label <label>` | Node label. Repeatable |
 | `--image <tag>` | Agent image |
@@ -281,9 +281,9 @@ Checks a Compose file against the `x-tug` schema with no control connection, cre
 | Option | Meaning |
 | --- | --- |
 | `-f, --file <file>` | Compose file. Default: the first of `compose.yaml`, `compose.yml`, `docker-compose.yaml` or `docker-compose.yml` in the working directory (or `file:` in `tug.yml`) |
-| `--json` | `{ ok, file, errors }` for scripts and editors |
+| `--json` | `{ ok, file, errors, warnings }` for scripts and editors |
 
-Findings go to stderr, one per line as `$FILE: $RULE`. The command exits nonzero when anything is wrong.
+Findings go to stderr, one per line as `$FILE: $RULE`. The command exits nonzero when anything is wrong. Warnings (a database or backup-target volume with no `x-tug.persistent`) print as `warning: $FILE: $MESSAGE` and never change the exit code.
 
 ### `tug deploy`
 

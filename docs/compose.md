@@ -47,7 +47,9 @@ bad.yaml: web: networks other than the default network are not supported
 bad.yaml: web: x-tug.rollback is not supported (supported: placement, replicas, global, health, ingress, rollout, backup, build)
 ```
 
-`--json` prints `{ ok, file, errors }`.
+`--json` prints `{ ok, file, errors, warnings }`.
+
+A warning does not fail the lint and does not stop a deploy. `tug lint` warns when a volume is a backup target, or is mounted by a service whose image is a database (MySQL, MariaDB, Postgres, MongoDB, Redis and similar), and has no `x-tug.persistent` setting. Mark it `persistent: true` so `tug volume remove` keeps refusing without `--delete-data` whatever the volume type, or `persistent: false` to say the data is disposable, which also silences the warning. Warnings print first on stderr as `warning: $FILE: $MESSAGE`.
 
 ### Checks against other projects
 
