@@ -127,12 +127,15 @@ test('legacy owned volumes block new empty volumes before any resource is create
 function fakeHost() {
   const docker = new FakeDocker();
   const unhealthy = new Set<string>();
+  /** URL paths every container answers 404 for, like a probe path the application does not have. */
+  const missingPaths = new Set<string>();
   const http = (async (url: string | URL | Request) => {
-    const ip = new URL(String(url)).hostname;
+    const { hostname: ip, pathname } = new URL(String(url));
+    if (missingPaths.has(pathname)) return new Response('', { status: 404 });
     const c = [...docker.containers.values()].find((candidate) => candidate.ip === ip);
     return new Response('', { status: c && !unhealthy.has(c.body.Image) ? 200 : 503 });
   }) as HttpClient;
-  return { docker, http, unhealthy };
+  return { docker, http, unhealthy, missingPaths };
 }
 type Host = ReturnType<typeof fakeHost>;
 
@@ -273,6 +276,50 @@ test('a new revision starts next to the old one, takes over and the old one is r
     (await loadRolloutState(projectDir(ctx))).services.web.draining.length,
     0,
     'the drained revision is forgotten',
+  );
+});
+
+test('a changed health check is gated on a candidate and a failing one leaves the old revision serving', async () => {
+  const host = fakeHost();
+  const ctx = await makeCtx(host);
+  const withPath = (path: string) => rolling('web:1', { health: { ...health, path } });
+  await reconcile(desired(withPath('/'), 'v1'), ctx);
+  const oldId = host.docker.service('proj', 'web')[0].id;
+  host.missingPaths.add('/missing');
+
+  const failed = await reconcile(desired(withPath('/missing'), 'v2'), ctx);
+  assert.equal(failed.health, 'failed', 'the node reports failed for the rejected health check');
+  assert.equal(
+    failed.serviceStates?.web.rolloutState,
+    'serving',
+    'the live revision is still reported serving, so the ingress keeps its upstream',
+  );
+  assert.equal(
+    failed.serviceStates?.web.port,
+    20000,
+    'the live revision keeps its port in the report',
+  );
+  assert.deepEqual(running(host, 'web'), ['20000:web:1'], 'the rejected candidate is removed');
+  assert.equal(
+    host.docker.service('proj', 'web')[0].id,
+    oldId,
+    'the live container was not touched',
+  );
+
+  const repeated = await reconcile(desired(withPath('/missing'), 'v2'), ctx);
+  assert.equal(
+    repeated.serviceStates?.web.rolloutState,
+    'serving',
+    'polling again with the rejected check keeps the live revision serving',
+  );
+
+  host.missingPaths.clear();
+  const fixed = await reconcile(desired(withPath('/ready'), 'v3'), ctx);
+  assert.equal(fixed.health, 'serving', 'a health check the app passes takes over');
+  assert.equal(
+    fixed.serviceStates?.web.port,
+    20001,
+    'the new check is gated on its own candidate revision',
   );
 });
 
