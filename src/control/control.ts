@@ -97,7 +97,8 @@ import {
 } from '../pki.ts';
 import { EXPIRY_WARN_DAYS, certificateExpiry, diagnoseNode, nodeStatus } from './diagnostics.ts';
 import { serverTlsOptions } from './tls-server.ts';
-import { isNodeHost, isPublicAddress } from '../node-address.ts';
+import { isNodeHost, isPort, isPublicAddress } from '../node-address.ts';
+import { EdgeChecks } from '../edge-check.ts';
 import { collectResources, ownContainer } from '../host-resources.ts';
 import { INGRESS_PORTS, describeClosedPort, probeTcpPort } from './port-probe.ts';
 import type { PortProbe } from './port-probe.ts';
@@ -225,6 +226,7 @@ import type {
   StreamMessage,
   WakeResponse,
   WorkResponse,
+  EdgeCheckRequest,
 } from '../protocol.ts';
 
 class WakeHub {
@@ -854,6 +856,7 @@ export async function createApp(
     });
   }
   const wakeHub = new WakeHub(() => watch.mark('nodes'));
+  const edgeChecks = new EdgeChecks();
 
   // Events are an operator-facing log, not a record of truth, so keep them bounded. `0` turns a limit off; anything that is
   // not a whole number falls back to the default.
@@ -1185,6 +1188,10 @@ export async function createApp(
   const wakeAll = (project?: string): void => {
     for (const node of db.all<Pick<NodeRow, 'id'>>('SELECT id FROM nodes'))
       wakeHub.wake(node.id, project);
+  };
+  const wakeNodeByName = (name: string): void => {
+    const row = db.get<Pick<NodeRow, 'id'>>('SELECT id FROM nodes WHERE name=?', name);
+    if (row) wakeHub.wake(row.id);
   };
   let endpointSnapshot = '';
 
@@ -6228,8 +6235,45 @@ export async function createApp(
         desiredStates.map((st) => [st.project, all[st.project] || {}]),
       );
     }
-    if (node.ingress) work.ingress = ingressFor(node, allStates);
+    if (node.ingress) {
+      work.ingress = ingressFor(node, allStates);
+      const probes = edgeChecks.pendingFor(node.name);
+      if (probes.length) work.ingress.probes = probes;
+    }
     res.json(work);
+  });
+  /**
+   * An app node asks, before a rolling revision takes traffic, whether the ingress nodes that route to the service can
+   * dial it. The reply waits for their answers. Only a definitive dial failure sets `ok: false`: an ingress node that
+   * stays silent, cannot probe, or is the app node itself is reported as unchecked and does not block the rollout.
+   */
+  post('/agent/v1/edge-check', authAgent, async (req, res) => {
+    const body = (req.body ?? {}) as Partial<EdgeCheckRequest>;
+    if (typeof body.project !== 'string' || typeof body.service !== 'string' || !isPort(body.port))
+      throw httpError(400, 'project, service and port are required');
+    const caller = db.get<NodeRow>('SELECT * FROM nodes WHERE id=?', req.node!.id)!;
+    const ds = currentDesired(body.project);
+    const state: DesiredState | undefined = ds ? JSON.parse(ds.state_json) : undefined;
+    const placed = state?.services[body.service]?.placement?.nodes?.includes(caller.name);
+    const ingress = state?.compose.services?.[body.service]?.['x-tug']?.ingress;
+    const hosts = new Map<string, string>();
+    if (placed && ingress && caller.address) {
+      for (const n of db.all<NodeRow>(
+        'SELECT * FROM nodes WHERE ingress=1 AND disabled_at IS NULL AND id<>?',
+        caller.id,
+      )) {
+        if (!n.last_seen_at || isStale(n) || !ingressServesNode(ingress, n.name)) continue;
+        let capable = false;
+        try {
+          capable = JSON.parse(n.ingress_status_json || '{}').edgeProbe === true;
+        } catch {
+          /* an unreadable status means the node cannot be asked */
+        }
+        if (capable) hosts.set(n.name, caller.address);
+      }
+    }
+    const timeoutMs = Number(process.env.TUG_EDGE_CHECK_TIMEOUT_MS || 20_000);
+    res.json(await edgeChecks.run(hosts, body.port, timeoutMs, (node) => wakeNodeByName(node)));
   });
   post('/agent/v1/status', authAgent, async (req, res) => {
     const ts = now();
@@ -6330,6 +6374,8 @@ export async function createApp(
         req.node!.id,
       );
     }
+    if (report.ingress?.probeResults?.length)
+      edgeChecks.onResults(req.node!.name, report.ingress.probeResults);
     db.run('UPDATE nodes SET last_seen_at=?,status=? WHERE id=?', ts, 'online', req.node!.id);
     applyingSince.delete(req.node!.id);
     if (report.sentAt)

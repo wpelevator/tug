@@ -69,6 +69,7 @@ import {
 import { isPublicAddress } from '../node-address.ts';
 import { parseDuration } from '../duration.ts';
 import { errMessage } from '../errors.ts';
+import { runProbes } from '../edge-check.ts';
 import { now } from '../db/row.ts';
 import { ensureDir } from '../files.ts';
 import { openAgentDb } from '../db/db.ts';
@@ -87,6 +88,7 @@ import type {
   EnrollRequest,
   EnrollResponse,
   HealthCheck,
+  EdgeCheckResponse,
   IngressStatus,
   BackupCredentialsResponse,
   JoinKey,
@@ -1347,6 +1349,37 @@ export async function reconcile(
         sec.registryAuth?.[imageLocation(plan.specs[service].body.Image).host],
       ),
     emit,
+    edgeCheck: async (service: string, port: number) => {
+      let res: EdgeCheckResponse;
+      try {
+        res = await api<EdgeCheckResponse>(ctx, '/agent/v1/edge-check', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ project: desiredState.project, service, port }),
+        });
+      } catch (e) {
+        // A control that predates the check (404) or cannot be reached says nothing about the edge: continue.
+        await emit(service, 'edge_unchecked', `edge check unavailable: ${errMessage(e)}`, 'warn');
+        return;
+      }
+      const { reached = [], failed = [], unchecked = [] } = res;
+      if (res.ok === false)
+        throw new Error(
+          `${service}: ingress cannot reach the new revision on host port ${port}: ${failed
+            .map((f) => `${f.node}: ${f.error}`)
+            .join('; ')}`,
+        );
+      const parts = [
+        reached.length ? `reached from ${reached.join(', ')}` : '',
+        unchecked.length ? `not checked from ${unchecked.join(', ')}` : '',
+      ].filter(Boolean);
+      await emit(
+        service,
+        'edge_checked',
+        `host port ${port}: ${parts.join('; ') || 'no ingress node needed to check it'}`,
+        unchecked.length ? 'warn' : 'info',
+      );
+    },
   };
   let failing: string | undefined;
   if (ctx.apply) {
@@ -1615,7 +1648,12 @@ async function applyWork(ctx: AgentContext, work: PolledWork): Promise<ProjectSt
       startGraceMs: 2000,
     };
     if (work.ingress) {
+      const probeResults = work.ingress.probes?.length
+        ? await runProbes(work.ingress.probes)
+        : undefined;
       ingress = await reconcileIngress(ingressCtx, work.ingress);
+      ingress.edgeProbe = true;
+      if (probeResults) ingress.probeResults = probeResults;
       if (ingress.state === 'serving') {
         // Certificate state is advisory: a probe failure must never withhold the routing acknowledgement.
         try {

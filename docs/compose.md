@@ -205,6 +205,16 @@ services:
 
 With `rolling`, the agent starts the new revision next to the old one, health-checks it, and only then lets the ingress switch. The old revision is removed once `drain` has passed. If the new revision never becomes healthy it is removed, the old one keeps serving, and the node reports `failed` for that deployment (see [Automatic rollback](#automatic-rollback)). A rolling service whose rendered definition, secrets and `x-tug.health` did not change is left alone, and nothing else on the node restarts. Changing the health check alone starts a candidate that must pass the new check, so a check the app fails is rejected while the old revision keeps serving.
 
+**What rolls.** Rolling applies to one service, not to the application around it. On a node, `tug` applies recreated services first and rolling services after them. A service that stays `recreate` is stopped and started in place while the rolling service in front of it keeps serving.
+
+| Change in one deployment | Result for requests |
+| --- | --- |
+| Only a rolling service changes | No request is dropped: the new revision takes over after it is healthy |
+| Only a recreated service changes (a database, PHP-FPM) | The rolling frontend keeps serving and answers errors, such as nginx `502`, until the service is back |
+| Both change | The recreated service restarts first, so the old frontend answers errors for that gap, then the frontend rolls |
+
+For a PHP site, run nginx and PHP-FPM in one image as one rolling service. Both then switch together, and a request never reaches a PHP-FPM of another revision. Split nginx and PHP-FPM into two services only when a short error window on deploys is acceptable, or when the PHP service changes rarely. Put the readiness check on a path that exercises PHP, so a candidate that cannot run PHP is rejected before it takes traffic.
+
 **Requirements.** Deploy rejects a rolling service without `x-tug.ingress` (the edge switches traffic), without `x-tug.health` (a revision takes over only once healthy), or without exactly one entry in `ports` (the ingress port).
 
 **Limits and behavior.**

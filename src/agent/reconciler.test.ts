@@ -135,16 +135,26 @@ function fakeHost() {
     const c = [...docker.containers.values()].find((candidate) => candidate.ip === ip);
     return new Response('', { status: c && !unhealthy.has(c.body.Image) ? 200 : 503 });
   }) as HttpClient;
-  return { docker, http, unhealthy, missingPaths };
+  /** What control answers to an edge check, and the checks the agent made. */
+  const edge = {
+    response: { ok: true, reached: ['edge'], failed: [], unchecked: [] } as Record<string, unknown>,
+    calls: [] as { service: string; port: number }[],
+  };
+  return { docker, http, unhealthy, missingPaths, edge };
 }
 type Host = ReturnType<typeof fakeHost>;
 
 function fakeControl(
   http: HttpClient,
   secrets: () => SecretsResponse = () => ({ secrets: {}, versions: {} }),
+  edge?: Host['edge'],
 ): HttpClient {
   return (async (url: string | URL | Request, init?: RequestInit) => {
     const u = String(url);
+    if (edge && u.includes('/agent/v1/edge-check')) {
+      edge.calls.push(JSON.parse(String(init?.body)));
+      return Response.json(edge.response);
+    }
     if (u.includes('/agent/v1/secrets')) return Response.json(secrets());
     if (u.includes('/agent/v1/events')) return Response.json({ ok: true });
     if (u.startsWith('http://control.test')) return Response.json({});
@@ -160,7 +170,7 @@ async function makeCtx(
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), 'tug-rollout-unit-'));
   return {
     docker: host.docker,
-    http: fakeControl(host.http, secrets),
+    http: fakeControl(host.http, secrets, host.edge),
     nodeName: 'n1',
     stateDir,
     apply: true,
@@ -320,6 +330,73 @@ test('a changed health check is gated on a candidate and a failing one leaves th
     fixed.serviceStates?.web.port,
     20001,
     'the new check is gated on its own candidate revision',
+  );
+});
+
+test('a candidate that an ingress node cannot dial is rejected and the old revision keeps serving', async () => {
+  const host = fakeHost();
+  const ctx = await makeCtx(host);
+  await reconcile(desired(rolling('web:1'), 'v1'), ctx);
+  host.edge.calls.length = 0;
+  host.edge.response = {
+    ok: false,
+    reached: [],
+    failed: [{ node: 'edge', error: 'ETIMEDOUT dialing 10.0.0.2:20001' }],
+    unchecked: [],
+  };
+
+  const failed = await reconcile(desired(rolling('web:2'), 'v2'), ctx);
+  assert.deepEqual(
+    host.edge.calls,
+    [{ project: 'proj', service: 'web', port: 20001 }],
+    'the edge is asked about the candidate host port, once its own health check passed',
+  );
+  assert.equal(failed.health, 'failed', 'the node reports failed for the unreachable candidate');
+  assert.match(
+    failed.error ?? '',
+    /ingress cannot reach the new revision on host port 20001: edge: ETIMEDOUT/,
+    'the error names the ingress node and why it could not dial',
+  );
+  assert.equal(
+    failed.serviceStates?.web.port,
+    20000,
+    'the old revision stays the serving one, so the edge keeps its upstream',
+  );
+  assert.deepEqual(running(host, 'web'), ['20000:web:1'], 'the unreachable candidate is removed');
+});
+
+test('an edge check that finds nothing definitive lets the candidate take over', async () => {
+  const host = fakeHost();
+  const ctx = await makeCtx(host);
+  await reconcile(desired(rolling('web:1'), 'v1'), ctx);
+  host.edge.response = { ok: true, reached: [], failed: [], unchecked: ['edge'] };
+  const taken = await reconcile(desired(rolling('web:2'), 'v2'), ctx);
+  assert.equal(
+    taken.health,
+    'serving',
+    'an ingress node that stays silent does not block the rollout',
+  );
+  assert.equal(taken.serviceStates?.web.port, 20001, 'the candidate took over');
+});
+
+test('a live revision that fails its probe stays routed as degraded instead of being withdrawn', async () => {
+  const host = fakeHost();
+  const ctx = await makeCtx(host);
+  await reconcile(desired(rolling('web:1'), 'v1'), ctx);
+  host.unhealthy.add('web:1');
+
+  const status = await reconcile(desired(rolling('web:1'), 'v1'), ctx);
+  assert.equal(status.health, 'failed', 'the node still reports the failed probe');
+  assert.equal(
+    status.serviceStates?.web.rolloutState,
+    'serving',
+    'a running revision is not reported out of service',
+  );
+  assert.equal(status.serviceStates?.web.port, 20000, 'its port stays in the report');
+  assert.match(
+    status.serviceStates?.web.degraded ?? '',
+    /503/,
+    'the probe failure is the degraded reason',
   );
 });
 

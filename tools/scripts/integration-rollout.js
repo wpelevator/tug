@@ -2,7 +2,8 @@
 // End-to-end check of rolling deploys and automatic rollback on one privileged fake VPS that runs
 // the app and the Caddy ingress. Requests hit the ingress continuously from inside the VPS while:
 //   1. v1 is deployed, 2. v2 is rolled out (zero failed requests, an unrelated service is not restarted),
-//   3. v3, whose health check fails, is rejected (v2 keeps serving) and rolled back automatically.
+//   3. v3, whose health check fails, is rejected (v2 keeps serving) and rolled back automatically,
+//   4. a deployment that changes only the health check, to one the app fails, is rejected and v2 keeps serving.
 import { api as mtlsApi, fetchRootCredential } from './mtls-fetch.js';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -40,7 +41,7 @@ async function until(label, fn, timeoutMs = 180000) {
   throw new Error(`FAILED: ${label}\n${last}`);
 }
 
-function appCompose(version, { healthPort = 80 } = {}) {
+function appCompose(version, { healthPort = 80, healthPath = '/', content = version } = {}) {
   return {
     'x-tug': { rollback: 'auto' },
     services: {
@@ -49,12 +50,12 @@ function appCompose(version, { healthPort = 80 } = {}) {
         command: [
           'sh',
           '-c',
-          `echo ${version} > /usr/share/nginx/html/index.html && exec nginx -g 'daemon off;'`,
+          `echo ${content} > /usr/share/nginx/html/index.html && exec nginx -g 'daemon off;'`,
         ],
         ports: [{ mode: 'ingress', target: 80, published: '8080', protocol: 'tcp' }],
         'x-tug': {
           placement: { nodes: ['vps-a'] },
-          health: { type: 'http', port: healthPort, path: '/', retries: 4, interval: '1s' },
+          health: { type: 'http', port: healthPort, path: healthPath, retries: 4, interval: '1s' },
           ingress: { host: 'rollout.test', port: 80, tls: 'off' },
           rollout: { strategy: 'rolling', drain: '8s' },
         },
@@ -213,6 +214,47 @@ try {
   );
   assert.equal(cacheId(), cache, 'the unrelated recreate service was still not restarted');
   console.log(`ok: ${rejected.length} requests while v3 was rejected, all served by v2`);
+
+  // ---- v2 again, only the health check changes to a path the app lacks --------------------------
+  // The container definition is identical, so the live revision must not be probed with the new check: it keeps its
+  // route, and the new check is tried on a candidate that is then rejected.
+  const live = webContainers();
+  startLoad();
+  await until('requests are flowing once more', async () => {
+    const r = vps('wc -l < /tmp/requests.log');
+    return { ok: Number(r.out.trim()) > 20, out: r.out };
+  });
+  const known = new Set(
+    (await api('/api/v1/status')).deployments
+      .filter((d) => d.project_id === PROJECT)
+      .map((d) => d.id),
+  );
+  const probeOnly = await deploy('v2-health-only', { content: 'v2', healthPath: '/missing' });
+  await waitState(probeOnly, 'failed');
+  await until('control rolled the health-only change back', async () => {
+    const next = (await api('/api/v1/status')).deployments.find(
+      (d) => d.project_id === PROJECT && !known.has(d.id) && d.version.startsWith('rollback-'),
+    );
+    return { ok: Boolean(next), out: 'no rollback deployment yet' };
+  });
+  const rollbackId = (await api('/api/v1/status')).deployments.find(
+    (d) => d.project_id === PROJECT && !known.has(d.id) && d.version.startsWith('rollback-'),
+  ).id;
+  await waitState(rollbackId, 'succeeded');
+  await new Promise((resolve) => setTimeout(resolve, 3000));
+  const unchanged = stopLoad();
+  assert.deepEqual(
+    unchanged.filter((l) => !l.startsWith('200 ')),
+    [],
+    'no request failed while a health check the app fails was rejected',
+  );
+  assert.deepEqual([...bodies(unchanged)], ['v2'], 'v2 served throughout');
+  assert.equal(
+    webContainers()[0].split(' ')[0],
+    live[0].split(' ')[0],
+    'the live web container was never replaced',
+  );
+  console.log(`ok: ${unchanged.length} requests while a failing health check was rejected`);
   console.log('rollout integration test passed');
 } catch (error) {
   console.error(error);

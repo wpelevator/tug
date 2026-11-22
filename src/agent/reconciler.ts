@@ -245,6 +245,11 @@ export interface ReconcileDeps {
   /** Pulls the service's published image. */
   pullImage: (service: string) => Promise<void>;
   emit: (service: string, event: string, message?: string) => Promise<unknown>;
+  /**
+   * Asks control whether the ingress nodes can dial the candidate's host port before it takes traffic. Throws when one
+   * definitively cannot. Absent in tests and on agents that predate it, which skips the gate.
+   */
+  edgeCheck?: (service: string, port: number) => Promise<void>;
 }
 
 export interface ReconcileInput {
@@ -396,6 +401,7 @@ export async function reconcileRolling(
     if (rollout.active && rollout.active.hash === spec.hash) {
       // Steady state: make sure the revision is still up and healthy; nothing restarts when it is.
       const active = { ...rollout.active, image };
+      let up = false;
       try {
         const running = present.find((c) => containerNameOf(c) === active.container);
         if (!running)
@@ -403,16 +409,17 @@ export async function reconcileRolling(
             await docker.createContainer(active.container, withHostPort(spec.body, active.port)),
           );
         else if (running.State !== 'running') await docker.startContainer(running.Id);
+        up = true;
         await deps.waitForHealth(active.container, service);
         delete rollout.failed;
         result.serviceStates[service] = servingState(active);
       } catch (e) {
         result.errors[service] = errMessage(e);
-        result.serviceStates[service] = {
-          rolloutState: 'health_checking',
-          image,
-          rolloutRevision: spec.hash,
-        };
+        // A revision that runs but fails its probe stays routed as degraded: control withdraws it only while another
+        // endpoint can take its traffic, because with none left a 503 is certain and a slow answer is only possible.
+        result.serviceStates[service] = up
+          ? servingState(active, { degraded: errMessage(e) })
+          : { rolloutState: 'health_checking', image, rolloutRevision: spec.hash };
       }
       continue;
     }
@@ -470,6 +477,7 @@ export async function reconcileRolling(
       }
       await deps.emit(service, 'health_checking');
       await deps.waitForHealth(candidate.container, service);
+      await deps.edgeCheck?.(service, candidate.port);
       // Takeover: the next status report carries the new port and control re-renders the ingress.
       if (rollout.active)
         rollout.draining.push({

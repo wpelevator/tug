@@ -628,6 +628,40 @@ export interface IngressWork {
   routes: IngressRoute[];
   /** Routes control had to skip (no serving upstream, missing TLS secret), for operator visibility. */
   warnings: string[];
+  /** Upstreams of a rolling candidate the node must dial before the app node switches traffic to it. */
+  probes?: EdgeProbe[];
+}
+
+/** One TCP dial an ingress node makes to an app node's published port, as Caddy would. */
+export interface EdgeProbe {
+  id: string;
+  host: string;
+  port: number;
+}
+
+export interface EdgeProbeResult {
+  id: string;
+  ok: boolean;
+  /** Why the dial failed, as the ingress node saw it. */
+  error?: string;
+}
+
+/** POST /agent/v1/edge-check: an app node asks whether its ingress nodes can reach a rolling candidate. */
+export interface EdgeCheckRequest {
+  project: string;
+  service: string;
+  port: number;
+}
+
+export interface EdgeCheckResponse {
+  /** False only on a definitive failure from at least one ingress node. */
+  ok: boolean;
+  /** Ingress nodes that dialed the candidate successfully. */
+  reached: string[];
+  /** Ingress nodes that could not dial it, with the reason. */
+  failed: { node: string; error: string }[];
+  /** Ingress nodes that did not answer in time, or that cannot probe. They do not fail the check. */
+  unchecked: string[];
 }
 
 /**
@@ -655,6 +689,10 @@ export interface IngressStatus {
   error?: string;
   /** Per named host with automatic HTTPS. Absent from agents that predate it: unknown, not issued. */
   tls?: IngressHostTls[];
+  /** Set by agents that answer `work.ingress.probes`; control sends no probes to a node without it. */
+  edgeProbe?: boolean;
+  /** Answers to the probes of the work this report follows. */
+  probeResults?: EdgeProbeResult[];
 }
 
 // ---- POST /agent/v1/status ---------------------------------------------------------------------
@@ -679,6 +717,8 @@ export interface ServiceState {
   rolloutRevision?: string;
   /** Rolling services: why the newest revision was rejected while this (older) one keeps serving. */
   rolloutError?: string;
+  /** Rolling services: the serving revision fails its readiness probe. It stays routed until another endpoint can take over. */
+  degraded?: string;
   /** Set when the container does not stay up: Docker keeps restarting it, or it exited with an error and stays down. */
   unstable?: string;
 }
