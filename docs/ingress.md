@@ -80,7 +80,7 @@ Only `edge1` renders a site block for `app.example.com` and requests its certifi
 
 The agent on an ingress node creates `tug-caddy` with host networking and three named volumes (`/data` for ACME accounts and certificates, `/config`, `/etc/caddy`), so certificates survive recreation and image updates. It uploads config through the Engine API archive endpoint, which works whether the agent runs on the host or in a container, and applies it with `caddy reload`. A reload swaps config without restarting the container or dropping in-flight HTTP requests (WebSockets stay open for a while, see [Edge features](#edge-features)). If Caddy rejects the config, the agent restores the last applied files, reports `failed` with Caddy's error in the node's ingress status and retries on the next poll. `tug doctor` flags ingress nodes that are not `serving` and ones that do not answer on ports 80 and 443 ([Port reachability](#port-reachability)). Removing the ingress role removes the container but keeps the volumes. The image is `caddy:2-alpine`, overridable with `TUG_CADDY_IMAGE` on the agent.
 
-For `rolling` services the upstream port is the one the serving revision reports, not the declared published port.
+For `rolling` services the upstream port is the one the serving revision reports, not the declared published port. Before a new revision takes over, each ingress node that routes the service dials it from the edge, see [Rolling rollouts](compose.md#rolling-rollouts).
 
 ## Mapped domains and wildcard zones
 

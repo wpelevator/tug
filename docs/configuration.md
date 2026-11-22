@@ -53,6 +53,7 @@ With none of them usable (a directory named `---`), the command fails and asks f
 | `TUG_BUILD_CACHE_KEEP` | `10GB` | After each successful deploy, control caps the Docker build cache with `docker builder prune --all --keep-storage <size>`. A size such as `5GB` or `500MB`; `0` leaves the cache alone. |
 | `TUG_LOCK_TTL_MS` | `600000` | Lease lifetime of per-project operation locks; active builds renew their lease. |
 | `TUG_STALE_SECONDS` | `60` | Seconds without an authenticated work fetch, status report or wake wait before a node is marked `stale`. |
+| `TUG_EDGE_CHECK_TIMEOUT_MS` | `20000` | How long control waits for the ingress nodes to dial a rolling candidate before the switch. A node that has not answered by then is reported as not checked and does not block the rollout. See [Rolling rollouts](compose.md#rolling-rollouts). |
 | `TUG_EVENT_RETENTION_DAYS` | `30` | Events older than this many days are deleted; `0` keeps events regardless of age. Pruning runs at startup and then at most once an hour while agents report events. |
 | `TUG_EVENT_MAX_ROWS` | `100000` | Only this many of the newest events are kept; `0` removes the limit. A value that is not a whole number falls back to the default. |
 | `TUG_CONTROL_BACKUP_DIR` | `<data dir>/control-backups` | Control backup archives. |
