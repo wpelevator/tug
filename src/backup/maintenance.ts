@@ -16,8 +16,8 @@ export const MAINTENANCE_NEXT_KEY = 'backup_maintenance_next:';
 export type MaintenanceRecord = VerifyRecord;
 
 /**
- * Maintenance results live in `meta`, one row per repository, so they need no table: an older control still opens the
- * database. Replacing or removing the destination clears them, because they describe the repositories it held.
+ * Maintenance results live in `meta`, one row per repository, so they need no table or migration. Replacing or removing
+ * the destination clears them, because they describe the repositories it held.
  */
 export function maintenanceStore(db: Db) {
   const upsert = (key: string, value: string): void =>

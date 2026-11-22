@@ -467,9 +467,9 @@ export function registerBackup(rt: CliRuntime, program: Command): void {
     .command('destination')
     .description('set, show or remove where backups go');
   destination
-    .command('set <url>')
+    .command('set [url]')
     .description(
-      'set where backups go, such as s3:https://s3.example.com/bucket/tug-backups, rest:http://backup.internal:8000/tug or b2:bucket:tug; credentials are stored encrypted on control. Then checks the destination (see `backup destination check`). A failed check is a warning and the exit code stays 0, since the destination is saved; --no-check skips it',
+      'set where backups go, such as s3:https://s3.example.com/bucket/tug-backups, rest:http://backup.internal:8000/tug or b2:bucket:tug; credentials are stored encrypted on control. Then checks the destination (see `backup destination check`). A failed check is a warning and the exit code stays 0, since the destination is saved; --no-check skips it. With only --retention (no URL) the destination in use keeps its credentials and changes its mode',
     )
     .option(
       '--env <name>',
@@ -480,57 +480,68 @@ export function registerBackup(rt: CliRuntime, program: Command): void {
     .addOption(
       new Option(
         '--retention <mode>',
-        'who removes old snapshots: managed (default; tug runs restic forget after each backup and restic prune once a week) or external (an append-only destination such as rest-server --append-only: tug never forgets or prunes, so you do it from the storage side). Setting only this on the destination already in use keeps its credentials; when omitted, the current mode is kept for the same URL',
+        'who removes old snapshots: managed (default; tug runs restic forget after each backup and restic prune once a week) or external (an append-only destination such as rest-server --append-only: tug never forgets or prunes, so you do it from the storage side). Without a URL, or with the URL already in use and no --env, only the mode changes and the credentials are kept; when omitted, the current mode is kept for the same URL',
       ).choices(['managed', 'external']),
     )
     .option('--no-check', 'save the destination without checking it')
-    .action(async (url: string, o: { env: string[]; check: boolean; retention?: string }) => {
-      // Only the mode for the destination in use: no credentials are sent, so control keeps the stored ones.
-      const env = o.env.length || !o.retention ? await readEnvValues(rt, o.env) : undefined;
-      const saved = await request<Record<string, unknown>>(
-        rt,
-        'POST',
-        '/api/v1/backup/destination',
-        { url, ...(env ? { env } : {}), ...(o.retention ? { retention: o.retention } : {}) },
-      );
-      // Saving succeeded, so nothing below changes the exit code: a failed or unavailable check is a warning.
-      let check: DestinationCheck | undefined;
-      let finished = true;
-      let unavailable = false;
-      if (o.check)
-        try {
-          ({ check, finished } = await checkDestination(rt));
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          if (!/destination\/check: 404/.test(message)) throw error;
-          unavailable = true;
-        }
-      // One JSON document, so scripts that parse the output of `set` keep working.
-      out(rt, JSON.stringify(check ? { ...saved, check } : saved));
-      err(
-        rt,
-        'Control now backs itself up here every night. Keep its password with these credentials: tug backup password --control',
-      );
-      if (saved.retention === 'external')
+    .action(
+      async (url: string | undefined, o: { env: string[]; check: boolean; retention?: string }) => {
+        if (!url && !o.retention)
+          throw new Error(
+            'pass the destination URL, or --retention to change the mode of the destination in use',
+          );
+        if (!url && o.env.length) throw new Error('--env needs the destination URL');
+        // Only the mode for the destination in use: no credentials are sent, so control keeps the stored ones.
+        const env = o.env.length || !o.retention ? await readEnvValues(rt, o.env) : undefined;
+        const saved = await request<Record<string, unknown>>(
+          rt,
+          'POST',
+          '/api/v1/backup/destination',
+          {
+            ...(url ? { url } : {}),
+            ...(env ? { env } : {}),
+            ...(o.retention ? { retention: o.retention } : {}),
+          },
+        );
+        // Saving succeeded, so nothing below changes the exit code: a failed or unavailable check is a warning.
+        let check: DestinationCheck | undefined;
+        let finished = true;
+        let unavailable = false;
+        if (o.check)
+          try {
+            ({ check, finished } = await checkDestination(rt));
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            if (!/destination\/check: 404/.test(message)) throw error;
+            unavailable = true;
+          }
+        // One JSON document, so scripts that parse the output of `set` keep working.
+        out(rt, JSON.stringify(check ? { ...saved, check } : saved));
         err(
           rt,
-          "retention is external: tug will not prune this destination. You own pruning from the storage side, keeping snapshots tagged trigger:pre-restore, and a failed backup's partial snapshot cannot be cleaned up.",
+          'Control now backs itself up here every night. Keep its password with these credentials: tug backup password --control',
         );
-      if (unavailable)
-        err(
-          rt,
-          'saved; this control is too old to check destinations (it has no destination check), so nothing was verified. Upgrade control to use tug backup destination check',
-        );
-      if (check && !finished) err(rt, `saved; ${STILL_RUNNING}`);
-      else if (check) {
-        reportCheck(rt, check);
-        if (!check.ok)
+        if (saved.retention === 'external')
           err(
             rt,
-            `saved; the check failed for ${failedNames(check) || 'some repositories'}: fix it and run tug backup destination check`,
+            "retention is external: tug will not prune this destination. You own pruning from the storage side, keeping snapshots tagged trigger:pre-restore, and a failed backup's partial snapshot cannot be cleaned up.",
           );
-      }
-    });
+        if (unavailable)
+          err(
+            rt,
+            'saved; this control is too old to check destinations (it has no destination check), so nothing was verified. Upgrade control to use tug backup destination check',
+          );
+        if (check && !finished) err(rt, `saved; ${STILL_RUNNING}`);
+        else if (check) {
+          reportCheck(rt, check);
+          if (!check.ok)
+            err(
+              rt,
+              `saved; the check failed for ${failedNames(check) || 'some repositories'}: fix it and run tug backup destination check`,
+            );
+        }
+      },
+    );
   destination
     .command('check')
     .description(

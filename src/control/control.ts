@@ -138,6 +138,7 @@ import type {
 import type { RetentionStatus } from '../backup/check.ts';
 import {
   isReservedProject,
+  normalizeDestinationUrl,
   parseBackupDestination,
   parseRetentionMode,
   projectRepository,
@@ -2396,16 +2397,15 @@ export async function createApp(
     if ('error' in started) return res.status(started.status).json({ error: started.error });
     res.json({ confirmed: true, plan, ...started });
   });
-  api('get', '/api/v1/restores', queryProject, async (req, res) =>
+  api('get', '/api/v1/restores', queryProject, async (req, res) => {
+    const project = String(req.query.project || 'site');
+    const interrupted = req.query.state === 'interrupted';
     res.json({
-      restores: restores.list(
-        String(req.query.project || 'site'),
-        20,
-        req.query.state === 'interrupted',
-      ),
-      leftovers: restores.leftovers(String(req.query.project || 'site')),
-    }),
-  );
+      restores: restores.list(project, 20, interrupted),
+      // What restores left behind belongs to the listing of one named project; a selection of interrupted restores has no use for it.
+      ...(req.query.project && !interrupted ? { leftovers: restores.leftovers(project) } : {}),
+    });
+  });
   /**
    * Forgets tug's safety snapshots in one `backup.forget` job and drops them from their restores. An append-only
    * destination refuses deletes, so it is refused here with the reason, before anything is queued. The caller holds the
@@ -2458,14 +2458,16 @@ export async function createApp(
     let lock;
     try {
       lock = acquireProjectLock(project, 'restore.remove');
-      const removed: Record<string, unknown> = {};
+      // A restore leaves one or the other: a scratch restore a volume, an in-place one its safety snapshot.
+      let removed: { safetySnapshot: string } | { scratchVolume: string };
       if (safety) {
         const forgotten = await forgetSafety(project, [safety]);
         if ('error' in forgotten)
           return res.status(forgotten.status).json({ error: forgotten.error });
-        removed.safetySnapshot = safety.snapshotId;
-      }
-      if (scratch) {
+        removed = { safetySnapshot: safety.snapshotId };
+      } else {
+        // `scratch` is set: the guard above returned when both were missing.
+        const volume = scratch!;
         if (!restore.node_id)
           return res
             .status(409)
@@ -2473,12 +2475,14 @@ export async function createApp(
         const commandId = queueCommand(restore.node_id, project, 'restore.remove', {
           project,
           restoreId: restore.id,
-          volume: scratch.volume,
+          volume: volume.volume,
         });
-        const outcome = await unlockCommands.wait(commandId, UNLOCK_LIMIT_MS(), () => {});
+        const outcome = await jobCommands.wait(commandId, UNLOCK_LIMIT_MS(), () =>
+          cancelCheckCommand(commandId, restore.node_id!, project),
+        );
         if (outcome === 'timeout')
           return res.status(504).json({
-            error: `node ${scratch.node ?? restore.node_id} did not remove volume ${scratch.volume} in time; check tug node list and run it again`,
+            error: `node ${volume.node ?? restore.node_id} did not remove volume ${volume.volume} in time; check tug node list and run it again`,
           });
         if (outcome.state !== 'succeeded')
           return res.status(502).json({
@@ -2487,7 +2491,7 @@ export async function createApp(
               'the node could not remove the volume',
           });
         restores.cleared(restore.id, 'scratch');
-        removed.scratchVolume = scratch.volume;
+        removed = { scratchVolume: volume.volume };
       }
       audit(req.actor!, {
         type: 'restore.removed',
@@ -2617,7 +2621,7 @@ export async function createApp(
       payload as unknown as Record<string, unknown>,
       new Date(Date.now() + limitMs).toISOString(),
     );
-    const outcome = await unlockCommands.wait(commandId, limitMs, () =>
+    const outcome = await jobCommands.wait(commandId, limitMs, () =>
       cancelCheckCommand(commandId, node.id, project),
     );
     if (outcome === 'timeout') {
@@ -2814,14 +2818,15 @@ export async function createApp(
         (e) => log.failure('control repository check failed', e, {}, 'error'),
       );
   };
-  /** The `backup.unlock` and `backup.maintain` commands being waited for; like a check's, their result is never a backup run's. */
-  const unlockCommands = new CheckCommands();
+  /** The `backup.unlock`, `backup.maintain`, `backup.forget` and `restore.remove` commands being waited for; like a check's, their result is never a backup run's. */
+  const jobCommands = new CheckCommands();
   const UNLOCK_LIMIT_MS = () => Number(process.env.TUG_UNLOCK_TIMEOUT_MS) || 5 * 60_000;
   /**
    * Removes stale restic locks from a project's repository, or with `control: true` from control's own. Plain
    * `restic unlock`, which removes only locks that have gone stale: tug never unlocks on its own, because a lock may
-   * belong to a prune running on another host. The project is locked while it runs, and the node runs it in the
-   * project's job lane, behind a backup of that project that is running there.
+   * belong to a prune running on another host. The project is not locked: restic's own stale-lock rule is what makes
+   * unlocking safe, and the project lock would only block deploys. The node runs it in the project's job lane, behind a
+   * backup of that project that is running there.
    */
   api(
     'post',
@@ -2865,9 +2870,7 @@ export async function createApp(
       const project = String(req.body?.project || 'site');
       const picked = pickBackupNode(project);
       if ('error' in picked) return res.status(picked.status).json({ error: picked.error });
-      let lock;
       try {
-        lock = acquireProjectLock(project, 'backup.unlock');
         const outcome = await runOnNode(picked.node, project, 'backup.unlock', 'unlock', {
           limitMs: UNLOCK_LIMIT_MS(),
         });
@@ -2883,8 +2886,6 @@ export async function createApp(
         res.json({ ok: true, project, node: picked.node.name, ...summary(counts) });
       } catch (e) {
         sendError(res, e);
-      } finally {
-        releaseLock(lock);
       }
     },
   );
@@ -2931,6 +2932,15 @@ export async function createApp(
         trigger: 'manual',
         actor: req.actor!,
       }).catch((e) => log.failure('backup verify failed', e, { project }, 'error'));
+      audit(req.actor!, {
+        type: 'backup.verify',
+        ...(control ? {} : { project }),
+        message: `repository check of ${control ? 'control' : project} started by ${req.actor!.name}`,
+        metadata: {
+          ...(control ? { control: true } : { node: node!.name }),
+          ...(subset ? { readDataSubset: subset } : {}),
+        },
+      });
       res.status(202).json({
         ok: true,
         started: true,
@@ -3004,17 +3014,26 @@ export async function createApp(
   });
   api('post', '/api/v1/backup/destination', null, async (req, res) => {
     const current = backupDestination();
-    // Only the mode, for the destination already in use: a request with a `retention` and no `env` keeps the stored credentials.
-    if (current && req.body?.env === undefined && req.body?.retention !== undefined) {
-      let mode;
-      try {
-        mode = parseRetentionMode(req.body.retention)!;
-      } catch (e) {
-        return res.status(400).json({ error: errMessage(e) });
-      }
-      const sameUrl =
-        typeof req.body.url === 'string' && req.body.url.trim().replace(/\/+$/, '') === current.url;
-      if (sameUrl) {
+    // A `retention` with no `env` changes only the mode of the destination in use and keeps its credentials. With no
+    // `url` that is the whole request; a `url` must then name the destination in use, never replace it.
+    if (req.body?.env === undefined && req.body?.retention !== undefined) {
+      const given = normalizeDestinationUrl(req.body.url) || undefined;
+      if (given === undefined || current) {
+        if (!current)
+          return res.status(409).json({
+            error:
+              'no backup destination is configured; set one with tug backup destination set <url>',
+          });
+        if (given !== undefined && given !== current.url)
+          return res.status(400).json({
+            error: `the destination in use is ${current.url}, not ${given}; --retention alone changes its mode. To move to ${given}, set it first (with its credentials, if it needs any) and then set the mode`,
+          });
+        let mode;
+        try {
+          mode = parseRetentionMode(req.body.retention)!;
+        } catch (e) {
+          return res.status(400).json({ error: errMessage(e) });
+        }
         destinationQueries.setRetention(mode);
         audit(req.actor!, {
           type: 'backup.destination_set',
@@ -4765,17 +4784,13 @@ export async function createApp(
         ? req.body.services.map(String)
         : [];
       // Only holds a deploy placed for a move; a restore's holds are dropped by `restore release`.
-      const rows = db.all<{ service: string }>(
-        'SELECT service FROM service_holds WHERE project_id=? AND restore_id IS NULL',
-        project,
-      );
-      const heldNow = db.all<{ service: string; reason: string }>(
+      const held = db.all<{ service: string; reason: string }>(
         'SELECT service,reason FROM service_holds WHERE project_id=? AND restore_id IS NULL',
         project,
       );
-      const reasons = new Map(heldNow.map((row) => [row.service, row.reason]));
+      const reasons = new Map(held.map((row) => [row.service, row.reason]));
       const admin = req.actor!.role === 'admin';
-      const wanted = rows
+      const wanted = held
         .map((row) => row.service)
         .filter((service) => !services.length || services.includes(service));
       // A credential that can place a hold by deploying can release it again; every other hold stays with an admin.
@@ -6231,7 +6246,7 @@ export async function createApp(
       // A destination check's command is not a backup run: its result goes to the check and nothing else.
       if (
         !checkCommands.onResult(cr.commandId, cr.state, cr.result) &&
-        !unlockCommands.onResult(cr.commandId, cr.state, cr.result)
+        !jobCommands.onResult(cr.commandId, cr.state, cr.result)
       )
         backups.onResult(cr.commandId, cr.state, cr.result);
       advanceWhere(

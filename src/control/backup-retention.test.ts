@@ -160,6 +160,65 @@ test('setting only the retention on the destination in use keeps its credentials
   }
 });
 
+test('a retention with no url changes only the mode, and a different url is refused instead of replacing the destination', async () => {
+  const s = await server(resticDocker(() => ({ code: 0 })));
+  try {
+    const none = await call(s.base, 'POST', '/api/v1/backup/destination', {
+      retention: 'external',
+    });
+    assert.equal(none.status, 409, 'there is no destination whose mode could change');
+    await call(s.base, 'POST', '/api/v1/backup/destination', DESTINATION);
+    const db = await openDb(s.dbFile);
+    const before = db.get<{ updated_at: string }>('SELECT updated_at FROM backup_destination')!;
+    const partial = await call(s.base, 'POST', '/api/v1/backup/destination', {
+      retention: 'external',
+    });
+    assert.equal(partial.status, 200, 'a retention alone is the partial update');
+    const shown = await json(await call(s.base, 'GET', '/api/v1/backup/destination'));
+    assert.equal(shown.retention, 'external', 'the mode of the destination in use is set');
+    assert.deepEqual(
+      shown.envNames,
+      ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY'],
+      'the stored credentials are kept',
+    );
+    assert.equal(
+      db.get<{ updated_at: string }>('SELECT updated_at FROM backup_destination')!.updated_at,
+      before.updated_at,
+      'the destination is not replaced, so its check result stays valid',
+    );
+    const padded = await call(s.base, 'POST', '/api/v1/backup/destination', {
+      url: ` ${DESTINATION.url}/`,
+      retention: 'managed',
+    });
+    assert.equal(
+      padded.status,
+      200,
+      'the same url written with a trailing slash and spaces is still the destination in use',
+    );
+    const mismatch = await call(s.base, 'POST', '/api/v1/backup/destination', {
+      url: 'rest:http://backup.internal:8000/tug',
+      retention: 'external',
+    });
+    assert.equal(mismatch.status, 400, 'another url with only a mode is refused');
+    assert.match(
+      (await json(mismatch)).error,
+      /destination in use is s3:.*not rest:/,
+      'the refusal names both urls',
+    );
+    assert.equal(
+      (await json(await call(s.base, 'GET', '/api/v1/backup/destination'))).url,
+      DESTINATION.url,
+      'a refused request replaces nothing',
+    );
+    const bad = await call(s.base, 'POST', '/api/v1/backup/destination', {
+      retention: 'sometimes',
+    });
+    assert.equal(bad.status, 400, 'an unknown mode is refused');
+  } finally {
+    await s.close();
+  }
+});
+
 test('destination set and the backup listing keep their roles: set is admin, the listing is readable', async () => {
   const s = await server(resticDocker(() => ({ code: 0 })));
   try {

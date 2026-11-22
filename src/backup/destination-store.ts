@@ -5,8 +5,8 @@ import type { RetentionMode } from '../protocol.ts';
 import { maintenanceStore } from './maintenance.ts';
 
 /**
- * Who prunes the destination lives in `meta` next to the destination row, not in a column: a column would be a schema
- * change that stops an older control from opening the database. `external` is stored; `managed` is the absence of the row.
+ * Who removes old snapshots from the destination lives in `meta` next to the destination row, not in a column: one
+ * setting needs no migration. `external` is stored; `managed` is the absence of the row.
  */
 const RETENTION_KEY = 'backup_destination_retention';
 

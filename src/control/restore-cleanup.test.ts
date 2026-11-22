@@ -213,6 +213,20 @@ test('restore list shows what restores left, and only restores that finished fre
     const lines = leftoverLines(leftovers);
     assert.equal(lines.length, 3, 'the CLI prints one line per leftover');
     assert.match(lines.join('\n'), /tug restore remove rst_scratch/, 'each line names the fix');
+    const interrupted = await json(
+      await call(s.base, 'GET', '/api/v1/restores?project=site&state=interrupted'),
+    );
+    assert.equal(
+      interrupted.leftovers,
+      undefined,
+      'a selection of interrupted restores does not compute leftovers',
+    );
+    const unnamed = await json(await call(s.base, 'GET', '/api/v1/restores'));
+    assert.equal(
+      unnamed.leftovers,
+      undefined,
+      'a request that names no project does not compute the leftovers of the default project',
+    );
   } finally {
     await s.close();
   }
@@ -280,6 +294,37 @@ test('restore remove forgets only that safety snapshot and removes a scratch vol
     await s.close();
   }
 });
+
+test('a scratch volume removal that no node picks up in time times out and is cancelled, not left queued', async () => {
+  const s = await server();
+  const previous = process.env.TUG_UNLOCK_TIMEOUT_MS;
+  process.env.TUG_UNLOCK_TIMEOUT_MS = '150';
+  try {
+    const { nodeId } = await deploy(s.base);
+    await call(s.base, 'POST', '/api/v1/backup/destination', DESTINATION);
+    const db = await seed(s.dbFile, nodeId);
+    const res = await call(s.base, 'POST', '/api/v1/restores/rst_scratch/remove', {});
+    assert.equal(res.status, 504, 'a node that never answers is reported as a timeout');
+    assert.deepEqual(
+      db.all<{ state: string }>("SELECT state FROM commands WHERE type='restore.remove'"),
+      [{ state: 'cancelled' }],
+      'the unanswered command is cancelled, so the node does not remove the volume later',
+    );
+    assert.equal(
+      restoreScratchVolume(db),
+      'tug_r4_site_r123',
+      'the restore still lists the volume, as it was not removed',
+    );
+  } finally {
+    if (previous === undefined) delete process.env.TUG_UNLOCK_TIMEOUT_MS;
+    else process.env.TUG_UNLOCK_TIMEOUT_MS = previous;
+    await s.close();
+  }
+});
+const restoreScratchVolume = (db: Awaited<ReturnType<typeof openDb>>): string | null | undefined =>
+  db.get<{ scratch_volume: string | null }>(
+    "SELECT scratch_volume FROM restore_runs WHERE id='rst_scratch'",
+  )?.scratch_volume;
 
 test('expire-safety forgets the safety snapshots older than the age in one job', async () => {
   const s = await server();

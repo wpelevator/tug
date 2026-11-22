@@ -420,6 +420,30 @@ test('long-wait commands report progress on stderr and retain their results and 
           { url: 'rest:http://backup.internal:8000/tug', env: {} },
           'without --retention the request is what it always was',
         );
+        await run('backup', 'destination', 'set', '--retention', 'external', '--no-check');
+        assert.deepEqual(
+          bodies['POST /api/v1/backup/destination'],
+          { retention: 'external' },
+          'with --retention alone the request is the mode only, naming no URL and carrying no credentials',
+        );
+        await assert.rejects(
+          run('backup', 'destination', 'set'),
+          /pass the destination URL, or --retention/,
+          'a set with neither a URL nor a mode says what to pass',
+        );
+        await assert.rejects(
+          run(
+            'backup',
+            'destination',
+            'set',
+            '--env',
+            'AWS_ACCESS_KEY_ID',
+            '--retention',
+            'external',
+          ),
+          /--env needs the destination URL/,
+          'credentials without a URL are not a mode change',
+        );
       },
     );
     await t.test(

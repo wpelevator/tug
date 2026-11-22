@@ -125,7 +125,10 @@ test('a deploy credential places a deploy hold and releases it, but an admin kee
     assert.equal(again.status, 200, `a later deploy succeeds: ${again.text}`);
     assert.equal((await holds()).length, 1, 'the hold persists across later deploys, once');
 
-    // An admin's hold for another reason, such as a moved service, stays with an admin.
+    // An admin's hold for another reason, such as a moved service, stays with an admin. A move hold is written with
+    // INSERT OR REPLACE, so a move acknowledged on a service that already carried a `deploy hold` overwrites its reason
+    // with `moved <service>`: that hold then needs an admin to release it, which is intended, because the moved
+    // service is empty until its data is restored.
     (await openDb(s.dbFile)).run(
       "INSERT INTO service_holds(project_id,service,reason,restore_id,created_at) VALUES('a','db','moved db',NULL,'2026-11-01T00:00:00Z')",
     );

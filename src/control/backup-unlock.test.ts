@@ -210,7 +210,7 @@ test('unlocking the control repository removes stale locks from control, reports
   }
 });
 
-test('unlocking a project queues backup.unlock on the node that runs its backups, with credentials and the project lock held', async () => {
+test('unlocking a project queues backup.unlock on the node that runs its backups, with credentials, and does not take the project lock', async () => {
   const s = await server(lockedDocker([], []));
   const stops: (() => Promise<void>)[] = [];
   try {
@@ -235,11 +235,15 @@ test('unlocking a project queues backup.unlock on the node that runs its backups
     stops.push(node.stop);
     const first = call(s.base, 'POST', '/api/v1/backups/unlock', { project: 'site' });
     await until(() => node.seen.length === 1, 'the node to take the unlock command');
-    const second = await call(s.base, 'POST', '/api/v1/backups/unlock', { project: 'site' });
+    const deploying = await call(s.base, 'POST', '/api/v1/deployments', {
+      project: 'site',
+      version: 'v2',
+      compose: COMPOSE,
+    });
     assert.equal(
-      second.status,
-      409,
-      'a second operation on the project is refused while the unlock holds its lock',
+      deploying.status,
+      200,
+      `a deploy is not blocked while an unlock runs, because unlock takes no project lock: ${await deploying.clone().text()}`,
     );
     release();
     const res = await first;
@@ -258,11 +262,7 @@ test('unlocking a project queues backup.unlock on the node that runs its backups
     );
     assert.equal((await events(s.dbFile, 'backup.unlock')).length, 1, 'the unlock is audited once');
     const again = call(s.base, 'POST', '/api/v1/backups/unlock', { project: 'site' });
-    assert.equal(
-      (await again).status,
-      200,
-      'the project lock is released once the unlock finished',
-    );
+    assert.equal((await again).status, 200, 'a second unlock runs after the first finished');
   } finally {
     for (const stop of stops) await stop();
     await s.close();

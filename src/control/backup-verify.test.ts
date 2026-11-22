@@ -227,6 +227,13 @@ test('backup verify checks the repository in the background, records it, and rai
       readDataSubset: '5%',
     });
     assert.equal(res.status, 202, 'a verify starts in the background');
+    const audited = await events(s.dbFile, 'backup.verify');
+    assert.equal(audited.length, 1, 'an accepted verify is audited once, with who asked');
+    assert.match(
+      audited[0].message,
+      /repository check of site started by operator/,
+      'the audit entry names the project and the actor',
+    );
     await until(
       async () => (await listing(s.base)).verify?.ok === true,
       'the check to be recorded',

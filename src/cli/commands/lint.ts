@@ -14,44 +14,6 @@ export interface LintResult {
   file: string;
   /** One finding per rejected rule; none means the file passes. */
   errors: string[];
-  /** Things deploy accepts that are probably a mistake; they never fail the lint. */
-  warnings?: string[];
-}
-
-/** Images that keep a database's files: a volume under one of these is the data, and losing it loses the app. */
-const DATABASE_IMAGE =
-  /^(?:.*\/)?(?:mysql|mariadb|percona|postgres|postgis|timescaledb|mongo|mongodb|redis|valkey|clickhouse|cassandra|couchdb|influxdb|cockroach)(?:[:@-]|$)/i;
-
-/**
- * Volumes that hold data worth keeping but do not say `x-tug.persistent: true`: one a database service mounts, or one
- * that is a backup target. Without the flag `tug volume remove` does not treat it as precious. An explicit
- * `persistent: false` is a decision and silences the warning.
- */
-export function persistentWarnings(compose: ComposeFile): string[] {
-  const warnings: string[] = [];
-  const volumes = compose.volumes && typeof compose.volumes === 'object' ? compose.volumes : {};
-  const reasons = new Map<string, string>();
-  for (const [name, volume] of Object.entries(volumes))
-    if (volume && typeof volume === 'object' && volume['x-tug']?.backup)
-      reasons.set(name, 'is a backup target');
-  for (const [service, svc] of Object.entries(compose.services ?? {})) {
-    if (!svc || typeof svc !== 'object' || typeof svc.image !== 'string') continue;
-    if (!DATABASE_IMAGE.test(svc.image)) continue;
-    for (const mount of svc.volumes ?? []) {
-      const source = typeof mount === 'string' ? mount.split(':')[0] : mount?.source;
-      if (typeof source === 'string' && source in volumes && !reasons.has(source))
-        reasons.set(source, `backs the database service ${service}`);
-    }
-  }
-  for (const [name, reason] of reasons) {
-    const persistent = (volumes[name] as { 'x-tug'?: { persistent?: unknown } } | null)?.['x-tug']
-      ?.persistent;
-    if (persistent === undefined)
-      warnings.push(
-        `volumes.${name} ${reason} but is not marked x-tug.persistent: true; mark it so the intent is written down and tug volume remove keeps refusing without --delete-data even if the volume type changes (persistent: false says the data is disposable)`,
-      );
-  }
-  return warnings;
 }
 
 /** `${NAME:-default}` and `${NAME-default}`, with no reference nested in the default. */
@@ -132,7 +94,7 @@ export async function lintComposeFile(file: string, cwd: string): Promise<LintRe
   const others = composeErrors(withResolvedHosts(compose), [], { normalized: false }).filter(
     (error) => !/: env_file is not supported$/.test(error),
   );
-  return { file, errors: [...envFiles, ...others], warnings: persistentWarnings(compose) };
+  return { file, errors: [...envFiles, ...others] };
 }
 
 export function registerLint(rt: CliRuntime, program: Command): void {
@@ -148,8 +110,6 @@ export function registerLint(rt: CliRuntime, program: Command): void {
       if (o.json) {
         out(rt, JSON.stringify({ ok: !result.errors.length, ...result }, null, 2));
       } else {
-        for (const warning of result.warnings ?? [])
-          err(rt, `warning: ${finding(result.file, warning)}`);
         // One finding per line on stderr, keeping any piped stdout clean for editors and scripts;
         // findings already name their service or volume, so the prefix only adds the file.
         for (const error of result.errors) err(rt, finding(result.file, error));

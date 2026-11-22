@@ -36,10 +36,15 @@ export function parseRetentionMode(value: unknown): RetentionMode | undefined {
   );
 }
 
+/** A destination URL as stored: trimmed, without trailing slashes; empty when it is not a string. */
+export function normalizeDestinationUrl(value: unknown): string {
+  return typeof value === 'string' ? value.trim().replace(/\/+$/, '') : '';
+}
+
 /** Throws an `Error` naming the first problem with a destination, or returns it normalized. */
 export function parseBackupDestination(input: unknown): BackupDestinationInput {
   const body = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>;
-  const url = typeof body.url === 'string' ? body.url.trim().replace(/\/+$/, '') : '';
+  const url = normalizeDestinationUrl(body.url);
   if (!url)
     throw new Error('url is required, such as s3:https://s3.example.com/bucket/tug-backups');
   if (/\s/.test(url)) throw new Error('url must not contain whitespace');

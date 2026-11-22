@@ -65,7 +65,7 @@ A server that refuses deletes, such as `rest-server --append-only`, protects sna
 tug backup destination set rest:http://backup.internal:8000/tug --retention external
 ```
 
-With only `--retention` and the URL already in use, the stored credentials are kept. The mode belongs to the destination, so it applies to every project and to control's own backup, and setting the same URL again keeps it. `--retention managed` turns pruning back on, and a different URL starts managed. `tug backup destination show` and `destination check` print the mode. The check does not test whether the credentials can delete.
+`tug backup destination set --retention external` with no URL changes only the mode of the destination in use and keeps its credentials, as does the same URL without `--env`; a different URL without `--env` is refused instead of replacing the destination. The mode belongs to the destination, so it applies to every project and to control's own backup, and setting the same URL again keeps it. `--retention managed` turns pruning back on, and a different URL starts managed. `tug backup destination show` and `destination check` print the mode. The check does not test whether the credentials can delete.
 
 With `external`, tug never runs `forget` or `prune`, and each run records `retention: external`. The weekly [repository check](#verify-a-repository) still runs, because it only reads. You then own:
 
@@ -218,7 +218,7 @@ tug backup verify --read-data-subset 5%
 tug backup verify --control
 ```
 
-`verify` runs the check now, in the background, and never prunes. `restic check` alone reads the repository's structure. `--read-data-subset` (a fraction such as `1/10`, a percentage or a size) also downloads that part of the stored data and verifies it, which catches bit rot at the price of bandwidth from the destination. It needs the admin role. A repository that has no snapshot yet cannot be checked and is skipped until its first backup succeeds. `TUG_MAINTENANCE_TIMEOUT_MS` (default six hours) bounds one job.
+`verify` runs the check now, in the background, and never prunes. `restic check` alone reads the repository's structure. `--read-data-subset` (a fraction such as `1/10`, a percentage or a size) also downloads that part of the stored data and verifies it, which catches bit rot at the price of bandwidth from the destination. It needs the admin role and is audited as `backup.verify`. A repository that has no snapshot yet cannot be checked and is skipped until its first backup succeeds. `TUG_MAINTENANCE_TIMEOUT_MS` (default six hours) bounds one job.
 
 ### Protection levels
 
@@ -242,7 +242,7 @@ tug backup unlock
 tug backup unlock --control
 ```
 
-The first runs `restic unlock` on the project's repository, from the node that runs its backups. The second does it on control's own repository, from control. Both need the admin role, hold the project lock for the duration (the second takes none) and are audited as `backup.unlock`. The answer is `{removed, remaining}`, the locks before and after.
+The first runs `restic unlock` on the project's repository, from the node that runs its backups. The second does it on control's own repository, from control. Both need the admin role and are audited as `backup.unlock`. Neither takes the project lock, so a deploy is not held up: restic removes only locks that have gone stale, and that rule is what makes unlocking safe. The answer is `{removed, remaining}`, the locks before and after.
 
 Only stale locks are removed. tug never passes `--remove-all` and never unlocks by itself, because a lock can belong to a prune running on another host, and removing it would let two writers meet. A `remaining` above zero means a restic is running now or its lock has not gone stale yet, so run the command again after 30 minutes. From 4.0 a stopped helper releases its lock first, see [Jobs on a node](#jobs-on-a-node), so a stale lock should be rare.
 
