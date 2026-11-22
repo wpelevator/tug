@@ -132,7 +132,8 @@ export function forgetArgs(payload: BackupJobPayload, retention: BackupRetention
     '--keep-tag',
     'trigger:pre-restore',
     ...keep,
-    '--prune',
+    // No `--prune`: dropping the data takes the exclusive lock, which contends with other nodes' backups, so the
+    // repository is pruned once a week by `backup.maintain`.
     '--retry-lock',
     RESTIC_LOCK_WAIT,
   ];
@@ -259,7 +260,12 @@ export async function runBackupJob(
   payload: BackupJobPayload,
   commandId: string,
   ctx: JobContext,
-  kind: 'backup.run' | 'backup.check' | 'backup.restore' | 'backup.unlock' = 'backup.run',
+  kind:
+    | 'backup.run'
+    | 'backup.check'
+    | 'backup.restore'
+    | 'backup.unlock'
+    | 'backup.maintain' = 'backup.run',
 ): Promise<BackupJobResult> {
   const started = Date.now();
   const { docker, credentials } = ctx;
@@ -428,7 +434,8 @@ export async function runBackupJob(
     const state = classifyRepositoryProbe(probe);
     if (
       state === 'error' ||
-      (state === 'missing' && (kind === 'backup.restore' || kind === 'backup.unlock'))
+      (state === 'missing' &&
+        (kind === 'backup.restore' || kind === 'backup.unlock' || kind === 'backup.maintain'))
     )
       // A restore or an unlock needs an existing repository; a wrong password or an unreachable bucket fails every kind of job.
       throw fail(
@@ -452,6 +459,46 @@ export async function runBackupJob(
         resticVersion: version,
         repository,
       };
+
+    if (kind === 'backup.maintain') {
+      phase('maintaining');
+      const plan = payload.maintain ?? { prune: false };
+      let message: string | undefined;
+      let locked = false;
+      const note = (what: string, result: { code: number; out: string; err: string }): void => {
+        message ??= `${what} failed: ${redact(result.err || result.out)
+          .trim()
+          .slice(-300)}`;
+        locked ||= result.code === RESTIC_EXIT_LOCKED;
+      };
+      let prune: 'ok' | 'skipped' | 'failed' = 'skipped';
+      if (plan.prune) {
+        const pruned = await exec(['restic', 'prune', '--retry-lock', RESTIC_LOCK_WAIT]);
+        prune = pruned.code === 0 ? 'ok' : 'failed';
+        if (pruned.code !== 0) note('prune', pruned);
+      }
+      // The check runs after a failed prune too: a repository that cannot be pruned may still be intact.
+      const checked = await exec([
+        'restic',
+        'check',
+        ...(plan.subset ? [`--read-data-subset=${plan.subset}`] : []),
+        '--retry-lock',
+        RESTIC_LOCK_WAIT,
+      ]);
+      if (checked.code !== 0) note('check', checked);
+      return {
+        runId: payload.runId,
+        durationMs: Date.now() - started,
+        resticVersion: version,
+        maintenance: {
+          prune,
+          check: checked.code === 0 ? 'ok' : 'failed',
+          ...(message ? { message } : {}),
+          ...(locked ? { locked: true } : {}),
+          ...(plan.subset ? { subset: plan.subset } : {}),
+        },
+      };
+    }
 
     if (kind === 'backup.unlock') {
       phase('unlocking');

@@ -189,6 +189,68 @@ test('an unlock job fails on a missing repository instead of creating one', asyn
   assert.ok(!ran(docker, 'restic init'), 'an unlock never initializes');
 });
 
+const maintained = async (
+  maintain: BackupJobPayload['maintain'],
+  responder: FakeDocker['execResponder'],
+) => {
+  const docker = dockerWith(responder);
+  const { jobs } = await runner(docker);
+  await jobs.start(command('cmd_1', payload({ maintain }), 'backup.maintain'));
+  await settle(jobs, 1);
+  return { docker, result: jobs.pending()[0] };
+};
+
+test('a maintenance job prunes, then checks, and reports both; a subset is passed to the check', async () => {
+  const { docker, result } = await maintained({ prune: true, subset: '5%' }, () => ({ code: 0 }));
+  assert.equal(result.state, 'succeeded', 'the job succeeds');
+  assert.deepEqual(
+    (result.result as { maintenance?: unknown }).maintenance,
+    { prune: 'ok', check: 'ok', subset: '5%' },
+    'prune and check outcomes are structured',
+  );
+  const lines = docker.execOptions.map((e) => e.cmd.join(' '));
+  const prune = lines.findIndex((line) => line.startsWith('restic prune'));
+  const check = lines.findIndex((line) => line.startsWith('restic check'));
+  assert.ok(prune >= 0 && check > prune, 'the prune runs before the check');
+  assert.match(lines[check], /--read-data-subset=5%/, 'the check reads the requested subset');
+  assert.match(lines[prune], /--retry-lock 10m/, 'the prune waits for the repository lock');
+});
+
+test('a maintenance job without prune only checks, so an append-only destination is never asked to delete', async () => {
+  const { docker, result } = await maintained({ prune: false }, () => ({ code: 0 }));
+  assert.deepEqual(
+    (result.result as { maintenance?: unknown }).maintenance,
+    { prune: 'skipped', check: 'ok' },
+    'the prune is reported as skipped',
+  );
+  assert.ok(!docker.execOptions.some((e) => e.cmd[1] === 'prune'), 'restic prune did not run');
+});
+
+test('a failed prune does not stop the check, and a failed check or a lock exit is reported as data', async () => {
+  const { result } = await maintained({ prune: true }, (cmd) =>
+    cmd[1] === 'prune'
+      ? { code: 11, err: 'unable to create lock in backend' }
+      : cmd[1] === 'check'
+        ? { code: 1, err: 'error: pack abc: ciphertext verification failed' }
+        : { code: 0 },
+  );
+  assert.equal(result.state, 'succeeded', 'a failing repository is a result, not a failed job');
+  const outcome = (result.result as { maintenance?: Record<string, unknown> }).maintenance!;
+  assert.equal(outcome.prune, 'failed', 'the prune failure is recorded');
+  assert.equal(outcome.check, 'failed', 'the check still ran and failed');
+  assert.equal(outcome.locked, true, "restic's lock exit code, not its wording, marks it locked");
+  assert.match(String(outcome.message), /prune failed/, 'the first failure is the message');
+});
+
+test('a maintenance job fails on a missing repository instead of creating one', async () => {
+  const docker = dockerWith((cmd) =>
+    cmd.join(' ') === 'restic cat config' ? { code: 10, err: REST_MISSING } : { code: 0 },
+  );
+  const result = await finished(docker, 'backup.maintain');
+  assert.equal(result.state, 'failed', 'there is nothing to check');
+  assert.ok(!ran(docker, 'restic init'), 'maintenance never initializes');
+});
+
 test('error text never contains credentials', async () => {
   const docker = dockerWith((cmd) =>
     cmd.join(' ') === 'restic cat config'
@@ -268,7 +330,11 @@ test('restic arguments carry the node as host, tags, retention and the stdin nam
   assert.match(backup, /--tag run:bkr_1/);
   const forget = forgetArgs(p, p.retention!).join(' ');
   assert.match(forget, /--tag target:service:db --host app1 --group-by host/);
-  assert.match(forget, /--keep-daily 7 --keep-weekly 4 --prune/);
+  assert.match(forget, /--keep-daily 7 --keep-weekly 4 --retry-lock/);
+  assert.ok(
+    !forget.includes('--prune'),
+    'a per-run forget never prunes: the exclusive lock is taken once a week by backup.maintain',
+  );
   assert.match(
     forget,
     /--keep-tag trigger:pre-restore/,

@@ -2,6 +2,7 @@ import type { BackupDestinationRow, Db } from '../db/db.ts';
 import { BACKUP_SECRET_PROJECT } from './destination.ts';
 import { immediateTransaction } from '../db/transaction.ts';
 import type { RetentionMode } from '../protocol.ts';
+import { maintenanceStore } from './maintenance.ts';
 
 /**
  * Who prunes the destination lives in `meta` next to the destination row, not in a column: a column would be a schema
@@ -53,6 +54,8 @@ export function backupDestinationQueries(db: Db) {
       mode: RetentionMode = 'managed',
     ): void {
       immediateTransaction(db, () => {
+        // The maintenance results describe the repositories of the destination being left.
+        if (find()?.url !== url) maintenanceStore(db).clear();
         setRetention(mode);
         db.run('DELETE FROM secrets WHERE project_id=?', BACKUP_SECRET_PROJECT);
         for (const secret of secrets)
@@ -127,6 +130,7 @@ export function backupDestinationQueries(db: Db) {
       return immediateTransaction(db, () => {
         db.run('DELETE FROM secrets WHERE project_id=?', BACKUP_SECRET_PROJECT);
         setRetention('managed');
+        maintenanceStore(db).clear();
         return db.run("DELETE FROM backup_destination WHERE id='default'").changes > 0;
       });
     },

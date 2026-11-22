@@ -24,8 +24,23 @@ interface BackupRunRecord {
   phase?: string;
   waitingFor?: string;
 }
+/** The last weekly maintenance or `backup verify` of a repository. */
+interface VerifyRecord {
+  ok: boolean;
+  startedAt: string;
+  finishedAt: string;
+  prune: 'ok' | 'skipped' | 'failed';
+  check: 'ok' | 'failed';
+  subset?: string;
+  message?: string;
+  error?: string;
+  trigger: 'schedule' | 'manual';
+}
 interface BackupListing {
   destinationConfigured: boolean;
+  /** The project repository's last maintenance; null before one ran. */
+  verify?: VerifyRecord | null;
+  maintenanceRunning?: boolean;
   /** Control's own backup in the destination; null while there is no destination. */
   control?: {
     lastSuccessAt: string | null;
@@ -35,6 +50,7 @@ interface BackupListing {
     scope?: 'shared' | 'local';
     retention?: RetentionInput | null;
     lock?: { message?: string } | null;
+    verify?: VerifyRecord | null;
   } | null;
   targets: {
     target: string;
@@ -47,6 +63,8 @@ interface BackupListing {
     problem: string | null;
     retention?: RetentionInput | null;
     lock?: { message?: string } | null;
+    /** `off-host`, `verified` or `restore-tested`; null when nothing is off-host. */
+    protection?: 'off-host' | 'verified' | 'restore-tested' | null;
   }[];
   runs: BackupRunRecord[];
 }
@@ -61,6 +79,19 @@ export function retentionColumns(item: {
       : `\tretention ${item.retention.state}`
     : '';
   return `${retention}${item.lock ? '\tREPOSITORY LOCKED' : ''}`;
+}
+/** `verify ok (check 2026-11-01, subset 5%)`, `verify FAILED` or nothing before a repository was checked. */
+export function verifyColumn(verify: VerifyRecord | null | undefined): string {
+  if (!verify) return '';
+  const when = verify.finishedAt.slice(0, 10);
+  const detail = [
+    verify.prune === 'ok' ? 'pruned' : '',
+    verify.subset ? `subset ${verify.subset}` : '',
+    verify.trigger === 'manual' ? 'manual' : '',
+  ].filter(Boolean);
+  return verify.ok
+    ? `\tverify ok (${when}${detail.length ? `, ${detail.join(', ')}` : ''})`
+    : `\tverify FAILED (${when})`;
 }
 interface DestinationCheck {
   checkId: string;
@@ -316,7 +347,7 @@ export function registerBackup(rt: CliRuntime, program: Command): void {
     .option('--limit <n>', 'number of recent runs to show', '20')
     .option(
       '--check',
-      'exit nonzero when a target is stale, or its last run failed or was missed, or its retention failed twice in a row or found the repository locked, or nothing is protected (no destination, or no enabled target); for cron and monitors',
+      'exit nonzero when a target is stale, or its last run failed or was missed, or its retention failed twice in a row or found the repository locked, or the last repository check failed, or nothing is protected (no destination, or no enabled target); for cron and monitors',
     )
     .option(
       '--allow-empty',
@@ -337,13 +368,18 @@ export function registerBackup(rt: CliRuntime, program: Command): void {
       if (!o.json && listing.control)
         out(
           rt,
-          `control\t-\tnightly\tlast success ${listing.control.lastSuccessAt ?? 'never'}${listing.control.scope === 'local' ? '\tlocal path only: not off-host' : ''}${retentionColumns(listing.control)}${listing.control.problem ? `\t${listing.control.problem}` : ''}`,
+          `control\t-\tnightly\tlast success ${listing.control.lastSuccessAt ?? 'never'}${listing.control.scope === 'local' ? '\tlocal path only: not off-host' : ''}${retentionColumns(listing.control)}${verifyColumn(listing.control.verify)}${listing.control.problem ? `\t${listing.control.problem}` : ''}`,
+        );
+      if (!o.json && (listing.verify || listing.maintenanceRunning))
+        out(
+          rt,
+          `repository\t-\tweekly\t${listing.maintenanceRunning ? 'maintenance running' : ''}${verifyColumn(listing.verify).replace(/^\t/, '')}${listing.verify && !listing.verify.ok && (listing.verify.message ?? listing.verify.error) ? `\t${listing.verify.message ?? listing.verify.error}` : ''}`,
         );
       if (!o.json)
         for (const t of listing.targets)
           out(
             rt,
-            `${t.target}\t${t.node ?? '-'}\t${t.schedule}\tlast success ${t.lastSuccessAt ?? 'never'}\tnext ${t.enabled ? t.nextRunAt : 'disabled'}${retentionColumns(t)}`,
+            `${t.target}\t${t.node ?? '-'}\t${t.schedule}\tlast success ${t.lastSuccessAt ?? 'never'}\tnext ${t.enabled ? t.nextRunAt : 'disabled'}${t.protection ? `\t${t.protection}` : ''}${retentionColumns(t)}`,
           );
       if (!o.json)
         for (const r of listing.runs)
@@ -370,6 +406,26 @@ export function registerBackup(rt: CliRuntime, program: Command): void {
       print(
         rt,
         await request(rt, 'POST', `/api/v1/backups/${encodeURIComponent(run)}/cancel`, { project }),
+      );
+    });
+  backup
+    .command('verify')
+    .description(
+      "check the project's repository now with restic check, in the background; the result shows in `tug backup list`. Control also prunes and checks every repository once a week. Admin only",
+    )
+    .option(
+      '--read-data-subset <subset>',
+      'also read part of the stored data to detect corruption: a fraction (1/10), a percentage (5%) or a size (500M); the data is downloaded from the destination',
+    )
+    .option('--control', "check control's own backup repository instead of the project's")
+    .action(async (o: { readDataSubset?: string; control?: boolean }) => {
+      const project = loadCfg(rt).project;
+      print(
+        rt,
+        await request(rt, 'POST', '/api/v1/backups/verify', {
+          ...(o.control ? { control: true } : { project }),
+          ...(o.readDataSubset ? { readDataSubset: o.readDataSubset } : {}),
+        }),
       );
     });
   backup

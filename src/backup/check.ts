@@ -8,6 +8,14 @@ export interface RetentionInput {
   locked?: boolean;
 }
 
+/** The last weekly maintenance or `backup verify` of a repository, as `GET /api/v1/backups` reports it. */
+export interface VerifyInput {
+  ok: boolean;
+  finishedAt: string;
+  message?: string;
+  error?: string;
+}
+
 /** The part of `GET /api/v1/backups` that `tug backup list --check` judges. */
 export interface BackupCheckInput {
   destinationConfigured: boolean;
@@ -17,7 +25,20 @@ export interface BackupCheckInput {
     problem?: string | null;
     retention?: RetentionInput | null;
   }[];
-  control?: { problem: string | null; retention?: RetentionInput | null } | null;
+  /** The project repository's last maintenance; absent until one ran. */
+  verify?: VerifyInput | null;
+  control?: {
+    problem: string | null;
+    retention?: RetentionInput | null;
+    verify?: VerifyInput | null;
+  } | null;
+}
+
+/** A repository whose last `restic check` or prune failed, which no later maintenance has cleared. */
+export function verifyProblem(verify: VerifyInput | null | undefined): string | null {
+  if (!verify || verify.ok) return null;
+  const why = verify.message ?? verify.error;
+  return `the last repository check or prune failed (${verify.finishedAt})${why ? `: ${why}` : ''}`;
 }
 
 /**
@@ -67,6 +88,10 @@ export function backupCheckProblems(
   if (!listing.destinationConfigured && (active.length || options.requireProtection))
     problems.unshift(NO_DESTINATION);
   if (options.requireProtection && !options.allowEmpty && !active.length) problems.push(NO_TARGETS);
+  const repository = verifyProblem(listing.verify);
+  if (repository && active.length) problems.push(repository);
+  const controlVerify = verifyProblem(listing.control?.verify);
+  if (controlVerify) problems.push(`control: ${controlVerify}`);
   if (listing.control?.problem) problems.push(`control: ${listing.control.problem}`);
   const controlRetention = retentionProblem(
     listing.control?.retention,

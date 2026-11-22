@@ -168,6 +168,7 @@ The project column says how a scoped credential's allowed projects are checked: 
 | `POST /api/v1/backups/run` | `deploy` | Body `project` |
 | `POST /api/v1/backups/:id/cancel` | `deploy` | Body `project`; stops a queued or running backup |
 | `POST /api/v1/backups/unlock` | `admin` | Body `project`, or `control: true` for control's own repository; removes stale restic locks, see [Unlock a repository](backups.md#unlock-a-repository) |
+| `POST /api/v1/backups/verify` | `admin` | Body `project`, or `control: true`, and optional `readDataSubset`; checks the repository in the background, see [Verify a repository](backups.md#verify-a-repository) |
 | `GET /api/v1/backups` | `read` | Query `project` |
 | `POST /api/v1/restores` | `admin` | Body `project`; without `confirm` it only returns the plan |
 | `GET /api/v1/restores` | `read` | Query `project`; `state=interrupted` returns all interrupted restores |

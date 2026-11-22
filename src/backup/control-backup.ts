@@ -16,7 +16,7 @@ import { classifyRepositoryProbe, describeProbeFailure } from './repository-prob
 import type { Collected } from './job.ts';
 import { RESTIC_EXIT_LOCKED } from '../protocol.ts';
 import type { AttachedProcess, DockerApi } from '../docker-api.ts';
-import type { BackupCause, BackupRetentionOutcome } from '../protocol.ts';
+import type { BackupCause, BackupMaintenanceOutcome, BackupRetentionOutcome } from '../protocol.ts';
 
 /** Name of the stdin stream restic stores the archive under; `restic dump` reads it back by this path. */
 export const CONTROL_ARCHIVE_NAME = 'control.tar.gz';
@@ -569,6 +569,46 @@ export async function unlockControlRepository(
     if (unlocked.code !== 0)
       throw new ControlBackupError(`unlock failed: ${summarize(unlocked.err || unlocked.out)}`);
     return { before, after: await counts() };
+  });
+}
+
+/**
+ * Runs `restic check` on the control repository, reading a subset of the data when `subset` is set. control's own backup
+ * prunes after each push, so there is nothing to prune here. Returns restic's verdict; the check failing is a result, not
+ * an error, so the caller can record it.
+ */
+export async function checkControlRepository(
+  docker: DockerApi,
+  access: ControlRepositoryAccess,
+  subset?: string,
+): Promise<BackupMaintenanceOutcome> {
+  return withRestic(docker, controlAccess(access), async (exec) => {
+    const probe = await exec(['restic', 'cat', 'config']);
+    const state = classifyRepositoryProbe(probe);
+    if (state === 'missing')
+      throw new ControlBackupError(
+        `no control repository exists at ${controlRepository(access.url)}, so there is nothing to check`,
+      );
+    if (state === 'error')
+      throw new ControlBackupError(
+        `cannot read the control repository: ${await explainProbe(exec, probe)}`,
+      );
+    const checked = await exec([
+      'restic',
+      'check',
+      ...(subset ? [`--read-data-subset=${subset}`] : []),
+      '--retry-lock',
+      RESTIC_LOCK_WAIT,
+    ]);
+    return {
+      prune: 'skipped',
+      check: checked.code === 0 ? 'ok' : 'failed',
+      ...(checked.code === 0
+        ? {}
+        : { message: `check failed: ${summarize(checked.err || checked.out)}` }),
+      ...(checked.code === RESTIC_EXIT_LOCKED ? { locked: true } : {}),
+      ...(subset ? { subset } : {}),
+    };
   });
 }
 

@@ -114,7 +114,7 @@ The stateful half of principle 5, and something a central control plane does bet
 - **Done: generic backups.** `x-tug.backup` marks a service or a volume. tug has no database support of its own: a service backup is a `command` run in the running container whose output is stored (database recipes are documentation), a volume backup archives its files. Control schedules them as agent commands on the placement node; the agent streams into restic in a helper container, uploading to a destination configured on control (S3-compatible, encrypted before leaving the node), one repository per project. Retention, a catalog, `backup run` and `backup list`, and `backup.*` events for completed, failed, missed and stale runs. See [Backups](backups.md).
 - **Done: restore.** `tug restore` locks the project, stops the services that write to the target, takes a safety backup, restores through the service's own `restore` command or the volume's files, and starts them again; an interrupted restore keeps the writers stopped until resumed or released. A scratch restore of a volume touches nothing live.
 - **Done: `tug run`.** `tug run SERVICE -- cmd` runs a one-off container with the service's image, environment, secrets, network and mounts, returns the exit code and is audited.
-- Not done: `x-tug.release` (a command that runs once per deployment before or after rollout, recorded on the deployment, a failure stopping the rollout), postgres-free extras such as a weekly `restic check`/prune and a restore drill, and failed or missed backups as webhooks (M8).
+- Not done: `x-tug.release` (a command that runs once per deployment before or after rollout, recorded on the deployment, a failure stopping the rollout), a scheduled restore drill (the weekly `restic check` and prune are done), and failed or missed backups as webhooks (M8).
 - Moving a stateful service to another node (`tug move SERVICE --to NODE`) as backup, stop, restore and re-place, since the pieces are the same.
 
 ### M12 — Container networking over the mesh (cancelled)
@@ -245,7 +245,8 @@ The test layers, the metrics milestones are held to and the backlog of mocked te
 - [x] M11 `x-tug.backup` (generic: a command in a service, or a volume's files), scheduled backups to S3-compatible storage with restic, catalog, `backup run`, `backup list`, `restore` (verified against real Docker and on two real hosts with an S3-compatible server and a scheduled run: [Real-host evaluation](real-host-evaluation.md#generic-backups-restore-and-tug-run-on-fresh-hosts-1-november-2026); not yet against AWS S3)
 - [x] M11 `tug run` one-off containers
 - [ ] M11 `x-tug.release` run-once hooks
-- [ ] M11 weekly maintenance (`restic check`, prune), restore drill
+- [x] M11 weekly maintenance (`restic check`, prune): once a week per repository, with `tug backup verify` and protection levels ([Verify a repository](backups.md#verify-a-repository))
+- [ ] M11 restore drill
 - [x] M11 `backup destination check` (and `destination set` checks by default); SFTP and rclone destinations are rejected for now because the helper has no SSH keys or rclone configuration
 - [x] M11 `restore` waits for the restored writers to be serving again (five minutes, then it finishes with a warning)
 - [ ] M11 list and remove scratch-restore volumes, and expire safety snapshots (they accumulate for ever and only `restic forget` removes them)

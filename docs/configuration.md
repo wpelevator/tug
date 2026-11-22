@@ -58,6 +58,8 @@ With none of them usable (a directory named `---`), the command fails and asks f
 | `TUG_CONTROL_BACKUP_DIR` | `<data dir>/control-backups` | Control backup archives. |
 | `TUG_CONTROL_BACKUP_INTERVAL_MS` | `86400000` | How long a successful control backup in the destination stays current before the next one is due. |
 | `TUG_CONTROL_BACKUP_RETRY_MS` | `3600000` | How long to wait before retrying a failed control backup. |
+| `TUG_MAINTENANCE_TIMEOUT_MS` | `21600000` | How long one weekly or manual repository check (and prune) may run before it is cancelled and recorded as failed. |
+| `TUG_UNLOCK_TIMEOUT_MS` | `300000` | How long `tug backup unlock` waits for the node to remove stale locks. |
 | `TUG_CONTROL_BACKUP_STALL_MS` | `120000` | How long restic may print only backend retry notices (a missing bucket, a refused login, an unreachable store) before a control backup, listing or fetch is failed with the cause instead of running to the limit. Any other output counts as progress. |
 | `TUG_CONTROL_BACKUP_LIMIT_MS` | `1800000` | How long one control backup, listing or fetch may take before its restic helper is removed and the job fails. |
 | `TUG_CONTROL_RESTORE_DIR` | `<data dir>/control-restore` | Parent of the private scratch directories restores use. Only directories tug created in it are ever removed, never the path itself. |

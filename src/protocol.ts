@@ -225,6 +225,8 @@ export type CommandType =
   | 'backup.list'
   /** Payload a `BackupJobPayload`: `restic unlock` on the project's repository, which removes only locks that have gone stale. */
   | 'backup.unlock'
+  /** Payload a `BackupJobPayload` with `maintain`: a weekly `prune` and `restic check` of the project's repository. */
+  | 'backup.maintain'
   /** Payload `{ commandId }`: stops that job on the node, whether it is queued or running. */
   | 'backup.cancel';
 
@@ -235,6 +237,7 @@ export const BACKUP_COMMAND_TYPES: readonly CommandType[] = [
   'backup.restore',
   'backup.list',
   'backup.unlock',
+  'backup.maintain',
 ];
 
 /** `GET /agent/v1/backup/credentials`: environment for the restic helper of one running backup command. */
@@ -271,7 +274,8 @@ export type JobPhase =
   | 'uploading'
   | 'forgetting'
   | 'restoring'
-  | 'unlocking';
+  | 'unlocking'
+  | 'maintaining';
 
 /** Payload of `backup.check`, `backup.run` and `backup.restore`. Restic credentials are never in a payload. */
 export interface BackupJobPayload {
@@ -289,6 +293,8 @@ export interface BackupJobPayload {
   retention?: BackupRetention;
   /** `external`: the destination is append-only, so `forget --prune` is skipped and reported as `retention.state: external`. */
   retentionMode?: 'external';
+  /** `backup.maintain` only: prune the repository (skipped when false) and then check it, reading a subset of the data when `subset` is set. */
+  maintain?: { prune: boolean; subset?: string };
   /** Command targets: what to run in the service's container, and how to name and check its output. */
   command?: {
     service: string;
@@ -308,6 +314,16 @@ export interface BackupJobPayload {
   restore?: { snapshotId: string; mode: 'in-place' | 'scratch'; scratchVolume?: string };
 }
 
+/** The result of one maintenance job: prune (when asked for) and `restic check`. */
+export interface BackupMaintenanceOutcome {
+  prune: 'ok' | 'skipped' | 'failed';
+  check: 'ok' | 'failed';
+  /** restic's closing words for whichever step failed. */
+  message?: string;
+  locked?: boolean;
+  subset?: string;
+}
+
 export interface BackupJobResult {
   runId: string;
   snapshotId?: string;
@@ -320,6 +336,8 @@ export interface BackupJobResult {
   warnings?: string[];
   /** What happened to retention; absent when the run applies none (a safety backup before a restore). */
   retention?: BackupRetentionOutcome;
+  /** `backup.maintain` only: what the prune and the check found. `locked` marks a failure that was restic's lock exit. */
+  maintenance?: BackupMaintenanceOutcome;
   /** `backup.unlock` only: repository locks before and after `restic unlock`. What is left is held by a live restic or is not stale yet. */
   unlock?: { before: number; after: number };
 }
